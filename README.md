@@ -11,7 +11,7 @@ This design assumes a **closed, social network**: you store with and among peers
 **Design principles (inherited from the kernel, applied to storage):**
 
 - The storage layer adds **no new kernel concepts**. It is bridges + app handlers + message names, gated by the existing capability and signature machinery.
-- **Integrity comes from content addressing, not from signatures.** A block is named by its hash; a block either hashes to its name or it is discarded. This is what lets bulk transfer skip the per-message verify that dominates kernel cost (§11).
+- **Integrity comes from content addressing, not from signatures.** A block is named by its hash; a block either hashes to its name or it is discarded. This is what lets bulk transfer skip the per-message verify (§4).
 - **Identity comes from the signature module.** A peer *is* its kernel pubkey. Reputation and storage receipts key on that one identity.
 - **Redundancy is erasure coding, not replication.** Any *k* of *n* fragments reconstruct a chunk, so up to *n − k* holders can vanish with no data loss, at a fraction of replication's overhead.
 - **Placement is by relationship, not by global address.** Fragments live on peers in your cohort, chosen by negotiation. Who holds what is discovered live from the cohort rather than pinned anywhere, and there is no global index — the absence of that index is a feature, not a gap (§5).
@@ -26,10 +26,11 @@ The reference composition stacks: storage app handlers → cohort + repair + pro
 
 - **Block** — the unit that moves on the wire: a content-addressed slice of bytes, ≤ 48 KB so it fits an envelope with room for framing (§4). `block_id = genesis_hash(ciphertext_bytes)`.
 - **Chunk** — a logical slice of a file (e.g. 4 MB) that is erasure-coded into *n* **fragments**, of which any *k* reconstruct it. Fragments are stored as blocks.
-- **Manifest** — the small root object that lists a file's chunks, their RS parameters, fragment block-ids, and the wrapped content key. The only thing you need to retrieve a whole file. It does *not* name holders; which peer holds a block is discovered live from the cohort.
+- **Manifest** — the small root object that lists a file's chunks, their RS parameters, fragment block-ids, and the wrapped content key. The only thing you need to *read* a whole file. It does *not* name holders; which peer holds a block is discovered live from the cohort.
+- **Repair header** — a few bytes stored alongside each fragment, naming its chunk's sibling block-ids and `(k, m)`, so any fragment-holder can rebuild the chunk without the read key (§3.6).
 - **Cohort** — the bounded set of peers you have a storage relationship with. Discovery, placement, and repair all happen inside it. There is no global overlay.
 - **Have/want** — the discovery primitive: peers tell each other which block-ids they hold or want. One round trip, no crypto protocol.
-- **Receipt** — a *signed* attestation that a holder answered a storage challenge correctly (§12). A peer's reputation is the verifiable pile of receipts others signed about it.
+- **Receipt** — a *signed* attestation that a holder answered a storage challenge correctly (§13). A peer's reputation is the verifiable pile of receipts others signed about it.
 - **`store.local`** — the I/O bridge (capability `store`) that reads/writes the node's donated blob store: filesystem on a server, OPFS/IndexedDB in a browser.
 
 ```
@@ -38,7 +39,7 @@ file ──chunk──► chunk[i] ──erasure-code──► fragment[i][0..n)
                                               ▼
                      placement: negotiate with cohort peers (frag.offer / accept)
                                               ▼
-              push blocks ──► cohort peers     locate later via have/want
+              push block + repair header ──► cohort peers     locate later via have/want
 ```
 
 ---
@@ -67,7 +68,7 @@ A file is cut into fixed-size **chunks** (default 4 MB; a deployment knob). Fixe
 
 ### 3.2 Erasure coding (the redundancy primitive)
 
-Each chunk is encoded with **Reed–Solomon `RS(k, m)`** into `n = k + m` fragments, where any *k* fragments reconstruct the chunk. Defaults: `k = 10, m = 6` → `n = 16`, 1.6× storage overhead, survives the loss of any 6 holders. Compare naïve 3× replication, which survives only 2 losses at nearly double the cost. Reed–Solomon encode/decode is simple, self-contained byte arithmetic and compiles to a small WASM handler that needs no capabilities.
+Each chunk is encoded with **Reed–Solomon `RS(k, m)`** into `n = k + m` fragments, where any *k* fragments reconstruct the chunk. Defaults: `k = 10, m = 6` → `n = 16`, 1.6× storage overhead, survives the loss of any 6 holders. Compare naïve 3× replication, which survives only 2 losses at nearly double the cost. Reed–Solomon encode/decode is simple, self-contained byte arithmetic and compiles to a small WASM handler that needs no capabilities. It operates on whatever bytes it is given — here, ciphertext (§3.5) — so reconstructing a missing fragment never requires the file's key.
 
 The choice of `(k, m)` is per-chunk and recorded in the manifest, so a deployment can dial durability per file (cold archives might use `RS(20, 20)`; hot ephemeral data `RS(4, 2)`).
 
@@ -108,6 +109,10 @@ Kernel envelopes are signed, not encrypted, and at-rest storage has no confident
 - The content key is wrapped to the file's sharing group and carried in the manifest; sharing a file means sharing or re-wrapping the key, not moving bytes.
 - Random per-file keys mean two different files never produce colliding ciphertext, so a `block_id` is meaningful only to someone who has handled that exact file. Convergent encryption (key = hash(plaintext)) is an opt-in for deployments that want cross-user dedup and accept its equality-leak.
 
+### 3.6 The repair header (travels with each block)
+
+*Reading* a file needs the whole manifest and the content key, and is gated to the sharing group. *Repair* needs much less — only a chunk's shape — and we want it possible for far more peers, so each stored block carries a tiny **repair header**: the chunk's `(k, m)` and the block-ids of all `n` sibling fragments. That is everything a holder needs to audit a chunk and rebuild a missing fragment, and because reconstruction is arithmetic on ciphertext (§3.2, §3.5) it needs no key. The header is set at placement time and re-attached whenever a repaired fragment is pushed to a new peer. It discloses a chunk's size and shape to anyone storing a piece of it — the same class of disclosure already accepted in §15 — but never its contents. This split is what makes repair redundant rather than owner-bound (§9).
+
 ---
 
 ## 4. The bulk-data problem (64 KB) and the two planes
@@ -144,16 +149,16 @@ Block-ids are hashes of random-key ciphertext (§3.5), so to a peer outside a fi
 
 This is deliberately **not an open market**: strangers cannot find or serve your data, because there is no global index and nothing to query. That absence is the privacy property we want. The cost is that storage is confined to your cohort — the trade we are choosing.
 
-What leaks, and why it is acceptable here: a peer you exchange have/want with learns which block-ids you hold or want *of files you have already shared with it*, and roughly your inventory size. These are disclosures to people you have already chosen to store with, about files you have already shared with them. The full leak inventory and the optional hardening for less-trusted cohorts are in §13.
+What leaks, and why it is acceptable here: a peer you exchange have/want with learns which block-ids you hold or want *of files you have already shared with it*, and roughly your inventory size. These are disclosures to people you have already chosen to store with, about files you have already shared with them. The full leak inventory and the optional hardening for less-trusted cohorts are in §15.
 
 ---
 
 ## 6. Writing a file (PUT)
 
 1. **Chunk & encrypt.** The owner feeds the file to the `chunker` (cap-free) block-by-block (the 64 KB cap applies to messages between handlers too). Each chunk is AEAD-encrypted (§3.5).
-2. **Erasure-code.** The `erasure` handler (cap-free) turns each chunk into `n` fragments; the `chunker` slices fragments into ≤ 48 KB blocks and computes block-ids.
-3. **Place by negotiation.** For each fragment, the `store.coordinator` picks candidate cohort peers — ordered by reputation (§12) and current reachability — and sends `frag.offer(block_id, size)`. A peer with free quota and willingness replies `frag.accept`; otherwise `frag.decline` and the coordinator moves to the next candidate. There is no global placement function; placement is a short private negotiation within the cohort.
-4. **Push.** On accept, the coordinator streams the block over the bulk plane (§4).
+2. **Erasure-code.** The `erasure` handler (cap-free) turns each chunk into `n` fragments; the `chunker` slices fragments into ≤ 48 KB blocks, computes block-ids, and forms each chunk's repair header (§3.6).
+3. **Place by negotiation.** For each fragment, the `store.coordinator` picks candidate cohort peers — ordered by reputation (§13) and current reachability — and sends `frag.offer(block_id, size)`. A peer with free quota and willingness replies `frag.accept`; otherwise `frag.decline` and the coordinator moves to the next candidate. There is no global placement function; placement is a short private negotiation within the cohort.
+4. **Push.** On accept, the coordinator streams the block over the bulk plane (§4), together with its repair header so the holder can later help heal the chunk.
 5. **Share the manifest.** The manifest lists block-ids, not holders; it is shared with the file's sharing group and stored the same erasure-coded way (§3.4). Which peer took which fragment is not pinned anywhere — it is rediscovered live via have/want, so placement can shift under repair without the manifest going stale.
 6. **Publish.** `manifest_id` is what the owner keeps and shares, wrapped in a signed 64 KB envelope.
 
@@ -176,7 +181,7 @@ Because any *k*-of-*n* suffices, a read succeeds even with up to *m* holders off
 
 Peers are expected to disappear and come back. The protocol distinguishes a transient blip from real loss so it doesn't churn data on every disconnect — and it does so by direct observation within the cohort, not by a global refresh scheme.
 
-**How liveness is observed.** Any cohort peer that holds a manifest periodically sends a have/want for its block-ids and notes who answers. There is no record to refresh and nothing to expire, so the picture is always current.
+**How liveness is observed.** Any fragment-holder (or the owner) periodically sends a have/want for a chunk's sibling block-ids and notes who answers. There is no record to refresh and nothing to expire, so the picture is always current.
 
 **Three states per holder of a fragment:**
 - **Live** — recently reachable and confirms it still holds the block.
@@ -191,18 +196,20 @@ Peers are expected to disappear and come back. The protocol distinguishes a tran
 
 ## 9. Self-healing / repair
 
-Repair is a shared responsibility of the cohort: any peer that holds a file's manifest can — and should — watch its redundancy and rebuild missing fragments. No peer is special and no one is appointed; the work simply gets done by whoever notices first.
+Repair is per-chunk, and it is performed by the chunk's own **fragment-holders**. Anyone holding a fragment also holds that chunk's repair header (§3.6) — the sibling block-ids and `(k, m)` — which is all you need to audit and rebuild it, and reconstruction runs on ciphertext, so a repairer never needs the file's key. The sharing group *reads*; any fragment-holder *repairs*. No peer is special and no one is appointed; the work gets done by whoever notices first.
 
-**The repair loop (run by any manifest-holder on a jittered interval):**
-1. Send a have/want to the cohort for the file's block-ids (§5) and count, per chunk, how many distinct fragments are currently retrievable → `live_fragments`.
+This is what makes repair redundant. The peers able to heal a chunk are exactly the peers storing it — about `n` of them — so repair survives as long as a single fragment-holder is online, and the repair-redundancy automatically scales with the durability `m` you chose. (The alternative, tying repair to whoever can read the manifest, would make a private file's owner the sole possible repairer — a single point of failure for healing even when the bytes themselves are amply redundant.)
+
+**The repair loop (run by any fragment-holder on a jittered interval):**
+1. Send a have/want to the cohort for the chunk's sibling block-ids (§5) and count how many distinct fragments are currently retrievable → `live_fragments`.
 2. If `live_fragments < low_water` (default `k + ⌈m/2⌉`), repair is needed.
 3. **Avoid duplicate work** with a jittered timer: the peer that fires first announces it (`repair.claim`); others hold off and cancel when a freshly placed fragment shows up in have/want. Because the cohort is small and the claim is observable, this needs no election or coordinator.
-4. The repairer fetches any *k* retrievable fragments, reconstructs the chunk, re-encodes only the **missing** fragments, and places them on fresh cohort peers (§6 steps 3–4), skipping current holders so redundancy spreads to new peers.
-5. The new fragments are immediately discoverable via have/want; redundancy returns to `n` with no manifest change, since the manifest never named holders in the first place.
+4. The repairer fetches any *k* retrievable fragments, reconstructs the chunk's ciphertext, re-encodes only the **missing** fragments, and places them on fresh cohort peers (§6 steps 3–4) with their repair header, skipping current holders so redundancy spreads to new peers.
+5. The new fragments are immediately discoverable via have/want; redundancy returns to `n` with no manifest change, since the manifest never named holders.
 
 **Moving data on availability change** is the same loop run proactively: if a peer sees the cohort thinning (many Suspected/Lost holders, e.g. a correlated outage), it re-spreads fragments toward healthier peers before a chunk crosses low-water.
 
-**The one real cost** of cohort-bound repair: it requires at least one peer that holds the manifest to be online within a repair interval. As long as a sharing group keeps reasonable aggregate uptime — typically one or two long-running members — this holds. A group that is *entirely* browser nodes with no steady member genuinely risks losing data during a long quiet stretch, so a deployment should make sure each group has at least one well-connected, long-lived peer.
+**The one real cost**: a chunk can only be healed while at least one of its fragment-holders is online within a repair interval. With about `n` holders that is a weak requirement, but it can still fail if a chunk's holders are *all* low-uptime and go dark together (e.g. an all-browser cohort overnight). Placing at least one durable peer among each chunk's holders removes the risk — which is also what §8 recommends for the durable `m`.
 
 **Repair amplification is bounded** by erasure coding: regenerating one lost fragment costs *k* fragment-reads, not a full re-upload, and only the lost fragments are rebuilt.
 
@@ -214,33 +221,47 @@ This requirement is met structurally, not by trust:
 
 - **No fragment is unique.** A chunk survives on any *k* of *n* fragments, and distinct fragments live on distinct peers (§6). One peer holds at most one fragment of a given chunk, so its disappearance — or its refusal to serve — costs at most one fragment. You need *more than m* peers to fail or defect simultaneously to lose a chunk.
 - **No metadata is unique.** The manifest is stored the same erasure-coded way and shared across the file's group (§3.4); there is no single index server, and the holder map is not stored at all — it is recomputed live.
-- **No single repairer is required.** Any cohort peer that holds the manifest can repair, and they overlap; removing any one peer removes no capability, provided the group keeps aggregate uptime (§9).
-- **Withholding is detected and routed around.** A holder that stops serving fails storage challenges (§12), loses reputation, and gets skipped in future placement; its unreachability tips it to Lost and triggers repair. Active malice degrades to the same path as passive offline-ness.
+- **No single repairer is required.** Any of a chunk's ~`n` fragment-holders can heal it (§9), on ciphertext, without the read key; removing any one removes no capability. Repair-redundancy is therefore as high as the data-redundancy *n*, not gated on a small set of readers.
+- **Withholding is detected and routed around.** A holder that stops serving fails storage challenges (§13), loses reputation, and gets skipped in future placement; its unreachability tips it to Lost and triggers repair. Active malice degrades to the same path as passive offline-ness.
 - **Corruption is impossible to hide.** Content addressing (§3.3) means a tampered block fails its hash check and is discarded; the reader simply fetches another fragment.
 
-The honest assumptions this rests on: *fewer than the redundancy budget of a chunk's holders fail or defect within a repair interval*, and *at least one cohort peer holding the manifest is online within that interval*. Sizing `(k, m)`, the low-water mark, and the repair cadence against your cohort's real churn is the deployment's durability dial (§18).
+The honest assumptions this rests on: *fewer than the redundancy budget of a chunk's holders fail or defect within a repair interval*, and *at least one of a chunk's fragment-holders is online within that interval*. Sizing `(k, m)`, the low-water mark, and the repair cadence against your cohort's real churn is the deployment's durability dial (§20).
 
 ---
 
-## 11. Donating storage
+## 11. Removal
+
+In a store where other people hold your bytes, you cannot force a remote peer to delete on command, so removal is two mechanisms with different guarantees.
+
+**Crypto-shredding — the guarantee.** Because every file has a random per-file key (§3.5), destroying that key makes all of its ciphertext fragments permanent noise to everyone, immediately and irreversibly. The owner and sharing group drop the wrapped key from their manifests and keystores; whatever ciphertext lingers on holders is unreadable forever. This is the only deletion the system can actually promise, and for confidentiality it is enough: a "deleted" file is one whose key no longer exists.
+
+**Tombstones — best-effort space reclamation.** To get the bytes off disk, the owner publishes a **signed tombstone** for the chunk's block-ids, gossiped through the cohort. A holder that receives it verifies the signature, drops the blocks, and stops counting them. Online holders comply at once; offline holders comply when they reconnect and see the tombstone; and the tombstone also tells fragment-holders to **stop repairing** that chunk, so it is allowed to decay below low-water and be reclaimed instead of healed back to life. Anything a tombstone never reaches simply ages out through normal eviction (§14).
+
+**Authority.** A tombstone is honored only when signed by the manifest's author (the §2 identity). For a shared file the simple rule is that only the owner's tombstone removes the data; a member who no longer wants it just drops its own copy and stops repairing — it cannot delete for everyone.
+
+Tombstones are bounded too: a holder keeps one only until the referenced blocks are gone and a short grace period passes, so the tombstone set does not grow without limit.
+
+---
+
+## 12. Donating storage
 
 "Donate whatever storage you have available" is the `store.local` bridge plus a host-configured quota.
 
-**`store.local` (capability `store`)** is a host-native bridge with operations `put(block_id, bytes)`, `get(block_id) → bytes`, `has(block_id)`, `delete(block_id)`, `list(prefix)`, and `stat() → { quota, used, free }`. Like every bridge it runs the caller-capability check before touching disk, so only handlers that declared `store` at install time can reach it. A holder stores opaque `(block_id → ciphertext)` pairs: it needs no file key and learns nothing about what it is holding.
+**`store.local` (capability `store`)** is a host-native bridge with operations `put(block_id, bytes)`, `get(block_id) → bytes`, `has(block_id)`, `delete(block_id)`, `list(prefix)`, and `stat() → { quota, used, free }`. Like every bridge it runs the caller-capability check before touching disk, so only handlers that declared `store` at install time can reach it. A holder stores opaque `(block_id → ciphertext)` pairs plus the small repair header (§3.6): it needs no file key and learns nothing about what it is holding beyond the chunk's shape.
 
 **Backends differ by host, protocol does not:**
 - **Long-running peer:** a directory on disk; quota is a config number; effectively always Live.
 - **Browser node:** OPFS or IndexedDB; quota bounded by the browser's storage budget; eviction-aware (treat browser-evicted blocks as Lost and let repair handle them). The browser shell exposes a "donate N GB" control to set the quota.
 
-**Quota honesty is enforced, not assumed.** A node advertises free space, but no peer trusts the number — it trusts the node's track record of *passing storage challenges for data it accepted* (§12). Lying about capacity gets you data you then fail to prove you hold, which costs reputation. `store.local.stat()` is for the owner's own accounting and admission control (refuse `frag.offer` when full), not a network-trusted figure.
+**Quota honesty is enforced, not assumed.** A node advertises free space, but no peer trusts the number — it trusts the node's track record of *passing storage challenges for data it accepted* (§13). Lying about capacity gets you data you then fail to prove you hold, which costs reputation. `store.local.stat()` is for the owner's own accounting and admission control (refuse `frag.offer` when full), not a network-trusted figure.
 
 ---
 
-## 12. Reputation: rewarding good citizens without a coin
+## 13. Reputation: rewarding good citizens without a coin
 
 The reward is a **verifiable reputation**, and the thing that earns it is *provably holding data and serving it*. No token, no ledger consensus — just signed evidence, which seedkernel's signature module already makes cheap and non-repudiable. In a closed cohort this fits naturally: you mostly score peers you actually interact with.
 
-### 12.1 Proof of storage (the earning event)
+### 13.1 Proof of storage (the earning event)
 
 A challenger periodically tests a holder it has data with: "send me the bytes at offset *o* of block *B*, plus a Merkle path proving they belong to `block_id`." The holder must produce them on demand; it cannot precompute answers without actually keeping the bytes (offsets are random per challenge). This is a lightweight proof-of-retrievability:
 
@@ -259,7 +280,7 @@ proof.receipt = signature-wrapped {
 
 Receipts are the kernel's signature wrapper doing exactly what it's for: an authenticated, replay-resistant attestation (each carries the challenge `nonce`). A holder accumulates receipts as its **track record**.
 
-### 12.2 What reputation is
+### 13.2 What reputation is
 
 A peer's reputation is computed from the receipts *others signed about it*, weighted by:
 - **Volume & longevity** — passing challenges for more data, over more time.
@@ -273,7 +294,7 @@ Two complementary views, and the closed network makes the simple one the default
 
 `reputation.score(pubkey) → score` is a read-only query, used by placement (§6), by holders deciding whether to accept a `frag.offer`, and by readers choosing whom to fetch from first.
 
-### 12.3 What reputation buys (the incentive loop)
+### 13.3 What reputation buys (the incentive loop)
 
 Reputation is spendable as **priority**, which closes the loop without money:
 - **Durability for your own data.** High-reputation owners get their `frag.offer`s accepted readily and placed on the best holders; low or negative-reputation peers are throttled or asked to contribute first.
@@ -284,7 +305,22 @@ Honest, available, truthful-about-capacity nodes accumulate receipts and climb; 
 
 ---
 
-## 13. Threat model and what leaks
+## 14. What to store, and what to evict
+
+A node has finite donated space and will be offered far more than it can hold, so it needs a policy for what to accept and what to drop. This is not a new subsystem — it is the local face of the reputation loop (§13). The one structural idea is **two tiers of storage**:
+
+- **Committed** — fragments a node accepted (`frag.accept`) and now earns reputation by provably keeping (§13.1). These are not dropped casually: shedding one abruptly means failing its next challenge and losing reputation. A node sheds a commitment only by **graceful release** — re-placing the fragment on another peer, or letting repair pick it up — accepting that durability dips until redundancy is restored.
+- **Opportunistic cache** — blocks picked up while serving reads, or extra replicas beyond `n`. Free to evict at any time, no commitment, no reputation cost.
+
+**Admission (when a `frag.offer` arrives).** Accept weighted by: reciprocity (prefer peers who store for you), reputation and social closeness, and how under-replicated the chunk is — a repair offer that lifts a chunk off its low-water mark outranks a routine first placement. Reserve a fraction of quota for commitments so cache cannot crowd out durability, and refuse offers outright when the committed tier is full.
+
+**Eviction (under quota pressure).** Drop cache first, favoring blocks that are cold *and* well-replicated elsewhere, while protecting rare or globally under-replicated blocks (the ones repair would struggle to regenerate). Only if still pressed does a node gracefully release its lowest-value commitments — typically those for low-reciprocity peers. Tombstoned and long-unchallenged orphan blocks are first out the door, which is how dead data is reclaimed without an explicit delete.
+
+Concretely, an eviction score like `coldness × redundancy_elsewhere × (1 / reciprocity_with_owner)`, with committed blocks weighted heavily against eviction, captures all of this from signals the node already tracks. The exact weighting is a tuning knob (§20); the property that matters is that a well-behaved node keeps what is scarce and what it owes, and sheds what is abundant and unasked-for.
+
+---
+
+## 15. Threat model and what leaks
 
 Because the network is a closed social cohort, the dominant open-network threats shrink: you only peer with people you've added, so Sybil flooding and eclipse are not the everyday concern they are in an open network, and the installer policy stays restrictive (an open registry would be remote code execution) so untrusted WASM never lands.
 
@@ -293,6 +329,7 @@ Because the network is a closed social cohort, the dominant open-network threats
 **What leaks, accepted by the closed-cohort assumption.** All of these are disclosures *to peers you have chosen to store with, about files you have already shared with them*:
 - **Inventory size** — a peer you have/want with learns roughly how much you store and a shared file's fragment count.
 - **Per-file holdings** — to a peer in a file's sharing group, which fragments you hold or want.
+- **Chunk shape** — a fragment's repair header (§3.6) tells whoever stores it the chunk's sibling block-ids and `(k, m)`, i.e. its size and shape — never its content. Same class of disclosure as the above; the PRF-tag hardening below covers it if a deployment cares.
 - **Interest** — asking a key-holder for a file reveals you wanted it (a non-key-holder learns nothing — the id is an opaque hash).
 - **Social graph** — who you maintain channels with is visible at the transport level. This is the residual metadata of going social, and it is far smaller than what a global, queryable index would expose.
 - **Ex-member probing** — someone who once held a file's ids can probe for those specific blocks until repair rotates them away; for sensitive files, re-encrypt and rotate on a membership change (expensive, usually done only when it matters).
@@ -306,11 +343,11 @@ Because the network is a closed social cohort, the dominant open-network threats
 
 ---
 
-## 14. New bridges (host-native, `SetHandler`-installed, one capability each)
+## 16. New bridges (host-native, `SetHandler`-installed, one capability each)
 
 | Bridge | Cap | Payload (request) | Host action |
 | --- | --- | --- | --- |
-| `store.local` | `store` | op-tagged: `put`/`get`/`has`/`delete`/`list`/`stat` (§11) | read/write the donated blob store (FS or OPFS/IndexedDB) |
+| `store.local` | `store` | op-tagged: `put`/`get`/`has`/`delete`/`list`/`stat` (§12) | read/write the donated blob store (FS or OPFS/IndexedDB) |
 | `net.send` | `net` | `[peer_id_len][peer_id][bytes...]` | addressed unicast to a cohort peer over its data channel (open/reuse) |
 | `clock.now` | `clock` | (empty) | u64 unix ms — grace windows, challenge timing, repair jitter |
 | `rand` | `rand` | `[n]` | n cryptographically-random bytes — nonces, content keys, jitter |
@@ -319,16 +356,16 @@ Because the network is a closed social cohort, the dominant open-network threats
 
 ---
 
-## 15. New app handlers (WASM, installed via signed messages)
+## 17. New app handlers (WASM, installed via signed messages)
 
 | Handler | Caps | Role |
 | --- | --- | --- |
-| `chunker` | — (pure) | split files into chunks; slice fragments into ≤ 48 KB blocks; compute block-ids |
-| `erasure` | — (pure) | Reed–Solomon encode/decode |
+| `chunker` | — (pure) | split files into chunks; slice fragments into ≤ 48 KB blocks; compute block-ids and repair headers |
+| `erasure` | — (pure) | Reed–Solomon encode/decode (on ciphertext) |
 | `manifest` | — (pure) | build/parse manifests; wrap/unwrap content keys |
 | `cohort` | `net`, `clock` | maintain the peer set and connections; run have/want exchanges and liveness checks |
-| `store.coordinator` | `store`, `net`, `clock` | orchestrate PUT/GET, including placement negotiation; windowed transfer |
-| `repair` | `store`, `net`, `clock` | the repair loop: measure redundancy via have/want, claim, reconstruct (§9) |
+| `store.coordinator` | `store`, `net`, `clock` | orchestrate PUT/GET incl. placement negotiation; issue tombstones; windowed transfer; admission & eviction (§14) |
+| `repair` | `store`, `net`, `clock` | the repair loop: measure redundancy via have/want, claim, reconstruct on ciphertext (§9) |
 | `proof` | `store`, `clock` | answer challenges (holder side) and issue them + sign receipts (challenger side) |
 | `reputation` | — (pure) | accumulate signed receipts within the age bound; compute local + optional gossiped scores; `reputation.score` query |
 
@@ -336,45 +373,48 @@ Discovery and placement are deliberately light: a single small `cohort` handler 
 
 ---
 
-## 16. Message catalog (control plane; every message ≤ 64 KB)
+## 18. Message catalog (control plane; every message ≤ 64 KB)
 
 | Name | Direction | Payload sketch |
 | --- | --- | --- |
 | `store.put_req` / `store.put_done` | user ↔ coordinator | file blocks in / `manifest_id` out |
 | `store.get_req` / `store.get_done` | user ↔ coordinator | `manifest_id` in / file blocks out |
-| `frag.offer` / `frag.accept` / `frag.decline` | coordinator ↔ peer | `block_id`, size / accept / reason |
+| `frag.offer` / `frag.accept` / `frag.decline` | coordinator ↔ peer | `block_id`, size, repair header / accept / reason |
 | `frag.fetch_req` / `frag.block` / `frag.ack` | reader ↔ holder | wanted block-ids / a block (bulk plane) / window ack |
 | `disc.have` / `disc.want` | peer ↔ peer | block-ids held / block-ids wanted (the discovery layer, §5) |
 | `proof.challenge` / `proof.response` / `proof.receipt` | challenger ↔ holder | nonce+offset / sector+merkle / **signed** receipt |
-| `repair.claim` | peer ↔ cohort | "I'm repairing this file" — suppresses duplicate repair (§9) |
+| `repair.claim` | peer ↔ cohort | "I'm repairing this chunk" — suppresses duplicate repair (§9) |
+| `frag.tombstone` | owner → cohort | **signed** "delete these block-ids and stop repairing" (§11) |
 | `rep.gossip` | peer ↔ peer | signed receipt summaries (optional, for friend-of-a-friend scoring) |
 
-Control messages that authorize a state change (the mutators in §15) carry a leading sequence number and are dropped on replay. Bulk `frag.block`s carry no signature; they are validated by `genesis_hash(bytes) == block_id` (§4).
+Control messages that authorize a state change (the mutators in §17) carry a leading sequence number and are dropped on replay. Bulk `frag.block`s carry no signature; they are validated by `genesis_hash(bytes) == block_id` (§4).
 
 ---
 
-## 17. Bootstrap additions
+## 19. Bootstrap additions
 
 On top of the kernel bootstrap, a storage-capable node additionally:
 
 1. Installs the storage bridges it offers: `store.local` (always, to donate space), `net.send`, `clock.now`, `rand`.
 2. Wires an installer policy that admits the storage app handlers — restrictive, *never* open, e.g. a content-hash allowlist of audited storage-handler bytecode plus a closed author set for who may publish upgrades.
-3. Receives the storage app handlers as signed install messages (`chunker`, `erasure`, `manifest`, `cohort`, `store.coordinator`, `repair`, `proof`, `reputation`) — each declaring exactly the caps in §15.
+3. Receives the storage app handlers as signed install messages (`chunker`, `erasure`, `manifest`, `cohort`, `store.coordinator`, `repair`, `proof`, `reputation`) — each declaring exactly the caps in §17.
 4. Joins its cohort: connects to known peers (by introduction or a rendezvous point), exchanges have/want, and starts serving.
 
 A node that only wants to *donate* storage installs the holder-side path (`store.local`, `cohort`, the accept/serve half of `store.coordinator`, the holder half of `proof`) and never needs the writer's chunker/erasure/manifest. A read-only client needs the reverse. The onion composes per-role.
 
 ---
 
-## 18. Tuning knobs and open questions
+## 20. Tuning knobs and open questions
 
 - **`(k, m)` and chunk size** — the durability/overhead dial. Size against measured cohort churn so that the chance of losing more than *m* holders within one repair interval is acceptably small.
 - **Grace window `G` and liveness cadence** — set so ordinary offline patterns (overnight, commute, reboot) never trigger repair, but real departures do within a bounded time. Too short → churn storms; too long → slow healing.
 - **Low-water mark & repair jitter** — trade healing speed against repair traffic and duplicate-repair avoidance.
-- **Cohort uptime** — the load-bearing durability decision (§9): each sharing group should include at least one well-connected, long-lived peer so repair can always run.
-- **Reputation window `X` and weighting** — the age bound (§12.2), the weighting of volume/diversity/recency, and whether to enable gossiped transitivity. This lives in the pure, swappable `reputation` handler.
+- **Cohort uptime** — the load-bearing durability decision (§9): each chunk's holders should include at least one well-connected, long-lived peer so repair can always run.
+- **Committed/cache split & eviction weights** — how much quota a node reserves for durable commitments vs. opportunistic cache, and the weighting of the eviction score (§14).
+- **Tombstone retention** — how long a holder keeps a tombstone after the referenced blocks are gone (§11).
+- **Reputation window `X` and weighting** — the age bound (§13.2), the weighting of volume/diversity/recency, and whether to enable gossiped transitivity. This lives in the pure, swappable `reputation` handler.
 - **Bulk transport choice** — in-band hash-verified frames (simplest) vs. a dedicated bulk channel (fastest). §4 supports either.
 - **Convergent vs. random-key encryption** — dedup vs. equality-leak (§3.5).
-- **Optional hardening** — PRF locator tags, padded/Bloom have-sets, or full PSI for less-trusted cohorts (§13). Off by default; add only when the cohort's trust assumption no longer holds.
+- **Optional hardening** — PRF locator tags, padded/Bloom have-sets, or full PSI for less-trusted cohorts (§15). Off by default; add only when the cohort's trust assumption no longer holds.
 
 Everything above is expressible as bridges, pure-compute handlers, signed messages, and a restrictive policy callback — i.e. as ordinary seedkernel modules. The kernel never learns what a "file" is; it just keeps routing names to handlers, the bulk bytes never enter its 64 KB world, and the design stays four ideas deep: a social cohort, encryption, content addressing, and have/want.
