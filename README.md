@@ -300,13 +300,15 @@ Receipts are the kernel's signature wrapper doing exactly what it's for: an auth
 
 A peer's reputation is computed from the receipts *others signed about it*, weighted by:
 - **Volume & longevity** — passing challenges for more data, over more time.
-- **Challenger diversity** — receipts from many *distinct* peers count more than many from one (collusion resistance).
+- **Challenger diversity** — receipts from many *distinct* peers count more than many from one. This blunts casual inflation, but on the gossip path it is not enough against deliberate collusion (a clique manufactures its own diversity), which is why gossiped receipts are additionally weighted *transitively* (below).
 - **Recency, with a hard age bound** — only receipts from the last `X` (a deployment window, e.g. 90 days) count, and receipts older than `X` are discarded rather than kept. This both decays the score of a peer that stops serving and bounds how much reputation state anyone has to store, so it never grows without limit.
 - **Retrieval success** — serving real `frag.fetch_req`s, not just challenges.
 
 Two complementary views, and the closed network makes the simple one the default:
-- **Subjective / local (default):** every peer scores peers it has directly interacted with. In a cohort you mostly *have* interacted with everyone you store with, so local scoring covers the common case and is inherently Sybil-proof — you only trust what you witnessed.
-- **Gossiped / objective (optional):** peers exchange signed receipt summaries (`rep.gossip`) so you can evaluate a friend-of-a-friend you haven't met, discounting by how much you trust the attesters. Transitive (EigenTrust-style) weighting is a drop-in; the inputs are all signed receipts.
+- **Subjective / local (default):** every peer scores peers it has directly interacted with. In a cohort you mostly *have* interacted with everyone you store with, so local scoring covers the common case and is inherently Sybil-proof — you only trust what you witnessed, so others' mutual receipts never enter your local view and collusion has nothing to grip.
+- **Gossiped / transitive (optional path, mandatory weighting):** to judge a friend-of-a-friend you have never challenged yourself, peers exchange signed receipt summaries (`rep.gossip`). Using this path is optional — but when you do, receipts **must** be weighted transitively, never summed flat. A receipt counts only in proportion to the *challenger's own reputation as you already assess it*, so a vouch from a peer you don't trust is worth almost nothing. This is the one defense that holds against deliberate collusion among real cohort members (Sybil among strangers is already bounded by the closed network, §15): a clique can sign each other glowing receipts all day, but until its members earn standing in *your* trust web those receipts carry ~0 weight.
+
+Concretely this is **EigenTrust-style transitive trust, personalized to the evaluator**. Each peer normalizes its locally-witnessed scores (§13.1) into a trust vector, then propagates trust over the gossiped receipt graph by damped power iteration — a peer's transitive score is the fixpoint of `trust(P) = (1−d)·local_seed(P) + d·Σ_c trust(c)·rating_c(P)` — restarting from its **own** local view rather than any global pre-trusted set. Anchoring on the local seed is what makes it collusion-resistant and keeps it consistent with the subjective default: trust is computed *relative to you*, so a collective with no edge into your local trust set never gains weight, and there is no global reputation object to agree on or attack. A new honest node starts near zero on the gossip path until someone's local trust reaches it — it proves itself locally first — and because the local seed and every edge obey the recency age bound, a peer that stops serving loses both its own score *and* its power to vouch for others. The whole computation is arithmetic over collected signed receipts, so it stays in the pure, cap-free `reputation` handler (§17).
 
 `reputation.score(pubkey) → score` is a read-only query, used by placement (§6), by holders deciding whether to accept a `frag.offer`, and by readers choosing whom to fetch from first.
 
@@ -383,7 +385,7 @@ Because the network is a closed social cohort, the dominant open-network threats
 | `store.coordinator` | `store`, `net`, `clock` | orchestrate PUT/GET incl. placement negotiation; issue tombstones; windowed transfer; admission & eviction (§14) |
 | `repair` | `store`, `net`, `clock` | the repair loop: measure redundancy via have/want, claim, reconstruct on ciphertext (§9) |
 | `proof` | `store`, `clock` | answer challenges (holder side) and issue them + sign receipts (challenger side) |
-| `reputation` | — (pure) | accumulate signed receipts within the age bound; compute local + optional gossiped scores; `reputation.score` query |
+| `reputation` | — (pure) | accumulate signed receipts within the age bound; compute local scores and transitively-weighted (EigenTrust-style, locally-anchored) gossiped scores; `reputation.score` query |
 
 Discovery and placement are deliberately light: a single small `cohort` handler keeps the peer set and runs have/want, and placement is just negotiation folded into `store.coordinator`. The three pure handlers (`chunker`, `erasure`, `manifest`) declare **no** capabilities, so the structural sandbox guarantees they can never reach disk or network even if buggy — the heavy crypto/coding code is exactly where you want that guarantee. Mutating handlers (`store.coordinator`, `repair`, `proof`) that act under a signer's authority consume a per-signer sequence number to reject replays.
 
@@ -428,7 +430,7 @@ A node that only wants to *donate* storage installs the holder-side path (`store
 - **Cohort uptime** — the load-bearing durability decision (§9): each chunk's holders should include at least one well-connected, long-lived peer so repair can always run.
 - **Committed/cache split & eviction weights** — how much quota a node reserves for durable commitments vs. opportunistic cache, and the weighting of the eviction score (§14).
 - **Tombstone retention** — how long a holder keeps a tombstone after the referenced blocks are gone (§11).
-- **Reputation window `X` and weighting** — the age bound (§13.2), the weighting of volume/diversity/recency, and whether to enable gossiped transitivity. This lives in the pure, swappable `reputation` handler.
+- **Reputation window `X` and weighting** — the age bound (§13.2), the weighting of volume/diversity/recency, and — on the gossip path — the EigenTrust damping factor `d` and how strongly to anchor on the local seed. Transitive weighting itself is *required* on that path, not a toggle (§13.2); only its parameters are tunable. This lives in the pure, swappable `reputation` handler.
 - **Bulk transport choice** — in-band hash-verified frames (simplest) vs. a dedicated bulk channel (fastest). §4 supports either.
 - **Convergent vs. random-key encryption** — dedup vs. equality-leak (§3.5).
 - **Optional hardening** — PRF locator tags, padded/Bloom have-sets, or full PSI for less-trusted cohorts (§15). Off by default; add only when the cohort's trust assumption no longer holds.
