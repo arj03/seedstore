@@ -91,6 +91,7 @@ manifest (CBOR or fixed binary; itself chunked into blocks if > 48 KB):
       chunk_index,
       k, m,                              // RS parameters for this chunk
       chunk_id,                          // = genesis_hash(ciphertext chunk)
+      descriptor_id,                     // = genesis_hash(signed repair descriptor), §3.6
       fragments: [
         { frag_index, block_ids: [...] } // the blocks that make up this fragment
       ]
@@ -109,9 +110,24 @@ Kernel envelopes are signed, not encrypted, and at-rest storage has no confident
 - The content key is wrapped to the file's sharing group and carried in the manifest; sharing a file means sharing or re-wrapping the key, not moving bytes.
 - Random per-file keys mean two different files never produce colliding ciphertext, so a `block_id` is meaningful only to someone who has handled that exact file. Convergent encryption (key = hash(plaintext)) is an opt-in for deployments that want cross-user dedup and accept its equality-leak.
 
-### 3.6 The repair header (travels with each block)
+### 3.6 The repair descriptor (signed; travels with each block)
 
-*Reading* a file needs the whole manifest and the content key, and is gated to the sharing group. *Repair* needs much less — only a chunk's shape — and we want it possible for far more peers, so each stored block carries a tiny **repair header**: the chunk's `(k, m)` and the block-ids of all `n` sibling fragments. That is everything a holder needs to audit a chunk and rebuild a missing fragment, and because reconstruction is arithmetic on ciphertext (§3.2, §3.5) it needs no key. The header is set at placement time and re-attached whenever a repaired fragment is pushed to a new peer. It discloses a chunk's size and shape to anyone storing a piece of it — the same class of disclosure already accepted in §15 — but never its contents. This split is what makes repair redundant rather than owner-bound (§9).
+*Reading* a file needs the whole manifest and the content key, and is gated to the sharing group. *Repair* needs much less — only a chunk's *shape* — and we want it possible for far more peers, so each stored block carries a tiny **repair descriptor**. This descriptor is control-plane data and **must be authenticated**: `block_id = genesis_hash(ciphertext_bytes)` covers a block's *bytes* but says nothing about the *relationships between blocks*, so an unsigned descriptor could be altered by a malicious holder to misdirect or suppress repair — point a repairer at fragments that don't exist, lie about `(k, m)`, or hide that a chunk is decaying. Content addressing alone cannot close this gap: a tampered descriptor is still a valid string of bytes, and what's missing is an anchor the attacker cannot forge. So the descriptor is **signed by the file's author** (the §2 manifest signer):
+
+```
+descriptor D:
+  file_root          // the manifest_id this chunk belongs to
+  chunk_index
+  k, m               // RS parameters
+  chunk_id           // = genesis_hash(ciphertext chunk) — the keyless reconstruction anchor
+  frag_ids[0..n)     // block-ids of all n sibling fragments, by frag_index
+descriptor_id = genesis_hash(canonical(D))
+repair_cert   = sign_author(descriptor_id)
+```
+
+It is set at placement time and re-attached whenever a repaired fragment is pushed to a new peer. The manifest also commits to each chunk's `descriptor_id` (§3.4), tying the descriptor into the file's signed root. **Verifying it needs only the author's *public* key — never the read key — so keyless repair (§9) is preserved.**
+
+Every peer that accepts a fragment first verifies its descriptor: it is self-consistent (`genesis_hash(canonical(D)) == descriptor_id`), `repair_cert` is a valid author signature over it, and the fragment's own `block_id ∈ frag_ids`. A fragment whose descriptor fails any check is rejected outright. A holder therefore cannot alter the descriptor it serves — the signature won't re-verify — and cannot substitute its own key, because authority is bound to the file's author, the same trust root that decides whose tombstone is honored (§11). The authenticated `chunk_id` additionally lets a repairer certify its *own* reconstruction before propagating it (§9), so a bad descriptor can never cause garbage to be minted. The descriptor still discloses a chunk's size and shape to anyone storing a piece of it — the same class of disclosure already accepted in §15 — but never its contents, and now never a forgeable instruction. This split — signed shape, keyless verification — is what makes repair redundant rather than owner-bound (§9).
 
 ---
 
@@ -156,7 +172,7 @@ What leaks, and why it is acceptable here: a peer you exchange have/want with le
 ## 6. Writing a file (PUT)
 
 1. **Chunk & encrypt.** The owner feeds the file to the `chunker` (cap-free) block-by-block (the 64 KB cap applies to messages between handlers too). Each chunk is AEAD-encrypted (§3.5).
-2. **Erasure-code.** The `erasure` handler (cap-free) turns each chunk into `n` fragments; the `chunker` slices fragments into ≤ 48 KB blocks, computes block-ids, and forms each chunk's repair header (§3.6).
+2. **Erasure-code.** The `erasure` handler (cap-free) turns each chunk into `n` fragments; the `chunker` slices fragments into ≤ 48 KB blocks, computes block-ids, and forms each chunk's repair descriptor, which the owner signs (§3.6).
 3. **Place by negotiation.** For each fragment, the `store.coordinator` picks candidate cohort peers — ordered by reputation (§13) and current reachability — and sends `frag.offer(block_id, size)`. A peer with free quota and willingness replies `frag.accept`; otherwise `frag.decline` and the coordinator moves to the next candidate. There is no global placement function; placement is a short private negotiation within the cohort.
 4. **Push.** On accept, the coordinator streams the block over the bulk plane (§4), together with its repair header so the holder can later help heal the chunk.
 5. **Share the manifest.** The manifest lists block-ids, not holders; it is shared with the file's sharing group and stored the same erasure-coded way (§3.4). Which peer took which fragment is not pinned anywhere — it is rediscovered live via have/want, so placement can shift under repair without the manifest going stale.
@@ -196,7 +212,7 @@ Peers are expected to disappear and come back. The protocol distinguishes a tran
 
 ## 9. Self-healing / repair
 
-Repair is per-chunk, and it is performed by the chunk's own **fragment-holders**. Anyone holding a fragment also holds that chunk's repair header (§3.6) — the sibling block-ids and `(k, m)` — which is all you need to audit and rebuild it, and reconstruction runs on ciphertext, so a repairer never needs the file's key. The sharing group *reads*; any fragment-holder *repairs*. No peer is special and no one is appointed; the work gets done by whoever notices first.
+Repair is per-chunk, and it is performed by the chunk's own **fragment-holders**. Anyone holding a fragment also holds that chunk's signed repair descriptor (§3.6) — the sibling block-ids, `(k, m)`, and `chunk_id` — which is all you need to audit and rebuild it, and reconstruction runs on ciphertext, so a repairer never needs the file's key (only the author's public key, to check the descriptor). The sharing group *reads*; any fragment-holder *repairs*. No peer is special and no one is appointed; the work gets done by whoever notices first.
 
 This is what makes repair redundant. The peers able to heal a chunk are exactly the peers storing it — about `n` of them — so repair survives as long as a single fragment-holder is online, and the repair-redundancy automatically scales with the durability `m` you chose. (The alternative, tying repair to whoever can read the manifest, would make a private file's owner the sole possible repairer — a single point of failure for healing even when the bytes themselves are amply redundant.)
 
@@ -204,7 +220,7 @@ This is what makes repair redundant. The peers able to heal a chunk are exactly 
 1. Send a have/want to the cohort for the chunk's sibling block-ids (§5) and count how many distinct fragments are currently retrievable → `live_fragments`.
 2. If `live_fragments < low_water` (default `k + ⌈m/2⌉`), repair is needed.
 3. **Avoid duplicate work** with a jittered timer: the peer that fires first announces it (`repair.claim`); others hold off and cancel when a freshly placed fragment shows up in have/want. Because the cohort is small and the claim is observable, this needs no election or coordinator.
-4. The repairer fetches any *k* retrievable fragments, reconstructs the chunk's ciphertext, re-encodes only the **missing** fragments, and places them on fresh cohort peers (§6 steps 3–4) with their repair header, skipping current holders so redundancy spreads to new peers.
+4. The repairer fetches any *k* retrievable fragments, reconstructs the chunk's ciphertext, and **verifies `genesis_hash(reconstructed) == chunk_id`** from the signed descriptor before trusting the result — this catches a tampered `(k, m)`, a wrong fetched fragment, or any decode error keylessly, so a poisoned descriptor can never make repair mint or propagate garbage. It then re-encodes only the **missing** fragments and places them on fresh cohort peers (§6 steps 3–4) with the signed descriptor, skipping current holders so redundancy spreads to new peers.
 5. The new fragments are immediately discoverable via have/want; redundancy returns to `n` with no manifest change, since the manifest never named holders.
 
 **Moving data on availability change** is the same loop run proactively: if a peer sees the cohort thinning (many Suspected/Lost holders, e.g. a correlated outage), it re-spreads fragments toward healthier peers before a chunk crosses low-water.
@@ -221,7 +237,7 @@ This requirement is met structurally, not by trust:
 
 - **No fragment is unique.** A chunk survives on any *k* of *n* fragments, and distinct fragments live on distinct peers (§6). One peer holds at most one fragment of a given chunk, so its disappearance — or its refusal to serve — costs at most one fragment. You need *more than m* peers to fail or defect simultaneously to lose a chunk.
 - **No metadata is unique.** The manifest is stored the same erasure-coded way and shared across the file's group (§3.4); there is no single index server, and the holder map is not stored at all — it is recomputed live.
-- **No single repairer is required.** Any of a chunk's ~`n` fragment-holders can heal it (§9), on ciphertext, without the read key; removing any one removes no capability. Repair-redundancy is therefore as high as the data-redundancy *n*, not gated on a small set of readers.
+- **No single repairer is required.** Any of a chunk's ~`n` fragment-holders can heal it (§9), on ciphertext, without the read key; removing any one removes no capability. Repair-redundancy is therefore as high as the data-redundancy *n*, not gated on a small set of readers. And because each chunk's shape travels as an **author-signed descriptor** (§3.6), no holder can misdirect or suppress repair by tampering the header — an altered descriptor fails its signature check and is rejected.
 - **Withholding is detected and routed around.** A holder that stops serving fails storage challenges (§13), loses reputation, and gets skipped in future placement; its unreachability tips it to Lost and triggers repair. Active malice degrades to the same path as passive offline-ness.
 - **Corruption is impossible to hide.** Content addressing (§3.3) means a tampered block fails its hash check and is discarded; the reader simply fetches another fragment.
 
@@ -324,7 +340,7 @@ Concretely, an eviction score like `coldness × redundancy_elsewhere × (1 / rec
 
 Because the network is a closed social cohort, the dominant open-network threats shrink: you only peer with people you've added, so Sybil flooding and eclipse are not the everyday concern they are in an open network, and the installer policy stays restrictive (an open registry would be remote code execution) so untrusted WASM never lands.
 
-**What is protected.** Content — encryption means holders see only ciphertext (§3.5). The wire — an authenticated, encrypted channel with each frame's signer pinned to the channel identity. The content↔holder mapping — there is no global index, and the holder map is never stored, only recomputed live within the cohort. Integrity — content addressing (§3.3). Identity — signatures.
+**What is protected.** Content — encryption means holders see only ciphertext (§3.5). The wire — an authenticated, encrypted channel with each frame's signer pinned to the channel identity. The content↔holder mapping — there is no global index, and the holder map is never stored, only recomputed live within the cohort. Integrity — content addressing (§3.3) for bulk bytes, and an author signature on the repair descriptor (§3.6) for the chunk-shape metadata that drives repair, so a holder cannot forge it to misdirect healing. Identity — signatures.
 
 **What leaks, accepted by the closed-cohort assumption.** All of these are disclosures *to peers you have chosen to store with, about files you have already shared with them*:
 - **Inventory size** — a peer you have/want with learns roughly how much you store and a shared file's fragment count.
@@ -335,7 +351,7 @@ Because the network is a closed social cohort, the dominant open-network threats
 - **Ex-member probing** — someone who once held a file's ids can probe for those specific blocks until repair rotates them away; for sensitive files, re-encrypt and rotate on a membership change (expensive, usually done only when it matters).
 
 **Optional hardening (documented, deliberately unbuilt).** Add only if a deployment's cohort is less than fully trusted; none of it is needed for a friends-or-devices cohort, and adding it by default would make the system the complicated monster we are avoiding:
-- **PRF locator tags.** Address blocks by `tag = PRF_{K_loc}(fragment_id)` (with `K_loc` a per-file locator key separate from the decryption key) instead of by the raw ciphertext hash. This decouples the locator from the content hash, gives holders and observers unlinkability, and lets you rotate locators on a membership change without re-encrypting. Cost: one extra per-file key and a second identifier in the manifest.
+- **PRF locator tags.** Address blocks by `tag = PRF_{K_loc}(fragment_id)` (with `K_loc` a per-file locator key separate from the decryption key) instead of by the raw ciphertext hash. This decouples the locator from the content hash, gives holders and observers unlinkability, and lets you rotate locators on a membership change without re-encrypting. Cost: one extra per-file key and a second identifier in the manifest. **If you adopt this, the repair descriptor's `chunk_id` (§3.6) must be tagged the same way** — it is a stable per-chunk identifier held by every fragment-holder, so left in the clear it survives as a cross-file linkage handle that defeats the unlinkability the tags otherwise buy. Tag it as `PRF_{K_loc}(chunk_id)` (the repairer still verifies reconstruction by recomputing the raw `chunk_id` locally and re-applying the PRF), and apply the same to the descriptor's `frag_ids`.
 - **Size-hiding have/want.** Pad have-sets to a round number or send them as Bloom filters to blunt the inventory-size leak — cheap, and the right first step for a semi-trusted pool.
 - **Size-Hiding PSI.** A malicious-secure, size-hiding private set intersection would hide set size and non-intersection elements even from an authorized-but-curious peer, at the cost of a multi-message protocol, real per-run latency, mandatory rate-limiting, and a substantial implementation burden. It is a possible future layer for genuinely semi-trusted community pools, **not** part of this design.
 
@@ -379,7 +395,7 @@ Discovery and placement are deliberately light: a single small `cohort` handler 
 | --- | --- | --- |
 | `store.put_req` / `store.put_done` | user ↔ coordinator | file blocks in / `manifest_id` out |
 | `store.get_req` / `store.get_done` | user ↔ coordinator | `manifest_id` in / file blocks out |
-| `frag.offer` / `frag.accept` / `frag.decline` | coordinator ↔ peer | `block_id`, size, repair header / accept / reason |
+| `frag.offer` / `frag.accept` / `frag.decline` | coordinator ↔ peer | `block_id`, size, **signed repair descriptor** (§3.6) / accept / reason |
 | `frag.fetch_req` / `frag.block` / `frag.ack` | reader ↔ holder | wanted block-ids / a block (bulk plane) / window ack |
 | `disc.have` / `disc.want` | peer ↔ peer | block-ids held / block-ids wanted (the discovery layer, §5) |
 | `proof.challenge` / `proof.response` / `proof.receipt` | challenger ↔ holder | nonce+offset / sector+merkle / **signed** receipt |
