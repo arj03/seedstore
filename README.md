@@ -88,6 +88,8 @@ Defaults: `k = 10, m = 6` → `n = 16`, 1.6× storage overhead, surviving the lo
 
 **This alignment — `chunk = k blocks` — is what collapses the data model.** A block *is* an erasure shard *is* the unit on the wire, so there is no distinct "fragment" object to slice, list, or address; a chunk's descriptor is simply its list of `n` block-ids, and one block per message is always true by construction. (Fixed-size chunking is also the simplest; a deployment that wants cross-file dedup can swap in content-defined chunking, at the cost of variable-length blocks that no longer map one-to-one onto shards.)
 
+**A file too small to fill a chunk is replicated, not coded.** A whole file — or the final partial chunk of a larger one — of only one or two blocks is stored as `r = m + 1` plain replicas on distinct peers (the path the manifest itself takes, §4.3), not padded out to `k` and RS-encoded. Padding tiny data is wasteful: `d` data blocks need `d·(m + 1)` replicas to match `RS(k, m)`'s loss tolerance, which beats the constant `k + m` blocks a padded chunk always emits only while `d < (k + m)/(m + 1)` — two blocks at the default `RS(10, 6)`. So the codec runs only where it earns its keep, the most common small files skip it entirely, and `r = m + 1` survives the same `m` losses as a coded chunk. A replica is the same content-addressed block, so discovery (§5), repair (just copy a missing replica from any live holder), and the §10 invariant all carry over unchanged; the descriptor of such a chunk simply lists its `d` data block-ids and no parity.
+
 ### 4.2 Blocks are content-addressed
 
 Each block is content-addressed: `block_id = genesis_hash(block_bytes)`. Content addressing makes every block **self-verifying**: a receiver recomputes the hash and rejects anything that doesn't match, so a malicious holder cannot return corrupt bytes undetected, and no signature is needed on bulk data (§3). Because the bytes are ciphertext (§4.4), a `block_id` is the hash of an encrypted blob — opaque and unguessable to anyone who has not handled that exact file.
@@ -100,7 +102,6 @@ Two small objects describe a file: a per-chunk **descriptor** and the file's **m
 
 ```
 descriptor D:
-  chunk_index
   block_ids[0..n)      // the n blocks of this chunk, by index (0..k data, k..n parity)
 signed by the file's author (the §2 identity)
 ```
@@ -120,7 +121,7 @@ manifest_id = genesis_hash(manifest_root)
 
 The manifest is encrypted under the file's content key and **replicated across cohort peers** — the same handful of copies any block gets — so it has no single point of failure and there is no index server. Because it is tiny, this needs none of the chunk/erasure machinery the file body uses; a manifest that outgrows one block simply splits into blocks listed by a small replicated root, and `manifest_id` is the hash of that root (for a manifest that fits one block, the root *is* that block). A file is referenced by `manifest_id`; that one hash, under a signature, is what travels in a 64 KB kernel envelope. Crucially, the manifest says *what* blocks a file is made of, never *which* peers hold them — that is discovered live via have/want (§5), so the holder map stays current under churn and repair instead of going stale in a fixed file.
 
-The same descriptor object thus lives in **two homes**: inside the (encrypted) manifest, so a reader gets every chunk's shape at once; and in the clear alongside each stored block, so a repairer who lacks the manifest still has its chunk's shape and can verify it from the author's public key alone. It is small and signed, so duplicating it is cheap and tamper-evident in both places.
+The descriptor carries no chunk index: a chunk's position in the file is given by its order in the manifest's `chunks` list, and a block-holder repairing a chunk never needs the position — only the sibling block-ids — so a unique-by-content `block_ids` set is the whole identity. The same descriptor object thus lives in **two homes**: inside the (encrypted) manifest, so a reader gets every chunk's shape at once; and in the clear alongside each stored block, so a repairer who lacks the manifest still has its chunk's shape and can verify it from the author's public key alone. It is small and signed, so duplicating it is cheap and tamper-evident in both places.
 
 ### 4.4 Encryption (the load-bearing privacy mechanism)
 
@@ -160,7 +161,7 @@ What leaks, and why it is acceptable here: a peer you exchange have/want with le
 ## 6. Writing a file (PUT)
 
 1. **Chunk & encrypt.** The owner generates a random content key `K` (via `rand`) and feeds the file to the `codec` (cap-free) block-by-block, AEAD-encrypting each chunk under `K` (§4.4).
-2. **Erasure-code.** The `codec` (cap-free) turns each chunk's *k* data blocks into *m* parity blocks, computes all `n` block-ids, and forms the chunk's descriptor, which the owner signs (§4.3).
+2. **Erasure-code.** The `codec` (cap-free) turns each chunk's *k* data blocks into *m* parity blocks, computes all `n` block-ids, and forms the chunk's descriptor, which the owner signs (§4.3). A file too small to fill a chunk skips this step and is replicated `r = m + 1` times instead (§4.1).
 3. **Place by negotiation.** For each block, the `store.coordinator` picks candidate cohort peers — ordered by reciprocity standing (§13) and current reachability — and sends `block.offer(block_id, size, signed descriptor)`. A peer with free quota and willingness replies `block.accept`; otherwise `block.decline` and the coordinator moves to the next candidate. There is no global placement function; placement is a short private negotiation within the cohort.
 4. **Push.** On accept, the coordinator streams the block over the bulk plane (§3) together with its signed chunk descriptor, so the holder can verify it and later help heal the chunk.
 5. **Build & store the manifest.** The `codec` assembles the signed descriptors and encryption header and encrypts the manifest under `K`, which is then **replicated across cohort peers** (§4.3). The manifest lists block-ids, not holders; which peer took which block is rediscovered live via have/want, so placement can shift under repair without the manifest going stale.
@@ -175,7 +176,7 @@ The `n` blocks of a chunk are placed on **distinct peers** (the coordinator enfo
 1. **Resolve the manifest.** Using the sealed `K` you were given, fetch the manifest's blocks from the cohort peers that hold them, verify by hash, and decrypt → the chunk descriptors.
 2. **Locate blocks.** Send a have/want to the cohort for a chunk's block-ids. You need any *k* of *n* per chunk, so race requests to the *k* best-scoring reachable peers that answer; if some are offline, the same have/want surfaces any extra replicas repair has created.
 3. **Fetch & verify.** Stream blocks over the bulk plane; each is checked against its `block_id` (self-verifying, §4.2).
-4. **Decode & decrypt.** If all *k* data blocks arrived, concatenate them (systematic RS, no decode); otherwise RS-decode any *k* blocks to recover the chunk ciphertext. AEAD-decrypt, concatenate chunks.
+4. **Decode & decrypt.** If all *k* data blocks arrived, concatenate them (systematic RS, no decode); otherwise RS-decode any *k* blocks to recover the chunk ciphertext. (A replicated sub-`k` file, §4.1, has no parity: fetch each of its `d` blocks from any live holder and concatenate — never a decode.) AEAD-decrypt, concatenate chunks.
 
 Because any *k*-of-*n* suffices, a read succeeds even with up to *m* holders offline or unwilling — no peer is on the critical path.
 
@@ -215,7 +216,7 @@ This is what makes repair redundant. The peers able to heal a chunk are exactly 
 
 **The one real cost**: a chunk can only be healed while at least one of its block-holders is online within a repair interval. With about `n` holders that is a weak requirement, but it can still fail if a chunk's holders are *all* low-uptime and go dark together (e.g. an all-browser cohort overnight). Placing at least one durable peer among each chunk's holders removes the risk — which is also what §8 recommends for the durable `m`.
 
-**Repair amplification is bounded** by erasure coding: regenerating one lost block costs *k* block-reads and one chunk reconstruction, and only the lost blocks are rebuilt. (When that *k*-read cost dominates, a Locally Repairable Code cuts it — §21.)
+**Repair amplification is bounded** by erasure coding: regenerating one lost block costs *k* block-reads and one chunk reconstruction, and only the lost blocks are rebuilt. (When that *k*-read cost dominates, a Locally Repairable Code cuts it — §21.) A replicated small file (§4.1) is cheaper still: repair is a single block copy from any live holder, with no reconstruction at all.
 
 ---
 
@@ -223,7 +224,7 @@ This is what makes repair redundant. The peers able to heal a chunk are exactly 
 
 This requirement is met structurally, not by trust:
 
-- **No block is unique.** A chunk survives on any *k* of *n* blocks, and the *n* blocks live on distinct peers (§6). One peer holds at most one block of a given chunk, so its disappearance — or its refusal to serve — costs at most one block. You need *more than m* peers to fail or defect simultaneously to lose a chunk.
+- **No block is unique.** A chunk survives on any *k* of *n* blocks, and the *n* blocks live on distinct peers (§6). One peer holds at most one block of a given chunk, so its disappearance — or its refusal to serve — costs at most one block. You need *more than m* peers to fail or defect simultaneously to lose a chunk. (A replicated small file, §4.1, is the same bound by another route: `r = m + 1` copies on distinct peers, so it too survives any *m* losses.)
 - **No metadata is unique.** The manifest is **replicated across cohort peers** (§4.3); there is no single index server, and the holder map is not stored at all — it is recomputed live.
 - **No single repairer is required.** Any of a chunk's ~`n` block-holders can heal it (§9), on ciphertext, without the read key; removing any one removes no capability. Repair-redundancy is therefore as high as the data-redundancy *n*, not gated on a small set of readers. And because each chunk's shape travels as an **author-signed descriptor** (§4.3), no holder can misdirect or suppress repair by tampering the header — an altered descriptor fails its signature check and is rejected.
 - **Withholding is detected and routed around.** A holder that stops serving fails its verification-fetches (§8), loses reciprocity standing (§13), and gets skipped in future placement; its unreachability tips it to Lost and triggers repair. Active malice degrades to the same path as passive offline-ness.
