@@ -113,7 +113,7 @@ Every peer that accepts a block first verifies its descriptor: the author's sign
 **The manifest** is the file's root — small, and the only thing a reader needs to bootstrap a download. It is the list of every chunk descriptor plus the metadata to decrypt:
 
 ```
-manifest (CBOR or fixed binary; itself encrypted and replicated, §4.3):
+manifest (a hand-rolled fixed binary layout — small enough to need no serialization library; itself encrypted and replicated, §4.3):
   version
   file_size, B                          // block size
   enc:    { alg, nonce_base }           // §4.4; absent if stored in clear
