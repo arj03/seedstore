@@ -148,6 +148,8 @@ A node keeps connections to a **bounded set of peers it has a relationship with*
 - *Who currently holds block B?* — ask the cohort. A have/want carrying the block-ids turns up whoever has them right now; nothing is pinned in advance, so the answer is always current.
 - *Are there extra replicas, and is a given peer still holding its blocks?* — the same one-round exchange: "I want these `block_id`s" / "I have these `block_id`s." No lookup walk, no cryptographic protocol, no rate-limit machinery.
 
+A have/want only ever **names ids the asker already holds**; it confirms or denies those and never returns a peer's full inventory. There is no "list everything you have" message anywhere in the protocol, so files cannot be enumerated — *don't share = can't probe*.
+
 Block-ids are hashes of random-key ciphertext (§4.4), so to a peer outside a file's sharing group they are opaque noise, and on the wire they are encrypted. The only parties who can interpret a have/want entry are those who already hold the file's key — i.e. people you deliberately shared with.
 
 Note that have/want is **advertisement, not proof**: a peer can answer "have" to a block it cannot actually serve. §8 closes that gap by backing the redundancy count with occasional verification-fetches.
@@ -309,7 +311,7 @@ Concretely, an eviction score like `coldness × redundancy_elsewhere × (1 / rec
 
 Because the network is a closed social cohort, the dominant open-network threats shrink: you only peer with people you've added, so Sybil flooding and eclipse are not the everyday concern they are in an open network, and the installer policy stays restrictive (an open registry would be remote code execution) so untrusted WASM never lands.
 
-**What is protected.** Content — encryption means holders see only ciphertext (§4.4). The wire — an authenticated, encrypted channel with each frame's signer pinned to the channel identity. The content↔holder mapping — there is no global index, and the holder map is never stored, only recomputed live within the cohort. Integrity — content addressing (§4.2) for bulk bytes, and an author signature on the chunk descriptor (§4.3) for the shape metadata that drives repair, so a holder cannot forge it to misdirect healing. Identity — signatures.
+**What is protected.** Content — encryption means holders see only ciphertext (§4.4). The wire — an authenticated, encrypted channel with each frame's signer pinned to the channel identity. The content↔holder mapping — there is no global index, and the holder map is never stored, only recomputed live within the cohort. Integrity — content addressing (§4.2) for bulk bytes, and an author signature on the chunk descriptor (§4.3) for the shape metadata that drives repair, so a holder cannot forge it to misdirect healing. Identity — signatures. Enumeration — there is no list-all operation (§5.2); a peer can only confirm ids it is named, and without a file's key its block-ids are unguessable noise (convergent-encryption exception, §24).
 
 **What leaks, accepted by the closed-cohort assumption.** All of these are disclosures *to peers you have chosen to store with, about files you have already shared with them*:
 - **Inventory size** — a peer you have/want with learns roughly how much you store and a shared file's block count.
