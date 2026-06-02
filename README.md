@@ -50,7 +50,7 @@ This is the whole system you actually need: a durable, private, self-healing sto
 
 ## 2. How it composes with the kernel
 
-Nothing here changes the envelope, the dispatch rule, or `SetHandler`. Storage shows up as four kinds of seedkernel object:
+Nothing here changes the envelope, the dispatch rule, or `SetHandler`. Storage shows up as five kinds of seedkernel object:
 
 **Identity.** Every operation that needs "who" reads `signature.signer`. The author of a manifest, the signer of a chunk descriptor, the peer whose reciprocity standing moves — all are the top signer. There is no separate account system.
 
@@ -59,6 +59,8 @@ Nothing here changes the envelope, the dispatch rule, or `SetHandler`. Storage s
 **Capabilities.** Each storage bridge is bound to exactly one capability, declared by the handlers that use it at install time and acknowledged by the installer policy. A pure-compute handler (the codec — chunking, erasure coding, manifest building — and the reputation math) declares **no** caps — it is computation, and the structural sandbox guarantees it can touch no I/O even if compromised.
 
 **Transport.** Seed store needs an authenticated channel between peers that carries kernel envelopes, with each frame's signer pinned to the channel identity; any such transport works (the chat demo's WebRTC data channel is one example). It adds one capability-gated `net.send` for *addressed unicast* to a specific cohort peer, and bulk blocks ride the existing data channel as unsigned, hash-verified frames (§3); a dedicated bulk channel is an optional performance upgrade (§22).
+
+**Crypto.** Storage reuses the kernel's cryptography rather than shipping its own. A seedkernel deployment already loads **libsodium** as its genesis suite — Ed25519 + SHA-3-256 (seedkernel §6.2) — so `genesis_hash` here *is* that SHA-3-256, and a chunk descriptor's authorship is checked not by verifying a blob in WASM but by carrying the descriptor as a signature-wrapped envelope and reading `signature.signer` (§4.3); signing itself is sender-side in the host (seedkernel §6.1). The one facility the kernel deliberately omits is confidentiality — it is authentication-only (seedkernel §14) — so the client-side AEAD and key-sealing of §4.4 are exposed as thin host services over that **same already-loaded libsodium** (§16), not bundled. The net effect: the only cryptographic-grade algorithm that lives in storage WASM is **Reed–Solomon**, for which libsodium has no equivalent; everything else is a call into crypto the deployment already carries (~217 KB, seedkernel §11.2). That is what keeps the storage handlers to logic + RS — tens of KB — instead of a second copy of a crypto library.
 
 **The 64 KB cap is the whole reason this layer exists**, so §3 treats it first.
 
@@ -125,10 +127,10 @@ The descriptor carries no chunk index: a chunk's position in the file is given b
 
 ### 4.4 Encryption (the load-bearing privacy mechanism)
 
-Kernel envelopes are signed, not encrypted, and at-rest storage has no confidentiality of its own. In this design, **encryption is what makes the closed network safe** — it lets you store on cohort peers who can read nothing, and it makes block-ids opaque. Seed store encrypts **client-side before erasure coding**:
+Kernel envelopes are signed, not encrypted, and at-rest storage has no confidentiality of its own. In this design, **encryption is what makes the closed network safe** — it lets you store on cohort peers who can read nothing, and it makes block-ids opaque. Seed store encrypts **client-side before erasure coding** — using the kernel's own libsodium for AEAD and sealing through a host crypto service (§2, §16), not bundled crypto:
 
 - Generate a random per-file **content key** `K`; AEAD-encrypt each chunk (key + per-chunk nonce) before slicing into blocks and erasure-coding. Holders store ciphertext blocks and learn nothing about content. The manifest (§4.3) is encrypted under `K` the same way.
-- **Sharing a file is sharing the key, not moving bytes.** The owner sends a recipient `{ manifest_id, seal(K → recipient_pubkey) }` over a signed envelope — `K` sealed to the recipient's kernel public key (e.g. an X25519 sealed box). The key is never stored in clear on holders, which is what avoids the circularity of putting `K` inside a manifest that `K` encrypts. Re-sharing is one more sealed copy; revocation that must deny future reads rotates `K` and re-encrypts (§23).
+- **Sharing a file is sharing the key, not moving bytes.** The owner sends a recipient `{ manifest_id, seal(K → recipient_pubkey) }` over a signed envelope — `K` sealed to the recipient's kernel public key (libsodium `crypto_box_seal`, converting the Ed25519 kernel key to X25519). The key is never stored in clear on holders, which is what avoids the circularity of putting `K` inside a manifest that `K` encrypts. Re-sharing is one more sealed copy; revocation that must deny future reads rotates `K` and re-encrypts (§23).
 - Random per-file keys mean two different files never produce colliding ciphertext, so a `block_id` is meaningful only to someone who has handled that exact file. Convergent encryption (key = hash(plaintext)) is an opt-in for deployments that want cross-user dedup and accept its equality-leak (§24).
 
 ---
@@ -334,19 +336,21 @@ Optional hardening for cohorts that are less than fully trusted is documented se
 
 `net.send` is the one genuinely new transport primitive (it adds addressed unicast). Async by nature, so it returns a correlation id and the host later delivers the response back to the originating handler. `clock.now` and `rand` are conventional bridges a deployment likely already has.
 
+**Crypto is reused, not added.** Hashing and the §4.4 confidentiality primitives are thin host services over the **libsodium the kernel already loads for its genesis suite** (seedkernel §6.2, §11.2): `hash` (SHA-3-256 — the `genesis_hash` used for block-ids), `seal`/`open` (AEAD under a content key), and `box_seal`/`box_open` (sealing `K` to a recipient's kernel key). These perform no I/O, so — like `signature.signer` — they need **no capability**, which is what lets `codec` stay pure (§17). Signing stays sender-side in the host (seedkernel §6.1), so a descriptor is authored by wrapping it as a signed envelope (§4.3), never by a signing call from WASM. Storage therefore ships **no crypto of its own except Reed–Solomon** (libsodium has no erasure coding), reusing the ~217 KB libsodium the deployment already carries rather than bundling a second copy.
+
 ---
 
 ## 17. New app handlers (WASM, installed via signed messages)
 
 | Handler | Caps | Role |
 | --- | --- | --- |
-| `codec` | — (pure) | AEAD-encrypt/decrypt chunks (key supplied), slice into ≤ 48 KB blocks, compute block-ids, Reed–Solomon encode/decode (on ciphertext), build/parse manifests and chunk descriptors, seal/unseal content keys (randomness supplied) |
+| `codec` | — (pure) | slice into ≤ 48 KB blocks; AEAD-encrypt/decrypt, compute block-ids, and seal/unseal content keys via the host crypto service (§16); **Reed–Solomon encode/decode (on ciphertext) — the only algorithm in-WASM**; build/parse manifests and chunk descriptors |
 | `cohort` | `net`, `clock` | maintain the peer set and connections; run have/want, liveness, and the verification-fetch sampling that backs it (§8) |
 | `store.coordinator` | `store`, `net`, `clock`, `rand` | orchestrate PUT/GET incl. placement negotiation and content-key/nonce generation; windowed transfer; admission, eviction (§14) and reciprocity accounting (§13) |
 | `repair` | `store`, `net`, `clock` | the repair loop: measure redundancy via have/want + verification-fetch, claim, reconstruct on ciphertext (§9) |
 | `reputation` | — (pure) | decayed per-peer reciprocity counters from witnessed verification-fetches and served reads; `reputation.score` query (§13). Swap for the §20 receipts-and-transitive handler when portable reputation is needed |
 
-Discovery and placement are deliberately light: a single small `cohort` handler keeps the peer set and runs have/want, and placement is just negotiation folded into `store.coordinator`. There is **no separate proof handler** — proving a holder still has data is an ordinary verification-fetch on the existing fetch path, scored locally by `reputation`. The two pure handlers (`codec`, `reputation`) declare **no** capabilities, so the structural sandbox guarantees they can never reach disk or network even if buggy — the heavy crypto/coding code and the trust math are exactly where you want that guarantee. Mutating handlers (`store.coordinator`, `repair`) that act under a signer's authority consume a per-signer sequence number to reject replays.
+Discovery and placement are deliberately light: a single small `cohort` handler keeps the peer set and runs have/want, and placement is just negotiation folded into `store.coordinator`. There is **no separate proof handler** — proving a holder still has data is an ordinary verification-fetch on the existing fetch path, scored locally by `reputation`. The two pure handlers (`codec`, `reputation`) declare **no** capabilities, so the structural sandbox guarantees they can never reach disk or network even if buggy — the Reed–Solomon coding and the trust math are exactly where you want that guarantee. (The crypto proper lives in the host's libsodium, §16, reached by a no-cap call, so `codec` keeps its purity.) Mutating handlers (`store.coordinator`, `repair`) that act under a signer's authority consume a per-signer sequence number to reject replays.
 
 ---
 
