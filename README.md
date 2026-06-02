@@ -86,7 +86,7 @@ A file is encrypted (§4.4) and the ciphertext is cut into fixed-size **blocks**
 
 Defaults: `k = 10, m = 6` → `n = 16`, 1.6× storage overhead, surviving the loss of any 6 of a chunk's 16 holders. Compare naïve 3× replication, which survives only 2 losses at nearly double the cost. Reed–Solomon is **systematic** — the *k* data blocks are the ciphertext verbatim — so when all *k* data blocks are present a read just concatenates them and never decodes; the GF(2^8) decode runs only to heal around missing blocks. Encode/decode is simple, self-contained byte arithmetic that compiles to a small WASM handler needing no capabilities, and it operates on whatever bytes it is given — here, ciphertext (§4.4) — so reconstructing a missing block never requires the file's key.
 
-`(k, m)` is a single **deployment-wide constant** (default `RS(10, 6)`, above), not a per-file choice — one value recorded once for the whole store, so it need not travel in every descriptor and there is nothing per-chunk to tamper with. Per-file durability dialing (cold archives at `RS(20, 20)`, hot ephemeral data at `RS(4, 2)`) is a deployment refinement, not part of the minimal core (§26).
+`(k, m)` is a single **deployment-wide constant** (default `RS(10, 6)`, above), not a per-file choice — one value recorded once for the whole store, so it need not travel in every descriptor and there is nothing per-chunk to tamper with. Per-file durability dialing (cold archives at `RS(20, 20)`, hot ephemeral data at `RS(4, 2)`) is a deployment refinement, not part of the minimal core (§27).
 
 **This alignment — `chunk = k blocks` — is what collapses the data model.** A block *is* an erasure shard *is* the unit on the wire, so there is no distinct "fragment" object to slice, list, or address; a chunk's descriptor is simply its list of `n` block-ids, and one block per message is always true by construction. (Fixed-size chunking is also the simplest; a deployment that wants cross-file dedup can swap in content-defined chunking, at the cost of variable-length blocks that no longer map one-to-one onto shards.)
 
@@ -234,7 +234,7 @@ This requirement is met structurally, not by trust:
 - **Withholding is detected and routed around.** A holder that stops serving fails its verification-fetches (§8), loses reciprocity standing (§13), and gets skipped in future placement; its unreachability tips it to Lost and triggers repair. Active malice degrades to the same path as passive offline-ness.
 - **Corruption is impossible to hide.** Content addressing (§4.2) means a tampered block fails its hash check and is discarded; the reader simply fetches another block.
 
-The honest assumptions this rests on: *fewer than the redundancy budget of a chunk's holders fail or defect within a repair interval*, and *at least one of a chunk's block-holders is online within that interval*. Sizing `(k, m)`, the low-water mark, and the repair cadence against your cohort's real churn is the deployment's durability dial (§26).
+The honest assumptions this rests on: *fewer than the redundancy budget of a chunk's holders fail or defect within a repair interval*, and *at least one of a chunk's block-holders is online within that interval*. Sizing `(k, m)`, the low-water mark, and the repair cadence against your cohort's real churn is the deployment's durability dial (§27).
 
 ---
 
@@ -247,6 +247,8 @@ In a store where other people hold your bytes, you cannot force a remote peer to
 **Reclaiming the bytes — by eviction.** Once a file's key is gone, nobody reads or repairs its blocks, so they go cold and age out as orphans under ordinary eviction (§14). This is unhurried — disk frees up over the eviction horizon, not on command — but it needs no new mechanism and no authority check, because crypto-shredding has already made the data worthless.
 
 **Authority.** Who may crypto-shred is just who holds the key: the owner and anyone they shared it with drop their own sealed copy. A member who no longer wants a file likewise just drops its copy and stops repairing — it cannot destroy the key for everyone.
+
+The flip side — making a key *survivable* rather than promptly destroyable, by splitting it across the cohort so a quorum can recover it — is the optional Shamir layer of §26, which deliberately weakens this guarantee for files that want it.
 
 A deployment that wants *prompt*, signed space-reclamation — actively telling holders to drop the bytes and stop repairing, rather than waiting for eviction — adds the optional **tombstone** layer of §25.
 
@@ -303,7 +305,7 @@ A node has finite donated space and will be offered far more than it can hold, s
 
 **Eviction (under quota pressure).** Drop cache first, favoring blocks that are cold *and* well-replicated elsewhere, while protecting rare or globally under-replicated blocks (the ones repair would struggle to regenerate). Only if still pressed does a node gracefully release its lowest-value commitments — typically those for low-reciprocity peers. Long-unserved orphan blocks — including those of a crypto-shredded file (§11) — are first out the door, which is how dead data is reclaimed without an explicit delete. (If the §25 tombstone layer is enabled, tombstoned blocks are dropped on sight rather than waiting to go cold.)
 
-Concretely, an eviction score like `coldness × redundancy_elsewhere × (1 / reciprocity_with_owner)`, with committed blocks weighted heavily against eviction, captures all of this from signals the node already tracks. The exact weighting is a tuning knob (§26); the property that matters is that a well-behaved node keeps what is scarce and what it owes, and sheds what is abundant and unasked-for.
+Concretely, an eviction score like `coldness × redundancy_elsewhere × (1 / reciprocity_with_owner)`, with committed blocks weighted heavily against eviction, captures all of this from signals the node already tracks. The exact weighting is a tuning knob (§27); the property that matters is that a well-behaved node keeps what is scarce and what it owes, and sheds what is abundant and unasked-for.
 
 ---
 
@@ -425,7 +427,7 @@ RS (§4.1) is MDS and dead simple — any *k* of *n* reconstruct, repair is a fl
 
 It preserves everything RS gives seedstore — fixed content-addressed blocks, deterministic re-encode so the signed descriptor (§4.3) still holds, keyless ciphertext repair — unlike a rateless fountain code (RaptorQ), which would break block content-addressing outright. The price is that LRCs are **not MDS**: durability becomes loss-pattern-dependent, so the clean §8/§10 "any *k* of *n*" accounting must become per-local-group health plus a global check, and §6 placement gains a "spread each local group across distinct peers" constraint.
 
-The win scales with *k* — large for cold archives (`RS(20,20)` → painful 20-read repairs), marginal for small hot chunks — so if adopted it likely belongs as a per-chunk option — the same per-file `(k, m)` override is the natural vehicle (§4.1, §26) — rather than a blanket default. Revisit if repair bandwidth turns out to dominate operational cost. (Regenerating/MSR codes cut repair bandwidth further still but contact more helpers per repair — worse coordination under churn — so LRC is the pragmatic step.)
+The win scales with *k* — large for cold archives (`RS(20,20)` → painful 20-read repairs), marginal for small hot chunks — so if adopted it likely belongs as a per-chunk option — the same per-file `(k, m)` override is the natural vehicle (§4.1, §27) — rather than a blanket default. Revisit if repair bandwidth turns out to dominate operational cost. (Regenerating/MSR codes cut repair bandwidth further still but contact more helpers per repair — worse coordination under churn — so LRC is the pragmatic step.)
 
 ## 22. A dedicated bulk channel
 
@@ -451,11 +453,23 @@ To get the bytes off disk quickly, the owner publishes a **signed `block.tombsto
 
 **Authority.** A tombstone is honored only when signed by the manifest's author (the §2 identity) — the same trust root that signs chunk descriptors (§4.3). For a shared file the simple rule is that only the owner's tombstone removes the data; a member who no longer wants it just drops its own copy and stops repairing — it cannot delete for everyone.
 
-Tombstones are bounded: a holder keeps one only until the referenced blocks are gone and a short grace period passes, so the tombstone set does not grow without limit (retention is a tuning knob, §26).
+Tombstones are bounded: a holder keeps one only until the referenced blocks are gone and a short grace period passes, so the tombstone set does not grow without limit (retention is a tuning knob, §27).
+
+## 26. Social key recovery via Shamir sharing
+
+Add only for files a deployment wants to survive the loss of the owner's own keys; it trades away part of the §11 deletion guarantee, so it is per-file opt-in and off by default.
+
+Crypto-shredding (§11) cuts both ways: lose the per-file key `K` and *every* sealed copy of it, and the file is gone for good — exactly what you want when deleting, a disaster when you merely lost your keystore. **Shamir's threshold scheme** splits `K` into `n` shares such that any `t` reconstruct it and any `t − 1` reveal *nothing* (information-theoretically). Hand the shares to `n` trusted cohort peers and any `t` of them can later help you rebuild `K` — while no single custodian, and no colluding group smaller than `t`, ever learns it.
+
+**It is the codec's own arithmetic, reused.** Shamir sharing and Reed–Solomon (§4.1) are the same construction — a value placed on a polynomial over GF(2^8), recovered from enough evaluations by Lagrange interpolation. The `codec` already carries that field arithmetic for erasure coding; splitting `K` byte-wise over the same GF(2^8) (one random degree-`t−1` polynomial per key byte) adds no new primitive and no new dependency, and runs in the existing cap-free handler. Shares are key-sized, so distribution is a handful of small sealed envelopes, not a bulk transfer.
+
+**Custody, not read access.** This is distinct from sharing a file (§4.4), which seals `K` to a *reader*. A Shamir share grants nothing on its own; it is held *against future recovery*, not to read the file. Each share is sealed to its custodian's kernel public key (the §4.4 mechanism) so an eavesdropper cannot accumulate shares toward `t`, and each custodian independently decides whether to release its share — the natural rule being "release only to the file's author identity (§2)" — so recovery needs no appointed coordinator, just `t` willing custodians.
+
+**The cost, and why it is opt-in.** Recoverability is the opposite of deletability: if `t` custodians can rebuild `K`, then destroying your own copy no longer crypto-shreds the file — a quorum can resurrect it. A recoverable file is therefore one you have chosen *not* to be able to promptly shred, and true deletion now also means retiring enough shares (or rotating `K`). Choose `t` against both risks at once: high enough that a colluding minority cannot recover, low enough to survive churn among the `n` custodians. For long-lived custody, refresh shares on a membership change (proactive secret sharing) so a slowly-compromised set never accumulates `t` valid shares — a further refinement, unnecessary for short horizons.
 
 ---
 
-## 26. Tuning knobs and open questions
+## 27. Tuning knobs and open questions
 
 - **`(k, m)`, chunk size, and block size `B`** — the durability/overhead dial, set once per deployment (§4.1). Size `(k, m)` against measured cohort churn so the chance of losing more than *m* holders within one repair interval is acceptably small; a per-file override is an extension, not core. `B` sets how many blocks a file becomes, and therefore manifest and have/want size.
 - **Grace window `G` and liveness cadence** — set so ordinary offline patterns (overnight, commute, reboot) never trigger repair, but real departures do within a bounded time. Too short → churn storms; too long → slow healing. Includes how often, and how widely, to sample verification-fetches (§8).
@@ -464,6 +478,6 @@ Tombstones are bounded: a holder keeps one only until the referenced blocks are 
 - **Reciprocity decay & weighting** — the half-life of the local score and how strongly to net give-against-take (§13).
 - **Committed/cache split & eviction weights** — how much quota a node reserves for durable commitments vs. opportunistic cache, and the weighting of the eviction score (§14).
 - **Tombstone retention** (if the §25 tombstone layer is enabled) — how long a holder keeps a tombstone after the referenced blocks are gone.
-- **Extensions, if enabled** — verifiable-reputation window `X`, EigenTrust damping `d`, and local-seed anchoring (§20); RS vs. LRC and where, and per-file `(k, m)` overrides (§21); in-band vs. dedicated bulk channel (§22); hardening choices (§23); convergent vs. random-key encryption (§24); prompt tombstone reclamation (§25). All are off or RS/in-band/deployment-default by default.
+- **Extensions, if enabled** — verifiable-reputation window `X`, EigenTrust damping `d`, and local-seed anchoring (§20); RS vs. LRC and where, and per-file `(k, m)` overrides (§21); in-band vs. dedicated bulk channel (§22); hardening choices (§23); convergent vs. random-key encryption (§24); prompt tombstone reclamation (§25); Shamir key recovery and its quorum `t` (§26). All are off or RS/in-band/deployment-default by default.
 
 Everything above is expressible as bridges, pure-compute handlers, signed messages, and a restrictive policy callback — i.e. as ordinary seedkernel modules. The kernel never learns what a "file" is; it just keeps routing names to handlers, the bulk bytes never enter its 64 KB world, and the core stays five ideas deep: a social cohort, encryption, content addressing, erasure coding, and have/want — with reciprocity, not a coin, rewarding the good citizens.
