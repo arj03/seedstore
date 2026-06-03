@@ -123,21 +123,34 @@ pulled from a CDN via the page's import map; vendor an ESM build to run offline.
 
 | | time | rate | |
 |---|---:|---:|---|
-| **write** — full (encrypt + hash + RS encode) | ~0.83 s | ~120 MB/s | |
-| &nbsp;&nbsp;↳ RS encode | ~0.52 s | ~190 MB/s | the dominant cost now |
-| &nbsp;&nbsp;↳ xchacha20 encrypt | ~0.18 s | ~550 MB/s | |
-| &nbsp;&nbsp;↳ BLAKE2b block-ids | ~0.15 s | ~1.1 GB/s | hashes all *n* blocks (1.6×) |
+| **write** — full (encrypt + hash + RS encode) | ~0.47 s | ~210 MB/s | |
+| &nbsp;&nbsp;↳ xchacha20 encrypt | ~0.18 s | ~545 MB/s | now the largest single piece |
+| &nbsp;&nbsp;↳ RS encode (SIMD) | ~0.15 s | ~670 MB/s | |
+| &nbsp;&nbsp;↳ BLAKE2b block-ids | ~0.14 s | ~1.1 GB/s | hashes all *n* blocks (1.6×) |
 | **read** — all data present (systematic) | ~0.03 s | ~3 GB/s | common path — a concat, no GF |
-| **read** — one block missing (decode) | ~0.27 s | ~370 MB/s | the common failure, §6/§21 |
+| **read** — one block missing (decode, SIMD) | ~0.16 s | ~625 MB/s | the common failure, §6/§21 |
 
-Two optimizations got here. (1) The codec multiplies via a precomputed 256×256
+Three optimizations got here. (1) The codec multiplies via a precomputed 256×256
 GF(2⁸) table — one indexed load per byte — making encode **~26× faster** than the
 naive exp/log multiply. (2) Block-ids hash with **BLAKE2b** instead of SHA-3,
 **~6× faster** (~0.83 s of SHA-3 was the original write bottleneck) and, like
 everything else, already in the libsodium the kernel loads — **no new bytes**
-(§16). With both done, RS encode is the dominant write cost and reads cost nothing
-on the codec unless a block is actually missing. `node tests/bench.mjs` reproduces
-these.
+(§16). (3) The RS multiply-accumulate loops use **WASM SIMD** — the GF(2⁸)
+split-table / `i8x16.swizzle` trick does 16 multiplies per instruction — for
+another **~3.4×** on encode/decode. With all three, the write is balanced across
+encrypt / encode / hash (each ~0.15 s, no single bottleneck) and reads cost
+nothing on the codec unless a block is actually missing. (SIMD needs a runtime
+with the WASM simd feature — Node 16+ and every current browser.) `node
+tests/bench.mjs` reproduces these.
+
+**The SIMD split-table trick (GF(2⁸) "PSHUFB").** For a fixed coefficient *c*,
+`c·x` is split into two 4-bit lookups: `c·(x & 0x0F) ⊕ c·(x >> 4)`, each a 16-byte
+table. WASM's `i8x16.swizzle` is a 16-lane parallel table lookup, so one
+instruction multiplies 16 bytes at once; output accumulators stay in `v128`
+registers across the *k* inputs (register blocking), with a scalar tail for a
+block whose size is not a multiple of 16. This is the same kernel native RS
+libraries use, and it lines up with the uniform *B*-byte blocks — the same shape
+that would let a BLAKE3 `hash_many` vectorize the block-id hashing next.
 
 **Block-id hash choice (BLAKE2b, and the BLAKE3 next step).** Block-ids are
 content addressing *internal* to storage — they never cross into the kernel — so
@@ -171,13 +184,13 @@ Runtime artifacts a node loads:
 
 | artifact | size | gzipped |
 |---|---:|---:|
-| `codec.wasm` | 6.2 KB | — |
+| `codec.wasm` (incl. SIMD RS + GF tables) | 6.9 KB | — |
 | `reputation.wasm` | 6.9 KB | — |
 | `kernel.wasm` + `bootstrap.wasm` (from seedkernel) | 12.7 KB | — |
 | host JS — this project + seedkernel `KernelHost` | 130 KB | **34 KB** |
 | libsodium (sumo) — reused, not bundled | 278 KB | — |
 
-So the whole storage layer is **~13 KB of WASM + ~34 KB of gzipped JS**, riding on
+So the whole storage layer is **~14 KB of WASM + ~34 KB of gzipped JS**, riding on
 the kernel and the libsodium the deployment already carries (§2, §16: "logic + RS,
 tens of KB, no second copy of a crypto library"). The host JS is unminified (doc
 comments preserved); a bundler/minifier shrinks it further.

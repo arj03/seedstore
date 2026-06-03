@@ -167,6 +167,21 @@ export async function run(t) {
     t.eq(ok, subsets, `all ${subsets} subsets reconstruct the original data`);
   }
 
+  t.group("codec: block sizes not a multiple of 16 exercise the SIMD tail");
+  {
+    // bs % 16 != 0 forces the scalar remainder path after the v128 body.
+    for (const bs of [17, 20, 31, 100, 255]) {
+      const k = 4, m = 3, n = k + m;
+      const data = new Uint8Array(k * bs).map((_, i) => (i * 37 + bs) & 255);
+      const parity = codec.encode(k, m, bs, data);
+      const all = [...blocks(data, bs), ...blocks(parity, bs)];
+      // Drop the first two blocks; reconstruct from k others.
+      const present = [...Array(n).keys()].slice(2, 2 + k).map((index) => ({ index, bytes: all[index] }));
+      const recovered = codec.decode(k, m, bs, present);
+      t.ok(recovered && eq(recovered, data), `bs=${bs}: encode+decode round trip (tail = ${bs % 16} bytes)`);
+    }
+  }
+
   t.group("codec: systematic — the k data blocks pass through verbatim");
   {
     const k = 6, m = 4, bs = 48;

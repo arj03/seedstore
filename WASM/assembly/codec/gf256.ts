@@ -17,8 +17,14 @@ export const GF_POLY: i32 = 0x11d;
 
 export const EXP = new Uint8Array(512);
 export const LOG = new Uint8Array(256);
-// Full multiply table, row-major: MUL[(a << 8) | b] = a · b in GF(2^8).
+// Full multiply table, row-major: MUL[(a << 8) | b] = a · b in GF(2^8). The
+// first 16 bytes of row a, MUL[(a<<8) .. (a<<8)+15], are a·{0..15} — the LOW
+// nibble table the SIMD path swizzles (so it needs no separate table).
 export const MUL = new Uint8Array(256 * 256);
+// HIGH nibble table for the SIMD split-multiply: MUL_HI[(a<<4) | i] = a·(i<<4),
+// i.e. a times each possible high nibble (§4.1 SIMD). 16 contiguous bytes per
+// coefficient, ready for a v128.load + i8x16.swizzle.
+export const MUL_HI = new Uint8Array(256 * 16);
 
 function mulSlow(a: i32, b: i32): u8 {
   if (a == 0 || b == 0) return 0;
@@ -39,6 +45,12 @@ function initTables(): void {
     const row = a << 8;
     for (let b = 0; b < 256; b++) MUL[row | b] = mulSlow(a, b);
   }
+  // Derive the high-nibble table from MUL.
+  for (let a = 0; a < 256; a++) {
+    const hrow = a << 4;
+    const row = a << 8;
+    for (let i = 0; i < 16; i++) MUL_HI[hrow | i] = MUL[row | (i << 4)];
+  }
 }
 initTables();
 
@@ -56,8 +68,16 @@ export function gfInv(a: u8): u8 {
 }
 
 /** Base pointer of the MUL table, for raw-load access in the RS inner loops.
- *  Row for coefficient c starts at mulBase() + (c << 8). */
+ *  Row for coefficient c starts at mulBase() + (c << 8); its first 16 bytes are
+ *  the SIMD low-nibble table for c. */
 @inline
 export function mulBase(): i32 {
   return MUL.dataStart as i32;
+}
+
+/** Base pointer of the high-nibble table. The 16-byte SIMD high table for
+ *  coefficient c starts at mulHiBase() + (c << 4). */
+@inline
+export function mulHiBase(): i32 {
+  return MUL_HI.dataStart as i32;
 }
