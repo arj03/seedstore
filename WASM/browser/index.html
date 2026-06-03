@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>seed store — in-browser node</title>
+<style>
+  body { font: 14px/1.5 system-ui, sans-serif; max-width: 760px; margin: 2rem auto; padding: 0 1rem; color: #1a1a1a; }
+  h1 { font-size: 1.3rem; } code { background: #f0f0f0; padding: 0 3px; border-radius: 3px; }
+  textarea { width: 100%; box-sizing: border-box; height: 5rem; font-family: ui-monospace, monospace; }
+  button { padding: .4rem .8rem; margin-right: .5rem; cursor: pointer; }
+  #log { white-space: pre-wrap; background: #111; color: #b8e8b8; padding: .8rem; border-radius: 6px; font-family: ui-monospace, monospace; font-size: 12px; min-height: 8rem; }
+  .row { margin: .8rem 0; }
+  .muted { color: #666; }
+</style>
+<!-- The host code is platform-neutral; only these bare specifiers need wiring.
+     seedkernel/browser is its own node:fs-free kernel host; sumo libsodium is
+     pulled from a CDN (swap for a vendored ESM build to run offline). -->
+<script type="importmap">
+{
+  "imports": {
+    "seedkernel-wasm/browser": "./seedkernel/browser.js",
+    "libsodium-wrappers-sumo": "https://esm.sh/libsodium-wrappers-sumo@0.8.4"
+  }
+}
+</script>
+</head>
+<body>
+<h1>seed store — a storage node running in your browser</h1>
+<p class="muted">
+  Boots a small cohort of storage nodes on the seedkernel (all in this one page,
+  wired over an in-process loopback network), then stores a file with client-side
+  encryption + Reed–Solomon erasure coding across the peers and reads it back —
+  the same protocol a long-running peer runs (README §1, §20).
+</p>
+
+<div class="row">
+  <label>File contents:<br><textarea id="data">the quick brown fox jumps over the lazy dog — stored across a cohort, any k of n reconstruct.</textarea></label>
+</div>
+<div class="row">
+  <button id="store">Store (PUT)</button>
+  <button id="get" disabled>Retrieve (GET)</button>
+  <button id="kill" disabled>Take 2 peers offline</button>
+  <button id="repair" disabled>Repair</button>
+</div>
+<div class="row"><strong>Log</strong></div>
+<div id="log"></div>
+
+<script type="module">
+import sodium from "libsodium-wrappers-sumo";
+import { loadWasmBytes, createConnectedCohort, LoopbackNetwork } from "./host/browser.js";
+
+const logEl = document.getElementById("log");
+const log = (m) => { logEl.textContent += m + "\n"; logEl.scrollTop = logEl.scrollHeight; };
+const hex = (b) => [...b].map((x) => x.toString(16).padStart(2, "0")).join("");
+
+let nodes, net, lastPut;
+
+(async () => {
+  log("readying libsodium (sumo)…");
+  await sodium.ready;
+  log("loading wasm: kernel, bootstrap, codec, reputation…");
+  const wasm = await loadWasmBytes("./");
+  net = new LoopbackNetwork();
+  log("booting a cohort of 6 nodes on the seedkernel…");
+  nodes = await createConnectedCohort({
+    count: 6, network: net, sodium, wasm,
+    config: { k: 2, m: 2, blockSize: 64 }, timeoutMs: 200,
+  });
+  log(`ready. ${nodes.length} nodes, RS(2,2). codec v${nodes[0].codec.info().version}, handlers installed: ${nodes[0].handlersInstalled()}`);
+  document.getElementById("store").disabled = false;
+})().catch((e) => log("ERROR: " + e.message));
+
+document.getElementById("store").onclick = async () => {
+  try {
+    const data = new TextEncoder().encode(document.getElementById("data").value);
+    log(`\nPUT ${data.length} bytes…`);
+    lastPut = await nodes[0].put(data);
+    log(`  manifest_id = ${hex(lastPut.manifestId).slice(0, 32)}…`);
+    log(`  ${lastPut.replicated ? "replicated (small file)" : lastPut.chunkCount + " RS chunk(s)"} placed across the cohort`);
+    const holders = nodes.filter((n) => n !== nodes[0] && n.store.list().length > 0).length;
+    log(`  blocks now held by ${holders} distinct peers; owner holds none`);
+    document.getElementById("get").disabled = false;
+    document.getElementById("kill").disabled = false;
+  } catch (e) { log("  PUT failed: " + e.message); }
+};
+
+document.getElementById("get").onclick = async () => {
+  try {
+    log("GET (locate via have/want, fetch any k, decode, decrypt)…");
+    const out = await nodes[0].get(lastPut.manifestId, lastPut.key);
+    log("  recovered: " + JSON.stringify(new TextDecoder().decode(out)));
+  } catch (e) { log("  GET failed: " + e.message); }
+};
+
+document.getElementById("kill").onclick = async () => {
+  const holders = nodes.filter((n) => n !== nodes[0] && n.store.list().length > 0);
+  net.setOnline(holders[0].peerId, false);
+  net.setOnline(holders[1].peerId, false);
+  log(`\ntook 2 holders offline (${holders[0].peerId.slice(0, 8)}, ${holders[1].peerId.slice(0, 8)})`);
+  log("try Retrieve — any k of n still reconstructs (§7, §8).");
+  document.getElementById("repair").disabled = false;
+};
+
+document.getElementById("repair").onclick = async () => {
+  log("\nrunning repair on the online block-holders (§9)…");
+  let total = 0;
+  for (const n of nodes) if (n !== nodes[0] && net.isOnline(n.peerId)) total += await n.runRepair();
+  log(`  repair re-placed ${total} block(s) on fresh peers — redundancy restored.`);
+};
+</script>
+</body>
+</html>

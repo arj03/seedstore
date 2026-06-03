@@ -1,0 +1,28 @@
+{
+  "name": "seedstore-wasm",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Peer-to-peer storage layer for seedkernel (README spec, Part I). Pure Reed–Solomon codec + reputation in WASM; storage bridges and orchestration in the host.",
+  "scripts": {
+    "copy-kernel": "node scripts/copy-kernel.mjs",
+    "build:codec": "asc assembly/codec/index.ts --config asconfig.codec.json --target release",
+    "build:reputation": "asc assembly/reputation/index.ts --config asconfig.reputation.json --target release",
+    "build:wasm": "npm run build:codec && npm run build:reputation",
+    "build:host": "tsc -p host",
+    "build:browser-demo": "node scripts/build-browser-demo.mjs",
+    "build": "npm run copy-kernel && npm run build:wasm && npm run build:host",
+    "build:browser": "npm run build && npm run build:browser-demo",
+    "build:debug": "asc assembly/codec/index.ts --config asconfig.codec.json --target debug && asc assembly/reputation/index.ts --config asconfig.reputation.json --target debug",
+    "test": "npm run build && node tests/run.mjs"
+  },
+  "dependencies": {
+    "libsodium-wrappers-sumo": "0.8.4",
+    "seedkernel-wasm": "file:../../seedkernel/WASM"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "assemblyscript": "0.28.14",
+    "typescript": "^5.4.0"
+  }
+}
