@@ -14,7 +14,7 @@
 // lets a repairer regenerate a block and check it against the already-signed
 // block_id without the file key (§9, keyless repair).
 
-import { gfMul, gfInv } from "./gf256";
+import { gfMul, gfInv, mulBase } from "./gf256";
 
 // Cauchy coefficient for parity row p (0..m) and data column j (0..k):
 //   C[p][j] = 1 / (x_p XOR y_j),  x_p = k + p,  y_j = j.
@@ -27,15 +27,19 @@ function cauchy(k: i32, p: i32, j: i32): u8 {
 
 /** Encode: read k data blocks at dataPtr, write m parity blocks at outPtr. */
 export function rsEncode(k: i32, m: i32, bs: i32, dataPtr: i32, outPtr: i32): void {
+  const mbase = mulBase();
   for (let i = 0; i < m; i++) {
     const optr = outPtr + i * bs;
     memory.fill(optr, 0, bs);
     for (let j = 0; j < k; j++) {
-      const coef = cauchy(k, i, j);
+      const coef = cauchy(k, i, j) as i32;
       if (coef == 0) continue;
+      // Row of the multiply table for this coefficient: a single indexed load
+      // per byte replaces the exp/log multiply (§4.1 perf).
+      const row = mbase + (coef << 8);
       const dptr = dataPtr + j * bs;
       for (let p = 0; p < bs; p++) {
-        store<u8>(optr + p, load<u8>(optr + p) ^ gfMul(coef, load<u8>(dptr + p)));
+        store<u8>(optr + p, load<u8>(optr + p) ^ load<u8>(row + (load<u8>(dptr + p) as i32)));
       }
     }
   }
@@ -111,15 +115,17 @@ export function rsDecode(
   }
   if (!gfInvertMatrix(k, mPtr, invPtr, augPtr)) return false;
   // data[j] = Σ_r inv[j][r] · present[r]
+  const mbase = mulBase();
   for (let j = 0; j < k; j++) {
     const optr = outPtr + j * bs;
     memory.fill(optr, 0, bs);
     for (let r = 0; r < k; r++) {
-      const coef = load<u8>(invPtr + j * k + r);
+      const coef = load<u8>(invPtr + j * k + r) as i32;
       if (coef == 0) continue;
+      const row = mbase + (coef << 8);
       const bptr = blocksPtr + r * bs;
       for (let p = 0; p < bs; p++) {
-        store<u8>(optr + p, load<u8>(optr + p) ^ gfMul(coef, load<u8>(bptr + p)));
+        store<u8>(optr + p, load<u8>(optr + p) ^ load<u8>(row + (load<u8>(bptr + p) as i32)));
       }
     }
   }

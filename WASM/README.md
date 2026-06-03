@@ -117,6 +117,24 @@ pulled from a CDN via the page's import map; vendor an ESM build to run offline.
   sealed key, crypto-shredding, reciprocity from served fetches.
 - **browser** — the same node booted through the `fetch`-based browser entry.
 
+## Performance
+
+100 MB, RS(10,6), 64 KB blocks, single-threaded (Node 20):
+
+| | time | rate | |
+|---|---:|---:|---|
+| **write** — encode (RS only) | ~0.5 s | ~195 MB/s | |
+| **write** — encrypt + hash + encode (full) | ~1.5 s | ~65 MB/s | |
+| **read** — all data present (systematic) | ~0.03 s | ~3 GB/s | common path — a concat, no GF |
+| **read** — one block missing (decode) | ~0.28 s | ~365 MB/s | the common failure, §6/§21 |
+
+The codec multiplies via a precomputed 256×256 GF(2⁸) table (one indexed load per
+byte), which makes encode ~26× faster than the naive exp/log multiply. With that
+done, the full write is dominated by **SHA-3-256 block-id hashing** (~0.83 s — it
+hashes all *n* blocks, 1.6× the file), well ahead of RS encode (~0.5 s) and the
+xchacha20 stream cipher (~0.18 s). Reads cost nothing on the codec unless a block
+is actually missing. `node tests/bench.mjs` reproduces these.
+
 ## Layout
 
 ```
