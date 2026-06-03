@@ -123,17 +123,36 @@ pulled from a CDN via the page's import map; vendor an ESM build to run offline.
 
 | | time | rate | |
 |---|---:|---:|---|
-| **write** — encode (RS only) | ~0.5 s | ~195 MB/s | |
-| **write** — encrypt + hash + encode (full) | ~1.5 s | ~65 MB/s | |
+| **write** — full (encrypt + hash + RS encode) | ~0.83 s | ~120 MB/s | |
+| &nbsp;&nbsp;↳ RS encode | ~0.52 s | ~190 MB/s | the dominant cost now |
+| &nbsp;&nbsp;↳ xchacha20 encrypt | ~0.18 s | ~550 MB/s | |
+| &nbsp;&nbsp;↳ BLAKE2b block-ids | ~0.15 s | ~1.1 GB/s | hashes all *n* blocks (1.6×) |
 | **read** — all data present (systematic) | ~0.03 s | ~3 GB/s | common path — a concat, no GF |
-| **read** — one block missing (decode) | ~0.28 s | ~365 MB/s | the common failure, §6/§21 |
+| **read** — one block missing (decode) | ~0.27 s | ~370 MB/s | the common failure, §6/§21 |
 
-The codec multiplies via a precomputed 256×256 GF(2⁸) table (one indexed load per
-byte), which makes encode ~26× faster than the naive exp/log multiply. With that
-done, the full write is dominated by **SHA-3-256 block-id hashing** (~0.83 s — it
-hashes all *n* blocks, 1.6× the file), well ahead of RS encode (~0.5 s) and the
-xchacha20 stream cipher (~0.18 s). Reads cost nothing on the codec unless a block
-is actually missing. `node tests/bench.mjs` reproduces these.
+Two optimizations got here. (1) The codec multiplies via a precomputed 256×256
+GF(2⁸) table — one indexed load per byte — making encode **~26× faster** than the
+naive exp/log multiply. (2) Block-ids hash with **BLAKE2b** instead of SHA-3,
+**~6× faster** (~0.83 s of SHA-3 was the original write bottleneck) and, like
+everything else, already in the libsodium the kernel loads — **no new bytes**
+(§16). With both done, RS encode is the dominant write cost and reads cost nothing
+on the codec unless a block is actually missing. `node tests/bench.mjs` reproduces
+these.
+
+**Block-id hash choice (BLAKE2b, and the BLAKE3 next step).** Block-ids are
+content addressing *internal* to storage — they never cross into the kernel — so
+they need not be the kernel's SHA-3 genesis hash; the content hash is a `Crypto`
+constructor argument (`sha3-256` stays available for genesis-identical ids,
+`blake2b-256` is the default). The next step up is **BLAKE3**: its tree of
+equal-size leaves lines up with the layer's own uniform *B*-byte block splitting,
+so a vectorized `hash_many` produces all *n* block-ids of a chunk across parallel
+SIMD lanes, and the independent per-block hashes thread trivially — projected
+multi-GB/s. Reusing BLAKE3 *interior tree nodes* as block-ids, by contrast, does
+**not** fit: content-addressed ids must be position-independent (a holder
+re-verifies `hash(bytes) == id` with no context, §4.2; a bulk frame is
+`[id ∥ bytes]`, §3), while BLAKE3 interior chaining values are position-dependent
+— and that path would re-introduce the Merkle-path machinery the spec deliberately
+avoids (§8).
 
 ## Footprint
 

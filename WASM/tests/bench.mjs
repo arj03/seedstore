@@ -73,8 +73,24 @@ t0 = performance.now();
 for (let c = 0; c < numChunks; c++) codec.rsDecode(K, M, B, present);
 let dec = performance.now() - t0;
 
-// ── full PUT-style pipeline: encrypt + hash every block + encode ───────────
+// ── component breakdown (encrypt-only, hash-only) ──────────────────────────
 const key = crypto.randomKey();
+t0 = performance.now();
+for (let c = 0; c < numChunks; c++) crypto.encrypt(key, DOMAIN_BODY, c, data.subarray(c * chunkData, (c + 1) * chunkData));
+let encr = performance.now() - t0;
+
+// Hash the n blocks of every chunk (data + parity = 1.6× the file).
+let hsum = 0;
+t0 = performance.now();
+for (let c = 0; c < numChunks; c++) {
+  for (let bl = 0; bl < K + M; bl++) {
+    const off = c * chunkData + (bl % K) * B;
+    hsum ^= crypto.hash(data.subarray(off, off + B))[0];
+  }
+}
+let hsh = performance.now() - t0;
+
+// ── full PUT-style pipeline: encrypt + hash every block + encode ───────────
 t0 = performance.now();
 for (let c = 0; c < numChunks; c++) {
   const ct = crypto.encrypt(key, DOMAIN_BODY, c, data.subarray(c * chunkData, (c + 1) * chunkData));
@@ -88,7 +104,9 @@ let full = performance.now() - t0;
 const rate = (ms) => (FILE / MB / (ms / 1000)).toFixed(0);
 console.log(`\nRS(${K},${M}), B=${B / 1024} KB, ${FILE / MB} MB → ${numChunks} chunks, ${1.6}x stored\n`);
 console.log(`  WRITE`);
-console.log(`    encode                       ${enc.toFixed(0).padStart(6)} ms   ${rate(enc).padStart(5)} MB/s`);
+console.log(`    RS encode                    ${enc.toFixed(0).padStart(6)} ms   ${rate(enc).padStart(5)} MB/s`);
+console.log(`    encrypt (xchacha20)          ${encr.toFixed(0).padStart(6)} ms   ${rate(encr).padStart(5)} MB/s`);
+console.log(`    hash block-ids (${crypto.hashAlg})  ${hsh.toFixed(0).padStart(6)} ms   ${(FILE * 1.6 / MB / (hsh / 1000)).toFixed(0).padStart(5)} MB/s   (hashes n blocks = 1.6×)  [acc ${hsum & 255}]`);
 console.log(`    encrypt+hash+encode (full)   ${full.toFixed(0).padStart(6)} ms   ${rate(full).padStart(5)} MB/s`);
 console.log(`  READ`);
 console.log(`    all data present (concat)    ${sysRead.toFixed(0).padStart(6)} ms   ${rate(sysRead).padStart(5)} MB/s   ← common path, no GF`);

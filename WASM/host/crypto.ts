@@ -16,17 +16,32 @@ import { writeU32BE } from "./util.js";
 export const DOMAIN_MANIFEST = 0x00;
 export const DOMAIN_BODY = 0x01;
 
+/** Content-address hash for block_id. The spec ties block_id to the kernel's
+ *  genesis hash (SHA-3-256) for reuse (§4.2), but block-ids never cross into
+ *  the kernel — they are pure content addressing within the storage layer — so
+ *  the choice of hash is a storage-local decision. We default to BLAKE2b
+ *  (`crypto_generichash`), which is ~6× faster than Keccak in software and is
+ *  *also* already in the libsodium the kernel loads, so it ships no new bytes
+ *  (§16). SHA-3-256 stays available for deployments that want byte-identical
+ *  ids with the genesis suite. (A future BLAKE3 + SIMD `hash_many` over the
+ *  equal-size blocks is the next step up — see README "Hashing".) */
+export type HashAlg = "blake2b-256" | "sha3-256";
+
+export const BLOCK_ID_BYTES = 32;
+
 export class Crypto {
   readonly keyBytes: number;
   readonly nonceBytes: number;
-  constructor(private readonly sodium: Sodium) {
+  constructor(private readonly sodium: Sodium, readonly hashAlg: HashAlg = "blake2b-256") {
     this.keyBytes = sodium.crypto_stream_xchacha20_KEYBYTES;   // 32
     this.nonceBytes = sodium.crypto_stream_xchacha20_NONCEBYTES; // 24
   }
 
-  /** Genesis hash — block_id = genesis_hash(block_bytes) (§4.2). */
+  /** Content-address hash → block_id = hash(block_bytes) (§4.2). */
   hash(bytes: Uint8Array): Uint8Array {
-    return this.sodium.crypto_hash_sha3256(bytes);
+    return this.hashAlg === "sha3-256"
+      ? this.sodium.crypto_hash_sha3256(bytes)
+      : this.sodium.crypto_generichash(BLOCK_ID_BYTES, bytes);
   }
   blockId(bytes: Uint8Array): Uint8Array {
     return this.hash(bytes);

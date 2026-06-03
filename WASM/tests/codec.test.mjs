@@ -25,7 +25,7 @@ export async function loadCodec() {
       call: (_schemaPtr, _schemaLen, payloadPtr, payloadLen) => {
         const mem = new Uint8Array(inst.exports.memory.buffer);
         const data = mem.slice(payloadPtr, payloadPtr + payloadLen);
-        const digest = sodium.crypto_hash_sha3256(data);
+        const digest = sodium.crypto_generichash(32, data); // BLAKE2b-256 (the storage content hash)
         new Uint8Array(inst.exports.memory.buffer, scratch, digest.length).set(digest);
         return digest.length;
       },
@@ -132,12 +132,12 @@ export async function run(t) {
     t.eq(info[2], 0x01, "poly high byte 0x01 (0x11D)");
   }
 
-  t.group("codec: block-id equals libsodium SHA-3-256 (genesis hash)");
+  t.group("codec: block-id equals the host content hash (BLAKE2b-256, §4.2)");
   {
     const data = new TextEncoder().encode("the quick brown fox");
     const id = codec.blockId(data);
-    const expect = sodium.crypto_hash_sha3256(data);
-    t.ok(id && eq(id, expect), "OP_BLOCKID == crypto_hash_sha3256");
+    const expect = sodium.crypto_generichash(32, data);
+    t.ok(id && eq(id, expect), "OP_BLOCKID routes through the crypto.hash bridge");
   }
 
   t.group("codec: encode is deterministic (keyless repair, §9)");

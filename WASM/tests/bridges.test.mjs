@@ -16,10 +16,13 @@ export async function run(t) {
   const sodium = await ensureSodium();
   const crypto = new Crypto(sodium);
 
-  t.group("crypto.hash: genesis SHA-3-256 (§4.2)");
+  t.group("crypto.hash: content hash is BLAKE2b-256 (§4.2)");
   {
     const data = new TextEncoder().encode("block bytes");
-    t.ok(bytesEqual(crypto.hash(data), sodium.crypto_hash_sha3256(data)), "hash == libsodium sha3-256");
+    t.ok(bytesEqual(crypto.hash(data), sodium.crypto_generichash(32, data)), "hash == libsodium BLAKE2b-256");
+    // SHA-3-256 stays available for deployments that want genesis-identical ids.
+    const sha = new Crypto(sodium, "sha3-256");
+    t.ok(bytesEqual(sha.hash(data), sodium.crypto_hash_sha3256(data)), "pluggable: sha3-256 mode matches the genesis hash");
   }
 
   t.group("crypto.stream: length-preserving, no tag (§4.4)");
