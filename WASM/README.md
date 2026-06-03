@@ -135,6 +135,34 @@ hashes all *n* blocks, 1.6× the file), well ahead of RS encode (~0.5 s) and the
 xchacha20 stream cipher (~0.18 s). Reads cost nothing on the codec unless a block
 is actually missing. `node tests/bench.mjs` reproduces these.
 
+## Footprint
+
+Source — the storage layer itself:
+
+| | LOC |
+|---|---:|
+| **codec** WASM — GF(2⁸) + Reed–Solomon (`gf256` + `rs` + `index`) | 352 |
+| **reputation** WASM — decayed reciprocity | 146 |
+| **host** TypeScript — bridges, crypto, manifest, cohort/coordinator/repair, node (19 files) | 1,951 |
+| **total** | **2,449** |
+
+(plus ~990 LOC of tests and ~210 of scripts + the browser demo.)
+
+Runtime artifacts a node loads:
+
+| artifact | size | gzipped |
+|---|---:|---:|
+| `codec.wasm` | 6.2 KB | — |
+| `reputation.wasm` | 6.9 KB | — |
+| `kernel.wasm` + `bootstrap.wasm` (from seedkernel) | 12.7 KB | — |
+| host JS — this project + seedkernel `KernelHost` | 130 KB | **34 KB** |
+| libsodium (sumo) — reused, not bundled | 278 KB | — |
+
+So the whole storage layer is **~13 KB of WASM + ~34 KB of gzipped JS**, riding on
+the kernel and the libsodium the deployment already carries (§2, §16: "logic + RS,
+tens of KB, no second copy of a crypto library"). The host JS is unminified (doc
+comments preserved); a bundler/minifier shrinks it further.
+
 ## Layout
 
 ```
