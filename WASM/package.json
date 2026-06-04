@@ -10,8 +10,9 @@
     "build:reputation": "asc assembly/reputation/index.ts --config asconfig.reputation.json --target release",
     "build:wasm": "npm run build:codec && npm run build:reputation",
     "build:host": "tsc -p host",
+    "build:host:min": "node scripts/minify.mjs",
     "build:browser-demo": "node scripts/build-browser-demo.mjs",
-    "build": "npm run copy-kernel && npm run build:wasm && npm run build:host",
+    "build": "npm run copy-kernel && npm run build:wasm && npm run build:host && npm run build:host:min",
     "build:browser": "npm run build && npm run build:browser-demo",
     "build:debug": "asc assembly/codec/index.ts --config asconfig.codec.json --target debug && asc assembly/reputation/index.ts --config asconfig.reputation.json --target debug",
     "test": "npm run build && node tests/run.mjs"

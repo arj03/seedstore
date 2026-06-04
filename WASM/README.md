@@ -186,13 +186,26 @@ Runtime artifacts a node loads:
 | `codec.wasm` (incl. SIMD RS + GF tables) | 6.9 KB | — |
 | `reputation.wasm` | 6.9 KB | — |
 | `kernel.wasm` + `bootstrap.wasm` (from seedkernel) | 12.7 KB | — |
-| host JS — this project + seedkernel `KernelHost` | 130 KB | **34 KB** |
+| seedstore host JS — **minified** (`build/host-min`) | 50 KB | **11 KB** |
+| &nbsp;&nbsp;↳ debug, doc comments intact (`build/host`) | 72 KB | 21 KB |
+| seedkernel `KernelHost` JS (shared; minified) | 36 KB | 7 KB |
 | libsodium (sumo) — reused, not bundled | 278 KB | — |
 
-So the whole storage layer is **~14 KB of WASM + ~34 KB of gzipped JS**, riding on
-the kernel and the libsodium the deployment already carries (§2, §16: "logic + RS,
-tens of KB, no second copy of a crypto library"). The host JS is unminified (doc
-comments preserved); a bundler/minifier shrinks it further.
+So the storage layer's own code ships as **~14 KB of WASM + ~11 KB of gzipped JS**
+(plus the shared ~7 KB-gz seedkernel `KernelHost` — about **18 KB gz of JS** for a whole browser node), riding on the libsodium the
+deployment already carries (§2, §16: "logic + RS, tens of KB, no second copy of a
+crypto library").
+
+`npm run build` emits the host **twice**: the readable `build/host` (doc comments
+intact, for debugging) and a comment-stripped `build/host-min` (for shipping).
+Over half the gzipped host bytes were doc comments — the source is heavily
+annotated — so stripping them nearly halves the wire size (21 → 11 KB gz). The
+"minifier" is a ~70-line dependency-free comment stripper (`scripts/minify.mjs`),
+**not** a bundler or terser: it preserves string/template contents and gates every
+emitted file through `node --check`, so a stripper mistake fails the build rather
+than shipping broken JS. The same step now runs in seedkernel too, shrinking that
+shared host from 15 to ~7 KB gz; `npm run build:browser` stages both minified
+hosts (`build/host-min`) into the demo.
 
 ## Layout
 

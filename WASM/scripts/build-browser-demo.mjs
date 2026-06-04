@@ -1,7 +1,7 @@
 // Stage a self-contained browser demo into build/browser-demo:
 //   - the four WASM modules (kernel, bootstrap, codec, reputation)
-//   - this project's compiled host (build/host → host/)
-//   - seedkernel's node:fs-free browser host (build/host → seedkernel/)
+//   - this project's compiled host, minified (build/host-min → host/)
+//   - seedkernel's node:fs-free browser host, minified (build/host-min → seedkernel/)
 //   - browser/index.html
 //
 // Serve it with any static file server, e.g.:
@@ -18,14 +18,14 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = join(__dirname, "..");
 const build = join(root, "build");
 const out = join(build, "browser-demo");
-const seedkernelHost = join(root, "..", "..", "seedkernel", "WASM", "build", "host");
+const seedkernelHost = join(root, "..", "..", "seedkernel", "WASM", "build", "host-min");
 
-if (!existsSync(join(build, "host", "browser.js"))) {
-  console.error("build/host not found — run `npm run build` first.");
+if (!existsSync(join(build, "host-min", "browser.js"))) {
+  console.error("build/host-min not found — run `npm run build` first.");
   process.exit(1);
 }
 if (!existsSync(join(seedkernelHost, "browser.js"))) {
-  console.error(`seedkernel browser host not found at ${seedkernelHost} — build seedkernel first.`);
+  console.error(`seedkernel minified host not found at ${seedkernelHost} — build seedkernel first (its build emits build/host-min).`);
   process.exit(1);
 }
 
@@ -44,7 +44,7 @@ const copyJs = (srcDir, dstDir) => {
     if (name.endsWith(".js")) copyFileSync(join(srcDir, name), join(dstDir, name));
   }
 };
-copyJs(join(build, "host"), join(out, "host"));
+copyJs(join(build, "host-min"), join(out, "host"));
 copyJs(seedkernelHost, join(out, "seedkernel"));
 
 // The page itself.
