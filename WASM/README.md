@@ -106,7 +106,7 @@ pulled from a CDN via the page's import map; vendor an ESM build to run offline.
 
 - **codec** — exhaustive any-*k*-of-*n* recovery across every loss pattern for
   several codes, deterministic encode (keyless repair), systematic pass-through,
-  block-id ≡ libsodium SHA-3-256, re-encode regenerates byte-identical blocks.
+  block-id ≡ libsodium BLAKE2b-256, re-encode regenerates byte-identical blocks.
 - **bridges** — crypto host services, the `store.local` backend, and the
   capability gate end-to-end via seedkernel's forwarder fixture (§8.2).
 - **manifest** — descriptor/manifest round trips, author signature is
@@ -154,9 +154,8 @@ that would let a BLAKE3 `hash_many` vectorize the block-id hashing next.
 
 **Block-id hash choice (BLAKE2b, and the BLAKE3 next step).** Block-ids are
 content addressing *internal* to storage — they never cross into the kernel — so
-they need not be the kernel's SHA-3 genesis hash; the content hash is a `Crypto`
-constructor argument (`sha3-256` stays available for genesis-identical ids,
-`blake2b-256` is the default). The next step up is **BLAKE3**: its tree of
+they need not be the kernel's SHA-3 genesis hash, and storage hashes them with
+**BLAKE2b** (`crypto_generichash`) — fast and already in libsodium. The next step up is **BLAKE3**: its tree of
 equal-size leaves lines up with the layer's own uniform *B*-byte block splitting,
 so a vectorized `hash_many` produces all *n* block-ids of a chunk across parallel
 SIMD lanes, and the independent per-block hashes thread trivially — projected

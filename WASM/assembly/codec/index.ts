@@ -5,8 +5,9 @@
 // here — they are no-cap host crypto services reached via kernel.call (§16),
 // so the structural sandbox can guarantee this module touches neither disk nor
 // network even if compromised (§2, §17). The only host interaction is the
-// block-id op, which calls the `crypto.hash` (genesis SHA-3-256) bridge — the
-// same one the kernel already exposes — to demonstrate that composition.
+// block-id op, which calls the `crypto.hash` (BLAKE2b-256) bridge — a no-cap
+// host service over the libsodium the kernel already loads — to demonstrate
+// that composition.
 //
 // ABI: the host stages a request at the exported `scratch` offset, calls
 // handle(input_len), and reads the response back from `scratch`.

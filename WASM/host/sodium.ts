@@ -9,11 +9,10 @@
 /** The subset of libsodium the storage host uses. */
 export interface Sodium {
   ready: Promise<void>;
-  // content-address hash for block_id (§4.2). The kernel's genesis hash is
-  // SHA-3-256, but block-ids never cross into the kernel, so the storage layer
-  // uses the faster BLAKE2b (also already in libsodium) by default — see
-  // host/crypto.ts. Both are exposed; the choice is a Crypto constructor arg.
-  crypto_hash_sha3256(message: Uint8Array): Uint8Array;
+  // content-address hash for block_id (§4.2). Block-ids never cross into the
+  // kernel, so the storage layer hashes them with BLAKE2b (crypto_generichash)
+  // — fast and already in libsodium — rather than the kernel's SHA-3 genesis
+  // hash. (SHA-3 stays the kernel's hash for handler-name derivation, not here.)
   crypto_generichash(hashLength: number, message: Uint8Array, key?: Uint8Array | null): Uint8Array;
   crypto_generichash_BYTES: number;
   // length-preserving stream cipher (§4.4): same op encrypts and decrypts

@@ -106,7 +106,7 @@ console.log(`\nRS(${K},${M}), B=${B / 1024} KB, ${FILE / MB} MB → ${numChunks}
 console.log(`  WRITE`);
 console.log(`    RS encode                    ${enc.toFixed(0).padStart(6)} ms   ${rate(enc).padStart(5)} MB/s`);
 console.log(`    encrypt (xchacha20)          ${encr.toFixed(0).padStart(6)} ms   ${rate(encr).padStart(5)} MB/s`);
-console.log(`    hash block-ids (${crypto.hashAlg})  ${hsh.toFixed(0).padStart(6)} ms   ${(FILE * 1.6 / MB / (hsh / 1000)).toFixed(0).padStart(5)} MB/s   (hashes n blocks = 1.6×)  [acc ${hsum & 255}]`);
+console.log(`    hash block-ids (BLAKE2b)  ${hsh.toFixed(0).padStart(6)} ms   ${(FILE * 1.6 / MB / (hsh / 1000)).toFixed(0).padStart(5)} MB/s   (hashes n blocks = 1.6×)  [acc ${hsum & 255}]`);
 console.log(`    encrypt+hash+encode (full)   ${full.toFixed(0).padStart(6)} ms   ${rate(full).padStart(5)} MB/s`);
 console.log(`  READ`);
 console.log(`    all data present (concat)    ${sysRead.toFixed(0).padStart(6)} ms   ${rate(sysRead).padStart(5)} MB/s   ← common path, no GF`);

@@ -1,7 +1,7 @@
 // Focused correctness tests for the codec WASM module (Reed–Solomon over
 // GF(2^8), README §4.1). Loads build/codec.wasm directly with a minimal
-// kernel.call import that routes the block-id op to libsodium SHA-3-256 — the
-// same genesis hash the kernel uses. Exhaustive over loss patterns for small
+// kernel.call import that routes the block-id op to libsodium BLAKE2b-256 —
+// the storage content hash (§4.2). Exhaustive over loss patterns for small
 // codes, randomized for the defaults.
 
 import { readFileSync } from "node:fs";
@@ -20,7 +20,7 @@ export async function loadCodec() {
   let inst;
   const imports = {
     kernel: {
-      // The only host call codec makes: crypto.hash (genesis SHA-3-256). The
+      // The only host call codec makes: crypto.hash (BLAKE2b-256). The
       // request bytes are at payloadPtr; write the 32-byte digest to scratch.
       call: (_schemaPtr, _schemaLen, payloadPtr, payloadLen) => {
         const mem = new Uint8Array(inst.exports.memory.buffer);
