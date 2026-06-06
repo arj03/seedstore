@@ -17,6 +17,7 @@ This design assumes a **closed, social network**: you store with and among peers
 - **Placement is by relationship, not by global address.** A chunk's blocks live on peers in your cohort, chosen by negotiation. Who holds what is discovered live from the cohort rather than pinned anywhere, and there is no global index — the absence of that index is a feature, not a gap (§5).
 - **Confidentiality is structural.** The wire is encrypted; stored data is encrypted so holders only ever see ciphertext; and there is no public directory mapping content to holders.
 - **Trust is local before it is global.** The base system rewards good citizens by direct, pairwise reciprocity you witness yourself (§13); portable, verifiable reputation across peers you have never dealt with is an optional layer (§20), not a baseline requirement.
+- **The trusted base is small and separate from the logic.** Only the I/O bridges (`store.local`, `net.send`, `clock.now`, `rand`) and the crypto services are trusted host code; all storage *logic* — `codec`, `reputation`, and the `coordinator`/`cohort`/`repair` orchestration — is **confined** (WASM or a zero-authority sandboxed-JS realm), reaching I/O only through capability-gated bridges. Trusting a node means trusting the small, stable base, not the larger, upgradeable logic (§2.1).
 - **Browser nodes and long-running peers run the same protocol**, differing only in their `store.local` backend and default quota.
 
 The reference composition stacks: storage app handlers → cohort + repair handlers → storage bridges (`store.local`, `net.send`, `clock.now`, `rand`) → installer → signature → kernel.
@@ -63,6 +64,27 @@ Nothing here changes the envelope, the dispatch rule, or `SetHandler`. Storage s
 **Crypto.** Storage reuses the kernel's cryptography rather than shipping its own, so the only cryptographic-grade algorithm in storage WASM is **Reed–Solomon** (libsodium has no erasure coding); hashing, stream encryption, and key-sealing are all calls into the libsodium the kernel already loads, exposed as the no-cap host services of §16. Two consequences shape the rest of this doc: a chunk descriptor's authorship is checked by carrying it as a signature-wrapped envelope and reading `signature.signer` (§4.3), never by verifying a blob in WASM; and confidentiality — the one facility the kernel omits (authentication-only, seedkernel §14) — is added client-side over that same libsodium (§4.4), not bundled. The payoff is storage handlers that are logic + RS, tens of KB, with no second copy of a crypto library.
 
 **The 64 KB cap is the whole reason this layer exists**, so §3 treats it first.
+
+---
+
+## 2.1 Trust model: three tiers
+
+Running a seed store node extends your trusted computing base (TCB) — but the design keeps the part you *must* trust small and separate from the part that changes. Three tiers, smallest-TCB-first:
+
+**Tier 0 — kernel base.** seedkernel itself: kernel, bootstrap, signature, installer. The root of trust; everything else composes on top.
+
+**Tier 1 — I/O base (trusted).** The host-native bridges — `store.local`, `net.send`, `clock.now`, `rand` (§16) — plus the no-cap crypto services over libsodium. These *must* be trusted: they are the only code that performs real I/O. They are deliberately small, each bound to exactly one capability, audited, and change rarely. This is the *whole* of what seed store adds to your TCB.
+
+**Tier 2 — logic (confined, upgradeable).** Everything else: `codec`, `reputation`, and the `coordinator`/`cohort`/`repair` orchestration (§17). This is pure logic. It is **confined** — no ambient access to disk, network, or clock — and reaches I/O *only* by calling Tier-1 bridges through capability-gated `kernel.call`. It **declares** the capabilities it needs, and — exactly like a seedkernel handler upgrade (seedkernel §7.4) — a new version that keeps the same-or-fewer capabilities applies automatically, while one that **broadens** them is held for explicit acknowledgement. So upgrading the logic does *not* re-grant full trust: a new version is structurally bounded to the capabilities you already acknowledged.
+
+Two implementation forms satisfy Tier 2, both confined identically:
+
+- **WASM** — the pure, hot compute (`codec`, `reputation`). The wasm sandbox is the boundary; capabilities and upgrade-acknowledgement come straight from the installer (seedkernel §7–§8).
+- **Sandboxed JS** — the async orchestration (`coordinator`/`cohort`/`repair`), which is awkward to express as a *synchronous* wasm handler. It runs in a **zero-authority JS realm**: a fresh context with *no* ambient authority, into which the host injects *only* the capability-gated bridge surface the logic declared. The realm cannot even name `fs`/`net` — those bindings do not exist in it — and CPU/memory are bounded by the host. It gets the same capability + upgrade-acknowledgement discipline as the wasm tier.
+
+The line that matters: **"trusting seed store" means trusting Tier 1 (small, stable, audited) — not Tier 2 (large, churning, upgradeable).** A buggy or compromised Tier-2 unit, of either form, can do nothing but compute and call the bridges for the capabilities it was granted; it can never reach I/O it did not declare, and an upgrade cannot silently widen that reach.
+
+> **Implementation status.** Today the two pure handlers (`codec`, `reputation`) are WASM and confined as described. The `coordinator`/`cohort`/`repair` orchestration currently runs as **trusted host JS with full authority** — a shortcut that collapses Tier 2 into Tier 1 and forfeits both the sandbox and the safe-upgrade guarantee. Moving that orchestration into a zero-authority sandboxed-JS realm (above) is the planned work that closes the gap; until then, an orchestration upgrade is a full-trust event and should be reviewed as one.
 
 ---
 
@@ -333,7 +355,7 @@ Because the network is a closed social cohort, the dominant open-network threats
 
 Optional hardening for cohorts that are less than fully trusted is documented separately in §23; none of it is needed for a friends-or-devices cohort, and adding it by default would make the system the complicated monster we are avoiding.
 
-**Residual kernel-inherited risk.** The protocol does not bound a single handler's CPU or memory, so run the heavy `codec` and `repair` handlers under a Worker watchdog. And `store.coordinator` is the cap-richest Part I handler — the only one holding four capabilities (`store`, `net`, `clock`, `rand`) and the most logic — so it is the largest blast radius if a storage handler is ever compromised, the prime audit target, and a standing reason the installer policy (§19) stays a closed allowlist rather than an open registry.
+**Residual kernel-inherited risk.** The protocol does not bound a single handler's CPU or memory, so run the heavy `codec` and `repair` handlers under a Worker watchdog (a Tier-2 sandboxed-JS realm bounds these via the host's interrupt/memory limits, §2.1). And `store.coordinator` is the cap-richest Part I unit — the only one holding four capabilities (`store`, `net`, `clock`, `rand`) and the most logic — so it is the largest blast radius if a storage unit is ever compromised, the prime audit target, and a standing reason the installer policy (§19) stays a closed allowlist rather than an open registry. Once Tier-2 confinement lands (§2.1) that blast radius is bounded to its four declared caps; until then the orchestration runs unconfined and a compromise is full-authority.
 
 ---
 
@@ -352,17 +374,21 @@ Optional hardening for cohorts that are less than fully trusted is documented se
 
 ---
 
-## 17. New app handlers (WASM, installed via signed messages)
+## 17. App logic — Tier-2, confined (§2.1)
 
-| Handler | Caps | Role |
-| --- | --- | --- |
-| `codec` | — (pure) | slice into `B`-byte blocks; encrypt/decrypt with the length-preserving stream cipher, compute block-ids, and seal/unseal content keys via the host crypto service (§16); **Reed–Solomon encode/decode (on ciphertext) — the only algorithm in-WASM**; build/parse manifests and chunk descriptors |
-| `cohort` | `net`, `clock` | maintain the peer set and connections; run have/want, liveness, and the verification-fetch sampling that backs it (§8) |
-| `store.coordinator` | `store`, `net`, `clock`, `rand` | orchestrate PUT/GET incl. placement negotiation and content-key generation; windowed transfer; admission, eviction (§14) and reciprocity accounting (§13) |
-| `repair` | `store`, `net`, `clock` | the repair loop: measure redundancy via have/want + verification-fetch, reconstruct on ciphertext (§9) |
-| `reputation` | — (pure) | decayed per-peer reciprocity counters from witnessed verification-fetches and served reads; `reputation.score` query (§13). Swap for the §20 receipts-and-transitive handler when portable reputation is needed |
+All storage *logic* is Tier-2: confined, capability-bounded, and reaching I/O only through the §16 bridges. It comes in the two confined forms of §2.1 — **WASM** for the pure hot compute, and a **zero-authority sandboxed-JS realm** for the async orchestration. Both are bounded identically: declared caps, no ambient I/O, upgrade-acknowledgement.
 
-Discovery and placement are deliberately light: a single small `cohort` handler keeps the peer set and runs have/want, and placement is just negotiation folded into `store.coordinator`. There is **no separate proof handler** — proving a holder still has data is an ordinary verification-fetch on the existing fetch path, scored locally by `reputation`. The two pure handlers (`codec`, `reputation`) declare **no** capabilities, so the structural sandbox guarantees they can never reach disk or network even if buggy — the Reed–Solomon coding and the trust math are exactly where you want that guarantee. (The crypto proper lives in the host's libsodium, §16, reached by a no-cap call, so `codec` keeps its purity.) Mutating handlers (`store.coordinator`, `repair`) that act under a signer's authority consume a per-signer sequence number to reject replays: each peer persists the highest sequence it has accepted per signer and drops anything not strictly greater. (Every Part I mutator is addressed unicast, so this is plain replay rejection — there is no gossiped state-change to reconcile.)
+| Handler | Form | Caps | Role |
+| --- | --- | --- | --- |
+| `codec` | WASM | — (pure) | slice into `B`-byte blocks; encrypt/decrypt with the length-preserving stream cipher, compute block-ids, and seal/unseal content keys via the host crypto service (§16); **Reed–Solomon encode/decode (on ciphertext) — the only algorithm in-WASM**; build/parse manifests and chunk descriptors |
+| `reputation` | WASM | — (pure) | decayed per-peer reciprocity counters from witnessed verification-fetches and served reads; `reputation.score` query (§13). Swap for the §20 receipts-and-transitive handler when portable reputation is needed |
+| `cohort` | sandboxed-JS | `net`, `clock` | maintain the peer set and connections; run have/want, liveness, and the verification-fetch sampling that backs it (§8) |
+| `store.coordinator` | sandboxed-JS | `store`, `net`, `clock`, `rand` | orchestrate PUT/GET incl. placement negotiation and content-key generation; windowed transfer; admission, eviction (§14) and reciprocity accounting (§13) |
+| `repair` | sandboxed-JS | `store`, `net`, `clock` | the repair loop: measure redundancy via have/want + verification-fetch, reconstruct on ciphertext (§9) |
+
+The two pure handlers (`codec`, `reputation`) declare **no** capabilities, so the structural sandbox guarantees they can never reach disk or network even if buggy — the Reed–Solomon coding and the trust math are exactly where you want that guarantee. (The crypto proper lives in the host's libsodium, §16, reached by a no-cap call, so `codec` keeps its purity.) The orchestration handlers run in a **sandboxed-JS realm** (§2.1) rather than as wasm because they are inherently async and multi-step — negotiating with peers, streaming blocks, awaiting responses — which the *synchronous* handler ABI (§4, seedkernel §4) expresses only through awkward correlation-id continuations; the realm lets them stay ordinary async JS while still being confined to their declared caps and subject to the same upgrade-acknowledgement gate. Discovery and placement are deliberately light: a single small `cohort` realm keeps the peer set and runs have/want, and placement is just negotiation folded into `store.coordinator`. There is **no separate proof handler** — proving a holder still has data is an ordinary verification-fetch on the existing fetch path, scored locally by `reputation`. Mutating handlers (`store.coordinator`, `repair`) that act under a signer's authority consume a per-signer sequence number to reject replays: each peer persists the highest sequence it has accepted per signer and drops anything not strictly greater. (Every Part I mutator is addressed unicast, so this is plain replay rejection — there is no gossiped state-change to reconcile.)
+
+> **Implementation status (§2.1).** `codec` and `reputation` are WASM and confined today. The `cohort`/`store.coordinator`/`repair` orchestration currently runs as **trusted host JS with full authority** — the realm confinement above is the planned work that restores the Tier-2 guarantee; until it lands, treat an orchestration upgrade as a full-trust event.
 
 ---
 
