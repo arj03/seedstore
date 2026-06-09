@@ -22,6 +22,13 @@ const files = ["kernel.wasm", "bootstrap.wasm"];
 
 mkdirSync(outDir, { recursive: true });
 
+// Stage the Tier-2 guest program (a plain .js the host loads as QuickJS source,
+// not a tsc input) next to the compiled host JS, so a shipped build/host is
+// self-contained. tsc emits the rest of build/host afterwards and leaves this.
+mkdirSync(join(outDir, "host"), { recursive: true });
+copyFileSync(join(root, "host", "tier2-guest.js"), join(outDir, "host", "tier2-guest.js"));
+console.log("  staged tier2-guest.js");
+
 let missing = false;
 for (const f of files) {
   const src = join(kernelBuild, f);

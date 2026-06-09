@@ -6,8 +6,10 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { KernelHost, referencePolicy, CURRENT_VERSION } from "seedkernel-wasm";
-import sodium from "libsodium-wrappers-sumo";
+import { KernelHost, referencePolicy, CURRENT_VERSION, loadSodium } from "seedkernel-wasm";
+
+// One libsodium for the whole stack: the sumo instance the kernel bundles (§16).
+const sodium = await loadSodium();
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 export const root = join(__dirname, "..");

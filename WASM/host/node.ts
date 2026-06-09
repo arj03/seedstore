@@ -10,7 +10,7 @@ import { fileURLToPath } from "node:url";
 
 import { loadSodium, generateKeyPair } from "./sodium.js";
 import { StorageNode, type StorageNodeOptions } from "./storage-node.js";
-import { LoopbackNetwork } from "./net.js";
+import { LoopbackNetwork } from "seedkernel-wasm/net";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const buildDir = join(__dirname, "..");
@@ -51,6 +51,8 @@ export {
   StorageNode, LoopbackNetwork, loadSodium, generateKeyPair,
 };
 export { createConnectedCohort } from "./cluster.js";
+export { Tier2Coordinator } from "./tier2-coordinator.js";
+export type { Tier2Host, Tier2PutResult } from "./tier2-coordinator.js";
 export type { StorageNodeOptions } from "./storage-node.js";
 export type { StorageConfig, Identity } from "./core.js";
 export { defaultConfig } from "./core.js";

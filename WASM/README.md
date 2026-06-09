@@ -3,16 +3,35 @@
 An AssemblyScript + TypeScript implementation of **Part I** of the [seed
 store](../README.md) spec: a durable, private, self-healing peer-to-peer storage
 layer that runs *on* the [seedkernel](https://github.com/arj03/seedkernel). A
-node built here runs the same protocol in Node and in the browser.
+node runs the same protocol in Node, in Bun, and in the browser.
 
-It composes the reference onion from the spec (§2):
+## seed store is content, not a binary
+
+The deployable artifact is the **generic seedkernel runtime** (the "shell"). It
+exposes only **raw-byte capabilities** — crypto, `net.*`, `fs.*`, an
+installed-handler call, a clock — and knows nothing about storage. seed store
+ships as **signed content** that the shell loads and *becomes* a storage node:
 
 ```
-storage app handlers (codec, reputation)        ← WASM, pure, no caps
-  → cohort + coordinator + repair               ← host orchestration (caps: store/net/clock/rand)
-    → storage bridges (crypto.*, store.local, net.send, clock.now, rand)
-      → installer → signature → kernel           ← seedkernel, taken verbatim
+seed store bundle  ──────────── signed by the app author, verified at load ────────────┐
+  codec.wasm  reputation.wasm        pure RS + reputation math, declare no capabilities │
+  tier2-guest.js                     PUT/GET/repair (initiator) + HAVE/OFFER/STORE/      │
+                                     FETCH (holder): zero-authority JS, no ambient I/O   │
+        │  reaches I/O only through ↓ the single capability seam                        │
+  cap-bridge   crypto · net · fs · module-call · clock · identity  ── generic primitives ┘
+        │
+  seedkernel runtime (the shell)     installer → signature → kernel  +  the raw-byte caps
 ```
+
+Everything with *structure* — content-addressing, the signed chunk descriptor,
+the HAVE/OFFER/STORE/FETCH wire format, Reed–Solomon, the nonce convention, the
+quota — is **seed store's**, and lives in the bundle. The kernel only moves
+opaque bytes. So the same shell can host storage or any other signed app, and a
+storage upgrade is new content, not a new binary (spec §2.1, §17). The runtime
+side of this — the shell, the capability vocabulary, the confinement realms, and
+the bundle format — is documented in
+[seedkernel](https://github.com/arj03/seedkernel)'s README ("The runtime as an
+app host").
 
 ## What lives where, and why
 
@@ -20,29 +39,33 @@ The spec is explicit that the **only** cryptographic-grade algorithm in storage
 WASM is Reed–Solomon — libsodium has no erasure coding (§2, §16) — and that the
 two pure handlers (`codec`, `reputation`) declare **no capabilities** so the
 structural sandbox guarantees they touch neither disk nor network even if buggy
-(§17). So:
+(§17). Under the runtime split, *all* storage logic is confined Tier-2 content:
 
-| Component | Where | Spec |
-| --- | --- | --- |
-| `codec` — GF(2⁸) + systematic Reed–Solomon RS(k,m) encode/decode, block-id | **WASM** (`assembly/codec`) | §4.1, §4.2, §9 |
-| `reputation` — decayed per-peer reciprocity counters | **WASM** (`assembly/reputation`) | §13 |
-| `crypto.*` (hash/stream/seal), `store.local`, `net.send`, `clock.now`, `rand` | host bridges (`host/`) | §16, §12 |
-| `cohort` (have/want, liveness, verification-fetch) | host (`host/cohort.ts`) | §5, §8 |
-| `store.coordinator` (PUT/GET, placement, manifest) | host (`host/coordinator.ts`) | §6, §7 |
-| `repair` (self-healing loop) | host (`host/repair.ts`) | §9 |
-| manifest + signed chunk descriptor | host (`host/manifest.ts`) | §4.3 |
+| Component | Where it runs | Form | Spec |
+| --- | --- | --- | --- |
+| `codec` — GF(2⁸) + systematic Reed–Solomon RS(k,m) encode/decode, block-id | installed kernel handler | **WASM**, no caps (`assembly/codec`) | §4.1, §4.2, §9 |
+| `reputation` — decayed per-peer reciprocity counters | installed kernel handler | **WASM**, no caps (`assembly/reputation`) | §13 |
+| coordinator (PUT/GET, placement, manifest) + cohort (have/want, verification-fetch) + repair | confined **async** QuickJS realm | zero-authority JS (`host/tier2-guest.js`) | §5–§9 |
+| holder side — admission, sibling rule, content-addressing, quota, the store writes | confined **sync** QuickJS realm | zero-authority JS (`host/tier2-guest.js`) | §6, §10, §14 |
+| the capability seam the guest reaches I/O through | seedkernel runtime | `cap-bridge` (generic primitives) | §16 |
+| `crypto.*`, `net.*`, `fs.*`, `clock` backends | seedkernel runtime | raw-byte capabilities | §12, §16 |
 
 Hashing, the length-preserving stream cipher (`crypto_stream_xchacha20_xor`),
-and key-sealing are **reused** from libsodium (the sumo build, which exposes the
-raw stream cipher) — never bundled — exactly as §16 requires. Descriptor signing
-uses the same Ed25519 the kernel signs with, invoked sender-side in the host.
+and signatures are **reused** from the runtime's libsodium (the sumo build, which
+exposes the raw stream cipher) — never bundled — exactly as §16 requires; the
+guest reaches them as generic `cap-bridge` primitives and builds its own
+descriptor envelope and nonce convention on top.
 
-The orchestration (cohort/coordinator/repair) is host-side TypeScript rather than
-WASM, mirroring how seedkernel keeps its *installer* host-side: it is the
-cap-holding logic above the bridges, and a host-side reference makes the async
-placement/transfer/repair protocol tractable and deterministically testable. The
-codec is **also** installed as a kernel handler on every node (§19), reachable
-via `kernel.call`, and the node's fast path drives an in-process copy of it.
+**Why two realms.** The initiator orchestration is inherently async (it fans out
+over `net` and awaits), so it runs in an Asyncify QuickJS realm where a host call
+*looks* synchronous while the host round-trips. The holder side, by contrast,
+answers purely from local `fs` + crypto and never round-trips — so it runs in a
+separate **synchronous** (non-Asyncify) realm, which lets it respond to an
+incoming request *while the node's own initiator realm is parked mid-`await`* (two
+async realms can't overlap host calls; a sync one, a different WASM instance,
+can). `StorageNode` (`host/storage-node.ts`) keeps a host-side copy of both sides
+as the reference/parity path — the same role the host-side classes play in the
+tests — but the **shipped** node runs the confined guest.
 
 ## Build
 
@@ -56,16 +79,83 @@ project runs a node on it, it does not re-implement it. Build seedkernel first:
 Then, here:
 
 ```sh
-npm install        # libsodium-wrappers-sumo + assemblyscript + typescript
-npm run build      # copy kernel.wasm/bootstrap.wasm, compile codec+reputation WASM, compile host TS
-npm test           # build + run the full test suite
+npm install        # one dependency: the sibling seedkernel-wasm (sumo libsodium + QuickJS live there)
+npm run build      # copy kernel.wasm/bootstrap.wasm, compile codec+reputation WASM, stage the guest, compile host TS
+npm test           # build + run the full test suite (Node); `bun tests/run.mjs` runs it on Bun
 ```
 
 `npm run build` produces `build/codec.wasm`, `build/reputation.wasm`, the copied
-`build/kernel.wasm` + `build/bootstrap.wasm`, and the compiled host in
-`build/host/`.
+`build/kernel.wasm` + `build/bootstrap.wasm`, the staged `build/host/tier2-guest.js`,
+and the compiled host in `build/host/`.
 
-## Run a node
+## Run a node from the command line
+
+A node is the generic seedkernel **shell** plus the signed seed store **bundle**.
+First build the bundle once (the offline producer holds the app author key):
+
+```sh
+npm run build:bundle      # → ./bundle/ (manifest + codec/reputation wasm + installs + guest),
+                          #   signed by ./seedstore-author.key (minted on first run; keep it secret)
+```
+
+The shell admits content only from authors named in a policy file. Take the
+author public key it printed (`author …`) and allow it:
+
+```sh
+echo '{ "authors": ["<author-pubkey-hex>"] }' > allowed-keys.json
+```
+
+Now run the shell from the seedkernel checkout. A **serving** node that has loaded
+a bundle becomes a full storage node — it installs the modules, runs the confined
+guest, and serves the holder side (HAVE/OFFER/STORE/FETCH) over TCP (and WebSocket
+for browsers):
+
+```sh
+SHELL=../../seedkernel/WASM/build/host/main.js     # the generic runtime
+
+# a holder: verifies + installs the bundle, then serves the confined holder side
+node "$SHELL" --policy allowed-keys.json --bundle ./bundle \
+     --dir ./data-A --key ./A.key --listen 127.0.0.1:7401
+#   seedkernel-shell <peer-pubkey>
+#     bundle seedstore v1 → installed codec, reputation
+#     holder serving the app's request side from the confined guest
+#     tcp    listening on :7401
+```
+
+Start a few holders on different ports/dirs (each prints its `<peer-pubkey>`), then
+PUT a file from a client that lists them as `--peers` (`<pubkey>@host:port`, comma-
+separated). The client orchestrates PUT inside the confined guest and places blocks
+across the cohort:
+
+```sh
+node "$SHELL" --policy allowed-keys.json --bundle ./bundle --dir ./client \
+     --peers "<pkA>@127.0.0.1:7401,<pkB>@127.0.0.1:7402,<pkC>@127.0.0.1:7403,<pkD>@127.0.0.1:7404" \
+     --put ./notes.txt
+#   PUT ok: 8 chunk(s)                 ← a ~4 KB file at the default RS(2,2)/256 B blocks
+#     --get bdbc41…:74a32f…            ← manifest-id : content-key K
+
+node "$SHELL" --policy allowed-keys.json --bundle ./bundle --dir ./client \
+     --peers "<pkA>@…,<pkB>@…,<pkC>@…,<pkD>@…" \
+     --get bdbc41…:74a32f… --out ./restored.txt
+#   GET ok: 4000 B → ./restored.txt
+```
+
+`--get` is `<manifest-id>:<key>` — the pair PUT printed; without `--out` the bytes
+go to stdout. The manifest-id locates the file; the key `K` decrypts it (lose `K`
+and the holders keep only permanent noise, §11). Useful shell flags: `--ws-listen
+host:port` (a browser edge over WebSocket), `--peers <pk>@host:port,…` (the cohort),
+`--timeout ms`, `--dir` (the `fs.*` backend directory), `--key` (the node's
+persisted kernel keypair). A node with no listener is a pure client; one with
+`--listen`/`--ws-listen` keeps serving until Ctrl-C.
+
+> A self-contained single-file binary is `bun build --compile` of the shell
+> (`seedkernel/WASM/host/main-bun.ts`) with kernel + bootstrap embedded; it loads
+> the same bundle. The shell is application-neutral, so this binary can host any
+> signed app, not just storage.
+
+### As a library (in-process)
+
+For tests and embedding, drive nodes directly over an in-process network:
 
 ```js
 import { createConnectedCohort, loadSodium, loadWasmBytes, LoopbackNetwork } from "./build/host/node.js";
@@ -80,10 +170,11 @@ const put = await nodes[0].put(data);                 // chunk → encrypt → R
 const got = await nodes[0].get(put.manifestId, put.key); // locate → fetch any k → decode → decrypt
 ```
 
-`LoopbackNetwork` wires nodes in one process; a real deployment supplies a
-`Network` backed by a WebRTC data channel (the chat demo's transport is one
-example, §2). The `BlobStore` backend is in-memory here; a server uses a
-directory, a browser uses OPFS/IndexedDB (§12).
+`LoopbackNetwork` wires nodes in one process. To run the *confined* guest instead
+of the host-side reference path, wrap a node in a `Tier2Coordinator`
+(`host/tier2-coordinator.ts`) — `put`/`get`/`repair` then run inside the QuickJS
+realm. The `BlobStore` backend is in-memory by default; a server uses a directory
+(`new NodeFs(dir)`), a browser uses OPFS/IndexedDB (§12).
 
 ## Browser
 
@@ -114,7 +205,17 @@ pulled from a CDN via the page's import map; vendor an ESM build to run offline.
 - **reputation** — passes raise / misses penalize / scores decay with a half-life.
 - **storage** (multi-node loopback) — PUT→GET, small-file replication, offline
   tolerance (any *k* of *n*), repair restoring redundancy after loss, sharing a
-  sealed key, crypto-shredding, reciprocity from served fetches.
+  sealed key, crypto-shredding, reciprocity from served fetches (the host-side
+  reference path).
+- **tier2-port** — the same PUT/GET/replication/offline/repair/crypto-shredding
+  matrix driven *inside* the confined QuickJS realm over the generic `cap-bridge`,
+  with cross-path parity proving the confined and host-side paths are byte-compatible.
+- **shell-run** — a generic seedkernel-shell (no seed store imports) loads the
+  signed bundle and runs the guest as the PUT/GET *initiator* against a cohort.
+- **holder-guest** — a cohort of generic shells runs storage end-to-end with the
+  *holder* side confined too; a guest initiator and a host-side initiator place
+  concurrently (so a shell serves its sync holder realm while its async realm is
+  parked); and a host-side initiator → confined shell holders round-trips (parity).
 - **browser** — the same node booted through the `fetch`-based browser entry.
 
 ## Performance
@@ -212,12 +313,21 @@ hosts (`build/host-min`) into the demo.
 ```
 assembly/codec/        gf256.ts, rs.ts, index.ts   — Reed–Solomon WASM handler
 assembly/reputation/   index.ts                    — decayed reciprocity WASM handler
-host/                  bridges, crypto, store-local, net, manifest, codec/reputation
-                       clients, cohort, coordinator, repair, storage-node, node/browser
-browser/index.html     in-browser demo page
-scripts/               copy-kernel, build-browser-demo
-tests/                 codec / bridges / manifest / reputation / storage / browser
+host/  tier2-guest.js          the confined guest: PUT/GET/repair + the holder side
+       tier2-coordinator.ts    drives the guest in a realm over the generic cap-bridge
+       storage-node.ts         host-side reference node (codec/reputation install, holder)
+       coordinator/cohort/repair/manifest/crypto/protocol/store-fs/codec+reputation clients
+       node.ts / browser.ts    Node + browser entry points
+scripts/  build-bundle.mjs     produce the signed bundle (npm run build:bundle)
+          copy-kernel, build-browser-demo
+tests/    codec / bridges / manifest / reputation / storage / browser
+          tier2-port / shell-run / holder-guest / bundle-fixture
 ```
+
+The runtime itself — the shell, the `cap-bridge`, the `fs.*`/`net.*` capabilities,
+the QuickJS confinement realms, the bundle format and policy — lives in
+[seedkernel](https://github.com/arj03/seedkernel); seed store consumes it as the
+`seedkernel-wasm` dependency and ships only the content above.
 
 ## Scope
 

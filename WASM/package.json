@@ -11,6 +11,7 @@
     "build:wasm": "npm run build:codec && npm run build:reputation",
     "build:host": "tsc -p host",
     "build:host:min": "node scripts/minify.mjs",
+    "build:bundle": "node scripts/build-bundle.mjs",
     "build:browser-demo": "node scripts/build-browser-demo.mjs",
     "build": "npm run copy-kernel && npm run build:wasm && npm run build:host && npm run build:host:min",
     "build:browser": "npm run build && npm run build:browser-demo",
@@ -18,7 +19,6 @@
     "test": "npm run build && node tests/run.mjs"
   },
   "dependencies": {
-    "libsodium-wrappers-sumo": "0.8.4",
     "seedkernel-wasm": "file:../../seedkernel/WASM"
   },
   "devDependencies": {
