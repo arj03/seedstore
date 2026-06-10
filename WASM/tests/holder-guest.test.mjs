@@ -58,6 +58,9 @@ export async function run(t) {
     const shell = await boot({
       kernelBytes: wasm.kernelBytes, bootstrapBytes: wasm.bootstrapBytes,
       policyJson, dir, identity, network: net, timeoutMs: TIMEOUT,
+      // Quota is operator policy now (not signed into the bundle): the operator
+      // supplies it at boot, merged over the manifest config into the guest's APP.
+      config: { quota: 64 * 1024 * 1024 },
     });
     shell.loadBundle(bundleDir);
     await shell.serveAsHolder();

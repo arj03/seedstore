@@ -52,10 +52,14 @@ export interface StorageNodeOptions {
   /** Raw-byte `fs.*` backend (§12; seedkernel's Fs). Defaults to an in-RAM
    *  MemoryFs; a server node passes a NodeFs, the browser an OPFS-backed one. The
    *  default store is an FsBlobStore over this, and the Tier-2 cap-bridge serves
-   *  `fs.*` from it — so it must back whatever `store` is, if one is supplied. */
+   *  `fs.*` from it (see `store` for when the two must share a backend). */
   fs?: Fs;
   /** Donated blob store (§12). Defaults to an FsBlobStore over `fs` with a
-   *  `quota`-byte budget; a custom store must layer over the same `fs`. */
+   *  `quota`-byte budget. A custom `store` only has to layer over the same `fs`
+   *  when this node serves the confined Tier-2 holder path — that path reads and
+   *  writes the store through `fs.*`, so the two would otherwise diverge. A node
+   *  that runs only the host-side holder may pass an independent store (e.g. a
+   *  MemoryBlobStore, as the net.test.mjs WebSocket peers do). */
   store?: BlobStore;
   quota?: number;
   clock?: () => number;

@@ -260,13 +260,28 @@ function encodeDescriptorCore(d) {
   return concat([head, ...d.blockIds]);
 }
 function decodeDescriptorCore(core) {
+  // Same structural guards host/manifest.ts enforces — a holder must reject a
+  // junk core exactly as the host holder does (§4.3).
+  if (core.length < 8 || core[0] !== 1) throw new Error("descriptor: bad core");
   const k = core[1], m = core[2], blockSize = rU32(core, 3), n = core[7], blockIds = [];
+  if (n !== k + m) throw new Error("descriptor: n != k+m");
+  if (core.length !== 8 + n * 32) throw new Error("descriptor: truncated");
   for (let i = 0; i < n; i++) blockIds.push(core.slice(8 + i * 32, 8 + (i + 1) * 32));
   return { k, m, blockSize, blockIds };
 }
 function parseSignedDescriptor(env) {
+  if (env.length < 32 + 64 + 8) throw new Error("signed descriptor: too short");
   const core = env.slice(96); // [authorPk 32][sig 64][core]
   return { core, descriptor: decodeDescriptorCore(core) };
+}
+// Verify the author signature AND structurally validate the core, mirroring
+// host/manifest.ts verifyDescriptor: returns the parsed descriptor or null. The
+// holder admits over this so a *signed* but malformed descriptor (junk core, n ≠
+// k+m) is rejected, not parsed into garbage block-ids that sidestep the §10
+// sibling invariant — the parity the host holder already had.
+function verifyDescriptor(env) {
+  if (!verifyEnv(env)) return null;
+  try { return parseSignedDescriptor(env).descriptor; } catch (_e) { return null; }
 }
 function signChunk(d) { return signCore(encodeDescriptorCore(d)); }
 function encodeManifest(man) {
@@ -286,6 +301,11 @@ function encodeManifest(man) {
   return concat(parts);
 }
 function decodeManifest(buf) {
+  // Same bounds checks host/manifest.ts makes (version byte + every length read).
+  // A wrong-K GET decrypts the manifest to noise: without these the random
+  // chunkCount drives the realm into billions of slice() calls until QuickJS's
+  // memory cap aborts it; with them it is a clean throw (crypto-shredding, §11).
+  if (buf.length < 19 || buf[0] !== 1) throw new Error("manifest: bad header");
   let o = 1;
   const hi = rU32(buf, o); o += 4;
   const lo = rU32(buf, o); o += 4;
@@ -295,7 +315,9 @@ function decodeManifest(buf) {
   const chunkCount = rU32(buf, o); o += 4;
   const chunks = [];
   for (let i = 0; i < chunkCount; i++) {
+    if (o + 4 > buf.length) throw new Error("manifest: truncated chunk length");
     const len = rU32(buf, o); o += 4;
+    if (o + len > buf.length) throw new Error("manifest: truncated chunk");
     chunks.push(buf.slice(o, o + len)); o += len;
   }
   return { fileSize, blockSize, k, m, encAlg, chunks };
@@ -503,8 +525,8 @@ function healCoded(d, descEnv, holders) {
 }
 // Audit and, if under-replicated, heal one chunk from its signed descriptor.
 function repairChunk(descEnv) {
-  if (!verifyEnv(descEnv)) return 0;                       // forged/unsigned (§4.3)
-  const d = parseSignedDescriptor(descEnv).descriptor;
+  const d = verifyDescriptor(descEnv);                     // forged/unsigned/malformed → null (§4.3)
+  if (!d) return 0;
   const holders = liveHolders(d.blockIds);
   let liveCount = 0;
   for (const set of holders.values()) if (set.size > 0) liveCount++;
@@ -538,7 +560,13 @@ function doRepair() {
 // parked mid-await (the runtime split). bytesUsed mirrors
 // FsBlobStore's byte budget, rebuilt lazily from the fs the first time it matters.
 let bytesUsed = -1;
-function quota() { return APP.quota; }
+// The §14 byte budget is OPERATOR policy, not author content: the StorageNode
+// injects its store's quota, and a seedkernel shell merges the operator's config
+// over the (author-signed) manifest. When neither supplies one, fall back to a
+// default so a holder never admits unbounded — the budget is never baked into the
+// signed bundle.
+const DEFAULT_QUOTA = 64 * 1024 * 1024;
+function quota() { return APP.quota != null ? APP.quota : DEFAULT_QUOTA; }
 function fsSize(keyStr) { return rU32(host.call(CAP_FS_SIZE, strBytes(keyStr)), 0); }
 function ensureUsed() {
   if (bytesUsed >= 0) return;
@@ -571,8 +599,8 @@ function storeWrite(id, bytes, descriptor) {
 function admit(descriptor, blockId, size) {
   if (quotaFree() < size) return false;                       // committed tier full
   if (descriptor && descriptor.length) {
-    if (!verifyEnv(descriptor)) return false;                 // forged/unsigned (§4.3)
-    const d = parseSignedDescriptor(descriptor).descriptor;
+    const d = verifyDescriptor(descriptor);                   // forged/unsigned/malformed → null (§4.3)
+    if (!d) return false;
     if (!d.blockIds.some((id) => bytesEqual(id, blockId))) return false; // not of this chunk
     for (const sib of d.blockIds) {                           // sibling rule (§6)
       if (bytesEqual(sib, blockId)) continue;

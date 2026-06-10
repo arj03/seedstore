@@ -2,7 +2,9 @@
 // content a generic seedkernel-shell loads to *become* a storage node —
 // codec.wasm + reputation.wasm + tier2-guest.js + a signed manifest declaring the
 // op catalog and required caps. The shell verifies + governs + installs it; this
-// script is the offline producer that holds the author key.
+// script is the offline producer that holds the author key. The bundle *content*
+// (modules/guest/ops/caps/config) is assembled in scripts/storage-bundle.mjs, the
+// one place the test fixture also uses, so the two can never drift.
 //
 //   node scripts/build-bundle.mjs            (writes ./bundle, signs with ./seedstore-author.key)
 //
@@ -13,21 +15,19 @@
 //
 // Run `npm run build` first so build/ holds the compiled host + wasm.
 
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { loadKernelHost, loadSodium, CURRENT_VERSION } from "seedkernel-wasm";
-import { signManifest } from "seedkernel-wasm/bundle";
+import { loadKernelHost, loadSodium } from "seedkernel-wasm";
 import { CAP } from "seedkernel-wasm/cap-bridge";
+import { writeStorageBundle } from "./storage-bundle.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = join(__dirname, "..");
 const build = join(root, "build");
 const out = join(root, "bundle");
 
-const { storageNames } = await import(new URL("../build/host/names.js", import.meta.url));
-const { defaultConfig } = await import(new URL("../build/host/core.js", import.meta.url));
 const { toHex, fromHex } = await import(new URL("../build/host/util.js", import.meta.url));
 
 const sodium = await loadSodium();
@@ -49,62 +49,8 @@ if (existsSync(keyPath)) {
   console.log(`  minted author key → ${keyPath}`);
 }
 
-const names = storageNames(host);
-const installName = host.deriveBootstrapName("install");
-
-// The two pure handlers (§17): no declared caps. Each install is signed by the
-// author so the shell can dispatch it verbatim through its policy gate.
-const modSpecs = [
-  { name: "codec", file: "codec.wasm", kernelName: names.codec },
-  { name: "reputation", file: "reputation.wasm", kernelName: names.reputation },
-];
-
-mkdirSync(out, { recursive: true });
-
-let seq = 0;
-const modules = modSpecs.map((m) => {
-  const wasm = new Uint8Array(readFileSync(join(build, m.file)));
-  const payload = host.encodeInstallPayload(++seq, m.kernelName, [], null, wasm);
-  const install = host.wrapAndEncode(sk, pk, CURRENT_VERSION, installName, payload);
-  writeFileSync(join(out, m.file), wasm);
-  writeFileSync(join(out, `${m.name}.install`), install);
-  console.log(`  ${m.name}: install bytesHash ${toHex(host.genesisHash(payload))}`); // for the operator's policy.modules
-  return {
-    name: m.name, file: m.file, hash: toHex(host.genesisHash(wasm)),
-    install: `${m.name}.install`, kernelName: toHex(m.kernelName),
-  };
-});
-
-// The zero-authority orchestration guest (raw; the host injects the op preamble).
-const guestText = readFileSync(join(root, "host", "tier2-guest.js"), "utf8");
-writeFileSync(join(out, "tier2-guest.js"), guestText);
-
-const cfg = defaultConfig();
-const manifest = {
-  app: "seedstore",
-  version: "1",
-  modules,
-  guest: { file: "tier2-guest.js", hash: toHex(host.genesisHash(new TextEncoder().encode(guestText))) },
-  // The runtime's generic seam (seedkernel cap-bridge). The shell builds the
-  // guest's CAP_* preamble from its own copy; this is here for the manifest to be
-  // self-describing.
-  ops: { ...CAP },
-  // Capabilities the guest reaches through the generic cap-bridge. crypto/clock
-  // are no-cap primitives; net + fs (store) are the gated ones.
-  caps: [names.capStore, names.capNet, names.capClock, names.capRand].map(toHex),
-  // App constants the shell injects into the guest as `const APP = …`: the
-  // storage dial + the codec/reputation kernel names the guest module-calls.
-  config: {
-    k: cfg.k, m: cfg.m, blockSize: cfg.blockSize,
-    replicas: cfg.replicas, lowWater: cfg.lowWater, smallMaxBlocks: cfg.smallMaxBlocks,
-    // The holder's byte budget (§14): a serving shell admits/stores under this,
-    // the same default a StorageNode uses. A deployment tunes it per node.
-    quota: 64 * 1024 * 1024,
-    codecName: toHex(names.codec), repName: toHex(names.reputation),
-  },
-};
-
-writeFileSync(join(out, "manifest.bundle"), signManifest(sodium, sk, pk, manifest));
+const manifest = writeStorageBundle({ dir: out, host, sodium, sk, pk, build, log: console.log });
 
 console.log(`  author ${toHex(pk)}`);
-console.log(`  wrote ${out} (app ${manifest.app} v${manifest.version}, ${modules.length} modules, ${Object.keys(CAP).length} ops)`);
+console.log(`  wrote ${out} (app ${manifest.app} v${manifest.version}, ${manifest.modules.length} modules, `
+  + `${Object.keys(CAP).length} ops, caps ${manifest.caps.join("+")})`);

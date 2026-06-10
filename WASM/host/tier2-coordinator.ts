@@ -109,14 +109,18 @@ function makeNodeCapBridge(node: Tier2Host) {
  *  protocol stays host-side on the StorageNode — only the *initiator's*
  *  orchestration runs in Tier-2. */
 export class Tier2Coordinator {
-  private realm: Tier2Realm | null = null;
+  // The realm *creation promise*, not the settled realm: two concurrent first
+  // calls must await one realm. Caching the realm itself (set only after the
+  // await) lets both pass the `!this.realm` guard — a second Asyncify realm leaks
+  // and the two then overlap host calls, the §2.1 module-global hard-abort.
+  private realm: Promise<Tier2Realm> | null = null;
   /** `guestSource` overrides the on-disk guest text — the seam for running the
    *  guest from a loaded bundle rather than the build dir. */
   constructor(private readonly node: Tier2Host, private readonly guestSource?: string) {}
 
-  private async realmInstance(): Promise<Tier2Realm> {
+  private realmInstance(): Promise<Tier2Realm> {
     if (!this.realm) {
-      this.realm = await createTier2Realm({
+      this.realm = createTier2Realm({
         source: tier2GuestSource(storageAppPreamble(this.node), this.guestSource),
         bridge: makeNodeCapBridge(this.node),
       });
@@ -150,7 +154,8 @@ export class Tier2Coordinator {
   }
 
   dispose(): void {
-    this.realm?.dispose();
+    const pending = this.realm;
     this.realm = null;
+    void pending?.then((r) => r.dispose(), () => { /* creation failed — nothing to free */ });
   }
 }
