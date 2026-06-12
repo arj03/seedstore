@@ -21,6 +21,11 @@ export interface PutResult {
   chunkCount: number;
   /** True if the file was replicated rather than RS-coded (§4.1). */
   replicated: boolean;
+  /** Every block id placed for this file (all chunks' blocks + the manifest), in
+   *  placement order. Lets a caller probe where the file landed (HAVE), e.g. the
+   *  browser demo showing per-holder counts — the manifest names ids, not holders
+   *  (§4.3), so this is the only handle on the concrete block set. */
+  blockIds: Uint8Array[];
 }
 
 export class Coordinator {
@@ -33,6 +38,7 @@ export class Coordinator {
     const K = this.node.crypto.randomKey();
     const totalBlocks = Math.max(1, Math.ceil(fileSize / blockSize));
     const descriptors: Uint8Array[] = [];
+    const placedIds: Uint8Array[] = [];
     const replicated = totalBlocks <= this.node.config.smallMaxBlocks;
 
     if (replicated) {
@@ -46,6 +52,7 @@ export class Coordinator {
       for (let i = 0; i < d; i++) {
         const placed = await this.placeBlock(blockIds[i], dataBlocks[i], env, new Set(), this.node.config.replicas);
         if (placed.length === 0) throw new Error("put: no peer accepted a replica");
+        placedIds.push(blockIds[i]);
       }
       descriptors.push(env);
     } else {
@@ -67,6 +74,7 @@ export class Coordinator {
           const placed = await this.placeBlock(blockIds[i], all[i], env, used, 1);
           if (placed.length === 0) throw new Error(`put: no peer accepted block ${i} of chunk ${c}`);
           for (const p of placed) used.add(p);
+          placedIds.push(blockIds[i]);
         }
         descriptors.push(env);
       }
@@ -81,8 +89,9 @@ export class Coordinator {
     const manifestId = this.node.crypto.hash(manCt);
     const placed = await this.placeBlock(manifestId, manCt, null, new Set(), this.node.config.replicas);
     if (placed.length === 0) throw new Error("put: no peer accepted the manifest");
+    placedIds.push(manifestId);
 
-    return { manifestId, key: K, chunkCount: descriptors.length, replicated };
+    return { manifestId, key: K, chunkCount: descriptors.length, replicated, blockIds: placedIds };
   }
 
   // ── GET (§7) ──────────────────────────────────────────────────────────

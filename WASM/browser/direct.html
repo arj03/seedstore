@@ -1,0 +1,223 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>seed store — relay-less WebRTC-Direct storage node</title>
+<style>
+  body { font: 14px/1.5 system-ui, sans-serif; max-width: 820px; margin: 2rem auto; padding: 0 1rem; color: #1a1a1a; }
+  h1 { font-size: 1.3rem; } h2 { font-size: 1rem; margin: 1.4rem 0 .4rem; }
+  code, .mono { font-family: ui-monospace, monospace; }
+  code { background: #f0f0f0; padding: 0 3px; border-radius: 3px; }
+  textarea.tokens { width: 100%; box-sizing: border-box; font-family: ui-monospace, monospace; font-size: 12px; padding: .4rem; height: 5rem; }
+  input.token { width: 100%; box-sizing: border-box; font-family: ui-monospace, monospace; padding: .35rem; }
+  button { padding: .4rem .8rem; margin: .5rem .5rem 0 0; cursor: pointer; }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  #log { white-space: pre-wrap; background: #111; color: #b8e8b8; padding: .8rem; border-radius: 6px;
+         font-family: ui-monospace, monospace; font-size: 12px; min-height: 7rem; max-height: 22rem; overflow:auto; }
+  .row { margin: .7rem 0; }
+  .muted { color: #666; } .pill { display:inline-block; padding:.05rem .5rem; border-radius:10px; background:#eee; }
+  .ok { background:#d8f0d8; } .warn { background:#fde9c8; }
+  #token { background:#f0f0f0; padding:.4rem; border-radius:4px; word-break:break-all; }
+</style>
+<!-- Browser-native, no bundler. The seedkernel browser host + transport + the
+     relay-less dial Network come from ./seedkernel/, this project's storage host
+     from ./host/, and sumo libsodium from a CDN (vendor an ESM build to run offline). -->
+<script type="importmap">
+{
+  "imports": {
+    "seedkernel-wasm/browser":               "./seedkernel/browser.js",
+    "seedkernel-wasm/net":                    "./seedkernel/transport.js",
+    "seedkernel-wasm/fs":                     "./seedkernel/fs.js",
+    "seedkernel-wasm/net-link":               "./seedkernel/net-link.js",
+    "seedkernel-wasm/net-rtc":                "./seedkernel/net-rtc.js",
+    "seedkernel-wasm/webrtc-direct-sdp":      "./seedkernel/webrtc-direct-sdp.js",
+    "seedkernel-wasm/webrtc-direct-browser":  "./seedkernel/webrtc-direct-browser.js",
+    "libsodium-wrappers-sumo": "https://esm.sh/libsodium-wrappers-sumo@0.8.4"
+  }
+}
+</script>
+</head>
+<body>
+<h1>seed store — a storage node in your browser, no relay</h1>
+<p class="muted">
+  This tab is a full storage node. It dials one or more console holders
+  (<code>bun scripts/serve-direct-holder.mjs</code>, each in its own terminal) over
+  <strong>WebRTC-Direct</strong> — it fabricates each console's answer locally from
+  the token's <strong>certhash</strong>, so no answer comes back and
+  <strong>no signaling relay</strong> is in the path. PeerLink then proves identity
+  in-channel. A file you store here is encrypted and replicated/erasure-coded across
+  the connected holders; watch the blocks land in their terminals.
+</p>
+
+<h2>1 · connect to holders</h2>
+<p class="muted">Paste one dial token per line (each terminal prints one), then connect.</p>
+<div class="row">
+  <textarea id="tokens" class="tokens" placeholder="/ip4/HOST/udp/PORT/certhash/uEi…/p2p/PUBKEYHEX&#10;/ip4/HOST/udp/PORT/certhash/uEi…/p2p/PUBKEYHEX"></textarea>
+</div>
+<div class="row">
+  <button id="connect">Connect to holders</button>
+  <span id="status" class="pill warn">idle</span>
+</div>
+<div class="row muted">me: <span id="me" class="mono">—</span> · connected holders: <span id="peers" class="pill">0</span></div>
+
+<h2>2 · store a file (PUT)</h2>
+<div class="row">
+  <input id="file" type="file" disabled />
+  <button id="store" disabled>Store across the holders</button>
+</div>
+<div class="row">
+  <div class="muted">retrieval token (copy to fetch later / in another tab):</div>
+  <div id="token" class="mono">—</div>
+</div>
+
+<h2>3 · retrieve a file (GET)</h2>
+<div class="row">
+  <input id="getToken" class="token mono" type="text" placeholder="manifestIdHex:keyHex" />
+</div>
+<div class="row"><button id="get" disabled>Retrieve &amp; download</button></div>
+
+<h2>log</h2>
+<div id="log"></div>
+
+<script type="module">
+import sodium from "libsodium-wrappers-sumo";
+import { createStorageNode } from "./host/browser.js";
+import { BrowserWebRtcDirectNetwork } from "seedkernel-wasm/webrtc-direct-browser";
+import { MsgType, encodeHaveReq, decodeHaveRes } from "./host/protocol.js";
+
+// RS(k=1, m=9), 48 KiB blocks: a file up to one block (≤48 KiB) is REPLICATED to
+// every connected holder (up to m+1 = 10) — so "stored on all the connected nodes"
+// holds for any 1…10 holders. Bigger files are erasure-coded and need k+m holders.
+// 48 KiB keeps each STORE under the WebRTC data-channel max message size: werift
+// (the console holder) reassembles at most 65536 B per message, and one STORE frame
+// = a block + descriptor + PeerLink overhead, so the block must sit well under 64 KiB.
+const CONFIG = { k: 1, m: 9, blockSize: 48 * 1024 };
+const SMALL_MAX = Math.max(1, Math.ceil((CONFIG.k + CONFIG.m) / (CONFIG.m + 1)) - 1);
+
+// Public STUN so the browser can reach a console behind NAT; same-LAN host
+// candidates connect without it. The console is ICE-lite (no STUN needed there).
+const RTC_CONFIG = { iceServers: [{ urls: ["stun:stun.l.google.com:19302", "stun:stun.cloudflare.com:3478"] }] };
+
+const $ = (id) => document.getElementById(id);
+const logEl = $("log");
+const log = (m) => { logEl.textContent += m + "\n"; logEl.scrollTop = logEl.scrollHeight; };
+const hex = (b) => [...b].map((x) => x.toString(16).padStart(2, "0")).join("");
+const fromHex = (s) => new Uint8Array(s.match(/.{1,2}/g)?.map((h) => parseInt(h, 16)) ?? []);
+
+let node = null, net = null;
+
+// Prefill tokens from the URL fragment: `direct.html#<token>` or `#<t1>,<t2>,…`.
+if (location.hash.length > 1) {
+  $("tokens").value = decodeURIComponent(location.hash.slice(1)).split(",").map((s) => s.trim()).filter(Boolean).join("\n");
+}
+
+function refreshPeers() {
+  const n = node ? node.cohortPeers().length : 0;
+  $("peers").textContent = String(n);
+  $("store").disabled = !(node && n >= 1);
+  $("get").disabled = !node; // GET only needs to reach a manifest holder
+}
+
+async function boot() {
+  if (node) return;
+  try {
+    log("readying libsodium (sumo)…");
+    await sodium.ready;
+    // One identity shared by the transport (PeerLink) and the storage node, so
+    // their peer ids match (the Transport registers under this id on the network).
+    const identity = sodium.crypto_sign_keypair();
+    $("me").textContent = hex(identity.publicKey).slice(0, 16) + "…";
+
+    net = new BrowserWebRtcDirectNetwork({
+      identity, sodium, rtcConfig: RTC_CONFIG,
+      onPeerUp: (pid) => { node?.addPeer(pid); log(`✓ holder linked: ${pid.slice(0, 8)}… (no relay; in-channel AUTH)`); refreshPeers(); },
+      onPeerDown: (pid) => { node?.removePeer(pid); log(`· holder dropped: ${pid.slice(0, 8)}…`); refreshPeers(); },
+    });
+
+    log("loading wasm + booting the storage node on the seedkernel…");
+    node = await createStorageNode({ network: net, sodium, identity, baseUrl: "./", config: CONFIG, timeoutMs: 8000 });
+    log(`node ready (${node.peerId.slice(0, 8)}…), RS(${CONFIG.k},${CONFIG.m}), ${CONFIG.blockSize / 1024} KiB blocks. handlers installed: ${node.handlersInstalled()}`);
+    $("file").disabled = false;
+    refreshPeers();
+  } catch (e) {
+    log("ERROR booting: " + (e?.message ?? e));
+    $("status").textContent = "error"; $("status").className = "pill warn";
+  }
+}
+
+async function connect() {
+  $("connect").disabled = true;
+  $("status").textContent = "connecting"; $("status").className = "pill warn";
+  try {
+    await boot();
+    const tokens = $("tokens").value.split("\n").map((s) => s.trim()).filter(Boolean);
+    if (tokens.length === 0) { log("paste at least one dial token."); return; }
+    log(`dialing ${tokens.length} holder token(s) directly (no relay)…`);
+    const results = await Promise.allSettled(tokens.map((tok) => net.dial(tok)));
+    results.forEach((r, i) => {
+      if (r.status === "rejected") log(`  ✗ token #${i + 1} failed: ${r.reason?.message ?? r.reason}`);
+    });
+    const up = node.cohortPeers().length;
+    $("status").textContent = up > 0 ? `${up} holder(s) connected` : "no holders";
+    $("status").className = up > 0 ? "pill ok" : "pill warn";
+  } catch (e) {
+    log("ERROR connecting: " + (e?.message ?? e));
+    $("status").textContent = "error"; $("status").className = "pill warn";
+  } finally {
+    $("connect").disabled = false;
+  }
+}
+
+$("connect").onclick = connect;
+
+$("store").onclick = async () => {
+  try {
+    const f = $("file").files?.[0];
+    if (!f) { log("pick a file first."); return; }
+    const data = new Uint8Array(await f.arrayBuffer());
+    const blocks = Math.max(1, Math.ceil(data.length / CONFIG.blockSize));
+    const peers = node.cohortPeers().length;
+    if (blocks > SMALL_MAX && peers < CONFIG.k + CONFIG.m) {
+      log(`\n"${f.name}" is ${data.length} B → ${blocks} blocks → erasure-coded, which needs ${CONFIG.k + CONFIG.m} holders (you have ${peers}).`);
+      log(`  store a file ≤ ${CONFIG.blockSize} B (replicates to every holder) or connect more nodes.`);
+      return;
+    }
+    log(`\nPUT "${f.name}" (${data.length} B) across ${peers} holder(s)…`);
+    const r = await node.put(data);
+    const token = hex(r.manifestId) + ":" + hex(r.key);
+    $("token").textContent = token;
+    $("getToken").value = token;
+    log(`  ${r.replicated ? "replicated (small file)" : r.chunkCount + " RS chunk(s)"}; ${r.blockIds.length} block(s) placed (this node holds none).`);
+
+    // Prove distribution: ask each holder which of the file's blocks it now has.
+    log(`  where it landed:`);
+    const rows = await Promise.all(node.cohortPeers().map(async (p) => {
+      try {
+        const res = await node.transport.request(p, MsgType.HAVE, encodeHaveReq(r.blockIds));
+        const held = decodeHaveRes(res).filter(Boolean).length;
+        return `    ${p.slice(0, 8)}…  ${held}/${r.blockIds.length} blocks`;
+      } catch { return `    ${p.slice(0, 8)}…  (unreachable)`; }
+    }));
+    log(rows.join("\n"));
+    log(`  retrieval token ready (also filled into the GET box).`);
+  } catch (e) { log("  PUT failed: " + (e?.message ?? e)); }
+};
+
+$("get").onclick = async () => {
+  try {
+    const [mHex, kHex] = $("getToken").value.trim().split(":");
+    if (!mHex || !kHex) { log("token must be manifestIdHex:keyHex"); return; }
+    log("\nGET (locate via have/want, fetch, decrypt)…");
+    const out = await node.get(fromHex(mHex), fromHex(kHex));
+    log(`  recovered ${out.length} B from the holders — downloading.`);
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob([out]));
+    a.download = "seedstore-" + mHex.slice(0, 8) + ".bin";
+    a.click();
+    URL.revokeObjectURL(a.href);
+  } catch (e) { log("  GET failed: " + (e?.message ?? e)); }
+};
+</script>
+</body>
+</html>

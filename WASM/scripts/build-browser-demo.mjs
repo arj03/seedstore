@@ -47,8 +47,15 @@ const copyJs = (srcDir, dstDir) => {
 copyJs(join(build, "host-min"), join(out, "host"));
 copyJs(seedkernelHost, join(out, "seedkernel"));
 
-// The page itself.
-copyFileSync(join(root, "browser", "index.html"), join(out, "index.html"));
+// The browser-only pages: the in-page loopback demo (index.html) and the real-P2P
+// demo over RtcNetwork+relay (p2p.html). The relay-less WebRTC-Direct dialer
+// (direct.html) needs console holders alongside it, so it has its own staging
+// script — `npm run demo:direct` (scripts/stage-direct-demo.mjs).
+for (const page of ["index.html", "p2p.html"]) {
+  copyFileSync(join(root, "browser", page), join(out, page));
+}
 
 console.log(`browser demo staged at ${out}`);
 console.log("serve it:  npx http-server build/browser-demo -p 8080");
+console.log("  in-page cohort:  http://localhost:8080/index.html");
+console.log("  real P2P (relay): npm run demo:relay   then open http://localhost:8080/p2p.html in 3+ tabs");
