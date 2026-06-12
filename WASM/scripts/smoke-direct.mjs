@@ -55,10 +55,28 @@ const blockSize = Number(process.env.BS) || 48 * 1024;     // same default as di
 const config = { k: 1, m: 9, blockSize };                   // (werift caps a data-channel message at 65536 B)
 
 let ok = false;
+let owner = null;
 try {
-  const owner = await StorageNode.create({ network: net, sodium, ...wasm, identity, config, timeoutMs: 5000 });
+  owner = await StorageNode.create({ network: net, sodium, ...wasm, identity, config, timeoutMs: 5000 });
   for (const tok of tokens) owner.addPeer(await net.dial(tok));
-  await sleep(300); // let the holders' reverse links finish promoting
+
+  // Wait for each holder's reverse link to promote — a fixed sleep is flaky under
+  // load (the WebRTC-Direct handshake can lag the owner-side dial). The holders are
+  // separate processes, so we can't read their link maps the way net.test.mjs does;
+  // instead poll the observable effect — a holder can only answer a HAVE once it has
+  // authenticated the owner, so a returned response is the readiness signal.
+  const probe = encodeHaveReq([new Uint8Array(32)]);
+  const answers = async (peer) => {
+    try { await owner.transport.request(peer, MsgType.HAVE, probe); return true; } catch { return false; }
+  };
+  const t0 = Date.now();
+  let linksReady = false;
+  while (Date.now() - t0 < 8000) {
+    const up = await Promise.all(owner.cohortPeers().map(answers));
+    if (up.length === HOLDERS && up.every(Boolean)) { linksReady = true; break; }
+    await sleep(100);
+  }
+  if (!linksReady) throw new Error("holder reverse links did not promote in time");
 
   const data = new Uint8Array(1000);
   for (let i = 0; i < data.length; i++) data[i] = (i * 7 + 3) & 255;
@@ -80,10 +98,10 @@ try {
   console.log(ok
     ? `\nOK — file replicated to all ${owner.cohortPeers().length} holders + retrieved through them (relay-less)`
     : `\nFAIL — roundTrip=${roundTrip}, onAllHolders=${onAll}`);
-  owner.close();
 } catch (e) {
   console.error("\nFAILED:", e?.message ?? e);
 } finally {
+  owner?.close();
   net.close();
   for (const h of holders) h.proc.kill("SIGINT");
 }

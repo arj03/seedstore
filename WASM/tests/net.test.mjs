@@ -102,6 +102,8 @@ async function directStar({ holderCount, sodium, wasm, config, baseDir }) {
   // holder's reverse link to promote too, so it can answer the owner's requests.
   const t0 = Date.now();
   while (holderNets.some((n) => !n.linkedPeers().includes(ownerHex)) && Date.now() - t0 < 5000) await sleep(50);
+  if (holderNets.some((n) => !n.linkedPeers().includes(ownerHex)))
+    throw new Error("directStar: holder reverse links did not promote within 5s");
 
   const dirs = [];
   const mk = async (net, kp, label) => {

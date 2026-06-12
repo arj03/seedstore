@@ -93,6 +93,9 @@ import { MsgType, encodeHaveReq, decodeHaveRes } from "./host/protocol.js";
 // (the console holder) reassembles at most 65536 B per message, and one STORE frame
 // = a block + descriptor + PeerLink overhead, so the block must sit well under 64 KiB.
 const CONFIG = { k: 1, m: 9, blockSize: 48 * 1024 };
+// Largest file (in blocks) the node replicates rather than RS-codes — must stay in
+// step with host/core.ts `smallMaxBlocks`; derived here from (k, m), not hardcoded,
+// so it tracks CONFIG. (A standalone page can't import the compiled host constant.)
 const SMALL_MAX = Math.max(1, Math.ceil((CONFIG.k + CONFIG.m) / (CONFIG.m + 1)) - 1);
 
 // Public STUN so the browser can reach a console behind NAT; same-LAN host

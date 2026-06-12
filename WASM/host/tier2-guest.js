@@ -135,6 +135,10 @@ function rsEncode(k, m, blockSize, dataBlocks) {
   return splitBlocks(moduleCall(CODEC_NAME, concat([head, ...dataBlocks])), blockSize);
 }
 function rsDecode(k, m, blockSize, present) {
+  // Callers (fetchCodedChunk, healCoded) already gate on present.length >= k, but
+  // guard the codec seam itself so a short set is a clean throw, never a silently
+  // truncated decode request (head[7] = use.length under k → garbage out).
+  if (present.length < k) throw new Error("rsDecode: need at least k blocks to reconstruct");
   const use = present.slice(0, k);
   const head = new Uint8Array(8);
   head[0] = CODEC_DECODE; head[1] = k; head[2] = m; wU32(head, 3, blockSize); head[7] = use.length;

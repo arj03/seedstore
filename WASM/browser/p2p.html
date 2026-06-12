@@ -108,6 +108,7 @@ function refreshPeers() {
 }
 
 async function boot() {
+  if (node) return; // already booted — guard against a second click stacking networks
   $("connect").disabled = true;
   try {
     log("readying libsodium (sumo)…");

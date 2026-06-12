@@ -61,7 +61,8 @@ const host = process.env.WD_ADVERTISE ?? lanIPv4();
 const token = net.token(host);
 
 console.log(`\nseed store holder ${short(node.peerId)} ready — handlers installed: ${node.handlersInstalled()}`);
-console.log(`listening on 0.0.0.0:${net.token().match(/udp\/(\d+)/)[1]}, advertising ${host} (override with WD_ADVERTISE)`);
+const listenPort = net.token().match(/udp\/(\d+)/)?.[1] ?? "?";
+console.log(`listening on 0.0.0.0:${listenPort}, advertising ${host} (override with WD_ADVERTISE)`);
 console.log("\npaste this dial token into direct.html (no relay needed):\n");
 console.log("  " + token + "\n");
 console.log("(Ctrl+C to stop)\n");
