@@ -7,7 +7,7 @@ import {
   LoopbackNetwork, loadWasmBytes, loadSodium, createConnectedCohort,
 } from "../build/host/node.js";
 import { parseSignedDescriptor } from "../build/host/manifest.js";
-import { toHex, bytesEqual } from "../build/host/util.js";
+import { toHex, fromHex, bytesEqual } from "../build/host/util.js";
 
 const TIMEOUT = 40; // ms — keep offline-peer timeouts snappy in tests
 
@@ -180,6 +180,60 @@ export async function run(t) {
       if (owner.reputation.score(n.identity.publicKey, now) > 0) anyPositive = true;
     }
     t.ok(anyPositive, "holders that served the owner gained positive standing");
+    nodes.forEach((n) => n.close());
+  }
+
+  // The browser demos run RS(1,·) on two or three holders — a shape the groups
+  // above never used (they are all RS(2,2) on a full cohort). That blind spot is
+  // why two real bugs shipped: a k=1 parity block is byte-identical to the lone
+  // data block, so its id repeated in the returned set (the "13/13" holder probe),
+  // and a cohort smaller than n=k+m used to fail the whole PUT. Cover both.
+  t.group("degenerate k=1 on a 2-holder cohort: the relay-less demo config");
+  {
+    const net = new LoopbackNetwork();
+    const cfg = { k: 1, m: 9, blockSize: 64 };
+    const nodes = await createConnectedCohort({ count: 3, network: net, sodium, wasm, config: cfg, timeoutMs: TIMEOUT }); // owner + 2 holders
+    const owner = nodes[0];
+    const data = file(400, 23); // > 1 block → RS path, several chunks
+
+    const put = await owner.put(data);
+    t.ok(!put.replicated, "k=1 multi-block file takes the RS path");
+
+    // The returned set must name each placed id once: the 13/13 probe was a
+    // duplicate id leaking into blockIds (parity≡data), not the store lying.
+    const hexes = put.blockIds.map(toHex);
+    t.eq(new Set(hexes).size, hexes.length, "PUT reports each placed block id once (no dup-id leak)");
+
+    // has() must agree with list() on every holder — has reporting an id the
+    // holder does not actually store would be the bug we shipped.
+    let consistent = true;
+    for (const n of nodes.filter((x) => x !== owner)) {
+      const held = new Set(n.store.list().map(toHex));
+      for (const h of hexes) if (n.store.has(fromHex(h)) !== held.has(h)) consistent = false;
+    }
+    t.ok(consistent, "every holder's has(id) matches its store.list()");
+
+    t.ok(bytesEqual(await owner.get(put.manifestId, put.key), data), "GET round-trips on a 2-holder cohort");
+
+    // What the demo user actually did: kill a holder, then read. k=1 means any one
+    // surviving copy reconstructs the file.
+    net.setOnline(nodes[1].peerId, false);
+    t.ok(bytesEqual(await owner.get(put.manifestId, put.key), data), "GET still reads after a holder is killed");
+    nodes.forEach((n) => n.close());
+  }
+
+  t.group("PUT on a cohort smaller than n = k+m succeeds best-effort (§6, §9)");
+  {
+    // RS(2,2) wants n=4 distinct holders; with only 3 the reference places what it
+    // can (≥ k distinct blocks) and leans on repair, rather than failing the PUT.
+    const net = new LoopbackNetwork();
+    const cfg = { k: 2, m: 2, blockSize: 64 };
+    const nodes = await createConnectedCohort({ count: 4, network: net, sodium, wasm, config: cfg, timeoutMs: TIMEOUT }); // owner + 3 holders < n=4
+    const owner = nodes[0];
+    const data = file(300, 29);
+    const put = await owner.put(data); // threw before best-effort placement
+    t.ok(put.blockIds.length > 0, "PUT places across the 3 available holders instead of failing");
+    t.ok(bytesEqual(await owner.get(put.manifestId, put.key), data), "GET reconstructs from a sub-n placement");
     nodes.forEach((n) => n.close());
   }
 }
