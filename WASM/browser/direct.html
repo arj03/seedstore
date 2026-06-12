@@ -108,7 +108,7 @@ const log = (m) => { logEl.textContent += m + "\n"; logEl.scrollTop = logEl.scro
 const hex = (b) => [...b].map((x) => x.toString(16).padStart(2, "0")).join("");
 const fromHex = (s) => new Uint8Array(s.match(/.{1,2}/g)?.map((h) => parseInt(h, 16)) ?? []);
 
-let node = null, net = null;
+let node = null, net = null, busy = false; // busy: a PUT/GET is in flight
 
 // Prefill tokens from the URL fragment: `direct.html#<token>` or `#<t1>,<t2>,…`.
 if (location.hash.length > 1) {
@@ -118,9 +118,41 @@ if (location.hash.length > 1) {
 function refreshPeers() {
   const n = node ? node.cohortPeers().length : 0;
   $("peers").textContent = String(n);
+  // The status pill tracks the LIVE count, not just the value at connect time, so a
+  // holder dropping (killed / unreachable) is reflected immediately.
+  $("status").textContent = n > 0 ? `${n} holder(s) connected` : "no holders";
+  $("status").className = n > 0 ? "pill ok" : "pill warn";
   $("store").disabled = !(node && n >= 1);
   $("get").disabled = !node; // GET only needs to reach a manifest holder
 }
+
+// Liveness: a relay-less WebRTC link does not reliably surface a hard-killed holder
+// (no graceful close, no signaling path, and ICE consent-freshness is unreliable for
+// this fabricated-answer / ICE-lite setup), so detect it at the application level:
+// actively poll. A holder that fails to answer a cheap HAVE within the request
+// timeout is treated as gone — dropped from the cohort + UI so the count stays
+// truthful and PUT/GET stop routing to it. We skip while a PUT/GET is in flight (the
+// probe shares the ordered data channel, so a HAVE queued behind a big STORE could
+// otherwise time out and false-drop a live holder), and never overlap rounds (a dead
+// peer then costs one timeout per round, not a pile-up).
+const LIVENESS_PROBE = new Uint8Array(32); // a dummy block id; we only care whether it answers
+let probing = false;
+setInterval(async () => {
+  if (!node || busy || probing || node.cohortPeers().length === 0) return;
+  probing = true;
+  try {
+    await Promise.all(node.cohortPeers().map(async (p) => {
+      try { await node.transport.request(p, MsgType.HAVE, encodeHaveReq([LIVENESS_PROBE])); }
+      catch {
+        if (node.cohortPeers().includes(p)) {
+          node.removePeer(p);
+          log(`· holder unreachable — dropped ${p.slice(0, 8)}…`);
+          refreshPeers();
+        }
+      }
+    }));
+  } finally { probing = false; }
+}, 3000);
 
 async function boot() {
   if (node) return;
@@ -161,9 +193,7 @@ async function connect() {
     results.forEach((r, i) => {
       if (r.status === "rejected") log(`  ✗ token #${i + 1} failed: ${r.reason?.message ?? r.reason}`);
     });
-    const up = node.cohortPeers().length;
-    $("status").textContent = up > 0 ? `${up} holder(s) connected` : "no holders";
-    $("status").className = up > 0 ? "pill ok" : "pill warn";
+    refreshPeers(); // pill reflects the live count (some dials may have failed)
   } catch (e) {
     log("ERROR connecting: " + (e?.message ?? e));
     $("status").textContent = "error"; $("status").className = "pill warn";
@@ -175,6 +205,7 @@ async function connect() {
 $("connect").onclick = connect;
 
 $("store").onclick = async () => {
+  busy = true; // pause the liveness probe so it can't compete with / false-drop on STORE traffic
   try {
     const f = $("file").files?.[0];
     if (!f) { log("pick a file first."); return; }
@@ -211,9 +242,11 @@ $("store").onclick = async () => {
     log(rows.join("\n"));
     log(`  retrieval token ready (also filled into the GET box).`);
   } catch (e) { log("  PUT failed: " + (e?.message ?? e)); }
+  finally { busy = false; }
 };
 
 $("get").onclick = async () => {
+  busy = true; // pause the liveness probe during the fetch
   try {
     const [mHex, kHex] = $("getToken").value.trim().split(":");
     if (!mHex || !kHex) { log("token must be manifestIdHex:keyHex"); return; }
@@ -226,6 +259,7 @@ $("get").onclick = async () => {
     a.click();
     URL.revokeObjectURL(a.href);
   } catch (e) { log("  GET failed: " + (e?.message ?? e)); }
+  finally { busy = false; }
 };
 </script>
 </body>
