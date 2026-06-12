@@ -15,7 +15,7 @@
 // Needs both builds' minified host: seedstore `npm run build`, and seedkernel
 // `npm run build:host && npm run build:host:min`.
 
-import { mkdirSync, copyFileSync, existsSync, readdirSync, rmSync } from "node:fs";
+import { mkdirSync, copyFileSync, existsSync, readdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -36,33 +36,47 @@ if (!existsSync(join(seedkernelHost, "webrtc-direct-browser.js"))) {
   process.exit(1);
 }
 
-// Clean the previous staging. On Windows this fails with EPERM if a `serve` is
-// still holding a file in there — that is a user mistake, not a fatal build error,
-// so warn and overwrite in place rather than dumping a stack trace.
-try {
-  rmSync(out, { recursive: true, force: true });
-} catch {
-  console.warn(`could not clear ${out} (a 'serve' may be running on it) — overwriting in place.`);
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// Copy by overwriting in place — we do NOT wipe `out` first. A recursive delete
+// followed by an immediate re-copy races on Windows (the dir entry lingers, and
+// Defender briefly locks each freshly written file for scanning), which used to
+// abort the stage mid-copy and leave a half-populated — or empty — direct-demo.
+// The staged file set is fixed, so overwriting is enough; transient EPERM/EBUSY/
+// EACCES on a just-written file is retried rather than fatal.
+async function copy(src, dst) {
+  for (let attempt = 1; ; attempt++) {
+    try { copyFileSync(src, dst); return; }
+    catch (e) {
+      const transient = e && (e.code === "EPERM" || e.code === "EBUSY" || e.code === "EACCES");
+      if (!transient || attempt >= 8) {
+        throw new Error(`could not write ${dst} (${e.code ?? e.message}). ` +
+          "If a server or browser is holding build/direct-demo open, stop it and re-run `npm run demo:direct`.");
+      }
+      await sleep(attempt * 50); // back off through the transient lock
+    }
+  }
 }
+
 mkdirSync(out, { recursive: true });
 
 // WASM modules the browser StorageNode fetches relative to the page.
 for (const f of ["kernel.wasm", "bootstrap.wasm", "codec.wasm", "reputation.wasm"]) {
-  copyFileSync(join(build, f), join(out, f));
+  await copy(join(build, f), join(out, f));
 }
 
 // Host JS (seedstore + seedkernel). Copy only .js — the page's import map resolves
 // "seedkernel-wasm/*" into ./seedkernel/ and this project's host imports into ./host/.
-const copyJs = (srcDir, dstDir) => {
+async function copyJs(srcDir, dstDir) {
   mkdirSync(dstDir, { recursive: true });
   for (const name of readdirSync(srcDir)) {
-    if (name.endsWith(".js")) copyFileSync(join(srcDir, name), join(dstDir, name));
+    if (name.endsWith(".js")) await copy(join(srcDir, name), join(dstDir, name));
   }
-};
-copyJs(seedstoreHost, join(out, "host"));
-copyJs(seedkernelHost, join(out, "seedkernel"));
+}
+await copyJs(seedstoreHost, join(out, "host"));
+await copyJs(seedkernelHost, join(out, "seedkernel"));
 
-copyFileSync(join(root, "browser", "direct.html"), join(out, "direct.html"));
+await copy(join(root, "browser", "direct.html"), join(out, "direct.html"));
 
 console.log(`direct storage demo staged at ${out}`);
 console.log("serve it:   npx serve build/direct-demo");

@@ -68,13 +68,26 @@ export class Coordinator {
         const blockIds = all.map((b) => this.node.crypto.hash(b));
         const env = this.signChunk({ k, m, blockSize, blockIds });
         // The n blocks of a chunk go on DISTINCT peers (§6) so losing one peer
-        // costs at most one block of the chunk (the §10 invariant).
+        // costs at most one block of the chunk (the §10 invariant). With fewer
+        // than n reachable peers we place as many as the cohort holds rather than
+        // failing the whole PUT — recoverable as long as ≥ k distinct ids landed,
+        // and repair (§9) restores the rest once more peers join. Once no untried
+        // peer takes a block, none will take a later one either, so we stop there.
+        // A degenerate RS(1,·) code repeats an id (a parity block byte-identical
+        // to the lone data block); the repeat still gets its own peer above — that
+        // is the chunk's replication when k = 1 — but we record each distinct id
+        // once so the returned block set and the holder probe stay accurate.
         const used = new Set<PeerId>();
+        const placedHex = new Set<string>();
         for (let i = 0; i < all.length; i++) {
           const placed = await this.placeBlock(blockIds[i], all[i], env, used, 1);
-          if (placed.length === 0) throw new Error(`put: no peer accepted block ${i} of chunk ${c}`);
+          if (placed.length === 0) break;
           for (const p of placed) used.add(p);
-          placedIds.push(blockIds[i]);
+          const idHex = toHex(blockIds[i]);
+          if (!placedHex.has(idHex)) { placedHex.add(idHex); placedIds.push(blockIds[i]); }
+        }
+        if (placedHex.size < k) {
+          throw new Error(`put: chunk ${c} landed ${placedHex.size}/${k} distinct blocks needed to read it back — connect more holders`);
         }
         descriptors.push(env);
       }

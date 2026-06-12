@@ -418,12 +418,19 @@ function doPut(plaintext) {
       const all = [...dataBlocks, ...rsEncode(c.k, c.m, c.blockSize, dataBlocks)];
       const blockIds = all.map(hash);
       const env = signChunk({ k: c.k, m: c.m, blockSize: c.blockSize, blockIds });
+      // Distinct peers per block (§6); fewer than n reachable ⇒ place what the
+      // cohort holds (recoverable while ≥ k distinct ids land, repair §9 tops up).
+      // A degenerate RS(1,·) repeats an id (parity≡data); the repeat still gets
+      // its own peer — that is k=1 replication — but counts once toward distinct.
       const used = new Set();
+      const placedHex = new Set();
       for (let i = 0; i < all.length; i++) {
         const placed = placeBlock(blockIds[i], all[i], env, used, 1);
-        if (placed.length === 0) throw new Error("put: no peer accepted block " + i + " of chunk " + ci);
+        if (placed.length === 0) break;
         for (const p of placed) used.add(p);
+        placedHex.add(toHex(blockIds[i]));
       }
+      if (placedHex.size < c.k) throw new Error("put: chunk " + ci + " landed " + placedHex.size + "/" + c.k + " distinct blocks — connect more holders");
       descriptors.push(env);
     }
   }

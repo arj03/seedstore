@@ -402,3 +402,16 @@ called out in the code: the Suspected/Lost grace window (§8) is represented by
 "verified-live vs not", admission/eviction (§14) is quota + the sibling rule
 rather than the full eviction-score, and the bulk plane (§3) rides the same
 awaited request/response channel rather than a separate unsigned frame stream.
+
+PUT also places **best-effort**: it spreads a chunk's *n = k+m* blocks across as
+many distinct holders as the cohort offers (one block per holder, the §6/§10
+sibling rule) and succeeds once at least *k* land, rather than requiring all *n*
+reachable up front. Redundancy then falls below RS(*k*,*m*) on a thin cohort and
+repair (§9) restores it as holders appear — which is what lets the browser demos
+store across just one or two holders. A deployment that must *guarantee* the full
+durability at write time would instead fail the PUT; the reference favours
+liveness. (A *k*=1 code is degenerate — an RS parity block comes out byte-
+identical to the lone data block — so it behaves as plain replication: the
+repeated block is placed on a second holder, and the returned block set counts
+each distinct id once. The browser demos use *k*=1 deliberately, since surviving
+the loss of a holder in a two- or three-node cohort means replication, not coding.)

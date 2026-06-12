@@ -181,10 +181,16 @@ $("store").onclick = async () => {
     const data = new Uint8Array(await f.arrayBuffer());
     const blocks = Math.max(1, Math.ceil(data.length / CONFIG.blockSize));
     const peers = node.cohortPeers().length;
-    if (blocks > SMALL_MAX && peers < CONFIG.k + CONFIG.m) {
-      log(`\n"${f.name}" is ${data.length} B → ${blocks} blocks → erasure-coded, which needs ${CONFIG.k + CONFIG.m} holders (you have ${peers}).`);
-      log(`  store a file ≤ ${CONFIG.blockSize} B (replicates to every holder) or connect more nodes.`);
+    if (peers < CONFIG.k) {
+      log(`\nconnect at least ${CONFIG.k} holder(s) before storing (you have ${peers}).`);
       return;
+    }
+    // Best-effort: with fewer than the full n = k+m holders the file is still
+    // stored — each chunk's blocks spread one-per-holder across the holders you
+    // have (§6), recoverable as long as ≥ k land. Redundancy is below RS(k,m)
+    // until more peers join and repair tops it up (§9).
+    if (blocks > SMALL_MAX && peers < CONFIG.k + CONFIG.m) {
+      log(`\nnote: ${peers} holder(s) < n=${CONFIG.k + CONFIG.m} — storing at reduced redundancy; repair fills in the rest as more holders connect.`);
     }
     log(`\nPUT "${f.name}" (${data.length} B) across ${peers} holder(s)…`);
     const r = await node.put(data);
