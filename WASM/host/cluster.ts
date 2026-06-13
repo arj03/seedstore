@@ -4,7 +4,7 @@
 // node to every other so placement has somewhere to go.
 
 import type { Sodium } from "./sodium.js";
-import type { Network } from "./net.js";
+import type { Network } from "seedkernel-wasm/net";
 import type { StorageConfig } from "./core.js";
 import type { WasmBytes } from "./node.js";
 import { StorageNode } from "./storage-node.js";

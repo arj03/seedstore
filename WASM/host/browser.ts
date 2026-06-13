@@ -30,7 +30,7 @@ export async function createStorageNode(
 }
 
 export { StorageNode } from "./storage-node.js";
-export { LoopbackNetwork } from "./net.js";
+export { LoopbackNetwork } from "seedkernel-wasm/net";
 export { createConnectedCohort } from "./cluster.js";
 export type { StorageNodeOptions } from "./storage-node.js";
 export type { StorageConfig, Identity } from "./core.js";

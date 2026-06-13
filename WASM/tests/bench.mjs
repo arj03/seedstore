@@ -11,9 +11,9 @@ import { Crypto, DOMAIN_BODY } from "../build/host/crypto.js";
 import { CodecClient } from "../build/host/codec-client.js";
 import { storageNames } from "../build/host/names.js";
 import { loadHost } from "./helpers.mjs";
-import sodium from "libsodium-wrappers-sumo";
+import { loadSodium } from "seedkernel-wasm";
 
-await sodium.ready;
+const sodium = await loadSodium();
 const crypto = new Crypto(sodium);
 const { host } = await loadHost();
 const names = storageNames(host);

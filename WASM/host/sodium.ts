@@ -33,14 +33,14 @@ export interface Sodium {
 
 let cached: Sodium | null = null;
 
-/** Load and ready the sumo libsodium build. Safe to call repeatedly. */
+/** Load the sumo libsodium the seedkernel runtime bundles, returning that one
+ *  shared, readied instance. seedstore ships no second crypto library — it
+ *  reuses the kernel's (README §16). Safe to call repeatedly. */
 export async function loadSodium(): Promise<Sodium> {
   if (cached) return cached;
-  const mod = await import("libsodium-wrappers-sumo");
-  const s = (mod.default ?? mod) as unknown as Sodium;
-  await s.ready;
-  cached = s;
-  return s;
+  const { loadSodium: kernelLoadSodium } = await import("seedkernel-wasm");
+  cached = (await kernelLoadSodium()) as unknown as Sodium;
+  return cached;
 }
 
 /** A fresh kernel keypair = a peer identity (§2). */

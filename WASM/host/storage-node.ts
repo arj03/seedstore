@@ -19,9 +19,11 @@
 import { KernelHost, referencePolicy, CURRENT_VERSION } from "seedkernel-wasm/browser";
 
 import type { Sodium } from "./sodium.js";
-import type { Network, PeerId } from "./net.js";
-import { Transport } from "./net.js";
-import { MemoryBlobStore, type BlobStore } from "./store-local.js";
+import type { Network, PeerId } from "seedkernel-wasm/net";
+import { Transport } from "seedkernel-wasm/net";
+import { MemoryFs, type Fs } from "seedkernel-wasm/fs";
+import { type BlobStore } from "./store-local.js";
+import { FsBlobStore } from "./store-fs.js";
 import { Crypto } from "./crypto.js";
 import { CodecClient } from "./codec-client.js";
 import { ReputationClient } from "./reputation-client.js";
@@ -47,6 +49,18 @@ export interface StorageNodeOptions {
   reputationBytes: Uint8Array;
   identity?: Identity;
   config?: Partial<StorageConfig>;
+  /** Raw-byte `fs.*` backend (§12; seedkernel's Fs). Defaults to an in-RAM
+   *  MemoryFs; a server node passes a NodeFs, the browser an OPFS-backed one. The
+   *  default store is an FsBlobStore over this, and the Tier-2 cap-bridge serves
+   *  `fs.*` from it (see `store` for when the two must share a backend). */
+  fs?: Fs;
+  /** Donated blob store (§12). Defaults to an FsBlobStore over `fs` with a
+   *  `quota`-byte budget. A custom `store` only has to layer over the same `fs`
+   *  when this node serves the confined Tier-2 holder path — that path reads and
+   *  writes the store through `fs.*`, so the two would otherwise diverge. A node
+   *  that runs only the host-side holder may pass an independent store (e.g. a
+   *  MemoryBlobStore, as the net.test.mjs WebSocket peers do). */
+  store?: BlobStore;
   quota?: number;
   clock?: () => number;
   /** net.send timeout — how long before a peer is treated as unreachable (§8). */
@@ -57,6 +71,7 @@ export class StorageNode implements Node {
   readonly peerId: PeerId;
   readonly identity: Identity;
   readonly transport: Transport;
+  readonly fs: Fs;
   readonly store: BlobStore;
   readonly codec!: CodecClient;
   readonly crypto: Crypto;
@@ -85,7 +100,8 @@ export class StorageNode implements Node {
     this.config = { ...defaultConfig(), ...opts.config };
     this.clockFn = opts.clock ?? (() => Date.now());
     this.crypto = new Crypto(opts.sodium);
-    this.store = new MemoryBlobStore(opts.quota ?? 64 * 1024 * 1024);
+    this.fs = opts.fs ?? new MemoryFs();
+    this.store = opts.store ?? new FsBlobStore(this.fs, opts.quota ?? 64 * 1024 * 1024);
     (this as { codec: CodecClient }).codec = codec;
     (this as { reputation: ReputationClient }).reputation = reputation;
     this.names = storageNames(host);

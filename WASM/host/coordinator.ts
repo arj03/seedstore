@@ -21,6 +21,11 @@ export interface PutResult {
   chunkCount: number;
   /** True if the file was replicated rather than RS-coded (§4.1). */
   replicated: boolean;
+  /** Every block id placed for this file (all chunks' blocks + the manifest), in
+   *  placement order. Lets a caller probe where the file landed (HAVE), e.g. the
+   *  browser demo showing per-holder counts — the manifest names ids, not holders
+   *  (§4.3), so this is the only handle on the concrete block set. */
+  blockIds: Uint8Array[];
 }
 
 export class Coordinator {
@@ -33,6 +38,7 @@ export class Coordinator {
     const K = this.node.crypto.randomKey();
     const totalBlocks = Math.max(1, Math.ceil(fileSize / blockSize));
     const descriptors: Uint8Array[] = [];
+    const placedIds: Uint8Array[] = [];
     const replicated = totalBlocks <= this.node.config.smallMaxBlocks;
 
     if (replicated) {
@@ -46,6 +52,7 @@ export class Coordinator {
       for (let i = 0; i < d; i++) {
         const placed = await this.placeBlock(blockIds[i], dataBlocks[i], env, new Set(), this.node.config.replicas);
         if (placed.length === 0) throw new Error("put: no peer accepted a replica");
+        placedIds.push(blockIds[i]);
       }
       descriptors.push(env);
     } else {
@@ -61,12 +68,26 @@ export class Coordinator {
         const blockIds = all.map((b) => this.node.crypto.hash(b));
         const env = this.signChunk({ k, m, blockSize, blockIds });
         // The n blocks of a chunk go on DISTINCT peers (§6) so losing one peer
-        // costs at most one block of the chunk (the §10 invariant).
+        // costs at most one block of the chunk (the §10 invariant). With fewer
+        // than n reachable peers we place as many as the cohort holds rather than
+        // failing the whole PUT — recoverable as long as ≥ k distinct ids landed,
+        // and repair (§9) restores the rest once more peers join. Once no untried
+        // peer takes a block, none will take a later one either, so we stop there.
+        // A degenerate RS(1,·) code repeats an id (a parity block byte-identical
+        // to the lone data block); the repeat still gets its own peer above — that
+        // is the chunk's replication when k = 1 — but we record each distinct id
+        // once so the returned block set and the holder probe stay accurate.
         const used = new Set<PeerId>();
+        const placedHex = new Set<string>();
         for (let i = 0; i < all.length; i++) {
           const placed = await this.placeBlock(blockIds[i], all[i], env, used, 1);
-          if (placed.length === 0) throw new Error(`put: no peer accepted block ${i} of chunk ${c}`);
+          if (placed.length === 0) break;
           for (const p of placed) used.add(p);
+          const idHex = toHex(blockIds[i]);
+          if (!placedHex.has(idHex)) { placedHex.add(idHex); placedIds.push(blockIds[i]); }
+        }
+        if (placedHex.size < k) {
+          throw new Error(`put: chunk ${c} landed ${placedHex.size}/${k} distinct blocks needed to read it back — connect more holders`);
         }
         descriptors.push(env);
       }
@@ -81,8 +102,9 @@ export class Coordinator {
     const manifestId = this.node.crypto.hash(manCt);
     const placed = await this.placeBlock(manifestId, manCt, null, new Set(), this.node.config.replicas);
     if (placed.length === 0) throw new Error("put: no peer accepted the manifest");
+    placedIds.push(manifestId);
 
-    return { manifestId, key: K, chunkCount: descriptors.length, replicated };
+    return { manifestId, key: K, chunkCount: descriptors.length, replicated, blockIds: placedIds };
   }
 
   // ── GET (§7) ──────────────────────────────────────────────────────────

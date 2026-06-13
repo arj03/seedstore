@@ -3,7 +3,7 @@
 // repair — are host-side classes (the cap-holding logic above the bridges,
 // §2 composition) that all operate against this Node surface.
 
-import type { PeerId, Transport } from "./net.js";
+import type { PeerId, Transport } from "seedkernel-wasm/net";
 import type { BlobStore } from "./store-local.js";
 import type { CodecClient } from "./codec-client.js";
 import type { Crypto } from "./crypto.js";
@@ -69,4 +69,4 @@ export interface Node {
 }
 
 /** peer_id is the hex of a peer's kernel public key (§2). */
-export { type PeerId } from "./net.js";
+export { type PeerId } from "seedkernel-wasm/net";
