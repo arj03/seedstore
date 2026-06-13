@@ -188,7 +188,7 @@ export async function run(t) {
   // why two real bugs shipped: a k=1 parity block is byte-identical to the lone
   // data block, so its id repeated in the returned set (the "13/13" holder probe),
   // and a cohort smaller than n=k+m used to fail the whole PUT. Cover both.
-  t.group("degenerate k=1 on a 2-holder cohort: the relay-less demo config");
+  t.group("degenerate k=1 on a 2-holder cohort (RS(1,9) on an undersized cohort)");
   {
     const net = new LoopbackNetwork();
     const cfg = { k: 1, m: 9, blockSize: 64 };

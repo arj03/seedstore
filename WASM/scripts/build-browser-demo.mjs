@@ -6,10 +6,9 @@
 //   - the pages:
 //       index.html   — in-page loopback cohort (self-contained)
 //       p2p.html     — real P2P over RtcNetwork + relay (signaling) + STUN
-//       direct.html  — relay-less WebRTC-Direct (browser dials console holders by token)
 //
 // Serve it with any static file server, e.g.:
-//   npx http-server build/browser-demo -p 3000   (then open /index.html, /p2p.html, /direct.html)
+//   npx http-server build/browser-demo -p 3000   (then open /index.html, /p2p.html)
 //
 // The pages' import maps resolve "seedkernel-wasm/*" → ./seedkernel/* and this
 // project's host → ./host/, and pull sumo libsodium from a CDN (vendor an ESM build
@@ -78,7 +77,7 @@ await copyJs(seedstoreHost, join(out, "host"));
 await copyJs(seedkernelHost, join(out, "seedkernel"));
 
 // Every browser page, into the one dir.
-for (const page of ["index.html", "p2p.html", "direct.html"]) {
+for (const page of ["index.html", "p2p.html"]) {
   await copy(join(root, "browser", page), join(out, page));
 }
 
@@ -86,4 +85,3 @@ console.log(`browser demo staged at ${out}`);
 console.log("serve it:   npx http-server build/browser-demo -p 3000");
 console.log("  in-page cohort:        http://localhost:3000/index.html");
 console.log("  real P2P (relay+STUN): npm run demo:relay  +  npm run serve:rtc-holder  → http://localhost:3000/p2p.html");
-console.log("  relay-less direct:     npm run serve:holder  (paste its token)          → http://localhost:3000/direct.html");

@@ -15,7 +15,6 @@ import { join } from "node:path";
 import { loadSodium, loadWasmBytes } from "../build/host/node.js";
 import { StorageNode } from "../build/host/storage-node.js";
 import { NodeNetwork } from "seedkernel-wasm/net-node";
-import { WebRtcDirectNetwork, makeCertKeys } from "seedkernel-wasm/webrtc-direct";
 import { FsBlobStore } from "../build/host/store-fs.js";
 import { NodeFs } from "seedkernel-wasm/fs-node";
 import { MemoryBlobStore } from "../build/host/store-local.js";
@@ -72,52 +71,6 @@ async function tcpCohort({ count, sodium, wasm, config, baseDir }) {
   await Promise.all(nets.map((n) => n.ready(8000)));
   await sleep(100); // let inbound links finish promoting
   return { nodes, nets, ids, dirs };
-}
-
-// Stand up an owner + `holderCount` holders whose fabric is relay-less
-// WebRTC-Direct (no signaling relay in the path). PUT/GET is coordinated entirely
-// by the owner — it offers blocks to, and fetches them from, the holders — so a
-// star is the minimal topology: the owner dials each holder's dial token, and the
-// link is bidirectional, so each holder can answer back. This is the storage-level
-// proof that a console `serveDirect` node is a first-class storage peer, reachable
-// by a static token, not just an echo pipe (the Transport-level proof lives in
-// seedkernel's testWebRtcDirectNetwork).
-async function directStar({ holderCount, sodium, wasm, config, baseDir }) {
-  const ownerKp = newKey(sodium);
-  const ownerHex = toHex(ownerKp.publicKey);
-  const holderKps = Array.from({ length: holderCount }, () => newKey(sodium));
-
-  // Each holder listens with its own pinned DTLS cert (its certhash rides the
-  // token it publishes); the owner dials out only, so it needs no cert.
-  const holderCerts = await Promise.all(holderKps.map(() => makeCertKeys()));
-  const holderNets = holderKps.map((kp, i) =>
-    new WebRtcDirectNetwork({ identity: kp, sodium, keys: holderCerts[i], listen: { host: "127.0.0.1" } }));
-  const ownerNet = new WebRtcDirectNetwork({ identity: ownerKp, sodium });
-
-  await Promise.all(holderNets.map((n) => n.listen()));
-  const tokens = holderNets.map((n) => n.token("127.0.0.1"));
-  await Promise.all(tokens.map((tok) => ownerNet.dial(tok)));
-
-  // The dial resolves on the owner's side of the in-channel AUTH; wait for each
-  // holder's reverse link to promote too, so it can answer the owner's requests.
-  const t0 = Date.now();
-  while (holderNets.some((n) => !n.linkedPeers().includes(ownerHex)) && Date.now() - t0 < 5000) await sleep(50);
-  if (holderNets.some((n) => !n.linkedPeers().includes(ownerHex)))
-    throw new Error("directStar: holder reverse links did not promote within 5s");
-
-  const dirs = [];
-  const mk = async (net, kp, label) => {
-    const dir = join(baseDir, label);
-    dirs.push(dir);
-    const store = new FsBlobStore(new NodeFs(dir), 64 * 1024 * 1024);
-    return StorageNode.create({ network: net, sodium, ...wasm, identity: kp, store, config, timeoutMs: 3000 });
-  };
-  const owner = await mk(ownerNet, ownerKp, "owner");
-  const holders = [];
-  for (let i = 0; i < holderCount; i++) holders.push(await mk(holderNets[i], holderKps[i], `h${i}`));
-  for (const h of holders) StorageNode.connect(owner, h);
-
-  return { owner, holders, ownerNet, holderNets, dirs };
 }
 
 export async function run(t) {
@@ -258,40 +211,6 @@ export async function run(t) {
     } finally {
       S.close(); B.close();
       netS.close(); netB.close();
-    }
-  }
-
-  // ── full PUT → GET over relay-less WebRTC-Direct ────────────────────────────
-  t.group("PUT → GET over relay-less WebRTC-Direct (a serveDirect node is a full storage peer)");
-  {
-    const baseDir = mkdtempSync(join(tmpdir(), "seedstore-direct-"));
-    let owner, holders, ownerNet, holderNets;
-    try {
-      ({ owner, holders, ownerNet, holderNets } = await directStar({
-        holderCount: 5, sodium, wasm, config: { k: 2, m: 2, blockSize: 64 }, baseDir,
-      }));
-      t.eq(owner.cohortPeers().length, 5, "owner linked to all five holders over WebRTC-Direct");
-      t.ok(holderNets.every((n) => n.linkedPeers().includes(owner.peerId)), "every holder holds the reverse link");
-
-      const data = file(200); // 4 blocks → 2 RS chunks, each spread over 4 distinct holders
-      const put = await owner.put(data);
-      t.ok(!put.replicated, "a multi-block file takes the RS path");
-      t.eq(put.chunkCount, 2, "200 bytes / (k=2 × 64) → 2 chunks");
-
-      const got = await owner.get(put.manifestId, put.key);
-      t.ok(bytesEqual(got, data), "GET reconstructs the file over relay-less links");
-
-      const occupied = holders.filter((h) => h.store.list().length > 0);
-      t.ok(occupied.length >= 4, "blocks placed across several distinct holders");
-      t.eq(owner.store.list().length, 0, "owner (coordinator) holds no blocks");
-      t.ok(ownerNet.framesDelivered > 0, "responses crossed the relay-less links to the owner");
-      t.ok(holderNets.some((n) => n.framesDelivered > 0), "requests crossed to the holders");
-    } finally {
-      holders?.forEach((h) => h.close());
-      owner?.close();
-      holderNets?.forEach((n) => n.close());
-      ownerNet?.close();
-      rmSync(baseDir, { recursive: true, force: true });
     }
   }
 

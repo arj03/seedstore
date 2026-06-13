@@ -62,7 +62,7 @@ console.log(`joined ${url}  (RS k=${config.k} m=${config.m}, ${config.blockSize}
 console.log(`open browser/p2p.html with the SAME relay + room "${room}" (or run more holders), then store a file.`);
 console.log("(Ctrl+C to stop)\n");
 
-// Show blocks landing: poll the store for newly-held ids, like serve-direct-holder.
+// Show blocks landing: poll the store for newly-held ids.
 const known = new Set();
 const timer = setInterval(() => {
   for (const id of node.store.list().map(toHex)) {
