@@ -179,26 +179,37 @@ realm. The `BlobStore` backend is in-memory by default; a server uses a director
 ## Browser
 
 The host is platform-neutral (it imports seedkernel's `node:fs`-free browser
-host). One build stages two browser demos into `build/browser-demo`:
+host). One build stages all three browser pages into `build/browser-demo`:
 
 ```sh
 npm run build && npm run build:browser-demo
-npx http-server build/browser-demo -p 8080
-#   in-tab cohort:    http://localhost:8080/index.html
-#   real P2P (relay): http://localhost:8080/p2p.html   (needs `npm run demo:relay`)
+npx http-server build/browser-demo -p 3000
+#   in-tab cohort:          http://localhost:3000/index.html
+#   real P2P (relay+STUN):  http://localhost:3000/p2p.html    (relay + holders, below)
+#   relay-less direct:      http://localhost:3000/direct.html (console holders, below)
 ```
 
 **`index.html`** boots a cohort of nodes in one browser tab, stores a file with
 client-side encryption + erasure coding across them, reads it back, and lets you
 take peers offline and watch repair restore redundancy.
 
-**`p2p.html`** makes each *tab* a full storage node. The tabs find each other
-through a WebSocket signaling relay (`npm run demo:relay`) and then talk
-**directly, peer-to-peer over WebRTC** — the relay only introduces peers, no
-server is in the data path. Open the page in **3+ tabs** in the same room; a file
-dropped in one is encrypted and erasure-coded (RS(1,1)) across the others, and any
-tab can reconstruct it from the retrieval token. This is the same `RtcNetwork` a
-Node peer would join via node-datachannel (§13.6).
+**`p2p.html`** makes each *tab* a full storage node. Tabs — and **console nodes** —
+find each other through a WebSocket signaling relay (`npm run demo:relay`) and then
+talk **directly, peer-to-peer over WebRTC**: the relay only introduces peers, STUN
+punches the path through NAT, and no server sits in the data path. A file dropped in
+one is encrypted and erasure-coded (RS(1,1)) across the others; any node rebuilds it
+from the retrieval token. Run the cohort either as **3+ tabs** in the same room, or
+as one tab plus **console holders** — the same `RtcNetwork`, driven on the Node/Bun
+side by werift's pure-JS WebRTC (§13.6):
+
+```sh
+npm run demo:relay          # the signaling relay (Node), ws://localhost:8080
+npm run serve:rtc-holder    # a real StorageNode joining the room over relay+STUN (Bun); run two
+#   then open http://localhost:3000/p2p.html  (relay ws://localhost:8080, room "seedstore-demo")
+```
+
+(`npm run smoke:rtc` proves the same PUT→GET path headless — owner + holders, no relay
+process or browser.)
 
 (Sumo libsodium is pulled from a CDN via the pages' import maps; vendor an ESM
 build to run offline. Public STUN lets tabs on different machines/NATs find a
@@ -231,15 +242,14 @@ WD_HOST=0.0.0.0 WD_PORT=4001 WD_ADVERTISE=<your LAN/public IP> npm run serve:hol
 **Browser node.** The page is assembled from *both* projects' minified browser
 hosts, so seedkernel must be built first — its `npm run build` emits the
 `build/host-min` (including the `webrtc-direct-browser.js` the page imports) that
-`demo:direct` copies in. The [Build](#build) step above already does this; if you
-skipped it, `demo:direct` stops with a hint and stages nothing (a near-empty
-`build/direct-demo` is the symptom). Then:
+`build:browser-demo` copies in. The [Build](#build) step above already does this; if
+you skipped it, `build:browser-demo` stops with a hint and stages nothing. Then:
 
 ```sh
 (cd ../../seedkernel/WASM && npm run build)   # once — emits seedkernel's build/host-min
 npm run build                                 # seedstore — emits its build/host-min
-npm run demo:direct                           # stage → build/direct-demo
-npx serve build/direct-demo                   # then open http://localhost:3000/direct.html
+npm run build:browser-demo                    # stage all pages → build/browser-demo
+npx http-server build/browser-demo -p 3000    # then open http://localhost:3000/direct.html
 ```
 
 The tab boots a storage node, dials every pasted token directly, then encrypts and
@@ -378,8 +388,9 @@ host/  tier2-guest.js          the confined guest: PUT/GET/repair + the holder s
        coordinator/cohort/repair/manifest/crypto/protocol/store-fs/codec+reputation clients
        node.ts / browser.ts    Node + browser entry points
 scripts/  build-bundle.mjs     produce the signed bundle (npm run build:bundle)
-          copy-kernel, build-browser-demo
-          serve-direct-holder / stage-direct-demo  — relay-less WebRTC-Direct demo
+          copy-kernel, build-browser-demo  — stage all browser pages → build/browser-demo
+          serve-direct-holder + smoke-direct  — relay-less WebRTC-Direct (dial token)
+          serve-rtc-holder + smoke-rtc        — relay-signaled P2P over RtcNetwork + STUN
 tests/    codec / bridges / manifest / reputation / storage / browser
           tier2-port / shell-run / holder-guest / bundle-fixture
 ```
