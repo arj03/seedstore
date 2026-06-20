@@ -184,6 +184,23 @@ export async function run(t) {
     }
   }
 
+  t.group("codec: large blocks cross the register-blocked body + both tails");
+  {
+    // bs > 128 with awkward remainders exercises the 128-byte STRIDE body, then
+    // the 16-byte SIMD remainder, then the scalar tail — all in one block — and
+    // proves the stitched paths agree (the optimized multiply-accumulate).
+    for (const bs of [128, 145, 159, 200, 257, 1024 + 53]) {
+      const k = 6, m = 4, n = k + m;
+      const data = new Uint8Array(k * bs).map((_, i) => (i * 2654435761) & 255);
+      const parity = codec.encode(k, m, bs, data);
+      const all = [...blocks(data, bs), ...blocks(parity, bs)];
+      // Drop two data blocks → real matrix inversion with many nonzero coeffs.
+      const present = [...Array(n).keys()].slice(2, 2 + k).map((index) => ({ index, bytes: all[index] }));
+      const recovered = codec.decode(k, m, bs, present);
+      t.ok(recovered && eq(recovered, data), `bs=${bs}: STRIDE+remainder+tail round trip`);
+    }
+  }
+
   t.group("codec: systematic — the k data blocks pass through verbatim");
   {
     const k = 6, m = 4, bs = 48;

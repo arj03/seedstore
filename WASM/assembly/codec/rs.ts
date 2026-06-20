@@ -11,11 +11,19 @@
 // The hot multiply-and-accumulate loops use WASM SIMD: for a fixed coefficient
 // c, c·x is split into two 4-bit table lookups — c·(x & 0x0F) and c·(x & 0xF0)
 // — each a 16-entry table, so a single i8x16.swizzle multiplies 16 bytes at
-// once (the GF(2^8) "PSHUFB" trick). Output accumulators stay in v128 registers
-// across the k inputs (register blocking). A scalar tail (the same MUL table,
-// one indexed load per byte) handles a block whose size is not a multiple of
-// 16. Encoding stays fully deterministic — same (k, m, bytes) → byte-identical
-// parity — which is what lets a repairer regenerate a block keylessly (§9).
+// once (the GF(2^8) "PSHUFB" trick).
+//
+// The key to throughput is *output register-blocking*: the coefficient and its
+// two 16-byte multiply tables depend only on the input row, not on which output
+// column we are filling, so the inner loop computes a whole STRIP of 8 output
+// vectors (128 bytes) per coefficient-table load. That amortizes the table
+// loads, the coefficient fetch and the zero-skip branch over 8 columns, and
+// gives the core 8 independent accumulator chains to overlap (the XOR-accumulate
+// across the k inputs is otherwise a latency-bound dependency). A 16-byte SIMD
+// step and then a scalar tail (the same MUL table, one indexed load per byte)
+// finish a block whose size is not a multiple of 128. Encoding stays fully
+// deterministic — same (k, m, bytes) → byte-identical parity — which is what
+// lets a repairer regenerate a block keylessly (§9).
 
 import { gfMul, gfInv, mulBase, mulHiBase } from "./gf256";
 
@@ -39,41 +47,85 @@ function gfMulSimd(d: v128, lowT: v128, highT: v128, mask: v128): v128 {
   return v128.xor(v128.swizzle(lowT, lo), v128.swizzle(highT, hi));
 }
 
+const STRIDE: i32 = 128; // 8 v128 lanes per register-blocked step
+
+// One output block = Σ_j coef[j] · src[j·bs ..] over GF(2^8). `srcPtr` holds k
+// contiguous blocks of `bs` bytes; `coefPtr` holds the k coefficients. Shared by
+// encode (parity rows) and decode (recovered data rows): both are the same MDS
+// linear combination, only the source blocks and coefficients differ.
+@inline
+function gfMacBlock(
+  k: i32, bs: i32, srcPtr: i32, coefPtr: i32, outPtr: i32,
+  mbase: i32, mhbase: i32, mask: v128,
+): void {
+  const blocked = bs & ~(STRIDE - 1);
+  let p = 0;
+
+  // Register-blocked body: 8 output vectors per coefficient-table load. The 8
+  // multiplies within a j are independent (same tables, different data) and the
+  // 8 accumulator chains across j are independent, so the core keeps many ops in
+  // flight instead of stalling on the XOR-accumulate latency.
+  for (; p < blocked; p += STRIDE) {
+    let a0 = i8x16.splat(0); let a1 = i8x16.splat(0);
+    let a2 = i8x16.splat(0); let a3 = i8x16.splat(0);
+    let a4 = i8x16.splat(0); let a5 = i8x16.splat(0);
+    let a6 = i8x16.splat(0); let a7 = i8x16.splat(0);
+    for (let j = 0; j < k; j++) {
+      const c = load<u8>(coefPtr + j) as i32;
+      if (c == 0) continue;
+      const lowT = v128.load(mbase + (c << 8));
+      const highT = v128.load(mhbase + (c << 4));
+      const b = srcPtr + j * bs + p;
+      a0 = v128.xor(a0, gfMulSimd(v128.load(b),       lowT, highT, mask));
+      a1 = v128.xor(a1, gfMulSimd(v128.load(b, 16),   lowT, highT, mask));
+      a2 = v128.xor(a2, gfMulSimd(v128.load(b, 32),   lowT, highT, mask));
+      a3 = v128.xor(a3, gfMulSimd(v128.load(b, 48),   lowT, highT, mask));
+      a4 = v128.xor(a4, gfMulSimd(v128.load(b, 64),   lowT, highT, mask));
+      a5 = v128.xor(a5, gfMulSimd(v128.load(b, 80),   lowT, highT, mask));
+      a6 = v128.xor(a6, gfMulSimd(v128.load(b, 96),   lowT, highT, mask));
+      a7 = v128.xor(a7, gfMulSimd(v128.load(b, 112),  lowT, highT, mask));
+    }
+    const o = outPtr + p;
+    v128.store(o, a0);      v128.store(o, a1, 16);
+    v128.store(o, a2, 32);  v128.store(o, a3, 48);
+    v128.store(o, a4, 64);  v128.store(o, a5, 80);
+    v128.store(o, a6, 96);  v128.store(o, a7, 112);
+  }
+  // 16-byte SIMD remainder.
+  const simdLen = bs & ~15;
+  for (; p < simdLen; p += 16) {
+    let acc = i8x16.splat(0);
+    for (let j = 0; j < k; j++) {
+      const c = load<u8>(coefPtr + j) as i32;
+      if (c == 0) continue;
+      const lowT = v128.load(mbase + (c << 8));
+      const highT = v128.load(mhbase + (c << 4));
+      acc = v128.xor(acc, gfMulSimd(v128.load(srcPtr + j * bs + p), lowT, highT, mask));
+    }
+    v128.store(outPtr + p, acc);
+  }
+  // Scalar tail.
+  for (; p < bs; p++) {
+    let acc: i32 = 0;
+    for (let j = 0; j < k; j++) {
+      const c = load<u8>(coefPtr + j) as i32;
+      if (c == 0) continue;
+      acc ^= load<u8>(mbase + (c << 8) + (load<u8>(srcPtr + j * bs + p) as i32)) as i32;
+    }
+    store<u8>(outPtr + p, acc as u8);
+  }
+}
+
 /** Encode: read k data blocks at dataPtr, write m parity blocks at outPtr. */
 export function rsEncode(k: i32, m: i32, bs: i32, dataPtr: i32, outPtr: i32): void {
   const mbase = mulBase();
   const mhbase = mulHiBase();
   const coefPtr = COEF.dataStart as i32;
   const mask = i8x16.splat(0x0f);
-  const simdLen = bs & ~15;
 
   for (let i = 0; i < m; i++) {
     for (let j = 0; j < k; j++) store<u8>(coefPtr + j, cauchy(k, i, j));
-    const optr = outPtr + i * bs;
-
-    // SIMD body: 16 bytes per step, accumulating all k contributions in `acc`.
-    for (let p = 0; p < simdLen; p += 16) {
-      let acc = i8x16.splat(0);
-      for (let j = 0; j < k; j++) {
-        const c = load<u8>(coefPtr + j) as i32;
-        if (c == 0) continue;
-        const lowT = v128.load(mbase + (c << 8));
-        const highT = v128.load(mhbase + (c << 4));
-        const d = v128.load(dataPtr + j * bs + p);
-        acc = v128.xor(acc, gfMulSimd(d, lowT, highT, mask));
-      }
-      v128.store(optr + p, acc);
-    }
-    // Scalar tail.
-    for (let p = simdLen; p < bs; p++) {
-      let acc: i32 = 0;
-      for (let j = 0; j < k; j++) {
-        const c = load<u8>(coefPtr + j) as i32;
-        if (c == 0) continue;
-        acc ^= load<u8>(mbase + (c << 8) + (load<u8>(dataPtr + j * bs + p) as i32)) as i32;
-      }
-      store<u8>(optr + p, acc as u8);
-    }
+    gfMacBlock(k, bs, dataPtr, coefPtr, outPtr + i * bs, mbase, mhbase, mask);
   }
 }
 
@@ -146,38 +198,18 @@ export function rsDecode(
   }
   if (!gfInvertMatrix(k, mPtr, invPtr, augPtr)) return false;
 
-  // data[j] = Σ_r inv[j][r] · present[r] — same SIMD multiply-accumulate.
+  // data[j] = Σ_r inv[j][r] · present[r] — same SIMD multiply-accumulate as
+  // encode. When all k present blocks are data rows the inverse is a permutation
+  // (each row has a single 1), so the zero-skip leaves one swizzle per output —
+  // the common single-loss read stays cheap (§4.1, §21).
   const mbase = mulBase();
   const mhbase = mulHiBase();
   const coefPtr = COEF.dataStart as i32;
   const mask = i8x16.splat(0x0f);
-  const simdLen = bs & ~15;
 
   for (let j = 0; j < k; j++) {
     for (let r = 0; r < k; r++) store<u8>(coefPtr + r, load<u8>(invPtr + j * k + r));
-    const optr = outPtr + j * bs;
-
-    for (let p = 0; p < simdLen; p += 16) {
-      let acc = i8x16.splat(0);
-      for (let r = 0; r < k; r++) {
-        const c = load<u8>(coefPtr + r) as i32;
-        if (c == 0) continue;
-        const lowT = v128.load(mbase + (c << 8));
-        const highT = v128.load(mhbase + (c << 4));
-        const d = v128.load(blocksPtr + r * bs + p);
-        acc = v128.xor(acc, gfMulSimd(d, lowT, highT, mask));
-      }
-      v128.store(optr + p, acc);
-    }
-    for (let p = simdLen; p < bs; p++) {
-      let acc: i32 = 0;
-      for (let r = 0; r < k; r++) {
-        const c = load<u8>(coefPtr + r) as i32;
-        if (c == 0) continue;
-        acc ^= load<u8>(mbase + (c << 8) + (load<u8>(blocksPtr + r * bs + p) as i32)) as i32;
-      }
-      store<u8>(optr + p, acc as u8);
-    }
+    gfMacBlock(k, bs, blocksPtr, coefPtr, outPtr + j * bs, mbase, mhbase, mask);
   }
   return true;
 }
