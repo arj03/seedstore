@@ -129,10 +129,22 @@ function moduleCall(name, req) {
   const head = new Uint8Array(1 + name.length); head[0] = name.length; head.set(name, 1);
   return host.call(CAP_MODULE_CALL, concat([head, req]));
 }
+// Like moduleCall but takes the request already split into parts, so the name
+// header and the request body fold into a single concat. The RS request is large
+// (k data blocks ≈ 640 KB); the old `moduleCall(name, concat([head, ...blocks]))`
+// built that buffer and then copied the whole of it again to prepend the name —
+// two passes over the blocks. One concat copies them once (the host fast path got
+// the same single-copy treatment in codec-client.ts; the guest reaches the codec
+// only through host.call so the in-place scratch staging isn't available here, but
+// folding the two concats is).
+function moduleCallParts(name, parts) {
+  const head = new Uint8Array(1 + name.length); head[0] = name.length; head.set(name, 1);
+  return host.call(CAP_MODULE_CALL, concat([head, ...parts]));
+}
 function rsEncode(k, m, blockSize, dataBlocks) {
   const head = new Uint8Array(7);
   head[0] = CODEC_ENCODE; head[1] = k; head[2] = m; wU32(head, 3, blockSize);
-  return splitBlocks(moduleCall(CODEC_NAME, concat([head, ...dataBlocks])), blockSize);
+  return splitBlocks(moduleCallParts(CODEC_NAME, [head, ...dataBlocks]), blockSize);
 }
 function rsDecode(k, m, blockSize, present) {
   // Callers (fetchCodedChunk, healCoded) already gate on present.length >= k, but
@@ -144,7 +156,7 @@ function rsDecode(k, m, blockSize, present) {
   head[0] = CODEC_DECODE; head[1] = k; head[2] = m; wU32(head, 3, blockSize); head[7] = use.length;
   const idx = new Uint8Array(use.length);
   for (let i = 0; i < use.length; i++) idx[i] = use[i].index;
-  return splitBlocks(moduleCall(CODEC_NAME, concat([head, idx, ...use.map((p) => p.bytes)])), blockSize);
+  return splitBlocks(moduleCallParts(CODEC_NAME, [head, idx, ...use.map((p) => p.bytes)]), blockSize);
 }
 function clockNow() { const b = host.call(CAP_CLOCK, EMPTY); return rU32(b, 0) * 0x100000000 + rU32(b, 4); }
 function repScore(peerPk, t) {
