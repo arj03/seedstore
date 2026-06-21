@@ -30,6 +30,7 @@
     "seedkernel-wasm/browser": "./seedkernel/browser.js",
     "seedkernel-wasm/net":     "./seedkernel/transport.js",
     "seedkernel-wasm/net-rtc": "./seedkernel/net-rtc.js",
+    "seedkernel-wasm/net-ws":  "./seedkernel/net-ws.js",
     "seedkernel-wasm/fs":      "./seedkernel/fs.js",
     "libsodium-wrappers-sumo": "https://esm.sh/libsodium-wrappers-sumo@0.8.4"
   }
@@ -39,18 +40,37 @@
 <body>
 <h1>seed store — a real-P2P storage node in your browser</h1>
 <p class="muted">
-  Each tab is a full storage node. They find each other through a WebSocket relay
-  (signaling only) and then talk <strong>directly, peer-to-peer over WebRTC</strong>
-  — no server in the data path. A file you drop here is encrypted and erasure-coded
-  across the other tabs' nodes; any tab can reconstruct it. This is the same
-  <code>RtcNetwork</code> a Node peer would join via node-datachannel (README §13.6).
+  Each tab is a full storage node. A file you drop here is encrypted and erasure-coded
+  across the cohort's nodes; any tab can reconstruct it. Two ways to reach the cohort:
+  <strong>WebRTC</strong> — tabs find each other through a WebSocket relay (signaling
+  only) and then talk directly, peer-to-peer, no server in the data path (the same
+  <code>RtcNetwork</code> a Node peer joins via node-datachannel, README §13.6); or
+  <strong>Direct WebSocket</strong> — dial a known set of natively-reachable nodes
+  (a public IP / LAN / port-forward) straight at their <code>--ws-listen</code> port,
+  no relay and no STUN (<code>WsNetwork</code>).
 </p>
 
-<h2>1 · connect to the signaling relay</h2>
-<p class="muted">Start one with <code>npm run demo:relay</code>, then open this page in <strong>3+ tabs</strong> using the same room.</p>
+<h2>1 · connect to the cohort</h2>
 <div class="row">
-  relay <input id="relay" class="url mono" type="text" value="ws://localhost:8080" />
-  room <input id="room" class="room mono" type="text" value="seedstore-demo" />
+  transport:
+  <label><input type="radio" name="transport" value="rtc" checked /> WebRTC (relay + STUN)</label>
+  <label><input type="radio" name="transport" value="ws" /> Direct WebSocket</label>
+</div>
+<div id="rtcConfig">
+  <p class="muted">Start a relay with <code>npm run demo:relay</code>, then open this page in <strong>3+ tabs</strong> using the same room.</p>
+  <div class="row">
+    relay <input id="relay" class="url mono" type="text" value="ws://localhost:8080" />
+    room <input id="room" class="room mono" type="text" value="seedstore-demo" />
+  </div>
+</div>
+<div id="wsConfig" style="display:none">
+  <p class="muted">Dial natively-reachable nodes started with <code>seedloader --ws-listen 0.0.0.0:&lt;port&gt;</code>.
+    One <code>pubkey@host:port</code> per line (or comma-separated). Need at least <span class="mono">k+m</span> distinct holders.</p>
+  <div class="row">
+    <textarea id="wsPeers" class="mono" rows="3" style="width:100%;box-sizing:border-box" placeholder="abc…64hex@127.0.0.1:47210&#10;def…64hex@127.0.0.1:47211"></textarea>
+  </div>
+</div>
+<div class="row">
   <button id="connect">Connect</button>
   <span id="status" class="pill warn">offline</span>
 </div>
@@ -79,11 +99,20 @@
 import sodium from "libsodium-wrappers-sumo";
 import { createStorageNode } from "./host/browser.js";
 import { RtcNetwork, relaySignaling } from "seedkernel-wasm/net-rtc";
+import { WsNetwork } from "seedkernel-wasm/net-ws";
 
 // RS(k=1, m=1): one data + one parity block per chunk, placed on two distinct
 // holders — so a file survives losing either holder, and the demo needs two
 // connected peers (three tabs). Bump m with more tabs for more redundancy.
-const CONFIG = { k: 1, m: 1, blockSize: 256 };
+//
+// blockSize is 32 KiB, not a few hundred bytes: a file becomes ceil(size /
+// (k·blockSize)) chunks, and EACH chunk costs an encrypt + RS-encode + an Ed25519
+// descriptor signature + a *sequential* OFFER/STORE round trip per block. A tiny
+// block turns a modest file into hundreds of chunks and hundreds of serial round
+// trips (a 31 KB file at 256 B = ~124 chunks → several seconds). 32 KiB keeps a
+// small file to a single chunk while staying under werift's ~64 KiB data-channel
+// reassembly cap, so the one CONFIG works over WebRTC and WebSocket alike.
+const CONFIG = { k: 1, m: 1, blockSize: 32 * 1024 };
 const REQUIRED_PEERS = CONFIG.k + CONFIG.m; // distinct holders a PUT needs
 
 // Public STUN so peers on different machines/NATs can still find a path; for
@@ -96,15 +125,31 @@ const log = (m) => { logEl.textContent += m + "\n"; logEl.scrollTop = logEl.scro
 const hex = (b) => [...b].map((x) => x.toString(16).padStart(2, "0")).join("");
 const fromHex = (s) => new Uint8Array(s.match(/.{1,2}/g)?.map((h) => parseInt(h, 16)) ?? []);
 
-let node = null, net = null;
+let node = null, net = null, dialTimer = null;
+
+const transport = () => document.querySelector('input[name="transport"]:checked').value;
+
+// Swap the connection inputs (relay+room ↔ peers box) when the transport changes.
+for (const r of document.querySelectorAll('input[name="transport"]')) {
+  r.onchange = () => {
+    const ws = transport() === "ws";
+    $("rtcConfig").style.display = ws ? "none" : "";
+    $("wsConfig").style.display = ws ? "" : "none";
+  };
+}
 
 function refreshPeers() {
   const n = node ? node.cohortPeers().length : 0;
   $("peers").textContent = String(n);
   const enough = n >= REQUIRED_PEERS;
-  $("need").textContent = enough ? "(enough to store)" : `(need ${REQUIRED_PEERS} — open more tabs in this room)`;
+  const more = transport() === "ws" ? "dial more nodes" : "open more tabs in this room";
+  $("need").textContent = enough ? "(enough to store)" : `(need ${REQUIRED_PEERS} — ${more})`;
   $("store").disabled = !(node && enough);
   $("get").disabled = !node; // GET only needs the manifest holder; allow once booted
+  if (enough) {
+    $("status").textContent = "connected"; $("status").className = "pill ok";
+    if (dialTimer) { clearTimeout(dialTimer); dialTimer = null; } // quorum reached — no warning needed
+  }
 }
 
 async function boot() {
@@ -118,17 +163,21 @@ async function boot() {
     const identity = sodium.crypto_sign_keypair();
     $("me").textContent = hex(identity.publicKey).slice(0, 16) + "…";
 
-    const base = $("relay").value.trim().replace(/\/+$/, "");
-    const room = $("room").value.trim();
-    const url = room ? `${base}/${encodeURIComponent(room)}` : base;
-    log(`connecting to relay ${url} …`);
+    // Both networks expose the same cohort-membership callbacks; only the bottom
+    // (WebRTC vs WebSocket) and the rendezvous (relay join vs direct dial) differ.
+    const onPeerUp = (pid) => { node?.addPeer(pid); log(`P2P link up: ${pid.slice(0, 8)}…`); refreshPeers(); };
+    const onPeerDown = (pid) => { node?.removePeer(pid); log(`P2P link down: ${pid.slice(0, 8)}…`); refreshPeers(); };
 
-    net = new RtcNetwork({
-      identity, sodium, rtcConfig: RTC_CONFIG,
-      signaling: relaySignaling(url),
-      onPeerUp: (pid) => { node?.addPeer(pid); log(`P2P link up: ${pid.slice(0, 8)}…`); refreshPeers(); },
-      onPeerDown: (pid) => { node?.removePeer(pid); log(`P2P link down: ${pid.slice(0, 8)}…`); refreshPeers(); },
-    });
+    const mode = transport();
+    if (mode === "ws") {
+      net = new WsNetwork({ identity, sodium, onPeerUp, onPeerDown });
+    } else {
+      const base = $("relay").value.trim().replace(/\/+$/, "");
+      const room = $("room").value.trim();
+      const url = room ? `${base}/${encodeURIComponent(room)}` : base;
+      log(`connecting to relay ${url} …`);
+      net = new RtcNetwork({ identity, sodium, rtcConfig: RTC_CONFIG, signaling: relaySignaling(url), onPeerUp, onPeerDown });
+    }
 
     log("loading wasm + booting the storage node on the seedkernel…");
     node = await createStorageNode({
@@ -136,19 +185,66 @@ async function boot() {
     });
     log(`node ready (${node.peerId.slice(0, 8)}…), RS(${CONFIG.k},${CONFIG.m}). handlers installed: ${node.handlersInstalled()}`);
 
-    net.join(); // announce into the room — peers begin the WebRTC handshake
-    $("status").textContent = "relay connected"; $("status").className = "pill ok";
     $("file").disabled = false;
+    lockTransportChoice(); // the network + rendezvous are fixed once the node is up
+    if (mode === "ws") {
+      $("status").textContent = "dialing"; $("status").className = "pill ok";
+      dialWs(); // reads the peers box, dials, and arms the unreachable-peer watchdog
+    } else {
+      net.join(); // announce into the room — peers begin the WebRTC handshake
+      $("status").textContent = "relay connected"; $("status").className = "pill ok";
+      log("waiting for peers — open this page in more tabs (same room).");
+    }
     refreshPeers();
-    log("waiting for peers — open this page in more tabs (same room).");
   } catch (e) {
     log("ERROR: " + (e?.message ?? e));
     $("status").textContent = "error"; $("status").className = "pill warn";
-    $("connect").disabled = false;
+    $("connect").disabled = false; // boot itself failed — let the user fix inputs and retry
   }
 }
 
-$("connect").onclick = boot;
+// First click boots the node + network; in WebSocket mode every later click re-dials the
+// (still-editable) peers box. net.connect() is idempotent — already-linked or in-flight
+// peers are no-ops, and a dial that failed was cleared from the dialing set, so only the
+// dead peers are retried. This is the recovery path: a dial that can't reach a node no
+// longer wedges the page behind a permanently-disabled Connect button.
+$("connect").onclick = async () => {
+  if (!node) { await boot(); return; }
+  if (transport() === "ws") dialWs();
+};
+
+function dialWs() {
+  const specs = $("wsPeers").value.split(/[\n,]/).map((s) => s.trim()).filter(Boolean);
+  if (specs.length === 0) { log("add at least one pubkey@host:port peer, then Dial."); return; }
+  log(`dialing ${specs.length} node(s) — links come up as each authenticates…`);
+  for (const spec of specs) { try { net.connect(spec); } catch (e) { log(`  bad peer "${spec}": ${e?.message ?? e}`); } }
+  armDialWatchdog();
+}
+
+// A WebSocket that can't reach a node fails silently — no peer-up, no link, no error here
+// (the drop happens before the identity handshake, so onPeerDown never fires). Without a
+// nudge the page just sits at "dialing". So after each dial, if we still lack a quorum a
+// few seconds on, say what to check and leave Connect enabled as a "Re-dial".
+function armDialWatchdog() {
+  if (dialTimer) clearTimeout(dialTimer);
+  $("connect").disabled = false;
+  $("connect").textContent = "Re-dial";
+  dialTimer = setTimeout(() => {
+    dialTimer = null;
+    const n = node ? node.cohortPeers().length : 0;
+    if (n < REQUIRED_PEERS) {
+      log(`only ${n}/${REQUIRED_PEERS} peer(s) linked — unreachable nodes are dropped silently. ` +
+          `Check each pubkey@host:port (node up with --ws-listen? right host/port? firewall open?), then Re-dial.`);
+    }
+  }, 8000);
+}
+
+// Once a node is booted its network type and rendezvous are fixed; lock those inputs so a
+// stray click can't desync the UI. The WS peers box stays editable — it drives re-dials.
+function lockTransportChoice() {
+  for (const r of document.querySelectorAll('input[name="transport"]')) r.disabled = true;
+  $("relay").disabled = true; $("room").disabled = true;
+}
 
 $("store").onclick = async () => {
   try {
