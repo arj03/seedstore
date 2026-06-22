@@ -18,6 +18,7 @@ const modules = [
   "./manifest.test.mjs",
   "./reputation.test.mjs",
   "./storage.test.mjs",
+  "./concurrency.test.mjs",
   "./net.test.mjs",
   "./browser.test.mjs",
   "./tier2-port.test.mjs",

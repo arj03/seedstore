@@ -12,7 +12,7 @@ import {
   encodeManifest, decodeManifest, ENC_XCHACHA20, type Descriptor,
 } from "./manifest.js";
 import { MsgType, encodeOffer, encodeStore } from "./protocol.js";
-import { toHex, fromHex, concatBytes } from "./util.js";
+import { toHex, fromHex, concatBytes, mapPool } from "./util.js";
 
 export interface PutResult {
   manifestId: Uint8Array;
@@ -57,39 +57,19 @@ export class Coordinator {
       descriptors.push(env);
     } else {
       // RS path (§4.1): chunk the ciphertext into k data blocks, add m parity.
+      // Each chunk is self-contained, so we run them through a bounded window
+      // instead of one-at-a-time: this overlaps one chunk's CPU (encrypt/RS/sign)
+      // and its placement round trips with another's, so PUT wall-clock stops
+      // scaling with the *serial* round-trip count over the whole file. Results
+      // are gathered by chunk index, so file order and the manifest are
+      // unaffected by the order chunks happen to finish in.
       const numChunks = Math.ceil(totalBlocks / k);
-      for (let c = 0; c < numChunks; c++) {
-        const start = c * k * blockSize;
-        const chunkPlain = plaintext.slice(start, start + k * blockSize);
-        const ct = this.node.crypto.encrypt(K, DOMAIN_BODY, c, padTo(chunkPlain, k * blockSize));
-        const dataBlocks = splitBlocks(ct, blockSize);
-        const parityBlocks = this.node.codec.rsEncode(k, m, blockSize, dataBlocks);
-        const all = [...dataBlocks, ...parityBlocks];
-        const blockIds = all.map((b) => this.node.crypto.hash(b));
-        const env = this.signChunk({ k, m, blockSize, blockIds });
-        // The n blocks of a chunk go on DISTINCT peers (§6) so losing one peer
-        // costs at most one block of the chunk (the §10 invariant). With fewer
-        // than n reachable peers we place as many as the cohort holds rather than
-        // failing the whole PUT — recoverable as long as ≥ k distinct ids landed,
-        // and repair (§9) restores the rest once more peers join. Once no untried
-        // peer takes a block, none will take a later one either, so we stop there.
-        // A degenerate RS(1,·) code repeats an id (a parity block byte-identical
-        // to the lone data block); the repeat still gets its own peer above — that
-        // is the chunk's replication when k = 1 — but we record each distinct id
-        // once so the returned block set and the holder probe stay accurate.
-        const used = new Set<PeerId>();
-        const placedHex = new Set<string>();
-        for (let i = 0; i < all.length; i++) {
-          const placed = await this.placeBlock(blockIds[i], all[i], env, used, 1);
-          if (placed.length === 0) break;
-          for (const p of placed) used.add(p);
-          const idHex = toHex(blockIds[i]);
-          if (!placedHex.has(idHex)) { placedHex.add(idHex); placedIds.push(blockIds[i]); }
-        }
-        if (placedHex.size < k) {
-          throw new Error(`put: chunk ${c} landed ${placedHex.size}/${k} distinct blocks needed to read it back — connect more holders`);
-        }
-        descriptors.push(env);
+      const indices = Array.from({ length: numChunks }, (_, c) => c);
+      const results = await mapPool(indices, this.node.config.putConcurrency,
+        (c) => this.placeChunk(plaintext, c, K));
+      for (const r of results) {
+        descriptors.push(r.descriptor);
+        for (const id of r.placedIds) placedIds.push(id);
       }
     }
 
@@ -107,6 +87,61 @@ export class Coordinator {
     return { manifestId, key: K, chunkCount: descriptors.length, replicated, blockIds: placedIds };
   }
 
+  /** Encode, sign, and place one RS chunk (§6). Self-contained — its own ≥ k
+   *  check — so chunks placed concurrently never interfere (the chunk window).
+   *
+   *  Within the chunk the n blocks are placed CONCURRENTLY too: the cohort is
+   *  ranked once (§13), then block i takes the disjoint candidate slice ranked[i],
+   *  ranked[i+n], ranked[i+2n], … (stride n). Disjoint slices put the n blocks on
+   *  n DISTINCT peers (§6, so losing one peer costs at most one block of the chunk
+   *  — the §10 invariant) WITHOUT a shared mutable "used" set, which is what used
+   *  to force the blocks to be placed one after another; a declined primary falls
+   *  back within its own slice, so fallbacks never collide either. The top n peers
+   *  by standing each take one block. Different chunks may still share a peer for
+   *  different blocks — the holder's sibling rule (§6) only forbids two blocks of
+   *  the SAME chunk on one holder, and disjoint slices already guarantee that.
+   *  With fewer than n reachable peers a chunk places as many as the cohort holds
+   *  rather than failing the PUT — recoverable as long as ≥ k distinct ids landed,
+   *  and repair (§9) restores the rest once more peers join. A degenerate RS(1,·)
+   *  code repeats an id (a parity block byte-identical to the lone data block); the
+   *  repeat still gets its own peer — the chunk's replication when k = 1 — but each
+   *  distinct id is recorded once so the returned block set and the holder probe
+   *  stay accurate. */
+  private async placeChunk(
+    plaintext: Uint8Array, c: number, K: Uint8Array,
+  ): Promise<{ descriptor: Uint8Array; placedIds: Uint8Array[] }> {
+    const { k, m, blockSize } = this.node.config;
+    const start = c * k * blockSize;
+    const chunkPlain = plaintext.slice(start, start + k * blockSize);
+    const ct = this.node.crypto.encrypt(K, DOMAIN_BODY, c, padTo(chunkPlain, k * blockSize));
+    const dataBlocks = splitBlocks(ct, blockSize);
+    const parityBlocks = this.node.codec.rsEncode(k, m, blockSize, dataBlocks);
+    const all = [...dataBlocks, ...parityBlocks];
+    const n = all.length;
+    const blockIds = all.map((b) => this.node.crypto.hash(b));
+    const env = this.signChunk({ k, m, blockSize, blockIds });
+
+    // Rank once, hand each block a disjoint stride-n slice, place all n in parallel.
+    const ranked = this.rankedPeers(new Set());
+    const landed = await Promise.all(all.map((bytes, i) => {
+      const candidates: PeerId[] = [];
+      for (let j = i; j < ranked.length; j += n) candidates.push(ranked[j]);
+      return this.placeBlockOn(blockIds[i], bytes, env, candidates);
+    }));
+
+    const placedHex = new Set<string>();
+    const placedIds: Uint8Array[] = [];
+    for (let i = 0; i < n; i++) {
+      if (!landed[i]) continue;
+      const idHex = toHex(blockIds[i]);
+      if (!placedHex.has(idHex)) { placedHex.add(idHex); placedIds.push(blockIds[i]); }
+    }
+    if (placedHex.size < k) {
+      throw new Error(`put: chunk ${c} landed ${placedHex.size}/${k} distinct blocks needed to read it back — connect more holders`);
+    }
+    return { descriptor: env, placedIds };
+  }
+
   // ── GET (§7) ──────────────────────────────────────────────────────────
   async get(manifestId: Uint8Array, K: Uint8Array): Promise<Uint8Array> {
     const manCt = await this.fetchBlock(manifestId);
@@ -114,39 +149,55 @@ export class Coordinator {
     const man = decodeManifest(this.node.crypto.decrypt(K, DOMAIN_MANIFEST, 0, manCt));
 
     const out = new Uint8Array(man.fileSize);
-    let written = 0;
-    for (let c = 0; c < man.chunks.length; c++) {
-      const sd = parseSignedDescriptor(man.chunks[c]);
+    const sds = man.chunks.map((env) => parseSignedDescriptor(env));
+
+    // One discovery fan-out for the whole file, not one have/want per chunk:
+    // union every chunk's block_ids into a single have/want, then fetch the
+    // chunks concurrently through a bounded window. Each chunk's output offset is
+    // fixed by the descriptors up front — every chunk's plaintext is k·blockSize,
+    // the final one truncated to fileSize — so chunks write into `out`
+    // independently and in any order.
+    const allIds: Uint8Array[] = [];
+    for (const sd of sds) for (const id of sd.descriptor.blockIds) allIds.push(id);
+    const holders = await this.cohort.haveWant(allIds);
+
+    let acc = 0;
+    const offsets = sds.map((sd) => {
+      const at = acc;
+      const d = sd.descriptor;
+      acc += (d.m === 0 ? d.blockIds.length : d.k) * d.blockSize;
+      return at;
+    });
+
+    await mapPool(sds, this.node.config.getConcurrency, async (sd, c) => {
       const d = sd.descriptor;
       const chunkCipher = d.m === 0
-        ? await this.fetchReplicatedChunk(d)
-        : await this.fetchCodedChunk(d, c);
-      const domainIndex = d.m === 0 ? 0 : c;
-      const chunkPlain = this.node.crypto.decrypt(K, DOMAIN_BODY, domainIndex, chunkCipher);
-      const take = Math.min(chunkPlain.length, man.fileSize - written);
-      out.set(chunkPlain.subarray(0, take), written);
-      written += take;
-    }
+        ? await this.fetchReplicatedChunk(d, holders)
+        : await this.fetchCodedChunk(d, holders);
+      const chunkPlain = this.node.crypto.decrypt(K, DOMAIN_BODY, d.m === 0 ? 0 : c, chunkCipher);
+      const take = Math.min(chunkPlain.length, man.fileSize - offsets[c]);
+      if (take > 0) out.set(chunkPlain.subarray(0, take), offsets[c]);
+    });
     return out;
   }
 
-  /** Replicated chunk (§4.1): fetch each data block from any live holder. */
-  private async fetchReplicatedChunk(d: Descriptor): Promise<Uint8Array> {
+  /** Replicated chunk (§4.1): fetch each data block from any live holder, using
+   *  the file-wide have/want already gathered by `get`. */
+  private async fetchReplicatedChunk(d: Descriptor, holders: Map<string, Set<PeerId>>): Promise<Uint8Array> {
     const blocks: Uint8Array[] = [];
     for (const id of d.blockIds) {
-      const b = await this.fetchBlock(id);
+      const b = await this.fetchVerified(id, holders.get(toHex(id)));
       if (!b) throw new Error("get: a replica is unavailable");
       blocks.push(b);
     }
     return concatBytes(blocks);
   }
 
-  /** Coded chunk (§7): locate via have/want, fetch any k of n, decode. When all
-   *  k data blocks are present, systematic RS means we just concatenate them
-   *  and never decode (§4.1). */
-  private async fetchCodedChunk(d: Descriptor, _chunkIdx: number): Promise<Uint8Array> {
+  /** Coded chunk (§7): from the file-wide have/want, fetch any k of n and decode.
+   *  When all k data blocks are present, systematic RS means we just concatenate
+   *  them and never decode (§4.1). */
+  private async fetchCodedChunk(d: Descriptor, holders: Map<string, Set<PeerId>>): Promise<Uint8Array> {
     const k = d.k;
-    const holders = await this.cohort.haveWant(d.blockIds);
     const present: { index: number; bytes: Uint8Array }[] = [];
     // Prefer the k data blocks first (indices 0..k) for the no-decode fast path.
     for (let idx = 0; idx < d.blockIds.length && present.length < k; idx++) {
@@ -172,7 +223,9 @@ export class Coordinator {
   // ── placement (§6 step 3–4) ────────────────────────────────────────────
   /** Offer a block to candidate peers ordered by reciprocity standing (§13) and
    *  reachability; on accept, push it. Places onto up to `count` distinct peers
-   *  not in `exclude`. Returns the peers that stored it. */
+   *  not in `exclude`. Returns the peers that stored it. Used for replicas (a
+   *  small file, the manifest) and repair; the RS-coded chunk path uses the
+   *  per-block `placeBlockOn` so its n blocks can be placed in parallel. */
   async placeBlock(
     blockId: Uint8Array, bytes: Uint8Array, descriptor: Uint8Array | null,
     exclude: Set<PeerId>, count: number,
@@ -181,12 +234,32 @@ export class Coordinator {
     for (const peer of this.rankedPeers(exclude)) {
       if (placed.length >= count) break;
       if (placed.includes(peer)) continue;
-      const accepted = await this.offer(peer, blockId, bytes.length, descriptor);
-      if (!accepted) continue;
-      const stored = await this.storePush(peer, blockId, descriptor, bytes);
-      if (stored) { placed.push(peer); this.node.markSeen(peer); }
+      if (await this.tryStore(peer, blockId, bytes, descriptor)) placed.push(peer);
     }
     return placed;
+  }
+
+  /** Place one block on the first of `candidates` that accepts it, returning that
+   *  peer or null. The candidate list is explicit so the concurrent blocks of a
+   *  chunk can take disjoint slices and never compete for the same peer. */
+  private async placeBlockOn(
+    blockId: Uint8Array, bytes: Uint8Array, descriptor: Uint8Array | null, candidates: PeerId[],
+  ): Promise<PeerId | null> {
+    for (const peer of candidates) {
+      if (await this.tryStore(peer, blockId, bytes, descriptor)) return peer;
+    }
+    return null;
+  }
+
+  /** OFFER a block to one peer and, if accepted, STORE it (§6 step 3–4). Returns
+   *  whether the peer now holds it; marks it seen on success (§8). */
+  private async tryStore(
+    peer: PeerId, blockId: Uint8Array, bytes: Uint8Array, descriptor: Uint8Array | null,
+  ): Promise<boolean> {
+    if (!(await this.offer(peer, blockId, bytes.length, descriptor))) return false;
+    if (!(await this.storePush(peer, blockId, descriptor, bytes))) return false;
+    this.node.markSeen(peer);
+    return true;
   }
 
   private async offer(peer: PeerId, blockId: Uint8Array, size: number, descriptor: Uint8Array | null): Promise<boolean> {
@@ -203,10 +276,18 @@ export class Coordinator {
     } catch { return false; }
   }
 
-  /** Fetch a block from whichever cohort peer holds it, verifying by hash. */
+  /** Fetch a block from whichever cohort peer holds it, verifying by hash. Does
+   *  its own have/want — used for the manifest and by repair (§9), where there is
+   *  no file-wide discovery to share. */
   async fetchBlock(id: Uint8Array): Promise<Uint8Array | null> {
-    const holders = (await this.cohort.haveWant([id])).get(toHex(id)) ?? new Set<PeerId>();
-    for (const peer of this.rankBy([...holders])) {
+    const holders = (await this.cohort.haveWant([id])).get(toHex(id));
+    return this.fetchVerified(id, holders);
+  }
+
+  /** Pull `id` from its holders, highest reciprocity standing first (§13),
+   *  returning the first bytes that verify by hash, or null if none serve it. */
+  private async fetchVerified(id: Uint8Array, holders: Set<PeerId> | undefined): Promise<Uint8Array | null> {
+    for (const peer of this.rankBy([...(holders ?? [])])) {
       const b = await this.cohort.verificationFetch(peer, id);
       if (b) return b;
     }

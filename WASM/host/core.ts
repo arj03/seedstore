@@ -28,6 +28,17 @@ export interface StorageConfig {
   smallMaxBlocks: number;
   /** Grace window G: an unreachable holder is Suspected, not Lost (§8). */
   graceMs: number;
+  /** How many chunks a PUT places / a GET fetches concurrently — the §6/§7
+   *  windows. Chunks are independent, so a bounded worker pool overlaps one
+   *  chunk's CPU (encrypt/RS/sign) and network with another's; without it PUT/GET
+   *  wall-clock scales with the *serial* round-trip count across the whole file,
+   *  which is fine on the zero-latency loopback but cripples a real high-latency
+   *  cohort. Kept well under net-link's MAX_QUEUE (256) so a peer's send queue
+   *  never overflows; the chunk window stacks with the n-way within-chunk fan-out,
+   *  so peak in-flight is bounded by putConcurrency × n. W = 1 = one chunk at a
+   *  time (its n blocks still place in parallel). */
+  putConcurrency: number;
+  getConcurrency: number;
 }
 
 export function defaultConfig(k = 2, m = 2, blockSize = 256): StorageConfig {
@@ -42,6 +53,8 @@ export function defaultConfig(k = 2, m = 2, blockSize = 256): StorageConfig {
     lowWater: k + Math.ceil(m / 2),
     smallMaxBlocks,
     graceMs: 24 * 3600 * 1000,
+    putConcurrency: 16,
+    getConcurrency: 16,
   };
 }
 
