@@ -105,14 +105,24 @@ import { WsNetwork } from "seedkernel-wasm/net-ws";
 // holders — so a file survives losing either holder, and the demo needs two
 // connected peers (three tabs). Bump m with more tabs for more redundancy.
 //
-// blockSize is 32 KiB, not a few hundred bytes: a file becomes ceil(size /
-// (k·blockSize)) chunks, and EACH chunk costs an encrypt + RS-encode + an Ed25519
-// descriptor signature + a *sequential* OFFER/STORE round trip per block. A tiny
-// block turns a modest file into hundreds of chunks and hundreds of serial round
-// trips (a 31 KB file at 256 B = ~124 chunks → several seconds). 32 KiB keeps a
-// small file to a single chunk while staying under werift's ~64 KiB data-channel
-// reassembly cap, so the one CONFIG works over WebRTC and WebSocket alike.
-const CONFIG = { k: 1, m: 1, blockSize: 32 * 1024 };
+// blockSize sets the chunk count, and the chunk count IS the round-trip count: a
+// file becomes ceil(size / (k·blockSize)) chunks, each costing an encrypt +
+// RS-encode + Ed25519 signature + an OFFER→STORE round trip per block. So a
+// wall-clock PUT/GET scales as round-trips × RTT. Two honest dials cut it:
+//   1. Bigger blocks → fewer chunks → fewer round trips. Capped by the transport:
+//      WebRTC (werift) reassembles data-channel messages up to ~64 KiB → 32 KiB;
+//      WebSocket/TCP framing (ws.wasm) carries up to 16 MB → 256 KiB, 8× fewer
+//      chunks for the cross-machine WS cohort. blockSize lives in the manifest, so
+//      PUT-encode and GET-decode of one file always agree; sessions may differ.
+//   2. A chunk window (putConcurrency/getConcurrency) ≥ the chunk count: then every
+//      chunk's OFFER and STORE are in flight at once, so the OFFER round trip
+//      overlaps the STOREs instead of serializing ahead of them — the honest way to
+//      stop the OFFER→STORE handshake from doubling PUT, with NO change to the
+//      protocol or admission. Peak in-flight per peer ≈ W, kept under net-link's
+//      MAX_QUEUE (256). At RS(1,1) a 10 MB file is 40 chunks over WS, so 64 covers
+//      it with headroom (32 KiB/WebRTC files are tiny, so W barely binds there).
+const blockSizeFor = (mode) => (mode === "ws" ? 256 : 32) * 1024;
+const CONFIG = { k: 1, m: 1, blockSize: 32 * 1024, putConcurrency: 64, getConcurrency: 64 };
 const REQUIRED_PEERS = CONFIG.k + CONFIG.m; // distinct holders a PUT needs
 
 // Public STUN so peers on different machines/NATs can still find a path; for
@@ -180,10 +190,13 @@ async function boot() {
     }
 
     log("loading wasm + booting the storage node on the seedkernel…");
+    // The WS/TCP path carries far larger frames than WebRTC, so it gets bigger
+    // blocks (fewer chunks → fewer round trips); WebRTC stays at the werift cap.
+    const config = { ...CONFIG, blockSize: blockSizeFor(mode) };
     node = await createStorageNode({
-      network: net, sodium, identity, baseUrl: "./", config: CONFIG, timeoutMs: 5000,
+      network: net, sodium, identity, baseUrl: "./", config, timeoutMs: 5000,
     });
-    log(`node ready (${node.peerId.slice(0, 8)}…), RS(${CONFIG.k},${CONFIG.m}). handlers installed: ${node.handlersInstalled()}`);
+    log(`node ready (${node.peerId.slice(0, 8)}…), RS(${config.k},${config.m}), ${config.blockSize / 1024} KiB blocks, W=${config.putConcurrency}. handlers installed: ${node.handlersInstalled()}`);
 
     $("file").disabled = false;
     lockTransportChoice(); // the network + rendezvous are fixed once the node is up
@@ -252,10 +265,19 @@ $("store").onclick = async () => {
     if (!f) { log("pick a file first."); return; }
     const data = new Uint8Array(await f.arrayBuffer());
     log(`\nPUT "${f.name}" (${data.length} B) across ${node.cohortPeers().length} peer(s)…`);
+    const t0 = performance.now();
     const r = await node.put(data);
+    const ms = performance.now() - t0;
     const token = hex(r.manifestId) + ":" + hex(r.key);
     $("token").textContent = token;
+    // A PUT uploads (k+m)/k × the file (RS(1,1) = 2× — a copy to each holder), so
+    // "wire MB/s" is the real upload rate; compare it to GET's MB/s. If wire MB/s ≈
+    // GET MB/s the cost is purely the 2× bytes; if it's far lower, the OFFER→STORE
+    // handshake (not bandwidth) is the bottleneck.
+    const fileMB = data.length / (1024 * 1024);
+    const wireMB = fileMB * (node.config.k + node.config.m) / node.config.k;
     log(`  ${r.replicated ? "replicated (small file)" : r.chunkCount + " RS chunk(s)"} placed on peers; this node holds none`);
+    log(`  PUT ${ms.toFixed(0)} ms — ${(fileMB / (ms / 1000)).toFixed(1)} MB/s file, ${(wireMB / (ms / 1000)).toFixed(1)} MB/s on the wire (uploaded ${wireMB.toFixed(1)} MB)`);
     log(`  token ready — paste it into another tab's GET box.`);
   } catch (e) { log("  PUT failed: " + (e?.message ?? e)); }
 };
@@ -265,8 +287,12 @@ $("get").onclick = async () => {
     const [mHex, kHex] = $("getToken").value.trim().split(":");
     if (!mHex || !kHex) { log("token must be manifestIdHex:keyHex"); return; }
     log("\nGET (locate via have/want, fetch any k, decode, decrypt)…");
+    const t0 = performance.now();
     const out = await node.get(fromHex(mHex), fromHex(kHex));
-    log(`  recovered ${out.length} B — downloading.`);
+    const ms = performance.now() - t0;
+    const fileMB = out.length / (1024 * 1024);
+    // GET downloads 1× the file (any k of n), so file MB/s is the download rate.
+    log(`  recovered ${out.length} B in ${ms.toFixed(0)} ms — ${(fileMB / (ms / 1000)).toFixed(1)} MB/s — downloading.`);
     const a = document.createElement("a");
     a.href = URL.createObjectURL(new Blob([out]));
     a.download = "seedstore-" + mHex.slice(0, 8) + ".bin";

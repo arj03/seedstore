@@ -70,6 +70,21 @@ export async function run(t) {
       `windowing chunks is far faster than one-at-a-time (${windowed.ms.toFixed(0)} ms vs ${serial.ms.toFixed(0)} ms) — the regression a real RTT exposes`);
   }
 
+  t.group("a window ≥ chunk count pipelines the OFFER+STORE round trips together");
+  {
+    // The remaining PUT cost is the per-block OFFER→STORE double round trip. It
+    // only serializes when the window is smaller than the chunk count; widen the
+    // window past N and every chunk's OFFER and STORE are in flight at once, so the
+    // OFFER round trip overlaps instead of adding to the critical path — no need to
+    // skip admission. Asserts a window ≥ N is materially faster than the default-ish
+    // window < N, with identical placement.
+    const narrow = await onCohort({ ...config, putConcurrency: 4 }, (o) => o.put(data)); // 4 < N=12
+    const wide = await onCohort({ ...config, putConcurrency: N * 2 }, (o) => o.put(data)); // ≥ N
+    t.eq(wide.result.blockIds.length, narrow.result.blockIds.length, "the window width does not change placement");
+    t.ok(wide.ms < narrow.ms * 0.7,
+      `a window ≥ chunk count pipelines the OFFER+STORE round trips (${wide.ms.toFixed(0)} ms vs ${narrow.ms.toFixed(0)} ms at W < N)`);
+  }
+
   t.group("GET fans out discovery once, then fetches chunks through a window");
   {
     // One PUT, then read it back at W=1 and W=W on fresh links so we compare the
