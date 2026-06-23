@@ -36,6 +36,7 @@ export class LatencyNetwork {
     this.inflightWork = 0;      // ditto, excluding the have/want fan-out
     this.maxInflightWork = 0;   // the concurrency the put/get window drove
     this.requests = 0;          // total control requests issued
+    this.byType = {};           // KIND_REQ count per MsgType — OFFER/FETCH batching shows up here
     this.framesDelivered = 0;
   }
 
@@ -49,9 +50,10 @@ export class LatencyNetwork {
     const sink = this.sinks.get(to);
     if (!sink) return;
     const copy = frame.slice();
-    const kind = copy[0], isWork = copy[5] !== TYPE_HAVE;
+    const kind = copy[0], type = copy[5], isWork = type !== TYPE_HAVE;
     if (kind === KIND_REQ) {
       this.requests++;
+      this.byType[type] = (this.byType[type] ?? 0) + 1;
       if (++this.inflight > this.maxInflight) this.maxInflight = this.inflight;
       if (isWork && ++this.inflightWork > this.maxInflightWork) this.maxInflightWork = this.inflightWork;
     }

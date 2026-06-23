@@ -1,15 +1,16 @@
-// PUT/GET concurrency over a *latency-bearing* link.
+// PUT/GET round-trip economy over a *latency-bearing* link.
 //
-// The rest of the suite runs on the zero-latency LoopbackNetwork, where a serial
-// round-trip loop and a windowed one finish in the same ~0 ms — so neither the
-// regression (wall-clock scaling with the serial round-trip count) nor its fix
-// (the chunk window + within-chunk parallel placement) is observable. This group
-// gives the link a real RTT and asserts what only then becomes visible:
-//   - correctness is identical to the serial path (bytes round-trip; the windowed
-//     GET assembles chunks into the right offsets regardless of completion order),
-//   - the windows are actually bounded (within-chunk fan-out = n, chunk window = W),
-//   - and the windowed path is dramatically faster than the serial one — the
-//     property the old benchmarks could not have caught.
+// The rest of the suite runs on the zero-latency LoopbackNetwork, where per-block
+// and batched round trips finish in the same ~0 ms — so the cost that batching
+// attacks (wall-clock ≈ round-trip count × RTT) is invisible. This group gives the
+// link a real RTT and asserts what only then matters: that OFFER, STORE, and FETCH
+// are batched *per holder* instead of issued *per block*. The win shows up as
+// request counts (LatencyNetwork.byType), not just wall-clock:
+//   - PUT negotiates with ONE OFFER per holder (accept-mask) and pushes the
+//     accepted blocks in ONE streamed STORE per holder — no per-block handshake.
+//   - GET pulls every block a holder serves in ONE FETCH per holder.
+//   - correctness is unchanged: bytes round-trip, assembly lands at the right
+//     offsets regardless of completion order, and any k of n still reads.
 
 import { loadWasmBytes, loadSodium, createConnectedCohort } from "../build/host/node.js";
 import { bytesEqual } from "../build/host/util.js";
@@ -18,6 +19,9 @@ import { LatencyNetwork } from "./latency-net.mjs";
 const DELAY = 2;        // ms per send → ~4 ms per request/response round trip
 const TIMEOUT = 2000;   // generous: requests succeed, so this never fires
 const W = 6;            // window width under test (chunks N > W so the cap binds)
+
+// MsgType (host/protocol.ts) — index the per-type request counter.
+const OFFER = 2, FETCH = 3, STORE = 4;
 
 function file(n, seed = 1) {
   const out = new Uint8Array(n);
@@ -29,15 +33,16 @@ export async function run(t) {
   const sodium = await loadSodium();
   const wasm = await loadWasmBytes();
   // RS(2,2): every chunk places n = k + m = 4 distinct blocks; a 6-node cohort
-  // leaves 5 holders, enough for placement. N (> W) chunks → a one-chunk-at-a-time
-  // PUT pays N× the round trips a window of W overlaps.
+  // leaves 5 holders, enough for placement. N (> W) chunks → a per-block PUT would
+  // pay N×n OFFER round trips; batching folds them to ≈ one OFFER per holder.
   const config = { k: 2, m: 2, blockSize: 64 };
   const N = 12;
-  const n = config.k + config.m; // blocks placed per chunk, fanned out in parallel
+  const n = config.k + config.m;        // blocks per chunk
+  const replicas = config.m + 1;        // manifest copies (defaultConfig: m+1)
   const data = file(N * config.k * config.blockSize, 7); // exactly N RS chunks (N > W)
 
-  // Stand up a fresh cohort, run `body(owner)`, and return its wall-clock plus
-  // the link's peak request concurrency for that run.
+  // Stand up a fresh cohort, run `body(owner)`, and return its wall-clock plus the
+  // link's request counters (reset just before the body runs).
   async function onCohort(cfg, body) {
     const net = new LatencyNetwork(DELAY);
     const nodes = await createConnectedCohort({ count: 6, network: net, sodium, wasm, config: cfg, timeoutMs: TIMEOUT });
@@ -45,82 +50,54 @@ export async function run(t) {
     const t0 = performance.now();
     const result = await body(nodes[0]);
     const ms = performance.now() - t0;
-    nodes.forEach((n) => n.close());
-    return { result, ms, maxInflightWork: net.maxInflightWork };
+    const byType = net.byType, peakWork = net.maxInflightWork;
+    nodes.forEach((nn) => nn.close());
+    return { result, ms, byType, peakWork };
   }
 
-  t.group("PUT places n blocks per chunk in parallel, chunks through a window");
+  t.group("PUT batches OFFER and STORE per holder, not per block");
   {
-    const serial = await onCohort(
-      { ...config, putConcurrency: 1 },
-      (owner) => owner.put(data),
-    );
-    const windowed = await onCohort(
-      { ...config, putConcurrency: W },
-      (owner) => owner.put(data),
-    );
+    const put = await onCohort(config, (o) => o.put(data));
+    const offers = put.byType[OFFER] ?? 0;
+    const stores = put.byType[STORE] ?? 0;
 
-    // One chunk at a time still fans its n blocks out concurrently (Phase 2), so
-    // even the chunk-window-of-1 run peaks at n in flight, not 1.
-    t.eq(serial.maxInflightWork, n, `putConcurrency=1 still places a chunk's n=${n} blocks in parallel (peak ${serial.maxInflightWork})`);
-    // The chunk window stacks on top: W chunks × n blocks in flight at the peak.
-    t.eq(windowed.maxInflightWork, W * n, `putConcurrency=${W} drives ${W}×${n} placements in flight (peak ${windowed.maxInflightWork}, N=${N} > W)`);
-    t.eq(windowed.result.blockIds.length, serial.result.blockIds.length, "both paths place the same number of blocks");
-    t.ok(windowed.ms < serial.ms * 0.6,
-      `windowing chunks is far faster than one-at-a-time (${windowed.ms.toFixed(0)} ms vs ${serial.ms.toFixed(0)} ms) — the regression a real RTT exposes`);
+    // A per-block PUT issues N×n OFFERs AND N×n STOREs (+ the manifest's replicas).
+    // Batching folds EACH to ≈ one message per holder offered to (≤ n) + the
+    // manifest's per-replica messages — the OFFER handshake and the bulk STORE both
+    // collapse from per-block to per-holder.
+    t.ok(offers <= n + replicas, `OFFER batched: ${offers} for ${N * n} chunk blocks (≤ one per holder + ${replicas} manifest)`);
+    t.ok(stores <= n + replicas, `STORE batched: ${stores} for ${N * n} chunk blocks (≤ one per holder + ${replicas} manifest)`);
+    t.ok(offers + stores < N * n, `control round trips collapsed from per-block ${2 * (N * n)} to ${offers + stores}`);
+    t.eq(put.result.blockIds.length, N * n + 1, "every chunk block + the manifest was placed");
   }
 
-  t.group("a window ≥ chunk count pipelines the OFFER+STORE round trips together");
+  t.group("GET pulls every block a holder serves in one FETCH, not one per block");
   {
-    // The remaining PUT cost is the per-block OFFER→STORE double round trip. It
-    // only serializes when the window is smaller than the chunk count; widen the
-    // window past N and every chunk's OFFER and STORE are in flight at once, so the
-    // OFFER round trip overlaps instead of adding to the critical path — no need to
-    // skip admission. Asserts a window ≥ N is materially faster than the default-ish
-    // window < N, with identical placement.
-    const narrow = await onCohort({ ...config, putConcurrency: 4 }, (o) => o.put(data)); // 4 < N=12
-    const wide = await onCohort({ ...config, putConcurrency: N * 2 }, (o) => o.put(data)); // ≥ N
-    t.eq(wide.result.blockIds.length, narrow.result.blockIds.length, "the window width does not change placement");
-    t.ok(wide.ms < narrow.ms * 0.7,
-      `a window ≥ chunk count pipelines the OFFER+STORE round trips (${wide.ms.toFixed(0)} ms vs ${narrow.ms.toFixed(0)} ms at W < N)`);
-  }
-
-  t.group("GET fans out discovery once, then fetches chunks through a window");
-  {
-    // One PUT, then read it back at W=1 and W=W on fresh links so we compare the
-    // *same* placement. The windowed GET must assemble byte-identically.
+    // One PUT, then read it back. A per-block GET would issue N×k fetches + the
+    // manifest; the batched GET issues ≈ one FETCH per distinct holder + the
+    // manifest, and assembles byte-identically.
     const net = new LatencyNetwork(DELAY);
     const nodes = await createConnectedCohort({ count: 6, network: net, sodium, wasm, config: { ...config, putConcurrency: W, getConcurrency: W }, timeoutMs: TIMEOUT });
     const owner = nodes[0];
     const put = await owner.put(data);
 
     net.reset();
-    owner.config.getConcurrency = 1;
-    let t0 = performance.now();
-    const serialBytes = await owner.get(put.manifestId, put.key);
-    const serialMs = performance.now() - t0;
-    const serialWork = net.maxInflightWork;
+    const bytes = await owner.get(put.manifestId, put.key);
+    const fetches = net.byType[FETCH] ?? 0;
 
-    net.reset();
-    owner.config.getConcurrency = W;
-    t0 = performance.now();
-    const windowedBytes = await owner.get(put.manifestId, put.key);
-    const windowedMs = performance.now() - t0;
-    const windowedWork = net.maxInflightWork;
-
-    t.ok(bytesEqual(serialBytes, data), "serial GET reconstructs the file");
-    t.ok(bytesEqual(windowedBytes, data), "windowed GET reconstructs the file byte-identically");
-    t.eq(serialWork, 1, "getConcurrency=1 fetches one block at a time (serial)");
-    t.eq(windowedWork, W, `getConcurrency=${W} drives the fetch window to its bound (peak ${windowedWork})`);
-    t.ok(windowedMs < serialMs * 0.6,
-      `windowed GET is far faster than serial (${windowedMs.toFixed(0)} ms vs ${serialMs.toFixed(0)} ms)`);
-    nodes.forEach((n) => n.close());
+    t.ok(bytesEqual(bytes, data), "batched GET reconstructs the file byte-identically");
+    // ≤ one FETCH per cohort holder (each serves a batch of the blocks it holds) +
+    // one for the manifest — far below the N×k a per-block GET would issue.
+    t.ok(fetches <= nodes.length,
+      `batched FETCH: ${fetches} FETCHes to recover ${N} chunks (≤ one per holder + manifest, vs ${N * config.k} per-block)`);
+    t.ok(fetches * 3 < N * config.k, `FETCH round trips are a fraction of the per-block count (${fetches} vs ${N * config.k})`);
+    nodes.forEach((nn) => nn.close());
   }
 
-  t.group("the window preserves every existing invariant under latency");
+  t.group("the batched paths preserve every invariant under latency");
   {
     // A full round trip on the latency link, just like the loopback groups, to
-    // confirm the concurrent path is correct end-to-end and tolerates loss.
+    // confirm the batched path is correct end-to-end and tolerates loss.
     const net = new LatencyNetwork(DELAY);
     const nodes = await createConnectedCohort({ count: 6, network: net, sodium, wasm, config, timeoutMs: TIMEOUT });
     const owner = nodes[0];
@@ -129,7 +106,7 @@ export async function run(t) {
     // Drop two holders (≤ m of any chunk): any k of n still reads.
     net.setOnline(nodes[1].peerId, false);
     net.setOnline(nodes[2].peerId, false);
-    t.ok(bytesEqual(await owner.get(put.manifestId, put.key), data), "windowed GET still reads with two holders offline");
-    nodes.forEach((n) => n.close());
+    t.ok(bytesEqual(await owner.get(put.manifestId, put.key), data), "batched GET still reads with two holders offline");
+    nodes.forEach((nn) => nn.close());
   }
 }

@@ -33,8 +33,9 @@ import { Cohort } from "./cohort.js";
 import { Coordinator, type PutResult } from "./coordinator.js";
 import { Repair } from "./repair.js";
 import {
-  MsgType, decodeHaveReq, encodeHaveRes, decodeOffer, OFFER_ACCEPT, OFFER_DECLINE,
-  decodeStore, STORE_OK, STORE_FAIL, encodeFetchRes,
+  MsgType, decodeHaveReq, encodeHaveRes, decodeOfferBatch, encodeOfferMask,
+  decodeStoreBatch, encodeStoreMask, decodeFetchBatchReq, encodeFetchBatchRes,
+  type Offer,
 } from "./protocol.js";
 import { verifyDescriptor, descriptorContains } from "./manifest.js";
 import { type Node, type Identity, type StorageConfig, defaultConfig } from "./core.js";
@@ -194,20 +195,59 @@ export class StorageNode implements Node {
         return encodeHaveRes(ids.map((id) => this.store.has(id)));
       }
       case MsgType.OFFER: {
-        const o = decodeOffer(payload);
-        return this.admit(o.descriptor, o.blockId, o.size) ? OFFER_ACCEPT : OFFER_DECLINE;
+        return encodeOfferMask(this.admitBatch(decodeOfferBatch(payload)));
       }
       case MsgType.STORE: {
-        const s = decodeStore(payload);
-        return this.acceptStore(s.blockId, s.descriptor, s.bytes) ? STORE_OK : STORE_FAIL;
+        // Each block is hash-verified + admitted independently (acceptStore), and
+        // committed before the next so the §6 sibling rule + §14 quota see prior
+        // blocks of the same batch — the binding gate, unchanged by batching.
+        return encodeStoreMask(decodeStoreBatch(payload).map((s) => this.acceptStore(s.blockId, s.descriptor, s.bytes)));
       }
       case MsgType.FETCH: {
-        const sb = this.store.get(payload.slice(0, 32));
-        return encodeFetchRes(sb ? sb.bytes : null);
+        const ids = decodeFetchBatchReq(payload);
+        return encodeFetchBatchRes(ids.map((id) => {
+          const sb = this.store.get(id);
+          return sb ? sb.bytes : null;
+        }));
       }
       default:
         return null;
     }
+  }
+
+  /** Batched admission: the same §6 sibling-rule + §14 quota check as `admit`,
+   *  but evaluated *cumulatively* over one OFFER's worth of blocks so a single
+   *  round trip can pre-decline the ones that won't fit. The running `free`
+   *  budget shrinks as blocks are provisionally accepted, and a block whose
+   *  sibling is already held OR provisionally accepted *in this same batch* is
+   *  declined — so two blocks of one chunk can never both pass here. STORE
+   *  re-checks every block against the committed store (acceptStore/admit), so a
+   *  TOCTOU between this and the push is caught there; this is the advisory
+   *  pre-check, not the enforcement. Returns one accept flag per offer, in order. */
+  private admitBatch(offers: Offer[]): boolean[] {
+    const stat = this.store.stat();
+    let free = stat.free;
+    // A holder that's out of quota declines every OFFER but still serves FETCHes
+    // (which don't check quota) — so PUT fails while GET works, silently. Say so:
+    // this fires only when nothing in the batch can fit, i.e. the store is full.
+    if (offers.length > 0 && offers.every((o) => o.size > free)) {
+      console.warn(`[holder ${this.peerId.slice(0, 8)}] OFFER declined: store full — free=${free} B < block=${offers[0].size} B (used ${stat.used}/${stat.quota} B). Clear its data dir or raise its quota.`);
+    }
+    const provisional = new Set<string>();
+    return offers.map((o) => {
+      if (o.size > free) return false;
+      if (o.descriptor) {
+        const sd = verifyDescriptor(this.sodium, o.descriptor);
+        if (!sd || !descriptorContains(sd.descriptor, o.blockId)) return false; // forged/unsigned/not-of-chunk (§4.3)
+        for (const sib of sd.descriptor.blockIds) {                              // sibling rule (§6)
+          if (bytesEqual(sib, o.blockId)) continue;
+          if (this.store.has(sib) || provisional.has(toHex(sib))) return false;
+        }
+      }
+      free -= o.size;
+      provisional.add(toHex(o.blockId));
+      return true;
+    });
   }
 
   /** Admission control (§6 sibling rule, §14 quota). A holder enforces the

@@ -35,7 +35,8 @@ const url = `${base}/${encodeURIComponent(room)}`;
 const RTC_CONFIG = { iceServers: [{ urls: ["stun:stun.l.google.com:19302", "stun:stun.cloudflare.com:3478"] }] };
 
 // Defaults match p2p.html so a mixed browser/console cohort agrees on RS params.
-const config = { k: Number(process.env.K) || 1, m: Number(process.env.M) || 1, blockSize: Number(process.env.BS) || 256 };
+// maxMessageBytes mirrors the browser's WebRTC value — under werift's ~64 KiB channel.
+const config = { k: Number(process.env.K) || 1, m: Number(process.env.M) || 1, blockSize: Number(process.env.BS) || 256, maxMessageBytes: 48 * 1024 };
 
 const sodium = await loadSodium();
 const wasm = await loadWasmBytes();

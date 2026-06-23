@@ -147,7 +147,7 @@ function rsEncode(k, m, blockSize, dataBlocks) {
   return splitBlocks(moduleCallParts(CODEC_NAME, [head, ...dataBlocks]), blockSize);
 }
 function rsDecode(k, m, blockSize, present) {
-  // Callers (fetchCodedChunk, healCoded) already gate on present.length >= k, but
+  // Callers (assembleChunk, healCoded) already gate on present.length >= k, but
   // guard the codec seam itself so a short set is a clean throw, never a silently
   // truncated decode request (head[7] = use.length under k → garbage out).
   if (present.length < k) throw new Error("rsDecode: need at least k blocks to reconstruct");
@@ -240,33 +240,87 @@ function haveWant(ids) {
   }
   return holders;
 }
-// verification-fetch (§8): pull a block from a holder, confirm it hashes to its
+// Batched FETCH wire: [count u32][id*32] → [count u32][ found u8 (| len u32 | bytes) ].
+function encodeFetchBatchReq(ids) {
+  const head = new Uint8Array(4); wU32(head, 0, ids.length);
+  return concat([head, ...ids]);
+}
+function decodeFetchBatchRes(buf) {
+  const count = rU32(buf, 0), out = []; let o = 4;
+  for (let i = 0; i < count; i++) {
+    const found = buf[o]; o += 1;
+    if (found !== 1) { out.push(null); continue; }
+    const len = rU32(buf, o); o += 4; out.push(buf.slice(o, o + len)); o += len;
+  }
+  return out;
+}
+// Batched fetch from one peer (the GET hot path): one round trip for many blocks.
+// Self reads the local store. Returns an array aligned to `ids` (bytes|null), or
+// null for the whole batch if the peer was unreachable — so the caller can score a
+// reachable-but-didn't-serve as a §8 miss but never an unreachable peer. The
+// caller hash-verifies every block (§4.2).
+function fetchBatch(peer, ids) {
+  if (peer === myPeer()) return ids.map((id) => { const sb = storeGet(id); return sb ? sb.bytes : null; });
+  const resp = netSend(peer, MSG_FETCH, encodeFetchBatchReq(ids));
+  if (resp === null) return null;
+  const blocks = decodeFetchBatchRes(resp);
+  return ids.map((_, i) => blocks[i] || null);
+}
+// verification-fetch (§8): pull one block from a holder, confirm it hashes to its
 // id, and score the holder. The hash check + reputation are the guest's, not the
-// host's. Self-fetch reads the local store directly (no round trip).
+// host's. Used for the manifest + repair; the GET path uses the batched fetchBatch.
 function verificationFetch(peer, id) {
   if (peer === myPeer()) {
     const sb = storeGet(id);
     return sb && bytesEqual(hash(sb.bytes), id) ? sb.bytes : null;
   }
-  const resp = netSend(peer, MSG_FETCH, id.slice());
+  const resp = netSend(peer, MSG_FETCH, encodeFetchBatchReq([id]));
   if (resp === null) return null;                       // unreachable — not a miss to score
-  const data = resp.length >= 1 && resp[0] === 1 ? resp.slice(1) : null;
+  const data = decodeFetchBatchRes(resp)[0] || null;
   const t = clockNow();
   if (data && bytesEqual(hash(data), id)) { repObserve(fromHex(peer), t, true); return data; }
   repObserve(fromHex(peer), t, false);
   return null;
 }
+// Batched OFFER wire: [count u32][ blockId 32 | size u32 | descLen u32 | desc ]+ →
+// one accept byte per entry. Returns the accept mask aligned to `offers`.
+function offerBatch(peer, offers) {
+  let total = 4;
+  for (const o of offers) total += 40 + (o.descriptor ? o.descriptor.length : 0);
+  const req = new Uint8Array(total); wU32(req, 0, offers.length);
+  let p = 4;
+  for (const o of offers) {
+    req.set(o.blockId, p); wU32(req, p + 32, o.size);
+    const desc = o.descriptor || EMPTY; wU32(req, p + 36, desc.length);
+    req.set(desc, p + 40); p += 40 + desc.length;
+  }
+  const resp = netSend(peer, MSG_OFFER, req);
+  if (resp === null) return offers.map(() => false);
+  return offers.map((_, i) => resp[i] === 1);
+}
 function offer(peer, blockId, size, descriptor) {
-  const head = new Uint8Array(40); head.set(blockId, 0); wU32(head, 32, size);
-  const desc = descriptor || EMPTY; wU32(head, 36, desc.length);
-  const resp = netSend(peer, MSG_OFFER, concat([head, desc]));
-  return resp !== null && resp.length >= 1 && resp[0] === 1;
+  return offerBatch(peer, [{ blockId, size, descriptor }])[0];
+}
+// Batched STORE wire: [count u32][ blockId 32 | descLen u32 | bytesLen u32 | desc |
+// bytes ]+ → one stored/failed byte per entry. The upload twin of the batched FETCH.
+function storeBatch(peer, stores) {
+  let total = 4;
+  for (const s of stores) total += 40 + (s.descriptor ? s.descriptor.length : 0) + s.bytes.length;
+  const req = new Uint8Array(total); wU32(req, 0, stores.length);
+  let p = 4;
+  for (const s of stores) {
+    req.set(s.blockId, p);
+    const desc = s.descriptor || EMPTY;
+    wU32(req, p + 32, desc.length); wU32(req, p + 36, s.bytes.length);
+    req.set(desc, p + 40); req.set(s.bytes, p + 40 + desc.length);
+    p += 40 + desc.length + s.bytes.length;
+  }
+  const resp = netSend(peer, MSG_STORE, req);
+  if (resp === null) return stores.map(() => false);
+  return stores.map((_, i) => resp[i] === 1);
 }
 function storePush(peer, blockId, descriptor, bytes) {
-  const head = new Uint8Array(36); head.set(blockId, 0);
-  const desc = descriptor || EMPTY; wU32(head, 32, desc.length);
-  const resp = netSend(peer, MSG_STORE, concat([head, desc, bytes]));
-  return resp !== null && resp.length >= 1 && resp[0] === 1;
+  return storeBatch(peer, [{ blockId, descriptor, bytes }])[0];
 }
 
 // ── manifest + descriptor (pure; mirror host/manifest.ts) ────────────────────
@@ -340,8 +394,37 @@ function decodeManifest(buf) {
 }
 
 // ── placement + fetch (coordinator §6/§7) ────────────────────────────────────
+// Appended to a placement-failure throw: on a fresh PUT a holder only declines on
+// the §14 quota, so "nothing landed" almost always means the holders are full (GET
+// still works — serving a FETCH never checks quota). Mirror of Coordinator.declineHint.
+const OUT_OF_STORAGE_HINT = " — holders answered but declined: most likely OUT OF STORAGE (quota/disk full); clear the holders' data dirs or raise their quota, or connect more holders";
+// A batched OFFER / STORE / FETCH is split to stay under config().maxMessageBytes —
+// the per-transport cap that keeps one message inside the frame cap AND the request
+// timeout (mirror coordinator.ts). Transport/operator policy injected via the APP
+// preamble (like quota); default if absent.
+function maxMsgBytes() { const v = config().maxMessageBytes; return (typeof v === "number" && v > 0) ? v : (1 << 20); }
+function sliceN(arr, size) {
+  if (arr.length <= size) return [arr];
+  const out = [];
+  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
+  return out;
+}
+// Group items so each group's summed sizeOf stays under `maxBytes` (a single
+// over-cap item still gets its own group). Used to bound a batched STORE message.
+function batchBytes(items, sizeOf, maxBytes) {
+  const out = [];
+  let group = [], acc = 0;
+  for (const it of items) {
+    const sz = sizeOf(it);
+    if (group.length > 0 && acc + sz > maxBytes) { out.push(group); group = []; acc = 0; }
+    group.push(it); acc += sz;
+  }
+  if (group.length > 0) out.push(group);
+  return out;
+}
 // Offer to candidates ranked by reciprocity (§13); on accept, push. Up to `count`
-// distinct peers not in `exclude`. Returns the peers that stored it.
+// distinct peers not in `exclude`. Returns the peers that stored it. Used for the
+// small-file replicas + the manifest; the RS path uses placeChunksBatched.
 function placeBlock(blockId, bytes, descriptor, exclude, count) {
   const placed = [];
   const ranked = rank(cohortPeers().filter((p) => !exclude.has(p)));
@@ -353,7 +436,67 @@ function placeBlock(blockId, bytes, descriptor, exclude, count) {
   }
   return placed;
 }
-// Fetch a block from whichever cohort peer holds it, verifying by hash.
+// Encode + sign one RS chunk: encrypt k data blocks, add m parity, hash, sign.
+function encodeChunk(plaintext, ci, K) {
+  const c = config();
+  const start = ci * c.k * c.blockSize;
+  const chunkPlain = plaintext.slice(start, start + c.k * c.blockSize);
+  const ct = encrypt(K, DOMAIN_BODY, ci, padTo(chunkPlain, c.k * c.blockSize));
+  const dataBlocks = splitBlocks(ct, c.blockSize);
+  const blocks = [...dataBlocks, ...rsEncode(c.k, c.m, c.blockSize, dataBlocks)];
+  const blockIds = blocks.map(hash);
+  const descriptor = signChunk({ k: c.k, m: c.m, blockSize: c.blockSize, blockIds });
+  return { blockIds, blocks, descriptor, placedPeer: new Array(blocks.length).fill(null) };
+}
+// Place every chunk's n blocks with one batched OFFER per peer per round, then the
+// accepted blocks STORE'd. Block index i targets ranked[i], ranked[i+n], … (a
+// disjoint residue class per i, so a chunk's n blocks land on distinct peers,
+// §6/§10). Synchronous: serial over the (small) peer set, but per-peer the OFFER
+// is one round trip for block i of every chunk at once. Returns nothing; fills
+// each chunk's placedPeer[]. Throws if a chunk lands < k distinct ids.
+function placeChunksBatched(chunks) {
+  const c = config();
+  const n = c.k + c.m;
+  const ranked = rank(cohortPeers());
+  const maxBytes = maxMsgBytes();
+  const entryBytes = 40 + (chunks.length ? chunks[0].descriptor.length : 0);
+  const maxOffers = Math.max(1, Math.floor(maxBytes / entryBytes));
+
+  for (let r = 0; ; r++) {
+    const byPeer = new Map(); // peer → [{ch, i}]
+    for (const ch of chunks) {
+      for (let i = 0; i < n; i++) {
+        if (ch.placedPeer[i]) continue;
+        const peer = ranked[i + r * n];
+        if (!peer) continue;
+        let list = byPeer.get(peer); if (!list) byPeer.set(peer, (list = []));
+        list.push({ ch, i });
+      }
+    }
+    if (byPeer.size === 0) break;
+
+    for (const [peer, items] of byPeer) {
+      for (const slice of sliceN(items, maxOffers)) {
+        const offers = slice.map(({ ch, i }) => ({ blockId: ch.blockIds[i], size: ch.blocks[i].length, descriptor: ch.descriptor }));
+        const mask = offerBatch(peer, offers);
+        const accepted = slice.filter((_, j) => mask[j]);
+        // STORE the accepted blocks in byte-bounded batches (one streamed message
+        // each — the upload twin of the batched FETCH).
+        for (const group of batchBytes(accepted, ({ ch, i }) => 40 + ch.descriptor.length + ch.blocks[i].length, maxBytes)) {
+          const stored = storeBatch(peer, group.map(({ ch, i }) => ({ blockId: ch.blockIds[i], descriptor: ch.descriptor, bytes: ch.blocks[i] })));
+          for (let j = 0; j < group.length; j++) if (stored[j]) { group[j].ch.placedPeer[group[j].i] = peer; markSeen(peer); }
+        }
+      }
+    }
+  }
+
+  for (const ch of chunks) {
+    const distinct = new Set();
+    for (let i = 0; i < ch.blockIds.length; i++) if (ch.placedPeer[i]) distinct.add(toHex(ch.blockIds[i]));
+    if (distinct.size < c.k) throw new Error("put: chunk landed " + distinct.size + "/" + c.k + " distinct blocks" + OUT_OF_STORAGE_HINT);
+  }
+}
+// Fetch a block from whichever cohort peer holds it, verifying by hash (manifest + repair).
 function fetchBlock(id) {
   const holders = haveWant([id]).get(toHex(id)) || new Set();
   for (const peer of rank([...holders])) {
@@ -362,37 +505,90 @@ function fetchBlock(id) {
   }
   return null;
 }
-// Replicated chunk (§4.1): fetch each data block from any live holder.
-function fetchReplicatedChunk(d) {
-  const blocks = [];
-  for (const id of d.blockIds) {
-    const b = fetchBlock(id);
-    if (!b) throw new Error("get: a replica is unavailable");
-    blocks.push(b);
+// Fetch every block the file's chunks need, batched per holder (mirror
+// coordinator.ts gatherBlocks). After the file-wide have/want, each still-missing
+// block is requested from its best untried holder, one FETCH per peer per round
+// (sub-batched under the frame cap); a coded chunk stops at k, preferring data
+// blocks. Every returned block is hash-verified (§4.2) and scores its holder (§8).
+// Returns a Map id-hex → bytes. Synchronous, serial over peers.
+function gatherBlocks(descriptors, holders) {
+  const c = config();
+  const got = new Map();
+  const tried = new Map();
+  const triedOf = (h) => { let s = tried.get(h); if (!s) tried.set(h, (s = new Set())); return s; };
+  const maxIds = Math.max(1, Math.floor(maxMsgBytes() / c.blockSize));
+
+  const stillNeeds = (d) => {
+    const distinct = new Set();
+    for (const id of d.blockIds) if (got.has(toHex(id))) distinct.add(toHex(id));
+    const need = d.m === 0 ? d.blockIds.length : d.k;
+    return Math.max(0, need - distinct.size);
+  };
+
+  for (;;) {
+    const byPeer = new Map(); // peer → [idHex]
+    const queued = new Set();
+    for (const d of descriptors) {
+      let need = stillNeeds(d);
+      if (need === 0) continue;
+      for (const id of d.blockIds) {
+        if (need === 0) break;
+        const h = toHex(id);
+        if (got.has(h) || queued.has(h)) continue;
+        const cands = rank([...(holders.get(h) || new Set())].filter((p) => !triedOf(h).has(p)));
+        if (cands.length === 0) continue;
+        let list = byPeer.get(cands[0]); if (!list) byPeer.set(cands[0], (list = []));
+        list.push(h);
+        queued.add(h);
+        need--;
+      }
+    }
+    if (byPeer.size === 0) break;
+
+    for (const [peer, hexes] of byPeer) {
+      const isSelf = peer === myPeer();
+      for (const slice of sliceN(hexes, maxIds)) {
+        const ids = slice.map(fromHex);
+        const blocks = fetchBatch(peer, ids);
+        const t = clockNow();
+        for (let i = 0; i < slice.length; i++) {
+          triedOf(slice[i]).add(peer);
+          if (blocks === null) continue;            // unreachable — not a §8 miss
+          const b = blocks[i];
+          if (b && bytesEqual(hash(b), ids[i])) {
+            if (!got.has(slice[i])) got.set(slice[i], b);
+            if (!isSelf) { markSeen(peer); repObserve(fromHex(peer), t, true); }
+          } else if (!isSelf) {
+            repObserve(fromHex(peer), t, false);
+          }
+        }
+      }
+    }
   }
-  return concat(blocks);
+  return got;
 }
-// Coded chunk (§7): locate via have/want, fetch any k of n, decode. With all k
-// data blocks present, systematic RS lets us just concatenate them (§4.1).
-function fetchCodedChunk(d) {
+// Assemble one chunk's ciphertext from the gathered blocks (§4.1/§7).
+function assembleChunk(d, got) {
+  if (d.m === 0) {
+    const blocks = [];
+    for (const id of d.blockIds) {
+      const b = got.get(toHex(id));
+      if (!b) throw new Error("get: a replica is unavailable");
+      blocks.push(b);
+    }
+    return concat(blocks);
+  }
   const k = d.k;
-  const holders = haveWant(d.blockIds);
   const present = [];
-  for (let idx = 0; idx < d.blockIds.length && present.length < k; idx++) {
-    const set = holders.get(toHex(d.blockIds[idx]));
-    if (!set || set.size === 0) continue;
-    const peer = rank([...set])[0];
-    const b = verificationFetch(peer, d.blockIds[idx]);
-    if (b) present.push({ index: idx, bytes: b });
+  for (let i = 0; i < d.blockIds.length && present.length < k; i++) {
+    const b = got.get(toHex(d.blockIds[i]));
+    if (b) present.push({ index: i, bytes: b });
   }
   if (present.length < k) throw new Error("get: fewer than k blocks retrievable — chunk unavailable");
-
   const allData = present.slice(0, k).every((p) => p.index < k);
   if (allData) {
     const ordered = present.filter((p) => p.index < k).sort((a, b) => a.index - b.index).slice(0, k);
-    if (ordered.length === k && ordered.every((p, i) => p.index === i)) {
-      return concat(ordered.map((p) => p.bytes)); // systematic — no decode
-    }
+    if (ordered.length === k && ordered.every((p, i) => p.index === i)) return concat(ordered.map((p) => p.bytes));
   }
   return concat(rsDecode(k, d.m, d.blockSize, present));
 }
@@ -415,36 +611,20 @@ function doPut(plaintext) {
     const env = signChunk({ k: d, m: 0, blockSize: c.blockSize, blockIds });
     for (let i = 0; i < d; i++) {
       if (placeBlock(blockIds[i], dataBlocks[i], env, new Set(), c.replicas).length === 0) {
-        throw new Error("put: no peer accepted a replica");
+        throw new Error("put: no peer accepted a replica" + OUT_OF_STORAGE_HINT);
       }
     }
     descriptors.push(env);
   } else {
-    // RS path (§4.1): chunk into k data blocks, add m parity, place on distinct peers.
+    // RS path (§4.1): chunk into k data blocks + m parity, sign each, then place
+    // the whole file through batched per-peer OFFERs (placeChunksBatched). A
+    // degenerate RS(1,·) repeats an id (parity≡data); the repeat still gets its
+    // own peer — k=1 replication — but counts once toward the ≥ k distinct check.
     const numChunks = Math.ceil(totalBlocks / c.k);
-    for (let ci = 0; ci < numChunks; ci++) {
-      const start = ci * c.k * c.blockSize;
-      const chunkPlain = plaintext.slice(start, start + c.k * c.blockSize);
-      const ct = encrypt(K, DOMAIN_BODY, ci, padTo(chunkPlain, c.k * c.blockSize));
-      const dataBlocks = splitBlocks(ct, c.blockSize);
-      const all = [...dataBlocks, ...rsEncode(c.k, c.m, c.blockSize, dataBlocks)];
-      const blockIds = all.map(hash);
-      const env = signChunk({ k: c.k, m: c.m, blockSize: c.blockSize, blockIds });
-      // Distinct peers per block (§6); fewer than n reachable ⇒ place what the
-      // cohort holds (recoverable while ≥ k distinct ids land, repair §9 tops up).
-      // A degenerate RS(1,·) repeats an id (parity≡data); the repeat still gets
-      // its own peer — that is k=1 replication — but counts once toward distinct.
-      const used = new Set();
-      const placedHex = new Set();
-      for (let i = 0; i < all.length; i++) {
-        const placed = placeBlock(blockIds[i], all[i], env, used, 1);
-        if (placed.length === 0) break;
-        for (const p of placed) used.add(p);
-        placedHex.add(toHex(blockIds[i]));
-      }
-      if (placedHex.size < c.k) throw new Error("put: chunk " + ci + " landed " + placedHex.size + "/" + c.k + " distinct blocks — connect more holders");
-      descriptors.push(env);
-    }
+    const chunks = [];
+    for (let ci = 0; ci < numChunks; ci++) chunks.push(encodeChunk(plaintext, ci, K));
+    placeChunksBatched(chunks);
+    for (const ch of chunks) descriptors.push(ch.descriptor);
   }
 
   // Build, encrypt, and replicate the manifest (§4.3).
@@ -454,7 +634,7 @@ function doPut(plaintext) {
   const manCt = encrypt(K, DOMAIN_MANIFEST, 0, manPlain);
   const manifestId = hash(manCt);
   if (placeBlock(manifestId, manCt, null, new Set(), c.replicas).length === 0) {
-    throw new Error("put: no peer accepted the manifest");
+    throw new Error("put: no peer accepted the manifest" + OUT_OF_STORAGE_HINT);
   }
 
   // result: [manifestId 32][replicated u8][chunkCount u32][K 32]
@@ -473,13 +653,20 @@ function doGet(arg) {
   if (!manCt) throw new Error("get: manifest not found in cohort");
   const man = decodeManifest(decrypt(K, DOMAIN_MANIFEST, 0, manCt));
 
+  // One file-wide have/want, then one batched FETCH per holder (gatherBlocks),
+  // instead of a discovery + fetch per chunk.
+  const ds = man.chunks.map((env) => parseSignedDescriptor(env).descriptor);
+  const allIds = [];
+  for (const d of ds) for (const id of d.blockIds) allIds.push(id);
+  const holders = haveWant(allIds);
+  const got = gatherBlocks(ds, holders);
+
   const out = new Uint8Array(man.fileSize);
   let written = 0;
-  for (let ci = 0; ci < man.chunks.length; ci++) {
-    const d = parseSignedDescriptor(man.chunks[ci]).descriptor;
-    const chunkCipher = d.m === 0 ? fetchReplicatedChunk(d) : fetchCodedChunk(d);
-    const domainIndex = d.m === 0 ? 0 : ci;
-    const chunkPlain = decrypt(K, DOMAIN_BODY, domainIndex, chunkCipher);
+  for (let ci = 0; ci < ds.length; ci++) {
+    const d = ds[ci];
+    const chunkCipher = assembleChunk(d, got);
+    const chunkPlain = decrypt(K, DOMAIN_BODY, d.m === 0 ? 0 : ci, chunkCipher);
     const take = Math.min(chunkPlain.length, man.fileSize - written);
     out.set(chunkPlain.subarray(0, take), written);
     written += take;
@@ -632,6 +819,30 @@ function admit(descriptor, blockId, size) {
   }
   return true;
 }
+// Batched admission (mirror StorageNode.admitBatch): one OFFER's worth of blocks
+// checked cumulatively — the §14 quota budget shrinks as blocks are provisionally
+// accepted, and a block whose sibling (§6) is already held OR provisionally
+// accepted in this same batch is declined, so two blocks of one chunk never both
+// pass. STORE re-checks each block (acceptStore/admit), so this is the advisory
+// pre-check, never the enforcement.
+function admitBatch(offers) {
+  let free = quotaFree();
+  const provisional = new Set();
+  return offers.map((o) => {
+    if (o.size > free) return false;
+    if (o.descriptor && o.descriptor.length) {
+      const d = verifyDescriptor(o.descriptor);
+      if (!d || !d.blockIds.some((id) => bytesEqual(id, o.blockId))) return false; // forged/unsigned/not-of-chunk
+      for (const sib of d.blockIds) {
+        if (bytesEqual(sib, o.blockId)) continue;
+        if (storeHas(sib) || provisional.has(toHex(sib))) return false;
+      }
+    }
+    free -= o.size;
+    provisional.add(toHex(o.blockId));
+    return true;
+  });
+}
 function acceptStore(blockId, descriptor, bytes) {
   // The bytes must hash to the claimed id (§4.2) — every holder, every hop.
   if (!bytesEqual(hash(bytes), blockId)) return false;
@@ -649,27 +860,66 @@ function encodeHaveRes(held) {
   for (let i = 0; i < held.length; i++) out[i] = held[i] ? 1 : 0;
   return out;
 }
-function decodeOfferReq(buf) {
-  const dlen = rU32(buf, 36);
-  return { blockId: buf.slice(0, 32), size: rU32(buf, 32), descriptor: dlen > 0 ? buf.slice(40, 40 + dlen) : null };
+function decodeOfferBatch(buf) {
+  const count = rU32(buf, 0), out = [];
+  let o = 4;
+  for (let i = 0; i < count; i++) {
+    const blockId = buf.slice(o, o + 32), size = rU32(buf, o + 32), dlen = rU32(buf, o + 36);
+    out.push({ blockId, size, descriptor: dlen > 0 ? buf.slice(o + 40, o + 40 + dlen) : null });
+    o += 40 + dlen;
+  }
+  return out;
 }
-function decodeStoreReq(buf) {
-  const dlen = rU32(buf, 32);
-  return { blockId: buf.slice(0, 32), descriptor: dlen > 0 ? buf.slice(36, 36 + dlen) : null, bytes: buf.slice(36 + dlen) };
+function encodeOfferMask(accepts) {
+  const out = new Uint8Array(accepts.length);
+  for (let i = 0; i < accepts.length; i++) out[i] = accepts[i] ? 1 : 0;
+  return out;
 }
-function encodeFetchRes(bytes) {
-  if (!bytes) return new Uint8Array([0]);
-  const out = new Uint8Array(1 + bytes.length); out[0] = 1; out.set(bytes, 1);
+function decodeStoreBatch(buf) {
+  const count = rU32(buf, 0), out = [];
+  let o = 4;
+  for (let i = 0; i < count; i++) {
+    const blockId = buf.slice(o, o + 32), dlen = rU32(buf, o + 32), blen = rU32(buf, o + 36);
+    out.push({
+      blockId,
+      descriptor: dlen > 0 ? buf.slice(o + 40, o + 40 + dlen) : null,
+      bytes: buf.slice(o + 40 + dlen, o + 40 + dlen + blen),
+    });
+    o += 40 + dlen + blen;
+  }
+  return out;
+}
+function encodeStoreMask(stored) {
+  const out = new Uint8Array(stored.length);
+  for (let i = 0; i < stored.length; i++) out[i] = stored[i] ? 1 : 0;
+  return out;
+}
+function decodeFetchBatchReq(buf) {
+  const count = rU32(buf, 0), out = [];
+  for (let i = 0; i < count; i++) out.push(buf.slice(4 + i * 32, 4 + (i + 1) * 32));
+  return out;
+}
+function encodeFetchBatchRes(blocks) {
+  let total = 4;
+  for (const b of blocks) total += b ? 5 + b.length : 1;
+  const out = new Uint8Array(total);
+  wU32(out, 0, blocks.length);
+  let o = 4;
+  for (const b of blocks) {
+    if (!b) { out[o++] = 0; continue; }
+    out[o++] = 1; wU32(out, o, b.length); o += 4; out.set(b, o); o += b.length;
+  }
   return out;
 }
 // Dispatch one incoming control message: arg = [type u8][payload]. Synchronous —
-// every branch is local fs + crypto; the initiator owns the round trips.
+// every branch is local fs + crypto; the initiator owns the round trips. OFFER and
+// FETCH carry a batch of blocks (one per peer per PUT/GET) and answer all at once.
 function doHandle(arg) {
   const type = arg[0], payload = arg.slice(1);
   if (type === MSG_HAVE) return encodeHaveRes(decodeHaveIds(payload).map((id) => storeHas(id)));
-  if (type === MSG_OFFER) { const o = decodeOfferReq(payload); return new Uint8Array([admit(o.descriptor, o.blockId, o.size) ? 1 : 0]); }
-  if (type === MSG_STORE) { const s = decodeStoreReq(payload); return new Uint8Array([acceptStore(s.blockId, s.descriptor, s.bytes) ? 1 : 0]); }
-  if (type === MSG_FETCH) { const sb = storeGet(payload.slice(0, 32)); return encodeFetchRes(sb ? sb.bytes : null); }
+  if (type === MSG_OFFER) return encodeOfferMask(admitBatch(decodeOfferBatch(payload)));
+  if (type === MSG_STORE) return encodeStoreMask(decodeStoreBatch(payload).map((s) => acceptStore(s.blockId, s.descriptor, s.bytes)));
+  if (type === MSG_FETCH) return encodeFetchBatchRes(decodeFetchBatchReq(payload).map((id) => { const sb = storeGet(id); return sb ? sb.bytes : null; }));
   return EMPTY;
 }
 

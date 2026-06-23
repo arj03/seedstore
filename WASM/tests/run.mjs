@@ -16,6 +16,7 @@ const modules = [
   "./codec.test.mjs",
   "./bridges.test.mjs",
   "./manifest.test.mjs",
+  "./protocol.test.mjs",
   "./reputation.test.mjs",
   "./storage.test.mjs",
   "./concurrency.test.mjs",

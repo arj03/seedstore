@@ -5,7 +5,7 @@
 // only ever names ids the asker already holds, so files cannot be enumerated.
 
 import type { Node, PeerId } from "./core.js";
-import { MsgType, encodeHaveReq, decodeHaveRes, encodeFetchReq, decodeFetchRes } from "./protocol.js";
+import { MsgType, encodeHaveReq, decodeHaveRes, encodeFetchBatchReq, decodeFetchBatchRes } from "./protocol.js";
 import { toHex, fromHex, bytesEqual } from "./util.js";
 
 export class Cohort {
@@ -52,8 +52,8 @@ export class Cohort {
     }
     const peerPk = fromHex(peer);
     try {
-      const res = await this.node.transport.request(peer, MsgType.FETCH, encodeFetchReq(id));
-      const bytes = decodeFetchRes(res);
+      const res = await this.node.transport.request(peer, MsgType.FETCH, encodeFetchBatchReq([id]));
+      const bytes = decodeFetchBatchRes(res)[0] ?? null;
       if (bytes && bytesEqual(this.node.crypto.hash(bytes), id)) {
         this.node.markSeen(peer);
         this.node.reputation.observe(peerPk, this.node.now(), true);

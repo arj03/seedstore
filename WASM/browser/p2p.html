@@ -105,24 +105,33 @@ import { WsNetwork } from "seedkernel-wasm/net-ws";
 // holders — so a file survives losing either holder, and the demo needs two
 // connected peers (three tabs). Bump m with more tabs for more redundancy.
 //
-// blockSize sets the chunk count, and the chunk count IS the round-trip count: a
-// file becomes ceil(size / (k·blockSize)) chunks, each costing an encrypt +
-// RS-encode + Ed25519 signature + an OFFER→STORE round trip per block. So a
-// wall-clock PUT/GET scales as round-trips × RTT. Two honest dials cut it:
-//   1. Bigger blocks → fewer chunks → fewer round trips. Capped by the transport:
-//      WebRTC (werift) reassembles data-channel messages up to ~64 KiB → 32 KiB;
-//      WebSocket/TCP framing (ws.wasm) carries up to 16 MB → 256 KiB, 8× fewer
-//      chunks for the cross-machine WS cohort. blockSize lives in the manifest, so
-//      PUT-encode and GET-decode of one file always agree; sessions may differ.
-//   2. A chunk window (putConcurrency/getConcurrency) ≥ the chunk count: then every
-//      chunk's OFFER and STORE are in flight at once, so the OFFER round trip
-//      overlaps the STOREs instead of serializing ahead of them — the honest way to
-//      stop the OFFER→STORE handshake from doubling PUT, with NO change to the
-//      protocol or admission. Peak in-flight per peer ≈ W, kept under net-link's
-//      MAX_QUEUE (256). At RS(1,1) a 10 MB file is 40 chunks over WS, so 64 covers
-//      it with headroom (32 KiB/WebRTC files are tiny, so W barely binds there).
+// blockSize sets the chunk count. The network cost is batched PER HOLDER, not per
+// block (host/coordinator.ts), so each holder takes a handful of round trips total
+// regardless of how many blocks it carries — the blocks to/from a peer ride streamed
+// batches, not a message per block:
+//   - PUT: ONE OFFER per holder (the holder replies an accept-mask: quota + the §6
+//     sibling rule over the whole batch), then a streamed STORE per holder carrying
+//     the accepted blocks (the holder hash-verifies + admits each and replies a
+//     stored-mask — STORE is still the binding gate, just framed once).
+//   - GET: a FETCH per holder — every block that peer serves — after a single
+//     file-wide have/want.
+// Each holder runs its own OFFER→STORE pipeline in parallel, so both sockets stay
+// saturated. blockSize still matters: bigger blocks = fewer chunks = less per-block
+// CPU (encrypt + RS + Ed25519) and smaller manifests. Capped by the transport —
+// WebRTC (werift) reassembles data-channel messages up to ~64 KiB → 32 KiB;
+// WebSocket carries up to 16 MB → 256 KiB. A per-holder batch is itself split under
+// maxMessageBytes (below) into one or a few messages, so no single transfer outruns
+// the frame cap OR the 5 s request timeout — the bug a 10 MB one-shot STORE hit on
+// WS, and a hard break on WebRTC's ~64 KiB channel. blockSize lives in the manifest,
+// so PUT-encode and GET-decode of one file always agree.
 const blockSizeFor = (mode) => (mode === "ws" ? 256 : 32) * 1024;
-const CONFIG = { k: 1, m: 1, blockSize: 32 * 1024, putConcurrency: 64, getConcurrency: 64 };
+// Per-transport batch cap: WS frames hold 16 MB but a multi-MB transfer can outrun
+// the 5 s request timeout, so keep WS batches ~1 MB; WebRTC reassembles only ~64 KiB,
+// so stay under it (one 32 KiB block + headers per message).
+const maxMessageBytesFor = (mode) => (mode === "ws" ? 1 << 20 : 48 * 1024);
+// getConcurrency windows the per-holder FETCH sub-batches on GET; PUT is bounded by
+// the holder count (streamed STOREs each), so it needs no window.
+const CONFIG = { k: 1, m: 1, blockSize: 32 * 1024, getConcurrency: 64 };
 const REQUIRED_PEERS = CONFIG.k + CONFIG.m; // distinct holders a PUT needs
 
 // Public STUN so peers on different machines/NATs can still find a path; for
@@ -191,12 +200,15 @@ async function boot() {
 
     log("loading wasm + booting the storage node on the seedkernel…");
     // The WS/TCP path carries far larger frames than WebRTC, so it gets bigger
-    // blocks (fewer chunks → fewer round trips); WebRTC stays at the werift cap.
-    const config = { ...CONFIG, blockSize: blockSizeFor(mode) };
+    // blocks (fewer chunks → fewer round trips) and a bigger per-message batch cap;
+    // WebRTC stays under the werift ~64 KiB channel on both.
+    const config = { ...CONFIG, blockSize: blockSizeFor(mode), maxMessageBytes: maxMessageBytesFor(mode) };
     node = await createStorageNode({
       network: net, sodium, identity, baseUrl: "./", config, timeoutMs: 5000,
     });
-    log(`node ready (${node.peerId.slice(0, 8)}…), RS(${config.k},${config.m}), ${config.blockSize / 1024} KiB blocks, W=${config.putConcurrency}. handlers installed: ${node.handlersInstalled()}`);
+    // Log the LIVE config the coordinator actually uses (after defaultConfig
+    // merge), so a stale/cached build that lost maxMessageBytes is visible here.
+    log(`node ready (${node.peerId.slice(0, 8)}…), RS(${node.config.k},${node.config.m}), ${node.config.blockSize / 1024} KiB blocks, batch cap ${Math.round(node.config.maxMessageBytes / 1024)} KiB. handlers installed: ${node.handlersInstalled()}`);
 
     $("file").disabled = false;
     lockTransportChoice(); // the network + rendezvous are fixed once the node is up
@@ -279,7 +291,18 @@ $("store").onclick = async () => {
     log(`  ${r.replicated ? "replicated (small file)" : r.chunkCount + " RS chunk(s)"} placed on peers; this node holds none`);
     log(`  PUT ${ms.toFixed(0)} ms — ${(fileMB / (ms / 1000)).toFixed(1)} MB/s file, ${(wireMB / (ms / 1000)).toFixed(1)} MB/s on the wire (uploaded ${wireMB.toFixed(1)} MB)`);
     log(`  token ready — paste it into another tab's GET box.`);
-  } catch (e) { log("  PUT failed: " + (e?.message ?? e)); }
+  } catch (e) {
+    const msg = e?.message ?? String(e);
+    log("  PUT failed: " + msg);
+    // The slow-to-diagnose case: the cohort is connected and GET works, but every
+    // OFFER is declined because the holders are full. Make it loud + actionable.
+    if (/out of storage|declined|no peer accepted/i.test(msg)) {
+      $("status").textContent = "holders full?"; $("status").className = "pill warn";
+      log("  ⚠ the cohort accepted no blocks — the holders are most likely OUT OF STORAGE (their quota/disk is full).");
+      log("    GET keeps working because serving a read never checks the quota; only a write (OFFER) does.");
+      log("    fix: clear each holder's data directory, or raise its quota, then retry.");
+    }
+  }
 };
 
 $("get").onclick = async () => {

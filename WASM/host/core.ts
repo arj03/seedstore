@@ -28,17 +28,22 @@ export interface StorageConfig {
   smallMaxBlocks: number;
   /** Grace window G: an unreachable holder is Suspected, not Lost (§8). */
   graceMs: number;
-  /** How many chunks a PUT places / a GET fetches concurrently — the §6/§7
-   *  windows. Chunks are independent, so a bounded worker pool overlaps one
-   *  chunk's CPU (encrypt/RS/sign) and network with another's; without it PUT/GET
-   *  wall-clock scales with the *serial* round-trip count across the whole file,
-   *  which is fine on the zero-latency loopback but cripples a real high-latency
-   *  cohort. Kept well under net-link's MAX_QUEUE (256) so a peer's send queue
-   *  never overflows; the chunk window stacks with the n-way within-chunk fan-out,
-   *  so peak in-flight is bounded by putConcurrency × n. W = 1 = one chunk at a
-   *  time (its n blocks still place in parallel). */
+  /** How many per-holder FETCH sub-batches a GET pulls concurrently. OFFER/STORE/
+   *  FETCH are batched per holder, so the round-trip count no longer scales with
+   *  the file; this just windows the GET fetches when a large file splits a
+   *  holder's blocks across several frame-sized FETCHes. (`putConcurrency` is kept
+   *  for back-compat but no longer governs the batched STORE path.) */
   putConcurrency: number;
   getConcurrency: number;
+  /** Max bytes in one batched OFFER/STORE/FETCH message. Every per-holder batch is
+   *  split to stay under it, so a single message both fits the transport's frame cap
+   *  AND transfers within the request timeout — and the holder (synchronous in the
+   *  confined realm) only ever hashes/admits/serves one capped batch at a time. Set
+   *  per transport: a WS/TCP frame holds up to 16 MB, but a multi-MB transfer can
+   *  outrun a tight request timeout, so the default stays ~1 MB; a WebRTC data
+   *  channel reassembles only ~64 KB, so the browser demo drops it to ~48 KB. (The
+   *  browser picks the value from the connection mode.) */
+  maxMessageBytes: number;
 }
 
 export function defaultConfig(k = 2, m = 2, blockSize = 256): StorageConfig {
@@ -55,6 +60,10 @@ export function defaultConfig(k = 2, m = 2, blockSize = 256): StorageConfig {
     graceMs: 24 * 3600 * 1000,
     putConcurrency: 16,
     getConcurrency: 16,
+    // ~1 MiB: a batch transfers well inside a typical request timeout and keeps a
+    // synchronous holder's per-message work small, while still collapsing per-block
+    // round trips. A transport with a tighter frame cap (WebRTC) lowers it.
+    maxMessageBytes: 1 << 20,
   };
 }
 

@@ -67,8 +67,10 @@ const join = RELAY ? () => relaySignaling(`${RELAY}/${encodeURIComponent(ROOM)}`
 // Loopback host candidate so every pair connects with no STUN (the smoke is offline).
 const pcFactory = weriftPeerConnectionFactory({ iceAdditionalHostAddresses: ["127.0.0.1"] });
 // Small file → replicated to every holder (≤ blockSize); 48 KiB stays under werift's
-// 64 KiB data-channel reassembly cap on the receiving (console) side.
-const config = { k: 1, m: HOLDERS, blockSize: 48 * 1024 };
+// 64 KiB data-channel reassembly cap on the receiving (console) side. maxMessageBytes
+// holds a batched OFFER/STORE/FETCH to the same ceiling, so a larger file can't pack
+// a batch past the data channel either.
+const config = { k: 1, m: HOLDERS, blockSize: 48 * 1024, maxMessageBytes: 48 * 1024 };
 
 function makeNode() {
   const identity = (() => { const kp = sodium.crypto_sign_keypair(); return { publicKey: kp.publicKey, privateKey: kp.privateKey }; })();

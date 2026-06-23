@@ -76,6 +76,10 @@ export function storageAppPreamble(node: Tier2Host): string {
     // The holder side's byte budget (§14) — the same quota FsBlobStore enforces,
     // surfaced so the confined `handle` path admits exactly as the host store does.
     quota: node.store.stat().quota,
+    // Transport/operator policy (like quota, not author-signed): the per-message
+    // batch cap the guest-as-initiator splits OFFER/STORE/FETCH under, so it batches
+    // byte-for-byte as the host Coordinator does.
+    maxMessageBytes: c.maxMessageBytes,
     codecName: toHex(node.names.codec), repName: toHex(node.names.reputation),
   };
   return `const APP = ${JSON.stringify(app)};\n`;
