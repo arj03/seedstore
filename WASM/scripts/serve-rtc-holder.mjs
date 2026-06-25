@@ -61,6 +61,22 @@ net.join(); // announce into the room → present peers begin the WebRTC handsha
 console.log(`\nseed store RTC holder ${short(node.peerId)} ready — handlers installed: ${node.handlersInstalled()}`);
 console.log(`joined ${url}  (RS k=${config.k} m=${config.m}, ${config.blockSize} B blocks)`);
 console.log(`open browser/p2p.html with the SAME relay + room "${room}" (or run more holders), then store a file.`);
+
+// Self-healing per spec §9: a holder runs repair on a jittered interval, so when a
+// peer leaves and a chunk drops below its redundancy target, the surviving holders
+// rebuild the missing blocks onto fresh peers — no button, no operator. Console
+// holders are the long-lived peers the durable m leans on (§8), so this is exactly
+// where the loop belongs. Tune with REPAIR_MS (ms); REPAIR_MS=0 turns it off.
+const repairMs = process.env.REPAIR_MS != null ? Number(process.env.REPAIR_MS) : 20_000;
+if (repairMs > 0) {
+  node.startRepairLoop({
+    intervalMs: repairMs,
+    onPass: (n) => { if (n > 0) console.log(`  ↻ repair re-placed ${n} block(s) on fresh peers — redundancy restored (§9)`); },
+  });
+  console.log(`self-healing on: repair pass every ~${(repairMs / 1000).toFixed(0)}s (jittered) — set REPAIR_MS to tune, =0 to disable.`);
+} else {
+  console.log("self-healing off (REPAIR_MS=0).");
+}
 console.log("(Ctrl+C to stop)\n");
 
 // Show blocks landing: poll the store for newly-held ids.

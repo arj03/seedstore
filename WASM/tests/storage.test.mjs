@@ -132,6 +132,73 @@ export async function run(t) {
     nodes.forEach((n) => n.close());
   }
 
+  // Fewest distinct online holders across a set of block-ids — the redundancy that
+  // matters for a degenerate RS(1,1) block (one distinct id per chunk, replicated),
+  // where the distinct-*id* live count (liveCount) maxes out at 1 and hides the loss.
+  const minHolders = (nodes, net, ids) =>
+    Math.min(...ids.map((id) => nodes.filter((n) => net.isOnline(n.peerId) && n.store.has(id)).length));
+
+  t.group("self-healing re-replicates a degenerate RS(1,1) file — chunks + manifest (§9)");
+  {
+    const net = new LoopbackNetwork();
+    const cfg = { k: 1, m: 1, blockSize: 64 };            // the p2p.html demo config
+    const nodes = await createConnectedCohort({ count: 5, network: net, sodium, wasm, config: cfg, timeoutMs: TIMEOUT });
+    const owner = nodes[0];
+    // Overriding k/m must re-derive the durability fields, not keep the (2,2)
+    // defaults — an unreachable lowWater > n would make repair never settle.
+    t.eq(owner.config.lowWater, 2, "lowWater re-derived for RS(1,1) (k + ceil(m/2))");
+    t.eq(owner.config.replicas, 2, "replicas re-derived for RS(1,1) (m + 1)");
+
+    const data = file(256, 11);                            // 4 blocks → 4 RS(1,1) chunks
+    const put = await owner.put(data);
+    t.ok(!put.replicated, "a multi-block k=1 file takes the coded path (healCoded), not replication");
+    // put.blockIds = each chunk's (single, parity≡data) block + the manifest.
+    t.eq(minHolders(nodes, net, put.blockIds), 2, "every block — chunks and manifest — is on 2 holders after PUT");
+
+    const holder = nodes.find((n) => n !== owner && n.store.list().length > 0);
+    net.setOnline(holder.peerId, false);                  // a holder leaves (tab closes)
+    t.eq(minHolders(nodes, net, put.blockIds), 1, "redundancy drops to 1 copy for the blocks it held");
+
+    const online = nodes.filter((n) => n !== owner && net.isOnline(n.peerId));
+    let replaced = 0;
+    for (const n of online) replaced += await n.runRepair();
+    t.ok(replaced >= 1, `repair re-replicated the lost copies (placed=${replaced})`);
+    t.ok(minHolders(nodes, net, put.blockIds) >= 2, "every block — incl. the manifest — is back on >= 2 holders");
+    t.ok(bytesEqual(await owner.get(put.manifestId, put.key), data), "file still reads after loss + repair");
+
+    // Idempotent: a second pass over now-healthy chunks re-places nothing (§9).
+    let again = 0;
+    for (const n of online) again += await n.runRepair();
+    t.eq(again, 0, "repair is idempotent once redundancy is restored");
+    nodes.forEach((n) => n.close());
+  }
+
+  t.group("startRepairLoop runs repair on a jittered interval, then settles (§9)");
+  {
+    const net = new LoopbackNetwork();
+    const cfg = { k: 1, m: 1, blockSize: 64 };
+    const nodes = await createConnectedCohort({ count: 5, network: net, sodium, wasm, config: cfg, timeoutMs: TIMEOUT });
+    const owner = nodes[0];
+    const put = await owner.put(file(256, 13));            // multi-block → coded path
+
+    const holder = nodes.find((n) => n !== owner && n.store.list().length > 0);
+    net.setOnline(holder.peerId, false);
+
+    let passes = 0;
+    const online = nodes.filter((n) => n !== owner && net.isOnline(n.peerId));
+    for (const n of online) n.startRepairLoop({ intervalMs: 25, jitter: 0.3, onPass: () => { passes++; } });
+    await new Promise((r) => setTimeout(r, 800));
+    for (const n of online) n.stopRepairLoop();
+
+    t.ok(passes > 0, `the loop fired at least one pass on its own (passes=${passes})`);
+    t.ok(minHolders(nodes, net, put.blockIds) >= 2, "the loop restored redundancy with no manual call");
+    // stopRepairLoop() must actually stop it — no further passes after a settle.
+    const at = passes;
+    await new Promise((r) => setTimeout(r, 150));
+    t.eq(passes, at, "stopRepairLoop() halts the loop (no passes after stop)");
+    nodes.forEach((n) => n.close());
+  }
+
   t.group("sharing is sharing the key, not the bytes (§4.4)");
   {
     const net = new LoopbackNetwork();

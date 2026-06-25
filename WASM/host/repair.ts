@@ -51,15 +51,21 @@ export class Repair {
     const d = sd.descriptor;
 
     const holders = await this.cohort.liveHolders(d.blockIds, true);
-    let liveCount = 0;
-    for (const set of holders.values()) if (set.size > 0) liveCount++;
+    const distinct = distinctBlocks(d.blockIds);
+    // Effective redundancy: distinct live holders per block, each capped by how
+    // many slots that block fills. A degenerate code (e.g. RS(1,1), whose parity
+    // is byte-identical to its data) repeats one id across slots, so that id must
+    // live on as many distinct holders as it has slots (§6/§10); for ordinary RS
+    // every id is unique and this is exactly the old `live_blocks` count (§8).
+    let redundancy = 0;
+    for (const [h, b] of distinct) redundancy += Math.min(holders.get(h)?.size ?? 0, b.count);
     // Repair triggers on a low-water mark strictly above k (§8, §9), never
     // waiting until the chunk is one loss from death.
-    if (liveCount >= this.node.config.lowWater) return 0;
+    if (redundancy >= this.node.config.lowWater) return 0;
 
     return d.m === 0
       ? this.healReplicated(d, descEnv, holders)
-      : this.healCoded(d, descEnv, holders);
+      : this.healCoded(d, descEnv, holders, distinct);
   }
 
   /** Replicated chunk (§4.1): repair is a single block copy from any live
@@ -80,43 +86,71 @@ export class Repair {
     return replaced;
   }
 
-  /** Coded chunk (§9): fetch any k retrievable blocks, reconstruct the chunk
-   *  ciphertext, re-encode only the missing blocks, and place them on fresh
-   *  peers — each re-certified against its signed block_id first. */
+  /** Coded chunk (§9): bring every block back to full redundancy. A block some
+   *  holder still serves but too few hold — a degenerate code's repeated id, or a
+   *  lost extra replica — is simply copied to fresh peers; a block no live holder
+   *  serves is reconstructed from any k present blocks, re-certified against its
+   *  signed block_id, then placed. Each id lands on as many distinct holders as it
+   *  has slots, preserving the one-block-per-holder invariant (§6, §10). */
   private async healCoded(
-    d: Descriptor, descEnv: Uint8Array, holders: Map<string, Set<PeerId>>,
+    d: Descriptor, descEnv: Uint8Array,
+    holders: Map<string, Set<PeerId>>,
+    distinct: Map<string, { id: Uint8Array; count: number }>,
   ): Promise<number> {
-    const present: { index: number; bytes: Uint8Array }[] = [];
-    for (let idx = 0; idx < d.blockIds.length && present.length < d.k; idx++) {
-      const set = holders.get(toHex(d.blockIds[idx]));
-      if (!set || set.size === 0) continue;
-      const peer = [...set][0];
-      const b = await this.cohort.verificationFetch(peer, d.blockIds[idx]);
-      if (b) present.push({ index: idx, bytes: b });
+    // Reconstruct any *entirely missing* id once, up front, from k present blocks.
+    // (A block that still has a live holder is copied below, not decoded — cheaper.)
+    const regenerated = new Map<string, Uint8Array>();
+    if ([...distinct.keys()].some((h) => (holders.get(h)?.size ?? 0) === 0)) {
+      const present: { index: number; bytes: Uint8Array }[] = [];
+      for (let idx = 0; idx < d.blockIds.length && present.length < d.k; idx++) {
+        const set = holders.get(toHex(d.blockIds[idx]));
+        if (!set || set.size === 0) continue;
+        const b = await this.cohort.verificationFetch([...set][0], d.blockIds[idx]);
+        if (b) present.push({ index: idx, bytes: b });
+      }
+      if (present.length >= d.k) {
+        const data = this.node.codec.rsDecode(d.k, d.m, d.blockSize, present);
+        const all = [...data, ...this.node.codec.rsEncode(d.k, d.m, d.blockSize, data)];
+        for (let i = 0; i < all.length; i++) {
+          const h = toHex(d.blockIds[i]);
+          if (regenerated.has(h)) continue;
+          // Re-certify against the already-signed id (§9): deterministic encode
+          // must reproduce it, so a mismatch means a bad input/decode — drop it,
+          // never propagate, so a poisoned descriptor can't mint garbage.
+          if (bytesEqual(this.node.crypto.hash(all[i]), d.blockIds[i])) regenerated.set(h, all[i]);
+        }
+      }
     }
-    if (present.length < d.k) return 0; // cannot heal — fewer than k retrievable
 
-    const data = this.node.codec.rsDecode(d.k, d.m, d.blockSize, present);
-    const parity = this.node.codec.rsEncode(d.k, d.m, d.blockSize, data);
-    const all = [...data, ...parity];
-
-    // Spread regenerated blocks onto peers not already holding part of this
-    // chunk, preserving the distinct-holder invariant (§6, §10).
+    // Spread copies onto peers not already holding part of this chunk (§6, §10).
     const occupied = new Set<PeerId>();
     for (const set of holders.values()) for (const p of set) occupied.add(p);
 
     let replaced = 0;
-    for (let i = 0; i < all.length; i++) {
-      const id = d.blockIds[i];
-      if ((holders.get(toHex(id))?.size ?? 0) > 0) continue; // already live
-      // Re-certify the regenerated block against the already-signed id (§9):
-      // deterministic encode guarantees a match, so a mismatch means a bad
-      // input/decode and the block is dropped rather than propagated.
-      if (!bytesEqual(this.node.crypto.hash(all[i]), id)) continue;
-      const placed = await this.coordinator.placeBlock(id, all[i], descEnv, occupied, 1);
+    for (const [h, { id, count }] of distinct) {
+      const live = holders.get(h)?.size ?? 0;
+      const need = count - live;
+      if (need <= 0) continue;
+      // A live copy is the cheapest source; otherwise the reconstructed block.
+      const bytes = live > 0 ? await this.coordinator.fetchBlock(id) : regenerated.get(h);
+      if (!bytes) continue; // missing and not reconstructable this pass
+      const placed = await this.coordinator.placeBlock(id, bytes, descEnv, occupied, need);
       for (const p of placed) occupied.add(p);
       replaced += placed.length;
     }
     return replaced;
   }
+}
+
+/** A chunk's distinct block-ids → their bytes and multiplicity (how many slots
+ *  each fills). Ordinary RS gives every id multiplicity 1; a degenerate k=1 code,
+ *  whose parity equals its data, collapses several slots onto one id (§9). */
+function distinctBlocks(blockIds: Uint8Array[]): Map<string, { id: Uint8Array; count: number }> {
+  const out = new Map<string, { id: Uint8Array; count: number }>();
+  for (const id of blockIds) {
+    const h = toHex(id);
+    const e = out.get(h);
+    if (e) e.count++; else out.set(h, { id, count: 1 });
+  }
+  return out;
 }

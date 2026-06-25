@@ -116,7 +116,12 @@ export class Coordinator {
     });
     const manCt = this.node.crypto.encrypt(K, DOMAIN_MANIFEST, 0, manPlain);
     const manifestId = this.node.crypto.hash(manCt);
-    const placed = await this.placeBlock(manifestId, manCt, null, new Set(), this.node.config.replicas);
+    // Carry the manifest as a one-block replicated chunk (m = 0) with a signed
+    // descriptor, so a holder can self-heal it the same way it heals any replica
+    // (§9): without a descriptor repair would skip it and the file's root could
+    // decay below redundancy and be lost while its body stays healthy.
+    const manEnv = this.signChunk({ k: 1, m: 0, blockSize: manCt.length, blockIds: [manifestId] });
+    const placed = await this.placeBlock(manifestId, manCt, manEnv, new Set(), this.node.config.replicas);
     if (placed.length === 0) throw new Error(`put: no peer accepted the manifest.${this.declineHint()} connect more holders`);
     placedIds.push(manifestId);
 

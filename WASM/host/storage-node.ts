@@ -91,6 +91,8 @@ export class StorageNode implements Node {
   private readonly liveness = new Map<PeerId, number>();
   private readonly clockFn: () => number;
   private installSeq = 0;
+  private repairLoopOn = false;
+  private repairTimer: ReturnType<typeof setTimeout> | null = null;
 
   private constructor(opts: StorageNodeOptions, host: KernelHost, identity: Identity, codec: CodecClient, reputation: ReputationClient) {
     this.network = opts.network;
@@ -98,7 +100,12 @@ export class StorageNode implements Node {
     this.host = host;
     this.identity = identity;
     this.peerId = toHex(identity.publicKey);
-    this.config = { ...defaultConfig(), ...opts.config };
+    // Derive replicas / lowWater / smallMaxBlocks from the *caller's* k & m, then
+    // let any explicit field in opts.config override — otherwise overriding k/m
+    // alone would leave those derived from the (2,2) default (e.g. an unreachable
+    // lowWater > n on the demo's RS(1,1)).
+    const c = opts.config;
+    this.config = { ...defaultConfig(c?.k, c?.m, c?.blockSize), ...c };
     this.clockFn = opts.clock ?? (() => Date.now());
     this.crypto = new Crypto(opts.sodium);
     this.fs = opts.fs ?? new MemoryFs();
@@ -183,8 +190,46 @@ export class StorageNode implements Node {
   /** Run one repair pass over every chunk this node holds a block of (§9). */
   runRepair(): Promise<number> { return this.repair.repairHeldChunks(); }
 
-  /** Tear down the transport (test cleanup). */
-  close(): void { this.transport.close(); }
+  /** Start the §9 self-healing loop: on a jittered interval, run one repair pass
+   *  over every chunk this node holds a block of, re-placing any that have fallen
+   *  below the low-water mark onto fresh cohort peers. This makes redundancy the
+   *  node's own job — no button, no operator — as the spec intends.
+   *
+   *  Self-arming and overlap-free: the next tick is scheduled only after a pass
+   *  finishes. Per-tick jitter (default ±50%) staggers holders so they don't all
+   *  repair at once — the first timer to fire heals, the rest see the freshly
+   *  placed blocks on their next have/want and stand down (repair is idempotent,
+   *  §9). Long-lived holders are where the durable `m` leans (§8), so this is the
+   *  loop to run on a server/console node; a low-uptime browser tab may skip it.
+   *  Calling it twice is a no-op; stopRepairLoop()/close() stop it. */
+  startRepairLoop(opts: { intervalMs?: number; jitter?: number; onPass?: (replaced: number) => void } = {}): void {
+    if (this.repairLoopOn) return;
+    this.repairLoopOn = true;
+    const intervalMs = opts.intervalMs ?? 30_000;
+    const jitter = opts.jitter ?? 0.5;
+    const arm = () => {
+      this.repairTimer = setTimeout(tick, intervalMs * (1 + Math.random() * jitter));
+      (this.repairTimer as { unref?: () => void }).unref?.(); // never hold the process open
+    };
+    const tick = async () => {
+      let replaced = 0;
+      try { replaced = await this.runRepair(); }
+      catch { /* a transient pass failure is fine — the next tick retries */ }
+      if (!this.repairLoopOn) return;                          // stopped during the await
+      opts.onPass?.(replaced);
+      arm();
+    };
+    arm(); // first tick jittered too, so a cohort booted together doesn't sync up
+  }
+
+  /** Stop the §9 repair loop started by startRepairLoop(). */
+  stopRepairLoop(): void {
+    this.repairLoopOn = false;
+    if (this.repairTimer) { clearTimeout(this.repairTimer); this.repairTimer = null; }
+  }
+
+  /** Tear down the transport, and stop the repair loop if running (test cleanup). */
+  close(): void { this.stopRepairLoop(); this.transport.close(); }
 
   // ── holder side of the protocol (§5, §6, §7) ────────────────────────────
   private handleRequest(from: PeerId, type: number, payload: Uint8Array): Uint8Array | null {
