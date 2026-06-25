@@ -203,12 +203,19 @@ export class Coordinator {
           const mask = await this.offerBatch(peer, offers);
           const ok = slice.filter((_, j) => mask[j]);
           accepted += ok.length;
-          // STORE the accepted blocks in byte-bounded batches — one streamed
-          // message per batch (the upload twin of the batched FETCH), so the socket
-          // carries blocks back-to-back instead of a request/response per block.
-          // Each batch is capped at maxBytes so it fits the transport frame and the
-          // request timeout; batches go serially to one peer, peers in parallel.
-          for (const group of batchByBytes(ok, ({ ch, i }) => 40 + ch.descriptor.length + ch.blocks[i].length, maxBytes)) {
+          // STORE the accepted blocks in byte-bounded batches — one streamed message
+          // per batch (the upload twin of the batched FETCH), each capped at maxBytes
+          // so it fits the transport frame and the request timeout. The batches to one
+          // peer are WINDOWED by putConcurrency (the upload twin of getConcurrency in
+          // gatherBlocks), not issued one-at-a-time-serially: when the transport cap
+          // forces ~one block per message (WebRTC's ~64 KB channel), a big file is many
+          // single-block STOREs, and a serial loop would pay one round trip per block —
+          // exactly the latency the window hides, restoring PUT's pipeline so it keeps
+          // pace with GET on a low-latency link. On WS each peer has only a few large
+          // batches, so the window is a no-op. Peers still run in parallel (outer
+          // Promise.all), so this windows each peer's link independently.
+          const groups = batchByBytes(ok, ({ ch, i }) => 40 + ch.descriptor.length + ch.blocks[i].length, maxBytes);
+          await mapPool(groups, this.node.config.putConcurrency, async (group) => {
             const stored0 = await this.storeBatch(peer, group.map(({ ch, i }) => ({
               blockId: ch.blockIds[i], descriptor: ch.descriptor, bytes: ch.blocks[i],
             })));
@@ -217,7 +224,7 @@ export class Coordinator {
               this.node.markSeen(peer);
               stored++;
             }
-          }
+          });
         }
       }));
     }

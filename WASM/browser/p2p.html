@@ -129,9 +129,12 @@ const blockSizeFor = (mode) => (mode === "ws" ? 256 : 32) * 1024;
 // the 5 s request timeout, so keep WS batches ~1 MB; WebRTC reassembles only ~64 KiB,
 // so stay under it (one 32 KiB block + headers per message).
 const maxMessageBytesFor = (mode) => (mode === "ws" ? 1 << 20 : 48 * 1024);
-// getConcurrency windows the per-holder FETCH sub-batches on GET; PUT is bounded by
-// the holder count (streamed STOREs each), so it needs no window.
-const CONFIG = { k: 1, m: 1, blockSize: 32 * 1024, getConcurrency: 64 };
+// getConcurrency windows the per-holder FETCH sub-batches on GET; putConcurrency
+// windows the per-holder STOREs on PUT. The WebRTC cap forces ~one block per STORE,
+// so without the window a file pays one serial round trip per block — visibly slower
+// than GET on a low-latency link. Match it to getConcurrency so PUT pipelines just as
+// wide (each holder's link windowed independently; both holders still run in parallel).
+const CONFIG = { k: 1, m: 1, blockSize: 32 * 1024, getConcurrency: 64, putConcurrency: 64 };
 const REQUIRED_PEERS = CONFIG.k + CONFIG.m; // distinct holders a PUT needs
 
 // Public STUN so peers on different machines/NATs can still find a path; for

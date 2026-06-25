@@ -4,12 +4,21 @@
 // zero-latency LoopbackNetwork, so none of them can see the cost that dominates a
 // real cross-machine cohort: wall-clock ≈ (serial round-trip count) × RTT. This
 // drives a real round-trip latency through the link and sweeps the coordinator's
-// chunk window so the serial-vs-windowed gap — and the point past which widening
-// the window stops helping — is visible. (Within a chunk the n blocks already
-// place in parallel, so the "peak" column reflects window × n in flight.)
+// chunk window (putConcurrency on PUT, getConcurrency on GET) so the serial-vs-
+// windowed gap — and the point past which widening the window stops helping — is
+// visible for BOTH directions. (Within a chunk the n blocks already place in
+// parallel, so the "peak" column reflects window × n in flight.)
 //
-// Run:  node tests/bench-net.mjs [rttMs] [fileMB] [blockKiB]
-//   e.g. node tests/bench-net.mjs 10 2 32      (10 ms RTT, 2 MB file, 32 KiB blocks)
+// The window binds hardest when the transport cap forces ~one block per STORE/FETCH
+// message — exactly the WebRTC case (a ~64 KB data channel, 32 KiB blocks). So the
+// cap defaults to blockKiB + 16, modelling that link: at W = 1 a 10 MB file pays one
+// serial round trip per block in each direction; widening W pipelines them. Pass a
+// big cap (e.g. 1024) to model a WS/TCP frame, where a holder's blocks ride a few
+// large batches and the window is a near no-op.
+//
+// Run:  node tests/bench-net.mjs [rttMs] [fileMB] [blockKiB] [capKiB]
+//   e.g. node tests/bench-net.mjs 10 2 32       (10 ms RTT, 2 MB file, 32 KiB blocks, WebRTC cap)
+//        node tests/bench-net.mjs 10 2 32 1024  (same, but a 1 MiB WS frame cap)
 
 import { performance } from "node:perf_hooks";
 import { loadWasmBytes, loadSodium, createConnectedCohort } from "../build/host/node.js";
@@ -19,12 +28,14 @@ import { LatencyNetwork } from "./latency-net.mjs";
 const RTT_MS = Number(process.argv[2] ?? 10);     // round-trip latency to model
 const FILE_MB = Number(process.argv[3] ?? 2);
 const BLOCK_KIB = Number(process.argv[4] ?? 32);
+const CAP_KIB = Number(process.argv[5] ?? BLOCK_KIB + 16); // one block + headers per STORE → WebRTC
 
 const MB = 1024 * 1024;
 const blockSize = BLOCK_KIB * 1024;
 const fileBytes = Math.round(FILE_MB * MB);
 const delay = RTT_MS / 2;                          // one request = two sends
-const config = { k: 2, m: 2, blockSize };
+const maxMessageBytes = CAP_KIB * 1024;
+const config = { k: 2, m: 2, blockSize, maxMessageBytes };
 const numChunks = Math.ceil(Math.ceil(fileBytes / blockSize) / config.k);
 
 const sodium = await loadSodium();
@@ -68,8 +79,9 @@ async function measure(W) {
 
 const tput = (ms) => (FILE_MB / (ms / 1000)).toFixed(1);
 
-console.log(`\nPUT/GET over a ${RTT_MS} ms-RTT cohort — RS(${config.k},${config.m}), ${BLOCK_KIB} KiB blocks, ${FILE_MB} MB → ${numChunks} chunks`);
-console.log(`(a serial PUT issues ~${numChunks * (config.k + config.m) * 2} request/response round trips; the window overlaps them)\n`);
+const blocksPerMsg = Math.max(1, Math.floor(maxMessageBytes / blockSize));
+console.log(`\nPUT/GET over a ${RTT_MS} ms-RTT cohort — RS(${config.k},${config.m}), ${BLOCK_KIB} KiB blocks, ${CAP_KIB} KiB cap (~${blocksPerMsg} block/msg), ${FILE_MB} MB → ${numChunks} chunks`);
+console.log(`(a serial PUT issues ~${numChunks * (config.k + config.m) * 2} request/response round trips; the window overlaps them — W is putConcurrency on PUT, getConcurrency on GET)\n`);
 console.log(`   W   PUT (ms)   MB/s   peak     GET (ms)   MB/s   peak    bytes`);
 console.log(`  ──  ────────  ─────  ────    ────────  ─────  ────    ─────`);
 

@@ -28,11 +28,16 @@ export interface StorageConfig {
   smallMaxBlocks: number;
   /** Grace window G: an unreachable holder is Suspected, not Lost (§8). */
   graceMs: number;
-  /** How many per-holder FETCH sub-batches a GET pulls concurrently. OFFER/STORE/
-   *  FETCH are batched per holder, so the round-trip count no longer scales with
-   *  the file; this just windows the GET fetches when a large file splits a
-   *  holder's blocks across several frame-sized FETCHes. (`putConcurrency` is kept
-   *  for back-compat but no longer governs the batched STORE path.) */
+  /** How many per-holder STORE batches a PUT pushes concurrently (putConcurrency)
+   *  and per-holder FETCH sub-batches a GET pulls (getConcurrency). OFFER/STORE/FETCH
+   *  are batched per holder, so the round-trip count no longer scales with the file;
+   *  these window the bulk transfers when a transport's frame cap splits a holder's
+   *  blocks across many messages. The window binds hardest under a small cap (WebRTC's
+   *  ~64 KB channel forces ~one block per STORE/FETCH): without it those messages would
+   *  go one serial round trip per block — the latency cost it hides. Under a large cap
+   *  (WS) each holder has only a few big batches, so it is a no-op. NB the async
+   *  initiator (the host Coordinator) pipelines; the synchronous Asyncify guest
+   *  (tier2-guest.js) cannot overlap host calls, so it STOREs serially regardless. */
   putConcurrency: number;
   getConcurrency: number;
   /** Max bytes in one batched OFFER/STORE/FETCH message. Every per-holder batch is

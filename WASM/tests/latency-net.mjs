@@ -37,6 +37,8 @@ export class LatencyNetwork {
     this.maxInflightWork = 0;   // the concurrency the put/get window drove
     this.requests = 0;          // total control requests issued
     this.byType = {};           // KIND_REQ count per MsgType — OFFER/FETCH batching shows up here
+    this.inflightByType = {};   // current in-flight per MsgType
+    this.maxInflightByType = {}; // peak in-flight per MsgType — isolates one path's pipeline (e.g. STORE)
     this.framesDelivered = 0;
   }
 
@@ -56,10 +58,12 @@ export class LatencyNetwork {
       this.byType[type] = (this.byType[type] ?? 0) + 1;
       if (++this.inflight > this.maxInflight) this.maxInflight = this.inflight;
       if (isWork && ++this.inflightWork > this.maxInflightWork) this.maxInflightWork = this.inflightWork;
+      const cur = this.inflightByType[type] = (this.inflightByType[type] ?? 0) + 1;
+      if (cur > (this.maxInflightByType[type] ?? 0)) this.maxInflightByType[type] = cur;
     }
     setTimeout(() => {
       if (this.offline.has(from) || this.offline.has(to)) return;
-      if (kind === KIND_RES) { this.inflight--; if (isWork) this.inflightWork--; } // requester got its answer
+      if (kind === KIND_RES) { this.inflight--; if (isWork) this.inflightWork--; this.inflightByType[type]--; } // requester got its answer
       this.framesDelivered++;
       sink(from, copy);
     }, this.delayMs);
