@@ -225,11 +225,22 @@ path; same-machine tabs connect on host candidates without it.)
   capability gate end-to-end via seedkernel's forwarder fixture (§8.2).
 - **manifest** — descriptor/manifest round trips, author signature is
   tamper-evident, manifest encrypt + `manifest_id` stability.
+- **protocol** — the batched OFFER/FETCH wire (`host/protocol.ts`): self-delimiting
+  offer entries, the per-block accept mask, FETCH present/absent blocks, and a
+  holder admitting a whole OFFER batch at once — the §6 sibling rule declines a
+  sibling offered alongside, the §14 quota declines the tail once the budget is spent.
 - **reputation** — passes raise / misses penalize / scores decay with a half-life.
 - **storage** (multi-node loopback) — PUT→GET, small-file replication, offline
   tolerance (any *k* of *n*), repair restoring redundancy after loss, sharing a
   sealed key, crypto-shredding, reciprocity from served fetches (the host-side
   reference path).
+- **concurrency** — PUT/GET round-trip economy over a *latency-bearing* link:
+  OFFER/STORE/FETCH are batched and windowed *per holder* rather than issued per
+  block, so wall-clock tracks round-trip-count × RTT — the cost the zero-latency
+  loopback hides (asserted as request counts, not just wall-clock).
+- **net** — networking + filesystem integration: `FsBlobStore` persisting across
+  reopen, a full cohort over real TCP sockets with blocks landing on holders'
+  disks, and a browser-like node reaching a server over a real WebSocket.
 - **tier2-port** — the same PUT/GET/replication/offline/repair/crypto-shredding
   matrix driven *inside* the confined QuickJS realm over the generic `cap-bridge`,
   with cross-path parity proving the confined and host-side paths are byte-compatible.
@@ -266,6 +277,22 @@ encrypt / encode / hash (each ~0.15 s, no single bottleneck) and reads cost
 nothing on the codec unless a block is actually missing. (SIMD needs a runtime
 with the WASM simd feature — Node 16+ and every current browser.) `node
 tests/bench.mjs` reproduces these.
+
+**End to end, the link bounds throughput, not the codec.** A multi-MB file is
+many blocks, and a WebRTC data channel caps a message at ~one 32 KiB block, so a
+naïve transfer pays one round trip *per block*. The coordinator avoids that by
+**windowing** — `putConcurrency`/`getConcurrency` keep many blocks per holder in
+flight at once — so wall-clock tracks `RTT × (chunks ÷ window)`, not `RTT ×
+blocks`. Over a 10 ms-RTT, WebRTC-capped link (4 MB, RS(2,2), 32 KiB blocks,
+window 32):
+
+| | time | rate | |
+|---|---:|---:|---|
+| **PUT** | ~370 ms | ~11 MB/s | ships the 2× erasure overhead — RS(2,2) is 2 data + 2 parity |
+| **GET** | ~240 ms | ~17 MB/s | downloads any *k* of *n* — 1× the file |
+
+`node tests/bench-net.mjs 10 4 32` reproduces this and sweeps the window; over a
+real browser↔browser WebRTC link the `p2p.html` demo reports ~13 MB/s both ways.
 
 **The SIMD split-table trick (GF(2⁸) "PSHUFB").** For a fixed coefficient *c*,
 `c·x` is split into two 4-bit lookups: `c·(x & 0x0F) ⊕ c·(x >> 4)`, each a 16-byte
@@ -344,8 +371,8 @@ host/  tier2-guest.js          the confined guest: PUT/GET/repair + the holder s
 scripts/  build-bundle.mjs     produce the signed bundle (npm run build:bundle)
           copy-kernel, build-browser-demo  — stage all browser pages → build/browser-demo
           serve-rtc-holder + smoke-rtc        — relay-signaled P2P over RtcNetwork + STUN
-tests/    codec / bridges / manifest / reputation / storage / browser
-          tier2-port / shell-run / holder-guest / bundle-fixture
+tests/    codec / bridges / manifest / protocol / reputation / storage
+          concurrency / net / browser / tier2-port / shell-run / holder-guest / bundle-fixture
 ```
 
 The runtime itself — the shell, the `cap-bridge`, the `fs.*`/`net.*` capabilities,

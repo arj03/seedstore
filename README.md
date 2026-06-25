@@ -401,6 +401,7 @@ The two pure handlers (`codec`, `reputation`) declare **no** capabilities, so th
 | `block.offer` / `block.accept` / `block.decline` | coordinator ↔ peer | `block_id`, size, **signed chunk descriptor** (§4.3) / accept / reason |
 | `block.fetch_req` / `block.data` / `block.ack` | reader ↔ holder | wanted block-ids / a block (bulk plane) / window ack |
 | `disc.have` / `disc.want` | peer ↔ peer | block-ids held / block-ids wanted (the discovery layer, §5) |
+
 Control messages that authorize a state change (the mutators in §17) carry a leading sequence number and are dropped on replay. Repair adds no message of its own — it runs on have/want, `block.fetch_req`, and `block.offer` (§9). Bulk `block.data`s carry no signature; they are validated by `content_hash(bytes) == block_id` (§3). The optional verifiable-reputation layer (§20) adds `proof.challenge` / `proof.receipt` and `rep.gossip`, and the optional tombstone layer (§25) adds the signed `block.tombstone`; the base protocol uses none of them.
 
 ---
