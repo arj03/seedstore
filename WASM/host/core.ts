@@ -72,9 +72,6 @@ export function defaultConfig(k = 2, m = 2, blockSize = 256): StorageConfig {
   };
 }
 
-/** Liveness state of a holder for a block (§8). */
-export type Liveness = "live" | "suspected" | "lost";
-
 /** The surface the orchestration modules share. StorageNode implements it. */
 export interface Node {
   readonly peerId: PeerId;

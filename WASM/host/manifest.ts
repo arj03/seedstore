@@ -93,7 +93,6 @@ export function descriptorContains(d: Descriptor, blockId: Uint8Array): boolean 
 
 // ── manifest ─────────────────────────────────────────────────────────────
 
-export const ENC_NONE = 0;
 export const ENC_XCHACHA20 = 1;
 
 export interface Manifest {

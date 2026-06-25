@@ -63,8 +63,12 @@ export function writeStorageBundle({ dir, host, sodium, sk, pk, build, log = () 
     };
   });
 
-  // The zero-authority orchestration guest (raw; the shell injects the op preamble).
-  const guestText = readFileSync(join(build, "host", "tier2-guest.js"), "utf8");
+  // The zero-authority orchestration guest, shipped *minified* (the shell injects
+  // the op preamble and runs it as source). We ship the comment-stripped copy to
+  // keep the signed bundle small; the minifier (scripts/minify.mjs) gates every
+  // file through `node --check`, so it is valid JS, just without the doc comments.
+  // The content hash below covers exactly these bytes, so shipped == verified.
+  const guestText = readFileSync(join(build, "host-min", "tier2-guest.js"), "utf8");
   writeFileSync(join(dir, "tier2-guest.js"), guestText);
 
   const cfg = defaultConfig();

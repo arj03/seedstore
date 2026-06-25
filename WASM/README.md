@@ -323,39 +323,49 @@ Source — the storage layer itself:
 
 | | LOC |
 |---|---:|
-| **codec** WASM — GF(2⁸) + Reed–Solomon (`gf256` + `rs` + `index`) | 352 |
-| **reputation** WASM — decayed reciprocity | 146 |
-| **host** TypeScript — bridges, crypto, manifest, cohort/coordinator/repair, node (19 files) | 1,951 |
-| **total** | **2,449** |
+| **codec** WASM — GF(2⁸) + Reed–Solomon (`gf256` + `rs` + `index`) | 417 |
+| **reputation** WASM — decayed reciprocity | 128 |
+| **host** TypeScript — bridges, crypto, manifest, protocol, cohort/coordinator/repair, node (20 files) | 2,341 |
+| **tier2-guest.js** — the confined PUT/GET/repair + holder guest | 896 |
+| **total** | **3,782** |
 
-(plus ~990 LOC of tests and ~210 of scripts + the browser demo.)
+(plus ~2,100 LOC of tests and ~530 of scripts + the browser demo.)
 
-Runtime artifacts a node loads:
+Runtime artifacts. A shipped node is the generic seedkernel **shell** plus the
+signed **bundle**: the shell verifies the bundle, installs the two wasm cores, and
+runs the guest. So the *seedstore* content a bundle node loads is just the two
+cores and the guest — it never loads a line of the host-side TypeScript:
 
 | artifact | size | gzipped |
 |---|---:|---:|
-| `codec.wasm` (incl. SIMD RS + GF tables) | 6.9 KB | — |
-| `reputation.wasm` | 6.9 KB | — |
-| `kernel.wasm` + `bootstrap.wasm` (from seedkernel) | 12.7 KB | — |
-| seedstore host JS — **minified** (`build/host-min`) | 50 KB | **11 KB** |
-| &nbsp;&nbsp;↳ debug, doc comments intact (`build/host`) | 72 KB | 21 KB |
-| seedkernel `KernelHost` JS (shared; minified) | 36 KB | 7 KB |
-| libsodium (sumo) — reused, not bundled | 278 KB | — |
+| `codec.wasm` (incl. SIMD RS + GF tables) | 8.5 KB | — |
+| `reputation.wasm` | 6.7 KB | — |
+| `tier2-guest.js` — the confined guest, shipped minified in the bundle | 29 KB | **7.6 KB** |
 
-So the storage layer's own code ships as **~14 KB of WASM + ~11 KB of gzipped JS**
-(plus the shared ~7 KB-gz seedkernel `KernelHost` — about **18 KB gz of JS** for a whole browser node), riding on the libsodium the
-deployment already carries (§2, §16: "logic + RS, tens of KB, no second copy of a
-crypto library").
+riding on the seedkernel shell it shares with any app — `kernel.wasm` +
+`bootstrap.wasm` (12.4 KB), the `KernelHost` JS (28 KB / **5 KB gz**), and the
+sumo libsodium (278 KB, reused not bundled). So **seedstore's own runtime
+footprint is ~15 KB of WASM + ~8 KB of gzipped JS (the guest)** (§2, §16: "logic +
+RS, tens of KB, no second copy of a crypto library").
+
+The host-side TypeScript (`build/host`, minified to `build/host-min`) is a
+*separate* path — the **in-process library and reference/parity oracle** that the
+browser demo and the `createConnectedCohort` tests load *instead* of the
+shell+bundle. Minified it is **21 KB gz** (14 KB gz without its own copy of the
+guest), debug 42 KB gz — so a browser-demo node carries ~26 KB gz of JS (host +
+the shared `KernelHost`) against a bundle node's ~13 KB (the 8 KB guest + the 5 KB
+`KernelHost`).
 
 `npm run build` emits the host **twice**: the readable `build/host` (doc comments
-intact, for debugging) and a comment-stripped `build/host-min` (for shipping).
+intact, for debugging) and a comment-stripped `build/host-min` (for the in-process
+library + browser demo).
 Over half the gzipped host bytes were doc comments — the source is heavily
-annotated — so stripping them nearly halves the wire size (21 → 11 KB gz). The
+annotated — so stripping them roughly halves the wire size (42 → 21 KB gz). The
 "minifier" is a ~70-line dependency-free comment stripper (`scripts/minify.mjs`),
 **not** a bundler or terser: it preserves string/template contents and gates every
 emitted file through `node --check`, so a stripper mistake fails the build rather
 than shipping broken JS. The same step now runs in seedkernel too, shrinking that
-shared host from 15 to ~7 KB gz; `npm run build:browser` stages both minified
+shared host from 11 to ~5 KB gz; `npm run build:browser` stages both minified
 hosts (`build/host-min`) into the demo.
 
 ## Layout
