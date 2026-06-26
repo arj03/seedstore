@@ -105,7 +105,13 @@ export class Repair {
       for (let idx = 0; idx < d.blockIds.length && present.length < d.k; idx++) {
         const set = holders.get(toHex(d.blockIds[idx]));
         if (!set || set.size === 0) continue;
-        const b = await this.cohort.verificationFetch([...set][0], d.blockIds[idx]);
+        // Try each live holder until one serves the block, rather than picking the
+        // first and silently skipping if it's stale or unreachable.
+        let b: Uint8Array | null = null;
+        for (const peer of set) {
+          b = await this.cohort.verificationFetch(peer, d.blockIds[idx]);
+          if (b) break;
+        }
         if (b) present.push({ index: idx, bytes: b });
       }
       if (present.length >= d.k) {

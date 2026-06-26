@@ -46,8 +46,11 @@ export class MemoryBlobStore implements BlobStore {
   put(id: Uint8Array, bytes: Uint8Array, descriptor: Uint8Array | null): void {
     const key = toHex(id);
     const prev = this.map.get(key);
-    const prevSize = prev ? prev.bytes.length : 0;
-    const next = this.bytesUsed - prevSize + bytes.length;
+    // Charge both the ciphertext and the descriptor sidecar against the budget,
+    // matching FsBlobStore so admission (§14) answers the same regardless of
+    // backend — a holder stores a descriptor copy per block, and it is real bytes.
+    const prevSize = prev ? prev.bytes.length + (prev.descriptor?.length ?? 0) : 0;
+    const next = this.bytesUsed - prevSize + bytes.length + (descriptor?.length ?? 0);
     if (next > this.quota) throw new Error("store.local: quota exceeded");
     this.map.set(key, { bytes: bytes.slice(), descriptor: descriptor ? descriptor.slice() : null });
     this.bytesUsed = next;
@@ -62,7 +65,7 @@ export class MemoryBlobStore implements BlobStore {
     const key = toHex(id);
     const v = this.map.get(key);
     if (!v) return false;
-    this.bytesUsed -= v.bytes.length;
+    this.bytesUsed -= v.bytes.length + (v.descriptor?.length ?? 0);
     return this.map.delete(key);
   }
   list(prefix?: string): Uint8Array[] {

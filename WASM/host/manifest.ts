@@ -40,6 +40,8 @@ export function decodeDescriptorCore(core: Uint8Array): Descriptor {
   if (core.length < 8 || core[0] !== 1) throw new Error("descriptor: bad core");
   const k = core[1], m = core[2];
   const blockSize = readU32BE(core, 3);
+  if (k < 1) throw new Error("descriptor: k must be >= 1");
+  if (blockSize < 1) throw new Error("descriptor: blockSize must be >= 1");
   const n = core[7];
   if (n !== k + m) throw new Error("descriptor: n != k+m");
   if (core.length !== 8 + n * BLOCK_ID_LEN) throw new Error("descriptor: truncated");
@@ -137,6 +139,10 @@ export function decodeManifest(buf: Uint8Array): Manifest {
   const blockSize = readU32BE(buf, o); o += 4;
   const k = buf[o++], m = buf[o++], encAlg = buf[o++];
   const chunkCount = readU32BE(buf, o); o += 4;
+  if (fileSize > 0x10000000000) throw new Error("manifest: fileSize out of bounds"); // 2^40 ≈ 1 TiB sanity cap (the file is assembled in one buffer)
+  if (blockSize < 1) throw new Error("manifest: blockSize must be >= 1");
+  if (k < 1) throw new Error("manifest: k must be >= 1");
+  if (chunkCount === 0) throw new Error("manifest: chunkCount must be >= 1");
   const chunks: Uint8Array[] = [];
   for (let i = 0; i < chunkCount; i++) {
     if (o + 4 > buf.length) throw new Error("manifest: truncated chunk length");

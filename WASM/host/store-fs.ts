@@ -23,6 +23,7 @@ const DSC = ".dsc"; // author-signed chunk descriptor envelope (§4.3)
 
 export class FsBlobStore implements BlobStore {
   private readonly index = new Map<string, number>(); // hex → ciphertext byte length
+  private readonly dscSize = new Map<string, number>(); // hex → descriptor byte length (0 if none)
   private bytesUsed = 0;
 
   constructor(
@@ -37,18 +38,31 @@ export class FsBlobStore implements BlobStore {
       if (sz < 0) continue;
       this.index.set(hex, sz);
       this.bytesUsed += sz;
+      // Account for the descriptor sidecar in the quota budget.
+      const dkey = hex + DSC;
+      const dsz = this.fs.size(dkey);
+      if (dsz > 0) {
+        this.dscSize.set(hex, dsz);
+        this.bytesUsed += dsz;
+      }
     }
   }
 
   put(id: Uint8Array, bytes: Uint8Array, descriptor: Uint8Array | null): void {
     const hex = toHex(id);
-    const prev = this.index.get(hex) ?? 0;
-    const next = this.bytesUsed - prev + bytes.length;
+    const prevBlk = this.index.get(hex) ?? 0;
+    const prevDsc = this.dscSize.get(hex) ?? 0;
+    const nextDsc = descriptor?.length ?? 0;
+    const next = this.bytesUsed - prevBlk - prevDsc + bytes.length + nextDsc;
     if (next > this.quota) throw new Error("store.local: quota exceeded");
     this.fs.put(hex + BLK, bytes);
-    if (descriptor) this.fs.put(hex + DSC, descriptor);
-    else if (prev) this.fs.delete(hex + DSC); // overwriting a described block with a bare one
+    if (descriptor) {
+      this.fs.put(hex + DSC, descriptor);
+    } else if (prevDsc > 0) {
+      this.fs.delete(hex + DSC); // overwriting a described block with a bare one
+    }
     this.index.set(hex, bytes.length);
+    this.dscSize.set(hex, nextDsc);
     this.bytesUsed = next;
   }
 
@@ -69,7 +83,9 @@ export class FsBlobStore implements BlobStore {
     this.fs.delete(hex + BLK);
     this.fs.delete(hex + DSC);
     this.index.delete(hex);
-    this.bytesUsed -= sz;
+    const dsz = this.dscSize.get(hex) ?? 0;
+    this.dscSize.delete(hex);
+    this.bytesUsed -= sz + dsz;
     return true;
   }
 

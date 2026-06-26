@@ -93,13 +93,13 @@ export async function run(t) {
       const got = store.get(id);
       t.ok(got && bytesEqual(got.bytes, bytes), "get returns the bytes");
       t.ok(got && got.descriptor && bytesEqual(got.descriptor, desc), "descriptor persisted alongside");
-      t.eq(store.stat().used, bytes.length, "used reflects ciphertext size");
+      t.eq(store.stat().used, bytes.length + desc.length, "used reflects ciphertext + descriptor size");
       t.eq(store.list().length, 1, "list sees the one block");
 
       // Persistence: a fresh store over the same dir rebuilds its index.
       const reopened = new FsBlobStore(new NodeFs(dir), 1024);
       t.ok(reopened.has(id), "reopened store still has the block");
-      t.eq(reopened.stat().used, bytes.length, "reopened used is correct");
+      t.eq(reopened.stat().used, bytes.length + desc.length, "reopened used is correct (blks + dscs)");
       const got2 = reopened.get(id);
       t.ok(got2 && bytesEqual(got2.bytes, bytes), "reopened get returns the bytes");
 

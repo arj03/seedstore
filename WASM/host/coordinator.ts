@@ -8,7 +8,7 @@ import type { Node, PeerId } from "./core.js";
 import type { Cohort } from "./cohort.js";
 import { DOMAIN_BODY, DOMAIN_MANIFEST } from "./crypto.js";
 import {
-  signDescriptor, parseSignedDescriptor,
+  signDescriptor, verifyDescriptor,
   encodeManifest, decodeManifest, ENC_XCHACHA20, type Descriptor,
 } from "./manifest.js";
 import {
@@ -256,8 +256,19 @@ export class Coordinator {
     if (!manCt) throw new Error("get: manifest not found in cohort");
     const man = decodeManifest(this.node.crypto.decrypt(K, DOMAIN_MANIFEST, 0, manCt));
 
+    // Verify every chunk descriptor's signature before using it (§4.3). A
+    // tampered descriptor would carry forged block-ids that redirect repair
+    // and make GET read out of thin air; the manifest is encrypted, not signed,
+    // so a wrong K gives noise — but a correct K with a tampered manifest is
+    // stopped by the per-chunk signature check.
+    const sds: { descriptor: Descriptor }[] = [];
+    for (const env of man.chunks) {
+      const sd = verifyDescriptor(this.node.sodium, env);
+      if (!sd) throw new Error("get: chunk descriptor signature invalid");
+      sds.push(sd);
+    }
+
     const out = new Uint8Array(man.fileSize);
-    const sds = man.chunks.map((env) => parseSignedDescriptor(env));
 
     // One discovery fan-out for the whole file (union every chunk's block_ids into
     // a single have/want), then one batched FETCH per holder pulling all the

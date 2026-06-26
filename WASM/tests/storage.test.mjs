@@ -173,6 +173,29 @@ export async function run(t) {
     nodes.forEach((n) => n.close());
   }
 
+  t.group("repair settles on a high-redundancy degenerate config (RS(1,4)) (§9)");
+  {
+    // RS(1,4): n=5, replicas=5, lowWater=3. The lone id (parity≡data) lives on 5
+    // distinct holders. Repair must read the *full* live-holder set, never a
+    // capped sample: a sample of, say, 2 reads redundancy 2 < lowWater 3 and would
+    // re-place on every pass, never settling. A freshly-PUT, fully-healthy file
+    // must therefore be a strict no-op for repair.
+    const net = new LoopbackNetwork();
+    const cfg = { k: 1, m: 4, blockSize: 64 };
+    const nodes = await createConnectedCohort({ count: 7, network: net, sodium, wasm, config: cfg, timeoutMs: TIMEOUT }); // owner + 6 holders >= n=5
+    const owner = nodes[0];
+    t.eq(owner.config.replicas, 5, "replicas re-derived for RS(1,4) (m + 1)");
+    const data = file(256, 41);                            // 4 blocks → coded path
+    const put = await owner.put(data);
+    t.ok(!put.replicated, "multi-block k=1 file takes the coded path");
+
+    let replaced = 0;
+    for (const n of nodes.filter((x) => x !== owner)) replaced += await n.runRepair();
+    t.eq(replaced, 0, "repair places nothing on an already-healthy file (reads the full holder set, §9)");
+    t.ok(bytesEqual(await owner.get(put.manifestId, put.key), data), "file still reads after the repair pass");
+    nodes.forEach((n) => n.close());
+  }
+
   t.group("startRepairLoop runs repair on a jittered interval, then settles (§9)");
   {
     const net = new LoopbackNetwork();

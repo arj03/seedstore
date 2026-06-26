@@ -35,6 +35,8 @@ export function encodeHaveReq(ids: Uint8Array[]): Uint8Array {
 }
 export function decodeHaveReq(buf: Uint8Array): Uint8Array[] {
   const count = readU32BE(buf, 0);
+  const need = 4 + count * 32;
+  if (buf.length < need) throw new Error("protocol: decodeHaveReq truncated");
   const out: Uint8Array[] = [];
   for (let i = 0; i < count; i++) out.push(buf.slice(4 + i * 32, 4 + (i + 1) * 32));
   return out;
@@ -45,6 +47,7 @@ export function encodeHaveRes(held: boolean[]): Uint8Array {
   return out;
 }
 export function decodeHaveRes(buf: Uint8Array): boolean[] {
+  if (buf.length < 1) throw new Error("protocol: decodeHaveRes truncated");
   return Array.from(buf, (b) => b === 1);
 }
 
@@ -73,12 +76,15 @@ export function encodeOfferBatch(offers: Offer[]): Uint8Array {
 }
 export function decodeOfferBatch(buf: Uint8Array): Offer[] {
   const count = readU32BE(buf, 0);
+  if (buf.length < 4) throw new Error("protocol: decodeOfferBatch truncated header");
   const out: Offer[] = [];
   let o = 4;
   for (let i = 0; i < count; i++) {
+    if (o + 40 > buf.length) throw new Error("protocol: decodeOfferBatch truncated entry");
     const blockId = buf.slice(o, o + 32);
     const size = readU32BE(buf, o + 32);
     const dlen = readU32BE(buf, o + 36);
+    if (o + 40 + dlen > buf.length) throw new Error("protocol: decodeOfferBatch truncated descriptor");
     const descriptor = dlen > 0 ? buf.slice(o + 40, o + 40 + dlen) : null;
     out.push({ blockId, size, descriptor });
     o += 40 + dlen;
@@ -123,12 +129,15 @@ export function encodeStoreBatch(stores: StoreReq[]): Uint8Array {
 }
 export function decodeStoreBatch(buf: Uint8Array): StoreReq[] {
   const count = readU32BE(buf, 0);
+  if (buf.length < 4) throw new Error("protocol: decodeStoreBatch truncated header");
   const out: StoreReq[] = [];
   let o = 4;
   for (let i = 0; i < count; i++) {
+    if (o + 40 > buf.length) throw new Error("protocol: decodeStoreBatch truncated entry");
     const blockId = buf.slice(o, o + 32);
     const dlen = readU32BE(buf, o + 32);
     const blen = readU32BE(buf, o + 36);
+    if (o + 40 + dlen + blen > buf.length) throw new Error("protocol: decodeStoreBatch truncated data");
     const descriptor = dlen > 0 ? buf.slice(o + 40, o + 40 + dlen) : null;
     const bytes = buf.slice(o + 40 + dlen, o + 40 + dlen + blen);
     out.push({ blockId, descriptor, bytes });
@@ -157,6 +166,8 @@ export function encodeFetchBatchReq(ids: Uint8Array[]): Uint8Array {
 }
 export function decodeFetchBatchReq(buf: Uint8Array): Uint8Array[] {
   const count = readU32BE(buf, 0);
+  const need = 4 + count * 32;
+  if (buf.length < need) throw new Error("protocol: decodeFetchBatchReq truncated");
   const out: Uint8Array[] = [];
   for (let i = 0; i < count; i++) out.push(buf.slice(4 + i * 32, 4 + (i + 1) * 32));
   return out;
@@ -176,12 +187,16 @@ export function encodeFetchBatchRes(blocks: (Uint8Array | null)[]): Uint8Array {
 }
 export function decodeFetchBatchRes(buf: Uint8Array): (Uint8Array | null)[] {
   const count = readU32BE(buf, 0);
+  if (buf.length < 4) throw new Error("protocol: decodeFetchBatchRes truncated header");
   const out: (Uint8Array | null)[] = [];
   let o = 4;
   for (let i = 0; i < count; i++) {
+    if (o >= buf.length) throw new Error("protocol: decodeFetchBatchRes truncated found");
     const found = buf[o]; o += 1;
     if (found !== 1) { out.push(null); continue; }
+    if (o + 4 > buf.length) throw new Error("protocol: decodeFetchBatchRes truncated len");
     const len = readU32BE(buf, o); o += 4;
+    if (o + len > buf.length) throw new Error("protocol: decodeFetchBatchRes truncated block");
     out.push(buf.slice(o, o + len)); o += len;
   }
   return out;

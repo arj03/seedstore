@@ -30,10 +30,15 @@
 "use strict";
 
 // ── byte helpers (mirror host/util.ts) ──────────────────────────────────────
+const HEX_CHARS = "0123456789abcdef";
 function toHex(b) {
-  let s = "";
-  for (let i = 0; i < b.length; i++) s += b[i].toString(16).padStart(2, "0");
-  return s;
+  const chars = new Array(b.length * 2);
+  for (let i = 0; i < b.length; i++) {
+    const h = b[i];
+    chars[i * 2] = HEX_CHARS[(h >> 4) & 0xf];
+    chars[i * 2 + 1] = HEX_CHARS[h & 0xf];
+  }
+  return chars.join("");
 }
 function fromHex(h) {
   const out = new Uint8Array(h.length >> 1);
@@ -246,11 +251,16 @@ function encodeFetchBatchReq(ids) {
   return concat([head, ...ids]);
 }
 function decodeFetchBatchRes(buf) {
+  if (buf.length < 4) throw new Error("protocol: decodeFetchBatchRes truncated header");
   const count = rU32(buf, 0), out = []; let o = 4;
   for (let i = 0; i < count; i++) {
+    if (o >= buf.length) throw new Error("protocol: decodeFetchBatchRes truncated found");
     const found = buf[o]; o += 1;
     if (found !== 1) { out.push(null); continue; }
-    const len = rU32(buf, o); o += 4; out.push(buf.slice(o, o + len)); o += len;
+    if (o + 4 > buf.length) throw new Error("protocol: decodeFetchBatchRes truncated len");
+    const len = rU32(buf, o); o += 4;
+    if (o + len > buf.length) throw new Error("protocol: decodeFetchBatchRes truncated block");
+    out.push(buf.slice(o, o + len)); o += len;
   }
   return out;
 }
@@ -334,6 +344,8 @@ function decodeDescriptorCore(core) {
   // junk core exactly as the host holder does (§4.3).
   if (core.length < 8 || core[0] !== 1) throw new Error("descriptor: bad core");
   const k = core[1], m = core[2], blockSize = rU32(core, 3), n = core[7], blockIds = [];
+  if (k < 1) throw new Error("descriptor: k must be >= 1");
+  if (blockSize < 1) throw new Error("descriptor: blockSize must be >= 1");
   if (n !== k + m) throw new Error("descriptor: n != k+m");
   if (core.length !== 8 + n * 32) throw new Error("descriptor: truncated");
   for (let i = 0; i < n; i++) blockIds.push(core.slice(8 + i * 32, 8 + (i + 1) * 32));
@@ -383,6 +395,10 @@ function decodeManifest(buf) {
   const blockSize = rU32(buf, o); o += 4;
   const k = buf[o++], m = buf[o++], encAlg = buf[o++];
   const chunkCount = rU32(buf, o); o += 4;
+  if (fileSize > 0x10000000000) throw new Error("manifest: fileSize out of bounds");
+  if (blockSize < 1) throw new Error("manifest: blockSize must be >= 1");
+  if (k < 1) throw new Error("manifest: k must be >= 1");
+  if (chunkCount === 0) throw new Error("manifest: chunkCount must be >= 1");
   const chunks = [];
   for (let i = 0; i < chunkCount; i++) {
     if (o + 4 > buf.length) throw new Error("manifest: truncated chunk length");
@@ -633,7 +649,11 @@ function doPut(plaintext) {
   });
   const manCt = encrypt(K, DOMAIN_MANIFEST, 0, manPlain);
   const manifestId = hash(manCt);
-  if (placeBlock(manifestId, manCt, null, new Set(), c.replicas).length === 0) {
+  // Signed descriptor for the manifest block so repair can self-heal it (§9).
+  // Carries as a one-block replicated chunk (k = 1, m = 0) with the manifest's
+  // block_id, matching the host-side Coordinator.put (coordinator.ts §123).
+  const manEnv = signChunk({ k: 1, m: 0, blockSize: manCt.length, blockIds: [manifestId] });
+  if (placeBlock(manifestId, manCt, manEnv, new Set(), c.replicas).length === 0) {
     throw new Error("put: no peer accepted the manifest" + OUT_OF_STORAGE_HINT);
   }
 
@@ -653,9 +673,16 @@ function doGet(arg) {
   if (!manCt) throw new Error("get: manifest not found in cohort");
   const man = decodeManifest(decrypt(K, DOMAIN_MANIFEST, 0, manCt));
 
+  // Verify every chunk descriptor's signature before using it (§4.3), mirroring
+  // the host-side Coordinator.get: the manifest is encrypted, not signed, so a
+  // correct K with a tampered manifest is caught only by the per-chunk signature.
   // One file-wide have/want, then one batched FETCH per holder (gatherBlocks),
   // instead of a discovery + fetch per chunk.
-  const ds = man.chunks.map((env) => parseSignedDescriptor(env).descriptor);
+  const ds = man.chunks.map((env) => {
+    const d = verifyDescriptor(env);
+    if (!d) throw new Error("get: chunk descriptor signature invalid");
+    return d;
+  });
   const allIds = [];
   for (const d of ds) for (const id of d.blockIds) allIds.push(id);
   const holders = haveWant(allIds);
@@ -710,7 +737,14 @@ function healCoded(d, descEnv, holders) {
   for (let idx = 0; idx < d.blockIds.length && present.length < d.k; idx++) {
     const set = holders.get(toHex(d.blockIds[idx]));
     if (!set || set.size === 0) continue;
-    const b = verificationFetch([...set][0], d.blockIds[idx]);
+    // Try each live holder until one serves the block, rather than picking the
+    // first and silently skipping if it's stale or unreachable.
+    const ranked = rank([...set]);
+    let b = null;
+    for (const peer of ranked) {
+      b = verificationFetch(peer, d.blockIds[idx]);
+      if (b) break;
+    }
     if (b) present.push({ index: idx, bytes: b });
   }
   if (present.length < d.k) return 0; // cannot heal — fewer than k retrievable
@@ -851,7 +885,10 @@ function acceptStore(blockId, descriptor, bytes) {
 }
 // Wire decoders for the requests a holder receives (mirror host/protocol.ts).
 function decodeHaveIds(buf) {
+  if (buf.length < 4) throw new Error("protocol: decodeHaveIds truncated header");
   const n = rU32(buf, 0), out = [];
+  const need = 4 + n * 32;
+  if (buf.length < need) throw new Error("protocol: decodeHaveIds truncated");
   for (let i = 0; i < n; i++) out.push(buf.slice(4 + i * 32, 4 + (i + 1) * 32));
   return out;
 }
@@ -861,10 +898,13 @@ function encodeHaveRes(held) {
   return out;
 }
 function decodeOfferBatch(buf) {
+  if (buf.length < 4) throw new Error("protocol: decodeOfferBatch truncated header");
   const count = rU32(buf, 0), out = [];
   let o = 4;
   for (let i = 0; i < count; i++) {
+    if (o + 40 > buf.length) throw new Error("protocol: decodeOfferBatch truncated entry");
     const blockId = buf.slice(o, o + 32), size = rU32(buf, o + 32), dlen = rU32(buf, o + 36);
+    if (o + 40 + dlen > buf.length) throw new Error("protocol: decodeOfferBatch truncated descriptor");
     out.push({ blockId, size, descriptor: dlen > 0 ? buf.slice(o + 40, o + 40 + dlen) : null });
     o += 40 + dlen;
   }
@@ -876,10 +916,13 @@ function encodeOfferMask(accepts) {
   return out;
 }
 function decodeStoreBatch(buf) {
+  if (buf.length < 4) throw new Error("protocol: decodeStoreBatch truncated header");
   const count = rU32(buf, 0), out = [];
   let o = 4;
   for (let i = 0; i < count; i++) {
+    if (o + 40 > buf.length) throw new Error("protocol: decodeStoreBatch truncated entry");
     const blockId = buf.slice(o, o + 32), dlen = rU32(buf, o + 32), blen = rU32(buf, o + 36);
+    if (o + 40 + dlen + blen > buf.length) throw new Error("protocol: decodeStoreBatch truncated data");
     out.push({
       blockId,
       descriptor: dlen > 0 ? buf.slice(o + 40, o + 40 + dlen) : null,
@@ -895,7 +938,10 @@ function encodeStoreMask(stored) {
   return out;
 }
 function decodeFetchBatchReq(buf) {
+  if (buf.length < 4) throw new Error("protocol: decodeFetchBatchReq truncated header");
   const count = rU32(buf, 0), out = [];
+  const need = 4 + count * 32;
+  if (buf.length < need) throw new Error("protocol: decodeFetchBatchReq truncated");
   for (let i = 0; i < count; i++) out.push(buf.slice(4 + i * 32, 4 + (i + 1) * 32));
   return out;
 }

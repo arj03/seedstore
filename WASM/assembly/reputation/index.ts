@@ -85,6 +85,31 @@ function decayTo(i: i32, now: f64): void {
   last[i] = now;
 }
 
+// Evict peers whose reciprocity mass, decayed forward to `now`, has fallen below
+// 2^-16 of a single observation (≈ 16 half-lives ≈ 16 weeks for a once-seen peer).
+// Called only when OBSERVE is about to append a never-seen peer — the one event
+// that grows the arrays — so re-observing a known peer pays nothing extra, and a
+// faded peer is reclaimed just before the new one lands. The threshold is checked
+// against the *decayed* mass: the stored mass is only current as of last[i] (decay
+// is applied lazily, per peer, on the next touch), so testing the raw stored mass
+// would never evict a peer seen a few times and then gone forever — exactly the
+// churn case this guards. Shift-compact the four parallel arrays in place to shrink
+// their logical length: the WASM handler can't free heap, but a shorter array
+// bounds findPeer/decay cost and prevents unbounded growth (§7).
+function prunePeers(now: f64): void {
+  const threshold: f64 = (1.0 / 65536.0);
+  let w = 0;
+  for (let i = 0; i < pks.length; i++) {
+    const dt = now - last[i];
+    const factor = dt > 0.0 ? Math.exp(-LN2 * dt / HALF_LIFE_MS) : 1.0;
+    if ((serve[i] + miss[i]) * factor > threshold) {
+      if (w != i) { pks[w] = pks[i]; serve[w] = serve[i]; miss[w] = miss[i]; last[w] = last[i]; }
+      w++;
+    }
+  }
+  pks.length = w; serve.length = w; miss.length = w; last.length = w;
+}
+
 function scoreOf(i: i32): f64 {
   const s = serve[i] * PASS_WEIGHT - miss[i] * MISS_PENALTY;
   return s;
@@ -123,7 +148,7 @@ export function handle(input_len: i32): i32 {
     const now = readU64BE(scratch + 33);
     const result = load<u8>(scratch + 41) as i32;
     let i = findPeer(pkPtr);
-    if (i < 0) i = addPeer(pkPtr);
+    if (i < 0) { prunePeers(now); i = addPeer(pkPtr); } // prune only when growing
     decayTo(i, now);
     if (result != 0) serve[i] = serve[i] + 1.0;
     else miss[i] = miss[i] + 1.0;

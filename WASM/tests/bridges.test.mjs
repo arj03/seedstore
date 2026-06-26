@@ -62,7 +62,7 @@ export async function run(t) {
     const got = store.get(id);
     t.ok(got && bytesEqual(got.bytes, bytes), "get returns bytes");
     t.ok(got && got.descriptor && bytesEqual(got.descriptor, desc), "get returns descriptor");
-    t.eq(store.stat().used, 4, "used reflects stored bytes");
+    t.eq(store.stat().used, bytes.length + desc.length, "used reflects ciphertext + descriptor bytes");
     t.eq(store.list().length, 1, "list has one id");
     t.ok(store.delete(id), "delete returns true");
     t.ok(!store.has(id), "gone after delete");
