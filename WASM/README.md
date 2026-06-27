@@ -326,10 +326,10 @@ Source — the storage layer itself:
 | | LOC |
 |---|---:|
 | **codec** WASM — GF(2⁸) + Reed–Solomon (`gf256` + `rs` + `index`) | 417 |
-| **reputation** WASM — decayed reciprocity | 128 |
-| **host** TypeScript — bridges, crypto, manifest, protocol, cohort/coordinator/repair, node (20 files) | 2,341 |
-| **tier2-guest.js** — the confined PUT/GET/repair + holder guest | 896 |
-| **total** | **3,782** |
+| **reputation** WASM — decayed reciprocity | 152 |
+| **host** TypeScript — crypto.hash bridge, crypto, manifest (+core), protocol, store, storage-node, node (15 files) | 1,292 |
+| **tier2-guest.js** — the confined PUT/GET/repair + holder guest (the whole protocol) | 896 |
+| **total** | **2,757** |
 
 (plus ~2,100 LOC of tests and ~530 of scripts + the browser demo.)
 
@@ -351,12 +351,12 @@ footprint is ~15 KB of WASM + ~8 KB of gzipped JS (the guest)** (§2, §16: "log
 RS, tens of KB, no second copy of a crypto library").
 
 The host-side TypeScript (`build/host`, minified to `build/host-min`) is a
-*separate* path — the **in-process library and reference/parity oracle** that the
-browser demo and the `createConnectedCohort` tests load *instead* of the
-shell+bundle. Minified it is **21 KB gz** (14 KB gz without its own copy of the
-guest), debug 42 KB gz — so a browser-demo node carries ~26 KB gz of JS (host +
-the shared `KernelHost`) against a bundle node's ~13 KB (the 8 KB guest + the 5 KB
-`KernelHost`).
+*separate* path — the **in-process library** (it boots the kernel and runs the same
+guest in-process) that the browser demo and the `createConnectedCohort` tests load
+*instead* of the shell+bundle. Minified it is **21 KB gz** (14 KB gz without its own
+copy of the guest), debug 42 KB gz — so a browser-demo node carries ~26 KB gz of JS
+(host + the shared `KernelHost`) against a bundle node's ~13 KB (the 8 KB guest +
+the 5 KB `KernelHost`).
 
 `npm run build` emits the host **twice**: the readable `build/host` (doc comments
 intact, for debugging) and a comment-stripped `build/host-min` (for the in-process
@@ -377,7 +377,7 @@ assembly/codec/        gf256.ts, rs.ts, index.ts   — Reed–Solomon WASM handl
 assembly/reputation/   index.ts                    — decayed reciprocity WASM handler
 host/  tier2-guest.js          the confined guest: the WHOLE protocol (PUT/GET/repair + holder)
        storage-node.ts         the host that boots the kernel + drives the guest in two realms
-       manifest/crypto/protocol/store-fs/names/codec+reputation clients  — shared helpers
+       manifest (+core)/crypto/protocol/store-fs/store-local/names/util  — shared helpers
        node.ts / browser.ts    Node + browser entry points (each loads the guest text)
 scripts/  build-bundle.mjs     produce the signed bundle (npm run build:bundle)
           copy-kernel, build-browser-demo  — stage all browser pages → build/browser-demo

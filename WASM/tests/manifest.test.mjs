@@ -3,7 +3,7 @@
 import { readFileSync } from "node:fs";
 
 import { Crypto } from "../build/host/crypto.js";
-import { CodecClient } from "../build/host/codec-client.js";
+import { CodecClient } from "./codec-client.mjs";
 import { storageNames } from "../build/host/names.js";
 import {
   encodeDescriptorCore, decodeDescriptorCore,

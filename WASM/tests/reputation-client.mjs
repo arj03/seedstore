@@ -1,43 +1,39 @@
-// Host-owned instance of the reputation WASM (README §13, §17). The node's
-// orchestration records witnessed verification-fetch outcomes here and queries
-// scores to rank peers for placement (§6), admission (§14), and fetch order
-// (§7). Pure — no host calls — so it instantiates with only the env imports.
+// Test-only host-owned instance of the reputation WASM (README §13, §17). Lets a
+// test drive the decayed-reciprocity counters directly — it is pure (no host
+// calls), so it instantiates with only the env imports. The runtime never uses
+// this: a node reaches reputation as an installed kernel handler over MODULE_CALL
+// (host/storage-node.ts score()), so this client lives with its test. The ABI
+// (op-tag layout) is owned by assembly/reputation/index.ts.
 
 const OP_OBSERVE = 1, OP_SCORE = 2, OP_COUNT = 3, OP_RESET = 4;
 
-interface RepExports {
-  memory: WebAssembly.Memory;
-  scratch: WebAssembly.Global;
-  handle(input_len: number): number;
-}
-
 export class ReputationClient {
-  private exports!: RepExports;
-  private scratch = 0;
+  exports;
+  scratch = 0;
 
-  static async load(bytes: Uint8Array): Promise<ReputationClient> {
+  static async load(bytes) {
     const c = new ReputationClient();
-    const mod = new WebAssembly.Module(bytes as BufferSource);
+    const mod = new WebAssembly.Module(bytes);
     const inst = new WebAssembly.Instance(mod, {
       env: {
-        abort: (_m: number, _f: number, l: number, col: number) => { throw new Error(`reputation abort ${l}:${col}`); },
+        abort: (_m, _f, l, col) => { throw new Error(`reputation abort ${l}:${col}`); },
         seed: () => Date.now(),
         trace: () => {},
       },
     });
-    c.exports = inst.exports as unknown as RepExports;
-    c.scratch = c.exports.scratch.value as number;
+    c.exports = inst.exports;
+    c.scratch = c.exports.scratch.value;
     return c;
   }
 
-  private write(b: Uint8Array): number {
+  write(b) {
     new Uint8Array(this.exports.memory.buffer, this.scratch, b.length).set(b);
     return b.length;
   }
-  private readF64(): number {
+  readF64() {
     return new DataView(this.exports.memory.buffer, this.scratch, 8).getFloat64(0, true);
   }
-  private u64be(out: Uint8Array, off: number, ms: number): void {
+  u64be(out, off, ms) {
     const hi = Math.floor(ms / 0x100000000);
     out[off] = (hi >>> 24) & 255; out[off + 1] = (hi >>> 16) & 255;
     out[off + 2] = (hi >>> 8) & 255; out[off + 3] = hi & 255;
@@ -47,7 +43,7 @@ export class ReputationClient {
   }
 
   /** Record a verification-fetch outcome for a peer (§8, §13). */
-  observe(peerPk: Uint8Array, nowMs: number, pass: boolean): number {
+  observe(peerPk, nowMs, pass) {
     const req = new Uint8Array(1 + 32 + 8 + 1);
     req[0] = OP_OBSERVE; req.set(peerPk, 1);
     this.u64be(req, 33, nowMs);
@@ -57,7 +53,7 @@ export class ReputationClient {
   }
 
   /** Decayed reciprocity score for a peer at `nowMs` (§13.1). */
-  score(peerPk: Uint8Array, nowMs: number): number {
+  score(peerPk, nowMs) {
     const req = new Uint8Array(1 + 32 + 8);
     req[0] = OP_SCORE; req.set(peerPk, 1);
     this.u64be(req, 33, nowMs);
@@ -65,7 +61,7 @@ export class ReputationClient {
     return this.readF64();
   }
 
-  count(): number {
+  count() {
     this.write(new Uint8Array([OP_COUNT]));
     const len = this.exports.handle(1);
     if (len !== 4) return 0;
@@ -73,7 +69,7 @@ export class ReputationClient {
     return v.getUint32(0, false);
   }
 
-  reset(): void {
+  reset() {
     this.write(new Uint8Array([OP_RESET]));
     this.exports.handle(1);
   }

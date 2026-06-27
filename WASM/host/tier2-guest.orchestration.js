@@ -1,21 +1,19 @@
-// The Tier-2 guest — the storage orchestration (README §6/§7/§9) as zero-authority
-// JS that runs *inside* the QuickJS realm (BUN.md §2.1). This is the real port the
-// spike pointed at: the bodies of `cohort` / `coordinator` / `repair` rewritten so
-// every `node.*` capability is reached only through the single `host.call(op,
-// bytes)` seam, and de-async'd to straight-line synchronous code over the blocking
+// The Tier-2 guest — the WHOLE storage protocol (README §6/§7/§9) as zero-authority
+// JS that runs *inside* the QuickJS realm (BUN.md §2.1). This is the single
+// implementation of placement, k-of-n, admission, the wire format, and repair: the
+// host (host/storage-node.ts) only boots the kernel and runs this guest in two
+// realms. Every capability is reached through the one `host.call(op, bytes)` seam,
+// and the code is de-async'd to straight-line synchronous form over the blocking
 // Asyncify bridge (the load-bearing finding — a host call from a deferred promise
-// job aborts the VM, so there is no async/await in here at all). Logic-for-logic
-// this mirrors host/cohort.ts, host/coordinator.ts, and host/repair.ts; only the
-// seam differs.
+// job aborts the VM, so there is no async/await in here at all).
 //
 // Two roles share this one program. The *initiator* entrypoints (`put`/`get`/
 // `repair`) are async — they fan out over net and run in the Asyncify realm. The
 // *holder* entrypoint (`handle`: HAVE/OFFER/STORE/FETCH, admission, content-
-// addressing, quota, fs writes — mirroring host/storage-node.ts + host/store-fs.ts)
-// is purely synchronous (local fs + crypto, no net) and runs in a SYNC realm, so a
-// node can answer requests while its own initiator realm is parked mid-await
-// (the runtime split). Whichever entrypoint a realm calls, the other
-// role's code is simply dormant there.
+// addressing, quota, fs writes) is purely synchronous (local fs + crypto, no net)
+// and runs in a SYNC realm, so a node can answer requests while its own initiator
+// realm is parked mid-await (the runtime split). Whichever entrypoint a realm
+// calls, the other role's code is simply dormant there.
 //
 // This is a plain script, not a module: it has no imports/exports and no ambient
 // authority. It is loaded as source by the host (host/storage-node.ts, or the
@@ -72,8 +70,8 @@ function bytesToStr(b) { let s = ""; for (let i = 0; i < b.length; i++) s += Str
 // as ordinary synchronous functions.
 
 // The op bytes of the two installed handlers (the guest owns their ABIs).
-const CODEC_ENCODE = 1, CODEC_DECODE = 2;     // host/codec-client.ts
-const REP_OBSERVE = 1, REP_SCORE = 2;         // host/reputation-client.ts
+const CODEC_ENCODE = 1, CODEC_DECODE = 2;     // assembly/codec/index.ts
+const REP_OBSERVE = 1, REP_SCORE = 2;         // assembly/reputation/index.ts
 // Control-plane message types carried over net.send (host/protocol.ts §18).
 const MSG_HAVE = 1, MSG_OFFER = 2, MSG_FETCH = 3, MSG_STORE = 4;
 const STORE_BLK = ".blk", STORE_DSC = ".dsc";
@@ -108,10 +106,9 @@ function moduleCall(name, req) {
 // header and the request body fold into a single concat. The RS request is large
 // (k data blocks ≈ 640 KB); the old `moduleCall(name, concat([head, ...blocks]))`
 // built that buffer and then copied the whole of it again to prepend the name —
-// two passes over the blocks. One concat copies them once (the host fast path got
-// the same single-copy treatment in codec-client.ts; the guest reaches the codec
-// only through host.call so the in-place scratch staging isn't available here, but
-// folding the two concats is).
+// two passes over the blocks. One concat copies them once. (The guest reaches the
+// codec only through host.call, so the in-place scratch staging a host-owned
+// instance could do isn't available here, but folding the two concats is.)
 function moduleCallParts(name, parts) {
   const head = new Uint8Array(1 + name.length); head[0] = name.length; head.set(name, 1);
   return host.call(CAP_MODULE_CALL, concat([head, ...parts]));
@@ -315,15 +312,14 @@ function signChunk(d) { return signCore(encodeDescriptorCore(d)); }
 const OUT_OF_STORAGE_HINT = " — holders answered but declined: most likely OUT OF STORAGE (quota/disk full); clear the holders' data dirs or raise their quota, or connect more holders";
 // A batched OFFER / STORE / FETCH is split to stay under config().maxMessageBytes —
 // the per-transport cap that keeps one message inside the frame cap AND the request
-// timeout (mirror coordinator.ts). Transport/operator policy injected via the APP
-// preamble (like quota); default if absent.
+// timeout. Transport/operator policy injected via the APP preamble (like quota);
+// default if absent.
 function maxMsgBytes() { const v = config().maxMessageBytes; return (typeof v === "number" && v > 0) ? v : (1 << 20); }
 // The fan-out windows (transport/operator policy, like maxMessageBytes): how many
 // per-peer sub-batches a single CAP_NET_SEND_MANY round carries. putWindow bounds
 // STORE messages PER PEER (peers concurrent → peak W·peers); getWindow bounds FETCH
-// messages TOTAL across the cohort (peak W). These mirror the host Coordinator's
-// mapPool(putConcurrency)/mapPool(getConcurrency); default 16 when the driver omits
-// them (the host defaultConfig value), so a confined sync guest pipelines a holder's
+// messages TOTAL across the cohort (peak W). Default 16 when the driver omits them
+// (the host defaultConfig value), so a confined sync guest pipelines a holder's
 // many ~1-block messages instead of paying one round trip apiece (the tight-cap
 // WebRTC case the lock-step fan-out was meant to keep windowed).
 function putWindow() { const v = config().putConcurrency; return (typeof v === "number" && v > 0) ? v : 16; }

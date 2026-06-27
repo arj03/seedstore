@@ -99,7 +99,6 @@ export class StorageNode {
   readonly host: KernelHost;
   readonly names: StorageNames;
 
-  private readonly network: Network;
   private readonly peers = new Set<PeerId>();
   private readonly clockFn: () => number;
   private readonly guestSource: string;
@@ -117,7 +116,6 @@ export class StorageNode {
   private holder!: SyncSafeRealm;
 
   private constructor(opts: StorageNodeOptions, host: KernelHost, identity: Identity) {
-    this.network = opts.network;
     this.sodium = opts.sodium;
     this.host = host;
     this.identity = identity;
@@ -283,7 +281,7 @@ export class StorageNode {
   score(peerPk: Uint8Array): number {
     const now = this.now();
     const req = new Uint8Array(41);
-    req[0] = 2; // OP_SCORE (reputation handler ABI, host/reputation-client.ts)
+    req[0] = 2; // OP_SCORE (reputation handler ABI, assembly/reputation/index.ts)
     req.set(peerPk, 1);
     writeU32BE(req, 33, Math.floor(now / 0x100000000));
     writeU32BE(req, 37, now >>> 0);
@@ -348,15 +346,10 @@ export class StorageNode {
 
   // ── bootstrap wiring (§19) ──────────────────────────────────────────────
   private registerBridges(): void {
-    registerStorageBridges(this.host, this.names, {
-      crypto: this.crypto,
-      store: this.store,
-      clockNow: () => this.now(),
-      randBytes: (n) => this.sodium.randombytes_buf(n),
-      // net.send bridge → the loopback/data-channel transport. The guest reaches
-      // net through the generic cap-bridge; this is the WASM-reachable surface (§16).
-      netSend: (peerId, bytes) => this.network.send(this.peerId, peerId, bytes),
-    });
+    // The only storage-named host service: the no-cap crypto.hash the installed
+    // codec WASM calls for block-ids (§16). The guest reaches net/fs/clock/rand
+    // through the generic cap-bridge (buildBridge), not through storage bridges.
+    registerStorageBridges(this.host, this.names, { crypto: this.crypto });
   }
 
   private installHandlers(codecBytes: Uint8Array, reputationBytes: Uint8Array): void {
