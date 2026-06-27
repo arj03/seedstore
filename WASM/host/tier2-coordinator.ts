@@ -47,21 +47,17 @@ export interface Tier2PutResult {
 }
 
 /** Read the guest program text. It is shipped next to this module in
- *  `build/host/tier2-guest.js` (staged by scripts/copy-kernel.mjs); the source
- *  copy is the dev fallback. When seedstore is delivered as a signed bundle the
- *  guest text comes from the loaded manifest instead (the shell's runGuest), so
- *  this fs read is not reached. */
+ *  `build/host/tier2-guest.js` — STITCHED by scripts/build-guest.mjs from the shared
+ *  pure core + the orchestration body (the raw `host/tier2-guest.orchestration.js`
+ *  alone is incomplete, so there is no source fallback: a build is required). When
+ *  seedstore is delivered as a signed bundle the guest text comes from the loaded
+ *  manifest instead (the shell's runGuest), so this fs read is not reached. */
 let guestCache: string | undefined;
 function guestProgram(): string {
   if (guestCache !== undefined) return guestCache;
-  const candidates = [
-    new URL("./tier2-guest.js", import.meta.url),       // shipped: build/host/
-    new URL("../../host/tier2-guest.js", import.meta.url), // dev fallback: source
-  ];
-  for (const url of candidates) {
-    try { return (guestCache = readFileSync(fileURLToPath(url), "utf8")); } catch { /* try next */ }
-  }
-  throw new Error("tier2: tier2-guest.js not found (run `npm run build`)");
+  const url = new URL("./tier2-guest.js", import.meta.url); // shipped: build/host/ (stitched)
+  try { return (guestCache = readFileSync(fileURLToPath(url), "utf8")); }
+  catch { throw new Error("tier2: build/host/tier2-guest.js not found (run `npm run build`)"); }
 }
 
 /** The `const APP = {…};` block the guest reads its config + module names from —
@@ -80,6 +76,12 @@ export function storageAppPreamble(node: Tier2Host): string {
     // batch cap the guest-as-initiator splits OFFER/STORE/FETCH under, so it batches
     // byte-for-byte as the host Coordinator does.
     maxMessageBytes: c.maxMessageBytes,
+    // The fan-out windows (same operator policy): how many STORE sub-batches a peer
+    // is sent at once (putConcurrency → peak W·peers) and how many FETCH sub-batches
+    // are in flight across the cohort at once (getConcurrency → peak W). The guest
+    // packs that many per-peer requests into one CAP_NET_SEND_MANY round, matching
+    // the host Coordinator's mapPool windows.
+    putConcurrency: c.putConcurrency, getConcurrency: c.getConcurrency,
     codecName: toHex(node.names.codec), repName: toHex(node.names.reputation),
   };
   return `const APP = ${JSON.stringify(app)};\n`;

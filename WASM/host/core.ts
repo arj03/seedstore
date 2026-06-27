@@ -35,9 +35,11 @@ export interface StorageConfig {
    *  blocks across many messages. The window binds hardest under a small cap (WebRTC's
    *  ~64 KB channel forces ~one block per STORE/FETCH): without it those messages would
    *  go one serial round trip per block — the latency cost it hides. Under a large cap
-   *  (WS) each holder has only a few big batches, so it is a no-op. NB the async
-   *  initiator (the host Coordinator) pipelines; the synchronous Asyncify guest
-   *  (tier2-guest.js) cannot overlap host calls, so it STOREs serially regardless. */
+   *  (WS) each holder has only a few big batches, so it is a no-op. The host
+   *  Coordinator pipelines these with Promise.all/mapPool; the synchronous Asyncify
+   *  guest (tier2-guest.js) can't overlap host calls itself, so it expresses the same
+   *  window through one batched CAP_NET_SEND_MANY round (W per-peer requests fanned
+   *  out host-side) — same peak in flight, one cap at a time. */
   putConcurrency: number;
   getConcurrency: number;
   /** Max bytes in one batched OFFER/STORE/FETCH message. Every per-holder batch is
