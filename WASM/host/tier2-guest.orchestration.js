@@ -1,5 +1,5 @@
 // The Tier-2 guest — the WHOLE storage protocol (README §6/§7/§9) as zero-authority
-// JS that runs *inside* the QuickJS realm (BUN.md §2.1). This is the single
+// JS that runs *inside* the QuickJS realm (§2.1). This is the single
 // implementation of placement, k-of-n, admission, the wire format, and repair: the
 // host (host/storage-node.ts) only boots the kernel and runs this guest in two
 // realms. Every capability is reached through the one `host.call(op, bytes)` seam,
