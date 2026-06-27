@@ -12,7 +12,7 @@
 //   - correctness is unchanged: bytes round-trip, assembly lands at the right
 //     offsets regardless of completion order, and any k of n still reads.
 
-import { loadWasmBytes, loadSodium, createConnectedCohort, Tier2Coordinator } from "../build/host/node.js";
+import { loadWasmBytes, loadSodium, createConnectedCohort } from "../build/host/node.js";
 import { bytesEqual } from "../build/host/util.js";
 import { LatencyNetwork } from "./latency-net.mjs";
 
@@ -48,7 +48,7 @@ export async function run(t) {
     const nodes = await createConnectedCohort({ count: 6, network: net, sodium, wasm, config: cfg, timeoutMs: TIMEOUT });
     net.reset();
     const t0 = performance.now();
-    const result = await body(nodes[0]);
+    const result = await body(nodes[0], net);
     const ms = performance.now() - t0;
     const byType = net.byType, peakWork = net.maxInflightWork, peakByType = net.maxInflightByType;
     nodes.forEach((nn) => nn.close());
@@ -157,101 +157,61 @@ export async function run(t) {
     nodes.forEach((nn) => nn.close());
   }
 
-  t.group("the confined guest drives the SAME per-holder concurrency as the host (CAP_NET_SEND_MANY fan-out)");
+  t.group("placement + gather fan out across holders (CAP_NET_SEND_MANY), not one round trip at a time");
   {
     // The orchestration runs INSIDE the QuickJS realm and reaches net only through
-    // host.call — yet placement/gather must still overlap holders, not serialize.
-    // Before the per-peer fan-out (cap-bridge op 19) the sync guest issued one
-    // awaited round trip at a time, so peak in-flight per type was 1; the fan-out
-    // lifts it to the holder count, matching the host Coordinator's Promise.all
-    // (proven against the host's own peaks in the groups above).
+    // host.call, yet placement/gather must still overlap holders. The per-peer
+    // fan-out (cap-bridge op 19) lifts the peak in-flight per type from 1 (a serial
+    // awaited round trip) to the holder count — the confined twin of a Promise.all.
     const net = new LatencyNetwork(DELAY);
     const nodes = await createConnectedCohort({ count: 6, network: net, sodium, wasm, config, timeoutMs: TIMEOUT });
     const owner = nodes[0];
-    const t2 = new Tier2Coordinator(owner);
 
     net.reset();
-    const put = await t2.put(data);
+    const put = await owner.put(data);
     const offerPeak = net.maxInflightByType[OFFER] ?? 0;
     const storePeak = net.maxInflightByType[STORE] ?? 0;
-    t.ok(offerPeak > 1, `guest OFFER fan-out overlaps holders: peak ${offerPeak} in flight (the serial guest was 1)`);
-    t.ok(storePeak > 1, `guest STORE fan-out overlaps holders: peak ${storePeak} in flight (the serial guest was 1)`);
-    t.eq(put.chunkCount, N, "the guest placed every RS chunk");
+    t.ok(offerPeak > 1, `OFFER fan-out overlaps holders: peak ${offerPeak} in flight (a serial path would be 1)`);
+    t.ok(storePeak > 1, `STORE fan-out overlaps holders: peak ${storePeak} in flight (a serial path would be 1)`);
+    t.eq(put.chunkCount, N, "placed every RS chunk");
 
     net.reset();
-    const bytes = await t2.get(put.manifestId, put.key);
+    const bytes = await owner.get(put.manifestId, put.key);
     const fetchPeak = net.maxInflightByType[FETCH] ?? 0;
-    t.ok(bytesEqual(bytes, data), "the confined guest GET reconstructs the file byte-identically under latency");
-    t.ok(fetchPeak > 1, `guest FETCH fan-out overlaps holders: peak ${fetchPeak} in flight (the serial guest was 1)`);
+    t.ok(bytesEqual(bytes, data), "GET reconstructs the file byte-identically under latency");
+    t.ok(fetchPeak > 1, `FETCH fan-out overlaps holders: peak ${fetchPeak} in flight (a serial path would be 1)`);
 
-    t2.dispose();
     nodes.forEach((nn) => nn.close());
   }
 
-  t.group("the confined guest WINDOWS its per-holder STOREs/FETCHes like the host (putConcurrency/getConcurrency in the realm)");
+  t.group("GET windows the per-holder FETCHes so they pipeline (getConcurrency), not one serial round trip per block");
   {
-    // The WebRTC tight-cap case, run THROUGH the confined guest. With ~one block per
-    // STORE/FETCH message a holder's blocks become many single-block messages; the
-    // guest must pipeline them by packing putWindow()/getWindow() of them into one
-    // batched CAP_NET_SEND_MANY fan-out, not send them one round trip at a time. This
-    // is the within-phase parallelism Step 2's lock-step was meant to preserve — the
-    // guest twin of the host's windowed-STORE group above. The window value rides in
-    // the guest's injected APP config (putConcurrency/getConcurrency), so the SAME
-    // knob drives the confined realm and the host Coordinator.
-    const bs = 4096;                                   // a block dominates a STORE/FETCH message
+    // The WebRTC tight-cap twin of the STORE-window group above: ~one block per FETCH
+    // message turns a holder's blocks into many single-block messages, and the window
+    // packs getWindow() of them into one CAP_NET_SEND_MANY fan-out instead of one
+    // round trip apiece. PUT then GET on ONE cohort (a fresh one would hold none of
+    // the blocks); the setup PUT is excluded from the peak by resetting just before
+    // the GET.
+    const bs = 4096;                                   // a block dominates a FETCH message
     const Nw = 16;                                     // chunks ≫ holders, so a window can bind
     const cap = bs + 2000;                             // one 4 KiB block + headers fits; two don't
     const webrtcData = file(Nw * config.k * bs, 9);    // exactly Nw RS chunks
-
-    // Stand up a cohort, drive the guest, return its per-type peak in flight. The
-    // body gets `net` so a GET case can reset the counters after its setup PUT and
-    // measure only the read path.
-    async function onGuest(cfg, body) {
-      const net = new LatencyNetwork(DELAY);
-      const nodes = await createConnectedCohort({ count: 6, network: net, sodium, wasm, config: cfg, timeoutMs: TIMEOUT });
-      const t2 = new Tier2Coordinator(nodes[0]);
-      net.reset();
-      const result = await body(t2, net);
-      const peakByType = net.maxInflightByType, byType = net.byType;
-      t2.dispose();
-      nodes.forEach((nn) => nn.close());
-      return { result, peakByType, byType };
-    }
-
     const cfg = { ...config, blockSize: bs, maxMessageBytes: cap };
 
-    // STORE: width 1 reproduces the OLD serial-per-holder guest (one STORE per peer
-    // per fan-out → peak is the holder count); width 64 pipelines each holder's
-    // STOREs into one fan-out, far past the serial peak.
-    const putSerial = await onGuest({ ...cfg, putConcurrency: 1 }, (t2) => t2.put(webrtcData));
-    const putWindowed = await onGuest({ ...cfg, putConcurrency: 64 }, (t2) => t2.put(webrtcData));
-    const storeSerial = putSerial.peakByType[STORE] ?? 0;
-    const storeWindowed = putWindowed.peakByType[STORE] ?? 0;
+    async function getPeak(getConcurrency) {
+      const r = await onCohort({ ...cfg, getConcurrency }, async (owner, net) => {
+        const put = await owner.put(webrtcData);
+        net.reset();
+        return owner.get(put.manifestId, put.key);
+      });
+      return { bytes: r.result, fetchPeak: r.peakByType[FETCH] ?? 0 };
+    }
+    const serial = await getPeak(1);
+    const windowed = await getPeak(64);
 
-    t.ok(storeSerial <= n, `serial guest STORE peaks at the holder count: ${storeSerial} in flight (≤ ${n})`);
-    t.ok(storeWindowed >= Nw, `windowed guest STORE pipelines past serial: ${storeWindowed} in flight (≥ ${Nw}, vs ${storeSerial} serial)`);
-    t.ok(storeWindowed > storeSerial * 2, `the window multiplies the guest's in-flight STOREs (${storeWindowed} vs ${storeSerial})`);
-    t.ok(storeWindowed <= 64 * n, `windowed guest STORE stays bounded by putConcurrency × holders: ${storeWindowed} ≤ ${64 * n}`);
-    t.eq(putWindowed.result.chunkCount, Nw, "the windowed guest placed every RS chunk");
-
-    // GET: the same proof for the read path, PUT and GET on ONE cohort (a fresh
-    // cohort would hold none of the blocks). getConcurrency = 1 fetches one block at a
-    // time (peak 1); = 64 windows the cohort-wide FETCH tasks (peak well past 1), and
-    // both reconstruct the file byte-identically. The setup PUT is excluded from the
-    // peak by resetting the counters just before the GET.
-    const getThenMeasure = async (t2, net) => {
-      const put = await t2.put(webrtcData);
-      net.reset();
-      return t2.get(put.manifestId, put.key);
-    };
-    const getSerial = await onGuest({ ...cfg, getConcurrency: 1 }, getThenMeasure);
-    const getWindowed = await onGuest({ ...cfg, getConcurrency: 64 }, getThenMeasure);
-    const fetchSerial = getSerial.peakByType[FETCH] ?? 0;
-    const fetchWindowed = getWindowed.peakByType[FETCH] ?? 0;
-
-    t.ok(bytesEqual(getSerial.result, webrtcData), "the serial guest GET reconstructs the tight-cap file byte-identically");
-    t.ok(bytesEqual(getWindowed.result, webrtcData), "the windowed guest GET reconstructs the tight-cap file byte-identically");
-    t.ok(fetchSerial <= 1, `serial guest GET fetches one block at a time: peak ${fetchSerial} in flight (≤ 1)`);
-    t.ok(fetchWindowed >= Nw, `windowed guest GET pipelines past serial: ${fetchWindowed} in flight (≥ ${Nw}, vs ${fetchSerial} serial)`);
+    t.ok(bytesEqual(serial.bytes, webrtcData), "the serial GET reconstructs the tight-cap file byte-identically");
+    t.ok(bytesEqual(windowed.bytes, webrtcData), "the windowed GET reconstructs the tight-cap file byte-identically");
+    t.ok(serial.fetchPeak <= 1, `serial GET fetches one block at a time: peak ${serial.fetchPeak} in flight (≤ 1)`);
+    t.ok(windowed.fetchPeak >= Nw, `windowed GET pipelines past serial: ${windowed.fetchPeak} in flight (≥ ${Nw}, vs ${serial.fetchPeak} serial)`);
   }
 }

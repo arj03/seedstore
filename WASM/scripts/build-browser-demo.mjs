@@ -65,6 +65,10 @@ for (const f of ["kernel.wasm", "bootstrap.wasm", "codec.wasm", "reputation.wasm
   await copy(join(build, f), join(out, f));
 }
 
+// The guest program (the whole protocol) is content the page fetches as text,
+// next to the wasm — browser.js feeds it to StorageNode (no node:fs in the browser).
+await copy(join(build, "host", "tier2-guest.js"), join(out, "tier2-guest.js"));
+
 // Host JS (seedstore + seedkernel). Copy only .js — the import maps resolve
 // "seedkernel-wasm/*" into ./seedkernel/ and this project's host into ./host/.
 async function copyJs(srcDir, dstDir) {

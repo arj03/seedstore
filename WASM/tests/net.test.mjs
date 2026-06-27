@@ -17,7 +17,6 @@ import { StorageNode } from "../build/host/storage-node.js";
 import { NodeNetwork } from "seedkernel-wasm/net-node";
 import { FsBlobStore } from "../build/host/store-fs.js";
 import { NodeFs } from "seedkernel-wasm/fs-node";
-import { MemoryBlobStore } from "../build/host/store-local.js";
 // `bytesCompare` is a transport helper from the seedkernel `./net` barrel, used
 // by the cohort below to canonicalise dial direction (lower pubkey dials higher).
 import { bytesCompare } from "seedkernel-wasm/net";
@@ -61,9 +60,11 @@ async function tcpCohort({ count, sodium, wasm, config, baseDir }) {
   for (let i = 0; i < count; i++) {
     const dir = join(baseDir, `n${i}`);
     dirs.push(dir);
-    const store = new FsBlobStore(new NodeFs(dir), 64 * 1024 * 1024);
+    // Give the node a disk-backed fs; its default store is an FsBlobStore over that
+    // same fs, so what the confined guest holder writes via fs.* lands on disk and
+    // node.store reflects it (the store must share the fs the guest serves).
     nodes.push(await StorageNode.create({
-      network: nets[i], sodium, ...wasm, identity: ids[i], store, config, timeoutMs: 3000,
+      network: nets[i], sodium, ...wasm, identity: ids[i], fs: new NodeFs(dir), config, timeoutMs: 3000,
     }));
   }
   for (let i = 0; i < count; i++) for (let j = i + 1; j < count; j++) StorageNode.connect(nodes[i], nodes[j]);
@@ -184,8 +185,10 @@ export async function run(t) {
     const netB = new NodeNetwork({ identity: idB, sodium }); // browser-like: dials out only
     netB.addPeerAddr(toHex(idS.publicKey), { host: "127.0.0.1", port: netS.wsPort, transport: "ws" });
 
-    const S = await StorageNode.create({ network: netS, sodium, ...wasm, identity: idS, store: new MemoryBlobStore(), timeoutMs: 3000 });
-    const B = await StorageNode.create({ network: netB, sodium, ...wasm, identity: idB, store: new MemoryBlobStore(), timeoutMs: 3000 });
+    // Default store = FsBlobStore over each node's (in-RAM) fs, so S.store reflects
+    // what the confined guest holder writes via fs.* when B stores to it.
+    const S = await StorageNode.create({ network: netS, sodium, ...wasm, identity: idS, timeoutMs: 3000 });
+    const B = await StorageNode.create({ network: netB, sodium, ...wasm, identity: idB, timeoutMs: 3000 });
     StorageNode.connect(S, B);
     await netB.ready(8000);
     await sleep(50);

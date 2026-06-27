@@ -67,7 +67,7 @@ let nodes, net, lastPut;
     count: 6, network: net, sodium, wasm,
     config: { k: 2, m: 2, blockSize: 64 }, timeoutMs: 200,
   });
-  log(`ready. ${nodes.length} nodes, RS(2,2). codec v${nodes[0].codec.info().version}, handlers installed: ${nodes[0].handlersInstalled()}`);
+  log(`ready. ${nodes.length} nodes, RS(2,2). handlers installed: ${nodes[0].handlersInstalled()}`);
   document.getElementById("store").disabled = false;
 })().catch((e) => log("ERROR: " + e.message));
 

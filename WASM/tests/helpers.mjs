@@ -78,3 +78,11 @@ export const wasmBytes = {
   codec: () => new Uint8Array(readFileSync(paths.codec)),
   reputation: () => new Uint8Array(readFileSync(paths.reputation)),
 };
+
+/** Count block-ids with ≥1 *live* holder — an online cohort node whose store
+ *  holds the id. On the loopback this is the redundancy the old
+ *  cohort.liveBlockCount measured (reachable + serves), without a protocol round
+ *  trip: a test can read every node's store directly. */
+export function liveBlockCount(nodes, net, ids) {
+  return ids.filter((id) => nodes.some((n) => net.isOnline(n.peerId) && n.store.has(id))).length;
+}

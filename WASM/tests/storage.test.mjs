@@ -8,6 +8,7 @@ import {
 } from "../build/host/node.js";
 import { parseSignedDescriptor } from "../build/host/manifest.js";
 import { toHex, fromHex, bytesEqual } from "../build/host/util.js";
+import { liveBlockCount } from "./helpers.mjs";
 
 const TIMEOUT = 40; // ms — keep offline-peer timeouts snappy in tests
 
@@ -33,10 +34,6 @@ function chunkBlockIds(nodes) {
   return [...seen.values()];
 }
 
-async function liveCount(observer, blockIds) {
-  return observer.cohort.liveBlockCount(blockIds, true);
-}
-
 export async function run(t) {
   const sodium = await loadSodium();
   const wasm = await loadWasmBytes();
@@ -47,7 +44,6 @@ export async function run(t) {
     const net = new LoopbackNetwork();
     const [node] = await createConnectedCohort({ count: 1, network: net, sodium, wasm, config, timeoutMs: TIMEOUT });
     t.ok(node.handlersInstalled(), "codec + reputation installed as kernel handlers");
-    t.eq(node.codec.info().version, 1, "host-owned codec is live");
     node.close();
   }
 
@@ -109,7 +105,7 @@ export async function run(t) {
     t.ok(chunks.length >= 1, "found the chunk descriptor among holders");
     const ids = chunks[0];
 
-    const before = await liveCount(owner, ids);
+    const before = liveBlockCount(nodes, net, ids);
     t.eq(before, 4, "all n=4 blocks live after PUT");
 
     // Find two online peers holding a block of this chunk and take them offline
@@ -117,7 +113,7 @@ export async function run(t) {
     const holders = nodes.filter((n) => n !== owner && ids.some((id) => n.store.has(id)));
     net.setOnline(holders[0].peerId, false);
     net.setOnline(holders[1].peerId, false);
-    const degraded = await liveCount(owner, ids);
+    const degraded = liveBlockCount(nodes, net, ids);
     t.ok(degraded <= 2, `redundancy dropped after losing two holders (live=${degraded})`);
 
     // Any online block-holder runs the repair loop; it reconstructs the missing
@@ -125,7 +121,7 @@ export async function run(t) {
     const online = nodes.filter((n) => n !== owner && net.isOnline(n.peerId));
     for (const n of online) await n.runRepair();
 
-    const healed = await liveCount(owner, ids);
+    const healed = liveBlockCount(nodes, net, ids);
     t.ok(healed >= config.k + Math.ceil(config.m / 2), `repair lifted redundancy back above low-water (live=${healed})`);
     const got = await owner.get(put.manifestId, put.key);
     t.ok(bytesEqual(got, data), "file still reads after loss + repair");
@@ -263,11 +259,12 @@ export async function run(t) {
     const owner = nodes[0];
     const put = await owner.put(file(200, 17));
     await owner.get(put.manifestId, put.key); // verification-fetches feed scoring
-    const now = owner.now();
     let anyPositive = false;
     for (const n of nodes) {
       if (n === owner) continue;
-      if (owner.reputation.score(n.identity.publicKey, now) > 0) anyPositive = true;
+      // Reputation now lives in the installed reputation handler the guest scores
+      // through; the owner reads a holder's standing the same way (§13).
+      if (owner.score(n.identity.publicKey) > 0) anyPositive = true;
     }
     t.ok(anyPositive, "holders that served the owner gained positive standing");
     nodes.forEach((n) => n.close());

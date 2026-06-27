@@ -3,8 +3,8 @@
 // format has ONE definition (host/{util,protocol,manifest-core}.ts) instead of a
 // hand-copied second one inside the guest.
 //
-// The guest is loaded as plain QuickJS *source* (not an ESM module) by the driver
-// (host/tier2-coordinator.ts) or the seedkernel shell, which prepends the CAP_* op
+// The guest is loaded as plain QuickJS *source* (not an ESM module) by the host
+// (host/storage-node.ts) or the seedkernel shell, which prepends the CAP_* op
 // catalog + the APP config block. So this stitch must emit a FLAT script: strip the
 // ESM import/export scaffolding off the compiled core (every imported name is
 // defined by another file included here), then append the orchestration body

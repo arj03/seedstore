@@ -1,14 +1,7 @@
-// Shared types + deployment configuration for the storage orchestration
-// (README §17). The three orchestration "handlers" — cohort, coordinator,
-// repair — are host-side classes (the cap-holding logic above the bridges,
-// §2 composition) that all operate against this Node surface.
-
-import type { PeerId, Transport } from "seedkernel-wasm/net";
-import type { BlobStore } from "./store-local.js";
-import type { CodecClient } from "./codec-client.js";
-import type { Crypto } from "./crypto.js";
-import type { ReputationClient } from "./reputation-client.js";
-import type { Sodium } from "./sodium.js";
+// Shared types + deployment configuration for the storage layer (README §17).
+// The protocol itself is the confined guest (host/tier2-guest.js); StorageNode
+// runs it. This module only holds the identity + the durability/overhead dial
+// every node agrees on.
 
 export interface Identity {
   publicKey: Uint8Array;
@@ -28,18 +21,17 @@ export interface StorageConfig {
   smallMaxBlocks: number;
   /** Grace window G: an unreachable holder is Suspected, not Lost (§8). */
   graceMs: number;
-  /** How many per-holder STORE batches a PUT pushes concurrently (putConcurrency)
-   *  and per-holder FETCH sub-batches a GET pulls (getConcurrency). OFFER/STORE/FETCH
-   *  are batched per holder, so the round-trip count no longer scales with the file;
-   *  these window the bulk transfers when a transport's frame cap splits a holder's
-   *  blocks across many messages. The window binds hardest under a small cap (WebRTC's
-   *  ~64 KB channel forces ~one block per STORE/FETCH): without it those messages would
-   *  go one serial round trip per block — the latency cost it hides. Under a large cap
-   *  (WS) each holder has only a few big batches, so it is a no-op. The host
-   *  Coordinator pipelines these with Promise.all/mapPool; the synchronous Asyncify
-   *  guest (tier2-guest.js) can't overlap host calls itself, so it expresses the same
-   *  window through one batched CAP_NET_SEND_MANY round (W per-peer requests fanned
-   *  out host-side) — same peak in flight, one cap at a time. */
+  /** How many per-holder STORE sub-batches a PUT pushes concurrently
+   *  (putConcurrency) and per-holder FETCH sub-batches a GET pulls
+   *  (getConcurrency). OFFER/STORE/FETCH are batched per holder, so the round-trip
+   *  count no longer scales with the file; these window the bulk transfers when a
+   *  transport's frame cap splits a holder's blocks across many messages. The
+   *  window binds hardest under a small cap (WebRTC's ~64 KB channel forces ~one
+   *  block per STORE/FETCH): without it those messages would go one serial round
+   *  trip per block. Under a large cap (WS) each holder has only a few big batches,
+   *  so it is a no-op. The synchronous guest can't overlap host calls itself, so it
+   *  expresses the same window through one batched CAP_NET_SEND_MANY round (W
+   *  per-peer requests fanned out host-side) — same peak in flight, one cap at a time. */
   putConcurrency: number;
   getConcurrency: number;
   /** Max bytes in one batched OFFER/STORE/FETCH message. Every per-holder batch is
@@ -72,26 +64,6 @@ export function defaultConfig(k = 2, m = 2, blockSize = 256): StorageConfig {
     // round trips. A transport with a tighter frame cap (WebRTC) lowers it.
     maxMessageBytes: 1 << 20,
   };
-}
-
-/** The surface the orchestration modules share. StorageNode implements it. */
-export interface Node {
-  readonly peerId: PeerId;
-  readonly identity: Identity;
-  readonly transport: Transport;
-  readonly store: BlobStore;
-  readonly codec: CodecClient;
-  readonly crypto: Crypto;
-  readonly reputation: ReputationClient;
-  /** libsodium — descriptor signing stays sender-side in the host (§16). */
-  readonly sodium: Sodium;
-  readonly config: StorageConfig;
-  now(): number;
-  /** Cohort peers, excluding self (§5.1). */
-  cohortPeers(): PeerId[];
-  /** Note that a peer answered/served just now (feeds liveness, §8). */
-  markSeen(peer: PeerId): void;
-  lastSeen(peer: PeerId): number;
 }
 
 /** peer_id is the hex of a peer's kernel public key (§2). */

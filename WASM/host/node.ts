@@ -20,21 +20,27 @@ export interface WasmBytes {
   bootstrapBytes: Uint8Array;
   codecBytes: Uint8Array;
   reputationBytes: Uint8Array;
+  /** The stitched guest program text (build/host/tier2-guest.js). It carries the
+   *  whole protocol; StorageNode runs it but never reads disk, so the loader hands
+   *  it the text (browser.js fetches it instead). */
+  guestSource: string;
 }
 
-/** Read the four WASM modules from the build directory (or a custom dir). */
+/** Read the four WASM modules + the guest program from the build directory. */
 export async function loadWasmBytes(dir = buildDir): Promise<WasmBytes> {
-  const [kernelBytes, bootstrapBytes, codecBytes, reputationBytes] = await Promise.all([
+  const [kernelBytes, bootstrapBytes, codecBytes, reputationBytes, guestSource] = await Promise.all([
     readFile(join(dir, "kernel.wasm")),
     readFile(join(dir, "bootstrap.wasm")),
     readFile(join(dir, "codec.wasm")),
     readFile(join(dir, "reputation.wasm")),
+    readFile(join(dir, "host", "tier2-guest.js"), "utf8"),
   ]);
   return {
     kernelBytes: new Uint8Array(kernelBytes),
     bootstrapBytes: new Uint8Array(bootstrapBytes),
     codecBytes: new Uint8Array(codecBytes),
     reputationBytes: new Uint8Array(reputationBytes),
+    guestSource,
   };
 }
 
@@ -51,8 +57,6 @@ export {
   StorageNode, LoopbackNetwork, loadSodium, generateKeyPair,
 };
 export { createConnectedCohort } from "./cluster.js";
-export { Tier2Coordinator } from "./tier2-coordinator.js";
-export type { Tier2Host, Tier2PutResult } from "./tier2-coordinator.js";
-export type { StorageNodeOptions } from "./storage-node.js";
+export type { StorageNodeOptions, PutResult } from "./storage-node.js";
 export type { StorageConfig, Identity } from "./core.js";
 export { defaultConfig } from "./core.js";

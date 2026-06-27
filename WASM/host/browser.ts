@@ -9,14 +9,16 @@ import type { Sodium } from "./sodium.js";
 import { StorageNode, type StorageNodeOptions } from "./storage-node.js";
 import type { WasmBytes } from "./node.js";
 
-/** Fetch the four WASM modules relative to the page. */
+/** Fetch the four WASM modules + the guest program relative to the page. */
 export async function loadWasmBytes(baseUrl: string | URL = "./"): Promise<WasmBytes> {
   const base = typeof baseUrl === "string" ? baseUrl : baseUrl.href;
   const get = async (name: string) => new Uint8Array(await (await fetch(base + name)).arrayBuffer());
-  const [kernelBytes, bootstrapBytes, codecBytes, reputationBytes] = await Promise.all([
+  const text = async (name: string) => (await fetch(base + name)).text();
+  const [kernelBytes, bootstrapBytes, codecBytes, reputationBytes, guestSource] = await Promise.all([
     get("kernel.wasm"), get("bootstrap.wasm"), get("codec.wasm"), get("reputation.wasm"),
+    text("tier2-guest.js"),
   ]);
-  return { kernelBytes, bootstrapBytes, codecBytes, reputationBytes };
+  return { kernelBytes, bootstrapBytes, codecBytes, reputationBytes, guestSource };
 }
 
 /** Boot one storage node in the browser. Pass a readied sumo libsodium. */
