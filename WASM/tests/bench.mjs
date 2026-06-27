@@ -8,7 +8,7 @@
 import { readFileSync } from "node:fs";
 import { performance } from "node:perf_hooks";
 import { Crypto, DOMAIN_BODY } from "../build/host/crypto.js";
-import { CodecClient } from "../build/host/codec-client.js";
+import { CodecClient } from "./codec-client.mjs";
 import { storageNames } from "../build/host/names.js";
 import { loadHost } from "./helpers.mjs";
 import { loadSodium } from "seedkernel-wasm";

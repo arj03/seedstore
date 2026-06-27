@@ -22,7 +22,6 @@ const modules = [
   "./concurrency.test.mjs",
   "./net.test.mjs",
   "./browser.test.mjs",
-  "./tier2-port.test.mjs",
   "./shell-run.test.mjs",
   "./holder-guest.test.mjs",
 ];

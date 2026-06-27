@@ -170,10 +170,12 @@ const put = await nodes[0].put(data);                 // chunk → encrypt → R
 const got = await nodes[0].get(put.manifestId, put.key); // locate → fetch any k → decode → decrypt
 ```
 
-`LoopbackNetwork` wires nodes in one process. To run the *confined* guest instead
-of the host-side reference path, wrap a node in a `Tier2Coordinator`
-(`host/tier2-coordinator.ts`) — `put`/`get`/`repair` then run inside the QuickJS
-realm. The `BlobStore` backend is in-memory by default; a server uses a directory
+`LoopbackNetwork` wires nodes in one process. There is one protocol
+implementation: `put`/`get`/`repair` always run the *confined* guest
+(`host/tier2-guest.orchestration.js`) inside a QuickJS realm, and the holder side
+(HAVE/OFFER/STORE/FETCH) runs the same guest in a synchronous realm —
+`StorageNode` is just the host that boots the kernel and drives it (§19, §2.1).
+The `BlobStore` backend is in-memory by default; a server uses a directory
 (`new NodeFs(dir)`), a browser uses OPFS/IndexedDB (§12).
 
 ## Browser
@@ -324,10 +326,10 @@ Source — the storage layer itself:
 | | LOC |
 |---|---:|
 | **codec** WASM — GF(2⁸) + Reed–Solomon (`gf256` + `rs` + `index`) | 417 |
-| **reputation** WASM — decayed reciprocity | 128 |
-| **host** TypeScript — bridges, crypto, manifest, protocol, cohort/coordinator/repair, node (20 files) | 2,341 |
-| **tier2-guest.js** — the confined PUT/GET/repair + holder guest | 896 |
-| **total** | **3,782** |
+| **reputation** WASM — decayed reciprocity | 152 |
+| **host** TypeScript — crypto.hash bridge, crypto, manifest (+core), protocol, store, storage-node, node (15 files) | 1,292 |
+| **tier2-guest.js** — the confined PUT/GET/repair + holder guest (the whole protocol) | 896 |
+| **total** | **2,757** |
 
 (plus ~2,100 LOC of tests and ~530 of scripts + the browser demo.)
 
@@ -349,12 +351,12 @@ footprint is ~15 KB of WASM + ~8 KB of gzipped JS (the guest)** (§2, §16: "log
 RS, tens of KB, no second copy of a crypto library").
 
 The host-side TypeScript (`build/host`, minified to `build/host-min`) is a
-*separate* path — the **in-process library and reference/parity oracle** that the
-browser demo and the `createConnectedCohort` tests load *instead* of the
-shell+bundle. Minified it is **21 KB gz** (14 KB gz without its own copy of the
-guest), debug 42 KB gz — so a browser-demo node carries ~26 KB gz of JS (host +
-the shared `KernelHost`) against a bundle node's ~13 KB (the 8 KB guest + the 5 KB
-`KernelHost`).
+*separate* path — the **in-process library** (it boots the kernel and runs the same
+guest in-process) that the browser demo and the `createConnectedCohort` tests load
+*instead* of the shell+bundle. Minified it is **21 KB gz** (14 KB gz without its own
+copy of the guest), debug 42 KB gz — so a browser-demo node carries ~26 KB gz of JS
+(host + the shared `KernelHost`) against a bundle node's ~13 KB (the 8 KB guest +
+the 5 KB `KernelHost`).
 
 `npm run build` emits the host **twice**: the readable `build/host` (doc comments
 intact, for debugging) and a comment-stripped `build/host-min` (for the in-process
@@ -373,16 +375,15 @@ hosts (`build/host-min`) into the demo.
 ```
 assembly/codec/        gf256.ts, rs.ts, index.ts   — Reed–Solomon WASM handler
 assembly/reputation/   index.ts                    — decayed reciprocity WASM handler
-host/  tier2-guest.js          the confined guest: PUT/GET/repair + the holder side
-       tier2-coordinator.ts    drives the guest in a realm over the generic cap-bridge
-       storage-node.ts         host-side reference node (codec/reputation install, holder)
-       coordinator/cohort/repair/manifest/crypto/protocol/store-fs/codec+reputation clients
-       node.ts / browser.ts    Node + browser entry points
+host/  tier2-guest.js          the confined guest: the WHOLE protocol (PUT/GET/repair + holder)
+       storage-node.ts         the host that boots the kernel + drives the guest in two realms
+       manifest (+core)/crypto/protocol/store-fs/store-local/names/util  — shared helpers
+       node.ts / browser.ts    Node + browser entry points (each loads the guest text)
 scripts/  build-bundle.mjs     produce the signed bundle (npm run build:bundle)
           copy-kernel, build-browser-demo  — stage all browser pages → build/browser-demo
           serve-rtc-holder + smoke-rtc        — relay-signaled P2P over RtcNetwork + STUN
 tests/    codec / bridges / manifest / protocol / reputation / storage
-          concurrency / net / browser / tier2-port / shell-run / holder-guest / bundle-fixture
+          concurrency / net / browser / shell-run / holder-guest / bundle-fixture
 ```
 
 The runtime itself — the shell, the `cap-bridge`, the `fs.*`/`net.*` capabilities,

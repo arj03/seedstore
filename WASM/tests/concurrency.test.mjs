@@ -48,7 +48,7 @@ export async function run(t) {
     const nodes = await createConnectedCohort({ count: 6, network: net, sodium, wasm, config: cfg, timeoutMs: TIMEOUT });
     net.reset();
     const t0 = performance.now();
-    const result = await body(nodes[0]);
+    const result = await body(nodes[0], net);
     const ms = performance.now() - t0;
     const byType = net.byType, peakWork = net.maxInflightWork, peakByType = net.maxInflightByType;
     nodes.forEach((nn) => nn.close());
@@ -155,5 +155,63 @@ export async function run(t) {
     net.setOnline(nodes[2].peerId, false);
     t.ok(bytesEqual(await owner.get(put.manifestId, put.key), data), "batched GET still reads with two holders offline");
     nodes.forEach((nn) => nn.close());
+  }
+
+  t.group("placement + gather fan out across holders (CAP_NET_SEND_MANY), not one round trip at a time");
+  {
+    // The orchestration runs INSIDE the QuickJS realm and reaches net only through
+    // host.call, yet placement/gather must still overlap holders. The per-peer
+    // fan-out (cap-bridge op 19) lifts the peak in-flight per type from 1 (a serial
+    // awaited round trip) to the holder count — the confined twin of a Promise.all.
+    const net = new LatencyNetwork(DELAY);
+    const nodes = await createConnectedCohort({ count: 6, network: net, sodium, wasm, config, timeoutMs: TIMEOUT });
+    const owner = nodes[0];
+
+    net.reset();
+    const put = await owner.put(data);
+    const offerPeak = net.maxInflightByType[OFFER] ?? 0;
+    const storePeak = net.maxInflightByType[STORE] ?? 0;
+    t.ok(offerPeak > 1, `OFFER fan-out overlaps holders: peak ${offerPeak} in flight (a serial path would be 1)`);
+    t.ok(storePeak > 1, `STORE fan-out overlaps holders: peak ${storePeak} in flight (a serial path would be 1)`);
+    t.eq(put.chunkCount, N, "placed every RS chunk");
+
+    net.reset();
+    const bytes = await owner.get(put.manifestId, put.key);
+    const fetchPeak = net.maxInflightByType[FETCH] ?? 0;
+    t.ok(bytesEqual(bytes, data), "GET reconstructs the file byte-identically under latency");
+    t.ok(fetchPeak > 1, `FETCH fan-out overlaps holders: peak ${fetchPeak} in flight (a serial path would be 1)`);
+
+    nodes.forEach((nn) => nn.close());
+  }
+
+  t.group("GET windows the per-holder FETCHes so they pipeline (getConcurrency), not one serial round trip per block");
+  {
+    // The WebRTC tight-cap twin of the STORE-window group above: ~one block per FETCH
+    // message turns a holder's blocks into many single-block messages, and the window
+    // packs getWindow() of them into one CAP_NET_SEND_MANY fan-out instead of one
+    // round trip apiece. PUT then GET on ONE cohort (a fresh one would hold none of
+    // the blocks); the setup PUT is excluded from the peak by resetting just before
+    // the GET.
+    const bs = 4096;                                   // a block dominates a FETCH message
+    const Nw = 16;                                     // chunks ≫ holders, so a window can bind
+    const cap = bs + 2000;                             // one 4 KiB block + headers fits; two don't
+    const webrtcData = file(Nw * config.k * bs, 9);    // exactly Nw RS chunks
+    const cfg = { ...config, blockSize: bs, maxMessageBytes: cap };
+
+    async function getPeak(getConcurrency) {
+      const r = await onCohort({ ...cfg, getConcurrency }, async (owner, net) => {
+        const put = await owner.put(webrtcData);
+        net.reset();
+        return owner.get(put.manifestId, put.key);
+      });
+      return { bytes: r.result, fetchPeak: r.peakByType[FETCH] ?? 0 };
+    }
+    const serial = await getPeak(1);
+    const windowed = await getPeak(64);
+
+    t.ok(bytesEqual(serial.bytes, webrtcData), "the serial GET reconstructs the tight-cap file byte-identically");
+    t.ok(bytesEqual(windowed.bytes, webrtcData), "the windowed GET reconstructs the tight-cap file byte-identically");
+    t.ok(serial.fetchPeak <= 1, `serial GET fetches one block at a time: peak ${serial.fetchPeak} in flight (≤ 1)`);
+    t.ok(windowed.fetchPeak >= Nw, `windowed GET pipelines past serial: ${windowed.fetchPeak} in flight (≥ ${Nw}, vs ${serial.fetchPeak} serial)`);
   }
 }

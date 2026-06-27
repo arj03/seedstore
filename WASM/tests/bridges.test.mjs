@@ -1,6 +1,6 @@
-// Storage bridge tests: crypto host services (§16), the store.local backend
-// (§12), and end-to-end capability gating on the kernel.call path (§8.2) using
-// seedkernel's forwarder fixture as the WASM caller.
+// Storage host-service tests: the crypto primitives (§16), the crypto.hash bridge
+// registered on the kernel for the installed codec (§16), and the store.local
+// backend (§12).
 
 import { Crypto, DOMAIN_BODY, DOMAIN_MANIFEST } from "../build/host/crypto.js";
 import { MemoryBlobStore } from "../build/host/store-local.js";
@@ -8,9 +8,7 @@ import { storageNames } from "../build/host/names.js";
 import { registerStorageBridges } from "../build/host/bridges.js";
 import { bytesEqual } from "../build/host/util.js";
 
-import {
-  ensureSodium, newKey, loadHost, makeSeq, installWasm, wasmBytes,
-} from "./helpers.mjs";
+import { ensureSodium, newKey, loadHost } from "./helpers.mjs";
 
 export async function run(t) {
   const sodium = await ensureSodium();
@@ -72,47 +70,18 @@ export async function run(t) {
     t.ok(threw, "put past quota throws");
   }
 
-  t.group("capability gate: store.local needs cap.store via kernel.call (§8.2)");
+  t.group("crypto.hash bridge: registered on the kernel, returns the content hash (§16)");
   {
-    const { host, installName } = await loadHost();
+    // The one storage-named host service still wired onto the kernel: the no-cap
+    // content-hash the installed codec WASM calls for block-ids. (net/fs/clock/rand
+    // are reached by the confined guest through seedkernel's generic cap-bridge,
+    // not through storage bridges, so there is nothing storage-specific to gate.)
+    const { host } = await loadHost();
     const names = storageNames(host);
-    const store = new MemoryBlobStore(4096);
-    registerStorageBridges(host, names, {
-      crypto,
-      store,
-      clockNow: () => 1000,
-      randBytes: (n) => sodium.randombytes_buf(n),
-      netSend: () => {},
-    });
-
-    const seq = makeSeq();
-    const author = newKey();
-    const withCap = host.deriveScopedName("test.fwd.withcap", author.publicKey);
-    const noCap = host.deriveScopedName("test.fwd.nocap", author.publicKey);
-    installWasm(host, installName, author.privateKey, author.publicKey, seq(author.publicKey),
-      withCap, [names.capStore], wasmBytes.forwarder());
-    installWasm(host, installName, author.privateKey, author.publicKey, seq(author.publicKey),
-      noCap, [], wasmBytes.forwarder());
-    t.ok(host.isRegistered(withCap) && host.isRegistered(noCap), "both forwarders installed");
-
-    // The forwarder calls kernel.call(target, forward_payload). Make the target
-    // store.local and the payload a STAT request (op 6, no args).
-    const SL_STAT = 6;
-    const makeForward = (target) => {
-      const fp = new Uint8Array(1);
-      fp[0] = SL_STAT;
-      const out = new Uint8Array(1 + target.length + fp.length);
-      out[0] = target.length;
-      out.set(target, 1);
-      out.set(fp, 1 + target.length);
-      return out;
-    };
-
-    const { CURRENT_VERSION } = await import("seedkernel-wasm");
-    host.dispatch(host.wrapAndEncode(author.privateKey, author.publicKey, CURRENT_VERSION, withCap, makeForward(names.storeLocal)));
-    t.eq(host.callDynamicHandlerI32(withCap, "last_resp_len"), 12, "cap.store holder gets the 12-byte stat");
-
-    host.dispatch(host.wrapAndEncode(author.privateKey, author.publicKey, CURRENT_VERSION, noCap, makeForward(names.storeLocal)));
-    t.eq(host.callDynamicHandlerI32(noCap, "last_resp_len"), 0, "no-cap caller is denied (no response)");
+    registerStorageBridges(host, names, { crypto });
+    t.ok(host.isRegistered(names.cryptoHash), "crypto.hash is registered");
+    const data = new TextEncoder().encode("hash me through the bridge");
+    const viaBridge = host.callHandler(names.cryptoHash, data);
+    t.ok(viaBridge && bytesEqual(viaBridge, crypto.hash(data)), "bridge returns crypto.hash(payload)");
   }
 }

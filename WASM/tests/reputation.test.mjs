@@ -2,7 +2,7 @@
 
 import { readFileSync } from "node:fs";
 
-import { ReputationClient } from "../build/host/reputation-client.js";
+import { ReputationClient } from "./reputation-client.mjs";
 import { ensureSodium, newKey, paths } from "./helpers.mjs";
 
 const DAY = 24 * 3600 * 1000;

@@ -30,6 +30,7 @@ export async function createConnectedCohort(opts: CohortOptions): Promise<Storag
       bootstrapBytes: opts.wasm.bootstrapBytes,
       codecBytes: opts.wasm.codecBytes,
       reputationBytes: opts.wasm.reputationBytes,
+      guestSource: opts.wasm.guestSource,
       config: opts.config,
       quota: opts.quota,
       timeoutMs: opts.timeoutMs,

@@ -3,11 +3,13 @@
 // (RS codec + crypto) in-process, and the integration tests run on the
 // zero-latency LoopbackNetwork, so none of them can see the cost that dominates a
 // real cross-machine cohort: wall-clock ≈ (serial round-trip count) × RTT. This
-// drives a real round-trip latency through the link and sweeps the coordinator's
-// chunk window (putConcurrency on PUT, getConcurrency on GET) so the serial-vs-
-// windowed gap — and the point past which widening the window stops helping — is
-// visible for BOTH directions. (Within a chunk the n blocks already place in
-// parallel, so the "peak" column reflects window × n in flight.)
+// drives a real round-trip latency through the link and sweeps the guest's chunk
+// window (putConcurrency on PUT, getConcurrency on GET — the guest reads them from
+// its injected APP config) so the serial-vs-windowed gap — and the point past which
+// widening the window stops helping — is visible for BOTH directions. PUT/GET run
+// the confined guest (the only path), reached over the per-peer fan-out cap. (Within
+// a chunk the n blocks already place in parallel, so the "peak" column reflects
+// window × n in flight.)
 //
 // The window binds hardest when the transport cap forces ~one block per STORE/FETCH
 // message — exactly the WebRTC case (a ~64 KB data channel, 32 KiB blocks). So the

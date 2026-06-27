@@ -16,12 +16,16 @@ const buildDir = join(dirname(fileURLToPath(import.meta.url)), "..", "build");
 export async function run(t) {
   const sodium = await ensureSodium();
   const origFetch = globalThis.fetch;
-  // Shim fetch to serve the four wasm files from disk, as a static file server
-  // would in a real deployment.
+  // Shim fetch to serve the wasm + the guest program from disk, as a static file
+  // server would in a real deployment. The wasm sit at the build root; the guest
+  // program is under host/ (browser.js fetches it as text).
   globalThis.fetch = async (url) => {
     const name = String(url).split("/").pop();
-    const buf = readFileSync(join(buildDir, name));
-    return { arrayBuffer: async () => buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength) };
+    const buf = readFileSync(name === "tier2-guest.js" ? join(buildDir, "host", name) : join(buildDir, name));
+    return {
+      arrayBuffer: async () => buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength),
+      text: async () => buf.toString("utf8"),
+    };
   };
   try {
     const { createStorageNode, LoopbackNetwork, StorageNode } = await import("../build/host/browser.js");
