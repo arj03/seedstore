@@ -174,11 +174,20 @@ function decodePeers(r) {
   return out;
 }
 function cohortPeers() { return decodePeers(host.call(CAP_NET_PEERS, EMPTY)); }
-function rank(peers) {
-  if (peers.length === 0) return [];
+// A reciprocity ranker (§13): orders peers best-score-first. Scoring one peer costs a
+// reputation MODULE_CALL across the bridge, so `makeRanker` reads the clock once and
+// memoizes each DISTINCT peer's decayed score for its lifetime — reuse one across a
+// round and ranking many overlapping holder subsets (a large GET ranks the same
+// holders for thousands of ids) costs one crossing per peer, not one per (peer, id).
+// Scores decay negligibly within a round, so a shared `t` is fine.
+function makeRanker() {
   const t = clockNow();
-  return peers.map((p) => ({ p, s: repScore(fromHex(p), t) })).sort((a, b) => b.s - a.s).map((x) => x.p);
+  const cache = new Map(); // peerHex → decayed score
+  const scoreOf = (p) => { let s = cache.get(p); if (s === undefined) { s = repScore(fromHex(p), t); cache.set(p, s); } return s; };
+  return (peers) => peers.length === 0 ? [] : peers.map((p) => ({ p, s: scoreOf(p) })).sort((a, b) => b.s - a.s).map((x) => x.p);
 }
+// One-shot ranker for callers that rank a single list (its own fresh cache).
+function rank(peers) { return makeRanker()(peers); }
 
 // ── net (request/response over the generic transport; wire format here) ──
 function netSend(peer, type, payload) {
@@ -504,6 +513,9 @@ function gatherBlocks(descriptors, holders) {
   };
 
   for (;;) {
+    // One ranker for the whole round: scoring a holder crosses the bridge once, then
+    // every id that shares that holder reuses the cached score (§13).
+    const rankRound = makeRanker();
     const byPeer = new Map(); // peer → [idHex]
     const queued = new Set();
     for (const d of descriptors) {
@@ -513,7 +525,7 @@ function gatherBlocks(descriptors, holders) {
         if (need === 0) break;
         const h = toHex(id);
         if (got.has(h) || queued.has(h)) continue;
-        const cands = rank([...(holders.get(h) || new Set())].filter((p) => !triedOf(h).has(p)));
+        const cands = rankRound([...(holders.get(h) || new Set())].filter((p) => !triedOf(h).has(p)));
         if (cands.length === 0) continue;
         let list = byPeer.get(cands[0]); if (!list) byPeer.set(cands[0], (list = []));
         list.push(h);
