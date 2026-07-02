@@ -172,7 +172,6 @@ function rank(peers) {
   const t = clockNow();
   return peers.map((p) => ({ p, s: repScore(fromHex(p), t) })).sort((a, b) => b.s - a.s).map((x) => x.p);
 }
-function markSeen(_peer) { /* liveness hint — no generic cap; reputation observe scores peers (§8) */ }
 
 // ── net (request/response over the generic transport; wire format here) ──
 function netSend(peer, type, payload) {
@@ -225,7 +224,6 @@ function haveWant(ids) {
   for (const id of ids) if (storeHas(id)) holders.get(toHex(id)).add(myPeer());
   for (const res of netRequestMany(cohortPeers(), MSG_HAVE, encodeHaveReq(ids))) {
     if (!res.ok) continue;
-    markSeen(res.peer);
     const held = res.bytes;
     for (let i = 0; i < ids.length && i < held.length; i++) {
       if (held[i] === 1) holders.get(toHex(ids[i])).add(res.peer);
@@ -308,7 +306,7 @@ function signChunk(d) { return signCore(encodeDescriptorCore(d)); }
 // ── placement + fetch (coordinator §6/§7) ────────────────────────────────────
 // Appended to a placement-failure throw: on a fresh PUT a holder only declines on
 // the §14 quota, so "nothing landed" almost always means the holders are full (GET
-// still works — serving a FETCH never checks quota). Mirror of Coordinator.declineHint.
+// still works — serving a FETCH never checks quota).
 const OUT_OF_STORAGE_HINT = " — holders answered but declined: most likely OUT OF STORAGE (quota/disk full); clear the holders' data dirs or raise their quota, or connect more holders";
 // A batched OFFER / STORE / FETCH is split to stay under config().maxMessageBytes —
 // the per-transport cap that keeps one message inside the frame cap AND the request
@@ -318,12 +316,14 @@ function maxMsgBytes() { const v = config().maxMessageBytes; return (typeof v ==
 // The fan-out windows (transport/operator policy, like maxMessageBytes): how many
 // per-peer sub-batches a single CAP_NET_SEND_MANY round carries. putWindow bounds
 // STORE messages PER PEER (peers concurrent → peak W·peers); getWindow bounds FETCH
-// messages TOTAL across the cohort (peak W). Default 16 when the driver omits them
-// (the host defaultConfig value), so a confined sync guest pipelines a holder's
-// many ~1-block messages instead of paying one round trip apiece (the tight-cap
-// WebRTC case the lock-step fan-out was meant to keep windowed).
-function putWindow() { const v = config().putConcurrency; return (typeof v === "number" && v > 0) ? v : 16; }
-function getWindow() { const v = config().getConcurrency; return (typeof v === "number" && v > 0) ? v : 16; }
+// messages TOTAL across the cohort (peak W), so a confined sync guest pipelines a
+// holder's many ~1-block messages instead of paying one round trip apiece (the
+// tight-cap WebRTC case the lock-step fan-out was meant to keep windowed). The
+// StorageNode always injects the config value; this default only bites a driver that
+// omits it — keep it equal to core.ts DEFAULT_FANOUT_WINDOW (the host defaultConfig).
+const DEFAULT_FANOUT_WINDOW = 16;
+function putWindow() { const v = config().putConcurrency; return (typeof v === "number" && v > 0) ? v : DEFAULT_FANOUT_WINDOW; }
+function getWindow() { const v = config().getConcurrency; return (typeof v === "number" && v > 0) ? v : DEFAULT_FANOUT_WINDOW; }
 function sliceN(arr, size) {
   if (arr.length <= size) return [arr];
   const out = [];
@@ -353,7 +353,7 @@ function placeBlock(blockId, bytes, descriptor, exclude, count) {
     if (placed.length >= count) break;
     if (placed.includes(peer)) continue;
     if (!offer(peer, blockId, bytes.length, descriptor)) continue;
-    if (storePush(peer, blockId, descriptor, bytes)) { placed.push(peer); markSeen(peer); }
+    if (storePush(peer, blockId, descriptor, bytes)) placed.push(peer);
   }
   return placed;
 }
@@ -403,10 +403,10 @@ function placeChunksBatched(chunks) {
     // rarely exceed maxOffers, so the sub-batch index is round-robined one-per-peer).
     // The STORE phase windows up to putWindow() of a peer's byte-bounded sub-batches
     // into each fan-out (peers concurrent → peak W·peers), so a holder's many capped
-    // STORE messages pipeline instead of going one round trip apiece — the within-
-    // phase parallelism the host gets from mapPool(putConcurrency). Within a phase
-    // every peer goes in parallel; the only loss vs the host's per-peer pipeline is
-    // ~one slow-peer half-RTT between the two phases.
+    // STORE messages pipeline instead of going one round trip apiece — a within-phase
+    // parallelism bounded by putConcurrency. Within a phase every peer goes in
+    // parallel; the only loss vs a per-peer pipeline is ~one slow-peer half-RTT
+    // between the two phases.
 
     // ── OFFER phase ──
     const offerSlices = new Map(); // peer → [slice]
@@ -455,7 +455,7 @@ function placeChunksBatched(chunks) {
       for (let ri = 0; ri < results.length; ri++) {
         const group = groupOf[ri];
         const stored = results[ri].ok ? decodeStoreMask(results[ri].bytes) : [];
-        for (let j = 0; j < group.length; j++) if (stored[j]) { group[j].ch.placedPeer[group[j].i] = results[ri].peer; markSeen(results[ri].peer); }
+        for (let j = 0; j < group.length; j++) if (stored[j]) group[j].ch.placedPeer[group[j].i] = results[ri].peer;
       }
     }
   }
@@ -476,13 +476,12 @@ function fetchBlock(id) {
   }
   return null;
 }
-// Fetch every block the file's chunks need, batched per holder (mirror
-// coordinator.ts gatherBlocks). After the file-wide have/want, each still-missing
-// block is requested from its best untried holder, sub-batched under the frame cap
-// and fanned out getWindow() FETCH messages at a time (peak W in flight, the host's
-// getConcurrency window); a coded chunk stops at k, preferring data blocks. Every
-// returned block is hash-verified (§4.2) and scores its holder (§8). Returns a Map
-// id-hex → bytes.
+// Fetch every block the file's chunks need, batched per holder. After the file-wide
+// have/want, each still-missing block is requested from its best untried holder,
+// sub-batched under the frame cap and fanned out getWindow() FETCH messages at a time
+// (peak W in flight, the getConcurrency window); a coded chunk stops at k, preferring
+// data blocks. Every returned block is hash-verified (§4.2) and scores its holder
+// (§8). Returns a Map id-hex → bytes.
 function gatherBlocks(descriptors, holders) {
   const c = config();
   const got = new Map();
@@ -531,7 +530,7 @@ function gatherBlocks(descriptors, holders) {
         const b = blocks[i];
         if (b && bytesEqual(hash(b), ids[i])) {
           if (!got.has(slice[i])) got.set(slice[i], b);
-          if (!isSelf) { markSeen(peer); repObserve(fromHex(peer), t, true); }
+          if (!isSelf) repObserve(fromHex(peer), t, true);
         } else if (!isSelf) {
           repObserve(fromHex(peer), t, false);
         }
@@ -546,9 +545,9 @@ function gatherBlocks(descriptors, holders) {
       }
     }
     // Every other holder's FETCH sub-batches are flattened into one task list and
-    // windowed by getWindow(): each round fans out up to W FETCH messages TOTAL
-    // across the cohort (peak W), matching the host's mapPool(getConcurrency) — the
-    // GET twin of the STORE window, but capped globally rather than per peer.
+    // windowed by getWindow(): each round fans out up to W FETCH messages TOTAL across
+    // the cohort (peak W), bounded by getConcurrency — the GET twin of the STORE
+    // window, but capped globally rather than per peer.
     const tasks = []; // { peer, slice, ids }
     for (const peer of byPeer.keys()) {
       if (peer === me) continue;
@@ -638,7 +637,7 @@ function doPut(plaintext) {
   const manifestId = hash(manCt);
   // Signed descriptor for the manifest block so repair can self-heal it (§9).
   // Carries as a one-block replicated chunk (k = 1, m = 0) with the manifest's
-  // block_id, matching the host-side Coordinator.put (coordinator.ts §123).
+  // block_id.
   const manEnv = signChunk({ k: 1, m: 0, blockSize: manCt.length, blockIds: [manifestId] });
   if (placeBlock(manifestId, manCt, manEnv, new Set(), c.replicas).length === 0) {
     throw new Error("put: no peer accepted the manifest" + OUT_OF_STORAGE_HINT);
@@ -665,11 +664,10 @@ function doGet(arg) {
   if (!manCt) throw new Error("get: manifest not found in cohort");
   const man = decodeManifest(decrypt(K, DOMAIN_MANIFEST, 0, manCt));
 
-  // Verify every chunk descriptor's signature before using it (§4.3), mirroring
-  // the host-side Coordinator.get: the manifest is encrypted, not signed, so a
-  // correct K with a tampered manifest is caught only by the per-chunk signature.
-  // One file-wide have/want, then one batched FETCH per holder (gatherBlocks),
-  // instead of a discovery + fetch per chunk.
+  // Verify every chunk descriptor's signature before using it (§4.3): the manifest is
+  // encrypted, not signed, so a correct K with a tampered manifest is caught only by
+  // the per-chunk signature. One file-wide have/want, then one batched FETCH per holder
+  // (gatherBlocks), instead of a discovery + fetch per chunk.
   const ds = man.chunks.map((env) => {
     const d = verifyDescriptor(env);
     if (!d) throw new Error("get: chunk descriptor signature invalid");
@@ -834,7 +832,8 @@ let bytesUsed = -1;
 // injects its store's quota, and a seedkernel shell merges the operator's config
 // over the (author-signed) manifest. When neither supplies one, fall back to a
 // default so a holder never admits unbounded — the budget is never baked into the
-// signed bundle.
+// signed bundle. Keep this equal to store-local.ts DEFAULT_QUOTA_BYTES (the host-side
+// store default); this fallback only bites a driver that injects no quota.
 const DEFAULT_QUOTA = 64 * 1024 * 1024;
 function quota() { return APP.quota != null ? APP.quota : DEFAULT_QUOTA; }
 function fsSize(keyStr) { return rU32(host.call(CAP_FS_SIZE, strBytes(keyStr)), 0); }

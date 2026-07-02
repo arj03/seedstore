@@ -9,6 +9,14 @@
 
 import { toHex, fromHex } from "./util.js";
 
+/** Default committed-tier byte budget (§14) when the operator sets none: 64 MiB.
+ *  The single source for every host-side store default — MemoryBlobStore, FsBlobStore,
+ *  and StorageNode's `quota` option all read it, so the budget can't drift between
+ *  backends. The confined guest holder keeps its OWN fallback (tier2-guest's
+ *  DEFAULT_QUOTA) because it runs in a separate realm with no imports; keep the two in
+ *  sync. */
+export const DEFAULT_QUOTA_BYTES = 64 * 1024 * 1024;
+
 /** What a holder keeps for one block: the ciphertext and the signed descriptor
  *  envelope its chunk travels under (§4.3). The descriptor is stored verbatim
  *  so a repairer that lacks the manifest still has the chunk's shape. */
@@ -41,7 +49,7 @@ export interface BlobStore {
 export class MemoryBlobStore implements BlobStore {
   private map = new Map<string, StoredBlock>();
   private bytesUsed = 0;
-  constructor(public quota = 64 * 1024 * 1024) {}
+  constructor(public quota = DEFAULT_QUOTA_BYTES) {}
 
   put(id: Uint8Array, bytes: Uint8Array, descriptor: Uint8Array | null): void {
     const key = toHex(id);

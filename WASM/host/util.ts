@@ -43,21 +43,3 @@ export function readU32BE(buf: Uint8Array, offset: number): number {
   return ((buf[offset] << 24) | (buf[offset + 1] << 16) |
           (buf[offset + 2] << 8) | buf[offset + 3]) >>> 0;
 }
-
-/** Map `fn` over `items` with at most `width` tasks in flight, returning results
- *  by input index (order preserved regardless of completion order). A bounded
- *  worker pool: `width` workers each pull the next unclaimed index until the list
- *  drains, so a slow item never stalls the others and never more than `width`
- *  requests are outstanding at once. `width <= 1` runs strictly serially. */
-export async function mapPool<T, R>(
-  items: readonly T[], width: number, fn: (item: T, index: number) => Promise<R>,
-): Promise<R[]> {
-  const out = new Array<R>(items.length);
-  let next = 0;
-  const workers = Math.max(1, Math.min(Math.floor(width) || 1, items.length));
-  const run = async (): Promise<void> => {
-    for (let i = next++; i < items.length; i = next++) out[i] = await fn(items[i], i);
-  };
-  await Promise.all(Array.from({ length: workers }, run));
-  return out;
-}

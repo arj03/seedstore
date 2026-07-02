@@ -36,7 +36,7 @@ import type { Sodium } from "./sodium.js";
 import type { Network, PeerId } from "seedkernel-wasm/net";
 import { Transport } from "seedkernel-wasm/net";
 import { MemoryFs, type Fs } from "seedkernel-wasm/fs";
-import { type BlobStore } from "./store-local.js";
+import { DEFAULT_QUOTA_BYTES, type BlobStore } from "./store-local.js";
 import { FsBlobStore } from "./store-fs.js";
 import { Crypto } from "./crypto.js";
 import { storageNames, type StorageNames } from "./names.js";
@@ -74,12 +74,20 @@ export interface StorageNodeOptions {
   /** Raw-byte `fs.*` backend (§12; seedkernel's Fs). Defaults to an in-RAM
    *  MemoryFs; a server node passes a NodeFs, the browser an OPFS-backed one. The
    *  default store is an FsBlobStore over this, and BOTH guest realms serve `fs.*`
-   *  from it — so the holder's writes and the host-side store view share a backend. */
+   *  from it — so the holder's writes and the host-side store view share a backend.
+   *  Do NOT write blocks into this `fs` out-of-band on a live node: the guest holder
+   *  caches its committed-tier byte total (bytesUsed) and only rebuilds it lazily, so
+   *  writes it didn't make leave its §14 quota accounting stale until the realm is
+   *  rebuilt (over/under-admitting in the meantime). */
   fs?: Fs;
   /** Donated blob store (§12) — a *read view* over `fs` for inspection (the guest
    *  holder writes the `<hex>.blk`/`.dsc` layout itself, via `fs.*`). Defaults to
    *  an FsBlobStore over `fs` with a `quota`-byte budget; a custom store must layer
-   *  over the same `fs` the node serves, or the two would diverge. */
+   *  over the same `fs` the node serves, or the two would diverge. Its put/delete are
+   *  for callers that drive the store directly (e.g. tests): calling them on a live
+   *  node bypasses the guest holder, whose cached quota budget then goes stale until
+   *  the holder realm is rebuilt — FsBlobStore itself reads used-bytes live for the
+   *  mirror-image reason (it can't see the guest's `fs.*` writes). */
   store?: BlobStore;
   quota?: number;
   clock?: () => number;
@@ -130,7 +138,7 @@ export class StorageNode {
     this.clockFn = opts.clock ?? (() => Date.now());
     this.crypto = new Crypto(opts.sodium);
     this.fs = opts.fs ?? new MemoryFs();
-    this.store = opts.store ?? new FsBlobStore(this.fs, opts.quota ?? 64 * 1024 * 1024);
+    this.store = opts.store ?? new FsBlobStore(this.fs, opts.quota ?? DEFAULT_QUOTA_BYTES);
     this.names = storageNames(host);
     this.transport = new Transport(this.peerId, opts.network, opts.timeoutMs ?? 200);
   }

@@ -45,6 +45,13 @@ export interface StorageConfig {
   maxMessageBytes: number;
 }
 
+/** Default fan-out window for putConcurrency / getConcurrency: how many per-holder
+ *  STORE/FETCH sub-batches are pushed/pulled concurrently. The confined guest keeps
+ *  its OWN copy (tier2-guest's DEFAULT_FANOUT_WINDOW, used only when the driver omits
+ *  the window) because it runs in a separate realm with no imports; keep the two in
+ *  sync. */
+export const DEFAULT_FANOUT_WINDOW = 16;
+
 export function defaultConfig(k = 2, m = 2, blockSize = 256): StorageConfig {
   // Replication beats padding a tiny file while d < (k+m)/(m+1) (§4.1) — e.g.
   // 2 blocks at the default RS(10,6). The largest such d is ceil((k+m)/(m+1))-1.
@@ -57,8 +64,8 @@ export function defaultConfig(k = 2, m = 2, blockSize = 256): StorageConfig {
     lowWater: k + Math.ceil(m / 2),
     smallMaxBlocks,
     graceMs: 24 * 3600 * 1000,
-    putConcurrency: 16,
-    getConcurrency: 16,
+    putConcurrency: DEFAULT_FANOUT_WINDOW,
+    getConcurrency: DEFAULT_FANOUT_WINDOW,
     // ~1 MiB: a batch transfers well inside a typical request timeout and keeps a
     // synchronous holder's per-message work small, while still collapsing per-block
     // round trips. A transport with a tighter frame cap (WebRTC) lowers it.

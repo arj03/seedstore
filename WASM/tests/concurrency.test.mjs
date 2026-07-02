@@ -88,7 +88,7 @@ export async function run(t) {
     const replicas = config.m + 1;                   // manifest copies (defaultConfig: m+1)
 
     // Same file, same cohort shape, same cap — only the window differs. putConcurrency
-    // = 1 reproduces the OLD serial-per-holder STORE loop (mapPool width 1 is strictly
+    // = 1 reproduces the OLD serial-per-holder STORE loop (a window of 1 is strictly
     // serial); putConcurrency = 64 is the fix.
     const serial = await onCohort({ ...cfg, putConcurrency: 1 }, (o) => o.put(webrtcData));
     const windowed = await onCohort({ ...cfg, putConcurrency: 64 }, (o) => o.put(webrtcData));

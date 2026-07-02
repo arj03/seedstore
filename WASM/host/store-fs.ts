@@ -16,7 +16,7 @@
 // past it throws so admission control refuses rather than over-commits.
 
 import { toHex, fromHex } from "./util.js";
-import type { BlobStore, StoredBlock, StoreStat } from "./store-local.js";
+import { DEFAULT_QUOTA_BYTES, type BlobStore, type StoredBlock, type StoreStat } from "./store-local.js";
 import type { Fs } from "seedkernel-wasm/fs";
 
 const BLK = ".blk"; // ciphertext
@@ -25,7 +25,7 @@ const DSC = ".dsc"; // author-signed chunk descriptor envelope (§4.3)
 export class FsBlobStore implements BlobStore {
   constructor(
     private readonly fs: Fs,
-    public quota = 64 * 1024 * 1024,
+    public quota = DEFAULT_QUOTA_BYTES,
   ) {}
 
   put(id: Uint8Array, bytes: Uint8Array, descriptor: Uint8Array | null): void {
