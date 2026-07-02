@@ -74,6 +74,8 @@ const CODEC_ENCODE = 1, CODEC_DECODE = 2;     // assembly/codec/index.ts
 const REP_OBSERVE = 1, REP_SCORE = 2;         // assembly/reputation/index.ts
 // Control-plane message types carried over net.send (host/protocol.ts §18).
 const MSG_HAVE = 1, MSG_OFFER = 2, MSG_FETCH = 3, MSG_STORE = 4;
+const HAVE_ID_LEN = 32;      // a HAVE/FETCH request names 32-byte block_ids (§18)
+const FETCH_FRAME = 5;       // a present block costs [found u8][len u32] in a FETCH response (§18)
 const STORE_BLK = ".blk", STORE_DSC = ".dsc";
 const CODEC_NAME = fromHex(APP.codecName);
 const REP_NAME = fromHex(APP.repName);
@@ -238,11 +240,20 @@ function haveWant(ids) {
   const holders = new Map();
   for (const id of ids) holders.set(toHex(id), new Set());
   for (const id of ids) if (storeHas(id)) holders.get(toHex(id)).add(myPeer());
-  for (const res of netRequestMany(cohortPeers(), MSG_HAVE, encodeHaveReq(ids))) {
-    if (!res.ok) continue;
-    const held = res.bytes;
-    for (let i = 0; i < ids.length && i < held.length; i++) {
-      if (held[i] === 1) holders.get(toHex(ids[i])).add(res.peer);
+  const peers = cohortPeers();
+  // Split the id list so one HAVE request stays under the frame cap, exactly as
+  // OFFER/STORE/FETCH do (§18). A HAVE request is 32 bytes/id (the reply is a 1-byte
+  // mask, so the request is the binding side): on a tight transport (WebRTC's ~48 KB
+  // cap → ~1.5k ids) an unsplit HAVE would break discovery for a modest file. Merge
+  // the per-slice masks — a holder accumulates across slices.
+  const maxIds = Math.max(1, Math.floor((maxMsgBytes() - 4) / HAVE_ID_LEN));
+  for (const slice of sliceN(ids, maxIds)) {
+    for (const res of netRequestMany(peers, MSG_HAVE, encodeHaveReq(slice))) {
+      if (!res.ok) continue;
+      const held = res.bytes;
+      for (let i = 0; i < slice.length && i < held.length; i++) {
+        if (held[i] === 1) holders.get(toHex(slice[i])).add(res.peer);
+      }
     }
   }
   return holders;
@@ -329,6 +340,10 @@ const OUT_OF_STORAGE_HINT = " — holders answered but declined: most likely OUT
 // timeout. Transport/operator policy injected via the APP preamble (like quota);
 // default if absent.
 function maxMsgBytes() { const v = config().maxMessageBytes; return (typeof v === "number" && v > 0) ? v : (1 << 20); }
+// Ids per FETCH sub-batch, bounded by the RESPONSE frame (blockSize + FETCH_FRAME per
+// present block) so a full reply stays under the cap. The GET gather and the repair
+// audit both size their batches this way; the holder caps served bytes the same (§18).
+function fetchMaxIds() { return Math.max(1, Math.floor(maxMsgBytes() / (config().blockSize + FETCH_FRAME))); }
 // The fan-out windows (transport/operator policy, like maxMessageBytes): how many
 // per-peer sub-batches a single CAP_NET_SEND_MANY round carries. putWindow bounds
 // STORE messages PER PEER (peers concurrent → peak W·peers); getWindow bounds FETCH
@@ -492,6 +507,38 @@ function fetchBlock(id) {
   }
   return null;
 }
+// Run a windowed batched FETCH over a peer→[idHex] plan. Self reads the local store
+// directly (no round trip, no scoring); every other holder's sub-batches are flattened
+// into one task list and fanned out getWindow() FETCH messages at a time (peak W in
+// flight, the getConcurrency window). `apply(peer, sliceHex, ids, blocks)` sees each
+// sub-batch's result — blocks aligned to ids (bytes|null), or null for the whole slice
+// if the peer was unreachable (partial, never a §8 miss). Shared by the GET gather and
+// the repair audit, so both express the same window through one CAP_NET_SEND_MANY round.
+function runFetchTasks(byPeer, maxIds, apply) {
+  const me = myPeer();
+  if (byPeer.has(me)) {
+    for (const slice of sliceN(byPeer.get(me), maxIds)) {
+      const ids = slice.map(fromHex);
+      apply(me, slice, ids, fetchBatch(me, ids));
+    }
+  }
+  const tasks = []; // { peer, slice, ids }
+  for (const peer of byPeer.keys()) {
+    if (peer === me) continue;
+    for (const slice of sliceN(byPeer.get(peer), maxIds)) tasks.push({ peer, slice, ids: slice.map(fromHex) });
+  }
+  const getW = getWindow();
+  for (let base = 0; base < tasks.length; base += getW) {
+    const window = tasks.slice(base, base + getW);
+    const results = netSendMany(window.map(({ peer, ids }) => ({ peer, type: MSG_FETCH, payload: encodeFetchBatchReq(ids) })));
+    for (let ri = 0; ri < results.length; ri++) {
+      const { slice, ids } = window[ri];
+      const decoded = results[ri].ok ? decodeFetchBatchRes(results[ri].bytes) : null;
+      const blocks = decoded === null ? null : ids.map((_, i) => decoded[i] || null);
+      apply(results[ri].peer, slice, ids, blocks);
+    }
+  }
+}
 // Fetch every block the file's chunks need, batched per holder. After the file-wide
 // have/want, each still-missing block is requested from its best untried holder,
 // sub-batched under the frame cap and fanned out getWindow() FETCH messages at a time
@@ -503,7 +550,10 @@ function gatherBlocks(descriptors, holders) {
   const got = new Map();
   const tried = new Map();
   const triedOf = (h) => { let s = tried.get(h); if (!s) tried.set(h, (s = new Set())); return s; };
-  const maxIds = Math.max(1, Math.floor(maxMsgBytes() / c.blockSize));
+  // Bound a FETCH sub-batch by the RESPONSE size: each present block is blockSize +
+  // FETCH_FRAME on the wire, so dividing by blockSize alone would let a full response
+  // slip just past the cap (the request side, 32 B/id, is smaller and never binds).
+  const maxIds = fetchMaxIds();
 
   const stillNeeds = (d) => {
     const distinct = new Set();
@@ -556,33 +606,8 @@ function gatherBlocks(descriptors, holders) {
       }
     };
 
-    // Self reads the local store directly — no round trip, no fan-out, no scoring.
-    if (byPeer.has(me)) {
-      for (const slice of sliceN(byPeer.get(me), maxIds)) {
-        const ids = slice.map(fromHex);
-        applyFetch(me, slice, ids, fetchBatch(me, ids));
-      }
-    }
-    // Every other holder's FETCH sub-batches are flattened into one task list and
-    // windowed by getWindow(): each round fans out up to W FETCH messages TOTAL across
-    // the cohort (peak W), bounded by getConcurrency — the GET twin of the STORE
-    // window, but capped globally rather than per peer.
-    const tasks = []; // { peer, slice, ids }
-    for (const peer of byPeer.keys()) {
-      if (peer === me) continue;
-      for (const slice of sliceN(byPeer.get(peer), maxIds)) tasks.push({ peer, slice, ids: slice.map(fromHex) });
-    }
-    const getW = getWindow();
-    for (let base = 0; base < tasks.length; base += getW) {
-      const window = tasks.slice(base, base + getW);
-      const results = netSendMany(window.map(({ peer, ids }) => ({ peer, type: MSG_FETCH, payload: encodeFetchBatchReq(ids) })));
-      for (let ri = 0; ri < results.length; ri++) {
-        const { slice, ids } = window[ri];
-        const decoded = results[ri].ok ? decodeFetchBatchRes(results[ri].bytes) : null;
-        const blocks = decoded === null ? null : ids.map((_, i) => decoded[i] || null);
-        applyFetch(results[ri].peer, slice, ids, blocks);
-      }
-    }
+    // Self reads local; every other holder's sub-batches window by getWindow() (§8/§13).
+    runFetchTasks(byPeer, maxIds, applyFetch);
   }
   return got;
 }
@@ -711,31 +736,60 @@ function doGet(arg) {
 }
 
 // ── repair (§9) ────────────────────────────────────────────────────────────--
-// For each block_id, the live holders — advertised via have/want, then confirmed
-// retrievable by a verification-fetch (§8).
+// Audit a chunk's blocks: for each block_id, the live holders — advertised via
+// have/want, then confirmed retrievable by a verification-fetch (§8). Returns
+// { live: Map hex → Set(peer), bytes: Map hex → one verified copy }. The audit
+// already pulls a verifying copy from every live holder, so it keeps one per id in
+// `bytes` — healing re-places THOSE instead of re-fetching (a whole-cohort have/want
+// per id, the pre-batch cost). The verification is unchanged per (peer, block): the
+// same hash-check (§4.2) + repObserve (§8), just batched one FETCH per holder (all the
+// ids it advertised) and windowed by getWindow(), not one round trip per (id, holder).
 function liveHolders(ids) {
   const advertised = haveWant(ids);
-  const verified = new Map();
+  const me = myPeer();
+  const live = new Map();
+  const bytes = new Map(); // hex → first hash-verifying copy seen this audit
+  for (const id of ids) live.set(toHex(id), new Set());
+
+  // Invert to holder → the ids it advertised, so one batched FETCH audits all of them.
+  const byPeer = new Map();
   for (const id of ids) {
-    const key = toHex(id);
-    const live = new Set();
-    for (const peer of advertised.get(key) || new Set()) {
-      if (verificationFetch(peer, id)) live.add(peer);
+    const h = toHex(id);
+    for (const peer of advertised.get(h) || new Set()) {
+      let list = byPeer.get(peer); if (!list) byPeer.set(peer, (list = []));
+      list.push(h);
     }
-    verified.set(key, live);
   }
-  return verified;
+  const applyAudit = (peer, slice, idBytes, blocks) => {
+    const isSelf = peer === me;
+    const t = clockNow();
+    for (let i = 0; i < slice.length; i++) {
+      if (blocks === null) continue;              // unreachable — not a §8 miss
+      const b = blocks[i];
+      if (b && bytesEqual(hash(b), idBytes[i])) {
+        live.get(slice[i]).add(peer);
+        if (!bytes.has(slice[i])) bytes.set(slice[i], b);
+        if (!isSelf) repObserve(fromHex(peer), t, true);
+      } else if (!isSelf) {
+        repObserve(fromHex(peer), t, false);
+      }
+    }
+  };
+  runFetchTasks(byPeer, fetchMaxIds(), applyAudit);
+  return { live, bytes };
 }
-// Replicated chunk (§4.1): repair is a single block copy from any live holder.
-function healReplicated(d, descEnv, holders) {
+// Replicated chunk (§4.1): repair is a single block copy from any live holder — the
+// copy the audit already fetched and verified (`verified`), never a fresh have/want.
+function healReplicated(d, descEnv, holders, verified) {
   const c = config();
   let replaced = 0;
   for (const id of d.blockIds) {
-    const set = holders.get(toHex(id)) || new Set();
+    const h = toHex(id);
+    const set = holders.get(h) || new Set();
     if (set.size >= c.replicas) continue;
-    const bytes = fetchBlock(id);
-    if (!bytes) continue;
-    replaced += placeBlock(id, bytes, descEnv, set, c.replicas - set.size).length;
+    const data = verified.get(h);        // present iff a live holder served it (set.size > 0)
+    if (!data) continue;                 // no live holder this pass — nothing to copy from
+    replaced += placeBlock(id, data, descEnv, set, c.replicas - set.size).length;
   }
   return replaced;
 }
@@ -756,22 +810,18 @@ function distinctBlocks(blockIds) {
 // replica — is copied to fresh peers; a block no live holder serves is reconstructed
 // from any k present blocks, re-certified against its signed block_id, then placed.
 // Each id lands on as many distinct holders as it has slots (§6/§10).
-function healCoded(d, descEnv, holders, distinct) {
-  // Reconstruct any entirely-missing id once, up front, from k present blocks. (A
-  // block that still has a live holder is copied below, not decoded — cheaper.)
+function healCoded(d, descEnv, holders, distinct, verified) {
+  // Reconstruct any entirely-missing id once, up front, from k present blocks — reusing
+  // the copies the audit (liveHolders) already fetched and verified, so a block that
+  // still has a live holder costs no extra round trip. (A missing id, held by no live
+  // holder, isn't in `verified`; it's decoded here and copied below.)
   const regenerated = new Map();
   let anyMissing = false;
   for (const h of distinct.keys()) if ((holders.get(h) || new Set()).size === 0) { anyMissing = true; break; }
   if (anyMissing) {
     const present = [];
     for (let idx = 0; idx < d.blockIds.length && present.length < d.k; idx++) {
-      const set = holders.get(toHex(d.blockIds[idx]));
-      if (!set || set.size === 0) continue;
-      // Try each live holder until one serves the block, rather than picking the
-      // first and silently skipping if it's stale or unreachable.
-      const ranked = rank([...set]);
-      let b = null;
-      for (const peer of ranked) { b = verificationFetch(peer, d.blockIds[idx]); if (b) break; }
+      const b = verified.get(toHex(d.blockIds[idx])); // present iff that id has a live holder
       if (b) present.push({ index: idx, bytes: b });
     }
     if (present.length >= d.k) {
@@ -796,8 +846,9 @@ function healCoded(d, descEnv, holders, distinct) {
     const live = (holders.get(h) || new Set()).size;
     const need = info.count - live;
     if (need <= 0) continue;
-    // A live copy is the cheapest source; otherwise the reconstructed block.
-    const bytes = live > 0 ? fetchBlock(info.id) : regenerated.get(h);
+    // A live copy (already fetched by the audit) is the cheapest source; otherwise the
+    // reconstructed block.
+    const bytes = live > 0 ? verified.get(h) : regenerated.get(h);
     if (!bytes) continue; // missing and not reconstructable this pass
     const placed = placeBlock(info.id, bytes, descEnv, occupied, need);
     for (const p of placed) occupied.add(p);
@@ -809,7 +860,7 @@ function healCoded(d, descEnv, holders, distinct) {
 function repairChunk(descEnv) {
   const d = verifyDescriptor(descEnv);                     // forged/unsigned/malformed → null (§4.3)
   if (!d) return 0;
-  const holders = liveHolders(d.blockIds);
+  const { live: holders, bytes: verified } = liveHolders(d.blockIds);
   const distinct = distinctBlocks(d.blockIds);
   // Effective redundancy: distinct live holders per block, each capped by how many
   // slots that block fills. A degenerate code (RS(1,·), parity≡data) repeats one id
@@ -818,7 +869,7 @@ function repairChunk(descEnv) {
   let redundancy = 0;
   for (const [h, info] of distinct) redundancy += Math.min((holders.get(h) || new Set()).size, info.count);
   if (redundancy >= config().lowWater) return 0;           // healthy (§8, §9)
-  return d.m === 0 ? healReplicated(d, descEnv, holders) : healCoded(d, descEnv, holders, distinct);
+  return d.m === 0 ? healReplicated(d, descEnv, holders, verified) : healCoded(d, descEnv, holders, distinct, verified);
 }
 // Run the repair loop over every chunk this node holds a block of (§9).
 function doRepair() {
@@ -855,11 +906,16 @@ let bytesUsed = -1;
 // store default); this fallback only bites a driver that injects no quota.
 const DEFAULT_QUOTA = 64 * 1024 * 1024;
 function quota() { return APP.quota != null ? APP.quota : DEFAULT_QUOTA; }
-function fsSize(keyStr) { return rU32(host.call(CAP_FS_SIZE, strBytes(keyStr)), 0); }
+// CAP_FS_SIZE returns 0xffffffff for an absent key (fs.size → -1 over the bridge);
+// map that to 0 so sizing a bare block's missing .dsc adds nothing, not ~4 GiB.
+function fsSize(keyStr) { const v = rU32(host.call(CAP_FS_SIZE, strBytes(keyStr)), 0); return v === 0xffffffff ? 0 : v; }
 function ensureUsed() {
   if (bytesUsed >= 0) return;
   bytesUsed = 0;
-  for (const id of storeList()) bytesUsed += fsSize(toHex(id) + STORE_BLK);
+  // Mirror FsBlobStore.usedBytes (store-fs.ts): the committed tier is the <hex>.blk
+  // ciphertext AND its <hex>.dsc descriptor sidecar — the descriptor is real bytes,
+  // so charging only .blk would over-admit relative to the host store's view (§14).
+  for (const id of storeList()) { const hex = toHex(id); bytesUsed += fsSize(hex + STORE_BLK) + fsSize(hex + STORE_DSC); }
 }
 function quotaFree() { ensureUsed(); return Math.max(0, quota() - bytesUsed); }
 function fsPut(keyStr, bytes) {
@@ -873,12 +929,18 @@ function fsPut(keyStr, bytes) {
 function storeWrite(id, bytes, descriptor) {
   ensureUsed();
   const hex = toHex(id);
-  const prev = storeHas(id) ? fsSize(hex + STORE_BLK) : 0;
-  const next = bytesUsed - prev + bytes.length;
+  // Charge the ciphertext AND the descriptor sidecar, crediting whatever was already
+  // stored under this id — byte-for-byte as FsBlobStore.put (store-fs.ts) and
+  // MemoryBlobStore, so a holder's §14 budget matches the host store's stat() at the
+  // boundary instead of writing the .dsc for free.
+  const prevBlk = storeHas(id) ? fsSize(hex + STORE_BLK) : 0;
+  const prevDsc = fsSize(hex + STORE_DSC);
+  const dscLen = descriptor && descriptor.length ? descriptor.length : 0;
+  const next = bytesUsed - prevBlk - prevDsc + bytes.length + dscLen;
   if (next > quota()) throw new Error("store: quota exceeded");
   fsPut(hex + STORE_BLK, bytes);
-  if (descriptor && descriptor.length) fsPut(hex + STORE_DSC, descriptor);
-  else if (prev) host.call(CAP_FS_DELETE, strBytes(hex + STORE_DSC));
+  if (dscLen) fsPut(hex + STORE_DSC, descriptor);
+  else if (prevDsc) host.call(CAP_FS_DELETE, strBytes(hex + STORE_DSC)); // described → bare
   bytesUsed = next;
 }
 // Admission (§6 sibling rule, §14 quota): a holder enforces no-two-blocks-of-a-
@@ -927,6 +989,31 @@ function acceptStore(blockId, descriptor, bytes) {
   if (!admit(descriptor, blockId, bytes.length)) return false;
   try { storeWrite(blockId, bytes, descriptor); return true; } catch (_e) { return false; }
 }
+// Serve a batched FETCH, but never emit more than one message's worth of bytes:
+// an honest requester caps itself at fetchMaxIds() so its whole response fits, but a
+// hostile cohort member can name the same id thousands of times in one ~1 MB request
+// and make this sync holder concat thousands × blockSize into one reply. Cap the
+// served bytes at maxMsgBytes (accounting for the response framing) — blocks past the
+// cap come back absent, which the reader already handles by falling back per block, so
+// this is pure hardening with no protocol change. A per-id memo keeps a repeated id
+// from costing a fresh storeGet each time.
+function serveFetch(ids) {
+  const cap = maxMsgBytes();
+  const out = new Array(ids.length).fill(null);
+  const seen = new Map(); // idHex → bytes|null, so a repeated id is one storeGet
+  let used = 4;           // the [count u32] response header
+  for (let i = 0; i < ids.length; i++) {
+    const h = toHex(ids[i]);
+    let bytes = seen.get(h);
+    if (bytes === undefined) { const sb = storeGet(ids[i]); bytes = sb ? sb.bytes : null; seen.set(h, bytes); }
+    if (!bytes) continue;
+    const framed = bytes.length + FETCH_FRAME;
+    if (used + framed > cap) continue; // over the frame cap → serve as absent (reader falls back)
+    out[i] = bytes;
+    used += framed;
+  }
+  return out;
+}
 // The wire codecs a holder decodes/encodes (decodeHaveReq, encodeHaveRes,
 // decodeOfferBatch, encodeOfferMask, decodeStoreBatch, encodeStoreMask,
 // decodeFetchBatchReq, encodeFetchBatchRes) all come from the SHARED host/protocol.ts
@@ -941,7 +1028,7 @@ function doHandle(arg) {
   if (type === MSG_HAVE) return encodeHaveRes(decodeHaveReq(payload).map((id) => storeHas(id)));
   if (type === MSG_OFFER) return encodeOfferMask(admitBatch(decodeOfferBatch(payload)));
   if (type === MSG_STORE) return encodeStoreMask(decodeStoreBatch(payload).map((s) => acceptStore(s.blockId, s.descriptor, s.bytes)));
-  if (type === MSG_FETCH) return encodeFetchBatchRes(decodeFetchBatchReq(payload).map((id) => { const sb = storeGet(id); return sb ? sb.bytes : null; }));
+  if (type === MSG_FETCH) return encodeFetchBatchRes(serveFetch(decodeFetchBatchReq(payload)));
   return EMPTY;
 }
 
