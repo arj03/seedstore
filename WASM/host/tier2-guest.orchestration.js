@@ -149,6 +149,13 @@ function storeGet(id) {
   const dsc = host.call(CAP_FS_GET, strBytes(hex + STORE_DSC));
   return { bytes: blk.slice(1), descriptor: dsc[0] === 1 ? dsc.slice(1) : null };
 }
+// Just the <hex>.dsc sidecar, without dragging the block ciphertext across the
+// bridge — repair audits chunk shape from the descriptor and never needs the .blk
+// bytes (it re-fetches those from holders only where healing actually places).
+function storeGetDescriptor(id) {
+  const dsc = host.call(CAP_FS_GET, strBytes(toHex(id) + STORE_DSC));
+  return dsc[0] === 1 ? dsc.slice(1) : null;
+}
 function storeList() {
   const r = host.call(CAP_FS_LIST, EMPTY), out = [];
   let o = 0; const n = rU32(r, o); o += 4;
@@ -806,12 +813,12 @@ function doRepair() {
   const seen = new Set();
   let replaced = 0;
   for (const id of storeList()) {
-    const sb = storeGet(id);
-    if (!sb || !sb.descriptor) continue;
-    const key = toHex(hash(sb.descriptor));
+    const descriptor = storeGetDescriptor(id);
+    if (!descriptor) continue;
+    const key = toHex(hash(descriptor));
     if (seen.has(key)) continue;
     seen.add(key);
-    replaced += repairChunk(sb.descriptor);
+    replaced += repairChunk(descriptor);
   }
   const out = new Uint8Array(4);
   wU32(out, 0, replaced);
