@@ -54,7 +54,8 @@ Hashing, the length-preserving stream cipher (`crypto_stream_xchacha20_xor`),
 and signatures are **reused** from the runtime's libsodium (the sumo build, which
 exposes the raw stream cipher) — never bundled — exactly as §16 requires; the
 guest reaches them as generic `cap-bridge` primitives and builds its own
-descriptor envelope and nonce convention on top.
+descriptor envelope and nonce convention on top. (The sign primitive is
+currently raw; the spec now scopes it — see the alignment guide below.)
 
 **Why two realms.** The initiator orchestration is inherently async (it fans out
 over `net` and awaits), so it runs in an Asyncify QuickJS realm where a host call
@@ -66,6 +67,83 @@ async realms can't overlap host calls; a sync one, a different WASM instance,
 can). `StorageNode` (`host/storage-node.ts`) keeps a host-side copy of both sides
 as the reference/parity path — the same role the host-side classes play in the
 tests — but the **shipped** node runs the confined guest.
+
+## Aligning with the seedkernel `simplify` spec — the next implementation step
+
+The kernel spec (seedkernel README, `simplify` branch) tightened several
+contracts this implementation predates; the spec-side story is in the
+[seed store spec](../README.md) (§16, *"The signing call exists — but it is
+scoped"*). This section is the code map. The runtime pieces land in
+**seedkernel** first — this repo consumes them through the `seedkernel-wasm`
+dependency — and the storage work is confined to the guest, the host parity
+mirror, and the bundle producer.
+
+**Runtime prerequisites (seedkernel, consumed here):**
+
+- **Scoped `SIGN`** (`cap-bridge`): the op signs `DOMAIN_guest ‖ scope ‖ msg`,
+  with `scope = author_pk ‖ app_len u8 ‖ app` derived from the *admitted bundle
+  manifest*, never from the caller. `VERIFY` stays raw (verification is not an
+  oracle).
+- **Op table renumber**: `FS_HAS` is deleted (existence is `FS_SIZE ≥ 0`) and
+  the ops become contiguous 1–18, grouped by domain (`crypto` 1–6, `net` 7–10,
+  `fs` 11–16, `module` 17, `clock` 18). The guest preamble and the bridge
+  switch regenerate together, so nothing in this repo hard-codes a number —
+  only the `CAP_FS_HAS` *call site* has to go.
+- **`./fs` drops `has`**: the iface becomes `get`/`put`/`size`/`list`/`delete`/`stat`.
+- **Transport**: `PeerLink` becomes a real AKE (ephemeral X25519 in HELLO, AUTH
+  signs the full transcript, post-AUTH frames are forward-secret
+  ChaCha20-Poly1305 records) and the separate `bulk 0x02` frame kind is deleted
+  — req/res is the only plane, which is exactly how this layer already moves
+  blocks (see Scope below).
+- **Bundle freshness**: `loadBundle` enforces a monotonic integer manifest
+  `version` per `(author, app)` against a persisted high-water mark.
+
+**Storage changes (this repo):**
+
+1. **`signCore` gains the prefix on both paths**
+   (`host/tier2-guest.orchestration.js`). The descriptor envelope stays
+   `[authorPk 32][sig 64][core ..]` — the prefix is preimage-only, never stored
+   — but the signature `signCore` gets back from `CAP_SIGN` is now over
+   `DOMAIN_guest ‖ scope ‖ core`, so `verifyEnv` must reconstruct that same
+   preimage before calling `CAP_VERIFY`, and the host mirror
+   (`signDescriptor`/`verifyDescriptor` in `host/manifest.ts`) must produce and
+   check byte-identical preimages or the `tier2-port`/`holder-guest` parity
+   tests fail. The guest needs the scope bytes to rebuild verify preimages:
+   inject them host-derived alongside the generated op preamble / `const APP` —
+   the shell derives them from the admitted manifest, `storage-node.ts` derives
+   the identical bytes for the in-process path. One consequence to weigh
+   (kernel §13.2): rotating the bundle author key changes the scope and orphans
+   previously signed descriptors, so a deployment that anticipates handover
+   records the scope inside its signed formats.
+2. **The descriptor's leading byte becomes the format tag** (spec §16). The
+   descriptor core already leads with a version byte — `manifest-core.ts`
+   rejects `core[0] !== 1` — so declare that byte the signed-format tag
+   (descriptor = `0x01`) and reserve distinct values for the Part II signed
+   formats (tombstone, file head) before they exist. The tag sits inside
+   `core`, so it is already under the signature and inside the scoped preimage
+   with no further change.
+3. **`storeHas` moves to `FS_SIZE ≥ 0`**
+   (`host/tier2-guest.orchestration.js`): drop the `CAP_FS_HAS` call and answer
+   from the existing `fsSize` seam — distinguishing absent (bridge −1) from
+   present-but-empty, which the current `fsSize` collapses to 0. Same move
+   host-side: `store-fs.ts` calls `fs.has(...)` twice; both become
+   `fs.size(...) >= 0` (the seedstore `BlobStore.has` iface itself is
+   unchanged — only its backing call moves).
+4. **`build-bundle` emits an integer, monotonic `version`**
+   (`scripts/storage-bundle.mjs` currently writes `version: "1"`, a string):
+   make it an integer and bump it on every publish — the shell then refuses a
+   stale bundle directory as a downgrade instead of silently reloading it.
+5. **Tests to touch**: `manifest` (tamper-evidence now over the tagged, scoped
+   preimage), `bridges` (store existence via size), `tier2-port` /
+   `holder-guest` (parity across the scoped sign/verify paths), `shell-run`
+   (bundle version freshness), `net` (rides the new encrypted record layer
+   transparently — assert nothing plaintext-specific about the wire).
+
+**What deliberately does not change:** the codec and reputation WASM, the
+HAVE/OFFER/STORE/FETCH wire format and its windowing, content addressing, the
+nonce convention, and the quota. The storage *structure* is untouched; the
+changes are confined to how signatures are prefixed, how existence is asked,
+and how the bundle versions itself.
 
 ## Build
 
@@ -403,7 +481,11 @@ A few Part I behaviours are modelled in a deliberately simple reference form and
 called out in the code: the Suspected/Lost grace window (§8) is represented by
 "verified-live vs not", admission/eviction (§14) is quota + the sibling rule
 rather than the full eviction-score, and the bulk plane (§3) rides the same
-awaited request/response channel rather than a separate unsigned frame stream.
+awaited request/response channel rather than a separate unsigned frame stream —
+no longer a simplification but exactly what the kernel transport now specifies:
+its separate bulk frame kind was removed, so block bytes ride ordinary req/res
+bodies (inside the encrypted record layer) and content-addressing stays the
+app-level admission check.
 
 PUT also places **best-effort**: it spreads a chunk's *n = k+m* blocks across as
 many distinct holders as the cohort offers (one block per holder, the §6/§10
