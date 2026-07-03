@@ -17,10 +17,16 @@ import { join } from "node:path";
 
 import { CURRENT_VERSION } from "seedkernel-wasm";
 import { signManifest } from "seedkernel-wasm/bundle";
-import { CAP } from "seedkernel-wasm/cap-bridge";
+import { CAP, guestSignScope } from "seedkernel-wasm/cap-bridge";
 import { storageNames } from "../build/host/names.js";
 import { defaultConfig } from "../build/host/core.js";
+import { guestSignPrefix } from "../build/host/manifest.js";
 import { toHex } from "../build/host/util.js";
+
+// The app name — the manifest `app` and the `app` component of the signing scope
+// (README §16). The shell scopes the guest's SIGN op to (author, app); build here the
+// byte-identical scope so the guest's injected verify prefix agrees with it.
+const APP_NAME = "seedstore";
 
 // The capability domains the storage guest reaches (cap-bridge CAP_DOMAINS keys).
 // Storage uses all of them; declaring them is exactly what the shell enforces.
@@ -35,10 +41,13 @@ const STORAGE_CAPS = ["crypto", "net", "fs", "module", "clock"];
  * @param {Uint8Array} o.sk   author secret key (signs the manifest + installs)
  * @param {Uint8Array} o.pk   author public key
  * @param {string} o.build    seedstore build/ dir (holds kernel/codec wasm + staged guest)
+ * @param {number} [o.version] monotonic-per-(author,app) freshness mark (README §13.4);
+ *                             the shell refuses a load below its high-water mark. Integer.
  * @param {(s:string)=>void} [o.log]  optional progress logger
  * @returns the manifest object that was signed (for logging/inspection).
  */
-export function writeStorageBundle({ dir, host, sodium, sk, pk, build, log = () => {} }) {
+export function writeStorageBundle({ dir, host, sodium, sk, pk, build, version = 1, log = () => {} }) {
+  if (!Number.isInteger(version)) throw new Error("writeStorageBundle: version must be an integer");
   const names = storageNames(host);
   const installName = host.deriveBootstrapName("install");
   const modSpecs = [
@@ -52,7 +61,7 @@ export function writeStorageBundle({ dir, host, sodium, sk, pk, build, log = () 
   let seq = 0;
   const modules = modSpecs.map((m) => {
     const wasm = new Uint8Array(readFileSync(join(build, m.file)));
-    const payload = host.encodeInstallPayload(++seq, m.kernelName, [], null, wasm);
+    const payload = host.encodeInstallPayload(++seq, m.kernelName, [], wasm);
     const install = host.wrapAndEncode(sk, pk, CURRENT_VERSION, installName, payload);
     writeFileSync(join(dir, m.file), wasm);
     writeFileSync(join(dir, `${m.name}.install`), install);
@@ -73,8 +82,10 @@ export function writeStorageBundle({ dir, host, sodium, sk, pk, build, log = () 
 
   const cfg = defaultConfig();
   const manifest = {
-    app: "seedstore",
-    version: "1",
+    app: APP_NAME,
+    // A monotonic integer freshness mark per (author, app): the shell enforces it as a
+    // high-water mark and refuses a downgrade (README §13.4). Bump it on every publish.
+    version,
     modules,
     guest: { file: "tier2-guest.js", hash: toHex(host.genesisHash(new TextEncoder().encode(guestText))) },
     // `ops` documents the seam ABI (the full catalog the guest was built against);
@@ -89,6 +100,10 @@ export function writeStorageBundle({ dir, host, sodium, sk, pk, build, log = () 
       k: cfg.k, m: cfg.m, blockSize: cfg.blockSize,
       replicas: cfg.replicas, lowWater: cfg.lowWater, smallMaxBlocks: cfg.smallMaxBlocks,
       codecName: toHex(names.codec), repName: toHex(names.reputation),
+      // The scoped-signature prefix `DOMAIN_guest ‖ scope` the guest prepends before
+      // CAP_VERIFY (README §16). The shell's SIGN op scopes to (this author, this app),
+      // so build the byte-identical prefix here from the same (pk, APP_NAME).
+      signPrefix: toHex(guestSignPrefix(guestSignScope(pk, APP_NAME))),
     },
   };
 

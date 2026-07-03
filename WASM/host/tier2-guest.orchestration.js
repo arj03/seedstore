@@ -79,6 +79,13 @@ const FETCH_FRAME = 5;       // a present block costs [found u8][len u32] in a F
 const STORE_BLK = ".blk", STORE_DSC = ".dsc";
 const CODEC_NAME = fromHex(APP.codecName);
 const REP_NAME = fromHex(APP.repName);
+// The scoped-signature prefix `DOMAIN_guest ‖ scope` (README §16): the CAP_SIGN op signs
+// `prefix ‖ msg`, never the raw msg, so a descriptor signature verifies only in this app's
+// scope. CAP_VERIFY stays raw, so verifyEnv rebuilds `prefix ‖ core` before checking. The
+// driver derives the bytes host-side (storage-node.ts from its scope, the shell from the
+// admitted bundle's (author, app)) and injects them alongside APP — the guest treats them
+// as an opaque prefix, never reconstructing the kernel's domain string itself.
+const SIGN_PREFIX = fromHex(APP.signPrefix);
 
 function config() { return APP; }
 
@@ -93,10 +100,14 @@ function nonce(domain, index) { const n = new Uint8Array(24); n[0] = domain & 25
 function streamXor(K, non, msg) { return host.call(CAP_STREAM_XOR, concat([non, K, msg])); }
 function encrypt(K, domain, index, msg) { return streamXor(K, nonce(domain, index), msg); }
 function decrypt(K, domain, index, ct) { return streamXor(K, nonce(domain, index), ct); }
-// Signed chunk descriptor envelope: [authorPk 32][sig 64][core] (§4.3, §16).
+// Signed chunk descriptor envelope: [authorPk 32][sig 64][core] (§4.3, §16). The
+// prefix rides both paths: CAP_SIGN prepends `DOMAIN_guest ‖ scope` for us (so signCore
+// passes the bare core and gets back a scoped signature), and verifyEnv rebuilds the same
+// preimage for the raw CAP_VERIFY. The stored envelope still holds only [pk][sig][core] —
+// the prefix is preimage-only, never transmitted.
 function signCore(core) { return concat([identity(), host.call(CAP_SIGN, core), core]); }
 function verifyEnv(env) {
-  return host.call(CAP_VERIFY, concat([env.slice(0, 32), env.slice(32, 96), env.slice(96)]))[0] === 1;
+  return host.call(CAP_VERIFY, concat([env.slice(0, 32), env.slice(32, 96), SIGN_PREFIX, env.slice(96)]))[0] === 1;
 }
 
 // ── codec + reputation via the generic module-call ──
@@ -143,7 +154,9 @@ function repObserve(peerPk, t, pass) {
 }
 
 // ── local store over fs.* (the <hex>.blk / <hex>.dsc layout of FsBlobStore) ──
-function storeHas(id) { return host.call(CAP_FS_HAS, strBytes(toHex(id) + STORE_BLK))[0] === 1; }
+// Existence is `size ≥ 0` (there is no CAP_FS_HAS): the raw CAP_FS_SIZE is 0xFFFFFFFF
+// (fs.size → -1) only for an absent key, so a present-but-empty value still reads as held.
+function storeHas(id) { return fsSizeRaw(toHex(id) + STORE_BLK) !== 0xffffffff; }
 function storeGet(id) {
   const hex = toHex(id);
   const blk = host.call(CAP_FS_GET, strBytes(hex + STORE_BLK));
@@ -906,9 +919,12 @@ let bytesUsed = -1;
 // store default); this fallback only bites a driver that injects no quota.
 const DEFAULT_QUOTA = 64 * 1024 * 1024;
 function quota() { return APP.quota != null ? APP.quota : DEFAULT_QUOTA; }
-// CAP_FS_SIZE returns 0xffffffff for an absent key (fs.size → -1 over the bridge);
-// map that to 0 so sizing a bare block's missing .dsc adds nothing, not ~4 GiB.
-function fsSize(keyStr) { const v = rU32(host.call(CAP_FS_SIZE, strBytes(keyStr)), 0); return v === 0xffffffff ? 0 : v; }
+// CAP_FS_SIZE returns 0xffffffff for an absent key (fs.size → -1 over the bridge).
+// fsSizeRaw preserves that sentinel — it is how existence is asked (storeHas), since
+// there is no CAP_FS_HAS. fsSize maps the sentinel to 0 so sizing a bare block's missing
+// .dsc adds nothing to the quota total, not ~4 GiB.
+function fsSizeRaw(keyStr) { return rU32(host.call(CAP_FS_SIZE, strBytes(keyStr)), 0); }
+function fsSize(keyStr) { const v = fsSizeRaw(keyStr); return v === 0xffffffff ? 0 : v; }
 function ensureUsed() {
   if (bytesUsed >= 0) return;
   bytesUsed = 0;

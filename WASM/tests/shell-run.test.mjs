@@ -18,6 +18,7 @@ import { fileURLToPath } from "node:url";
 import { boot } from "seedkernel-wasm/shell";
 import {
   loadSodium, loadWasmBytes, generateKeyPair, LoopbackNetwork, createConnectedCohort,
+  storageSignScope,
 } from "../build/host/node.js";
 import { toHex, bytesEqual, concatBytes } from "../build/host/util.js";
 import { buildBundle } from "./bundle-fixture.mjs";
@@ -38,10 +39,16 @@ export async function run(t) {
 
   t.group("shell: a generic seedkernel-shell runs the seedstore guest end-to-end (step 7)");
   {
-    const net = new LoopbackNetwork();
-    const holders = await createConnectedCohort({ count: 6, network: net, sodium, wasm, timeoutMs: 40 });
-
+    // The bundle author fixes the deployment's signing scope (README §16). The shell
+    // running the bundle signs descriptors under it, so the host-side StorageNode holders
+    // must verify under the SAME scope — build them with storageSignScope(bundle author).
     const author = generateKeyPair(sodium);
+    const net = new LoopbackNetwork();
+    const holders = await createConnectedCohort({
+      count: 6, network: net, sodium, wasm, timeoutMs: 40,
+      signScope: storageSignScope(author.publicKey),
+    });
+
     const bundleDir = mkdtempSync(join(tmpdir(), "seedstore-bundle-"));
     const shellDir = mkdtempSync(join(tmpdir(), "seedstore-shell-"));
     let shell;
@@ -88,6 +95,38 @@ export async function run(t) {
       if (shell) shell.close();
       holders.forEach((h) => h.close());
       rmSync(bundleDir, { recursive: true, force: true });
+      rmSync(shellDir, { recursive: true, force: true });
+    }
+  }
+
+  t.group("shell: bundle version freshness — a downgrade is refused (§13.4)");
+  {
+    // The manifest `version` is a monotonic integer high-water mark per (author, app).
+    // Once a shell loads version 5 it refuses a same-author version-3 directory as a
+    // downgrade — the guest is loaded wholesale from the directory, so this is the only
+    // guard against silently swapping in an older signed bundle.
+    const author = generateKeyPair(sodium);
+    const net = new LoopbackNetwork();
+    const hiDir = mkdtempSync(join(tmpdir(), "seedstore-bundle-hi-"));
+    const loDir = mkdtempSync(join(tmpdir(), "seedstore-bundle-lo-"));
+    const shellDir = mkdtempSync(join(tmpdir(), "seedstore-shell-fresh-"));
+    let shell;
+    try {
+      await buildBundle(hiDir, author, sodium, build, 5);
+      await buildBundle(loDir, author, sodium, build, 3);
+      shell = await boot({
+        kernelBytes: wasm.kernelBytes, bootstrapBytes: wasm.bootstrapBytes,
+        policyJson: JSON.stringify({ authors: [toHex(author.publicKey)] }),
+        dir: shellDir, identity: generateKeyPair(sodium), network: net, timeoutMs: 40,
+      });
+      shell.loadBundle(hiDir); // advances the (author, app) high-water mark to 5
+      let refused = false;
+      try { shell.loadBundle(loDir); } catch { refused = true; }
+      t.ok(refused, "a version-3 bundle is refused after a version-5 bundle loaded (no downgrade)");
+    } finally {
+      if (shell) shell.close();
+      rmSync(hiDir, { recursive: true, force: true });
+      rmSync(loDir, { recursive: true, force: true });
       rmSync(shellDir, { recursive: true, force: true });
     }
   }

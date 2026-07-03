@@ -21,6 +21,7 @@ import { fileURLToPath } from "node:url";
 
 import { loadKernelHost, loadSodium } from "seedkernel-wasm";
 import { CAP } from "seedkernel-wasm/cap-bridge";
+import { verifyManifest } from "seedkernel-wasm/bundle";
 import { writeStorageBundle } from "./storage-bundle.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -49,7 +50,19 @@ if (existsSync(keyPath)) {
   console.log(`  minted author key → ${keyPath}`);
 }
 
-const manifest = writeStorageBundle({ dir: out, host, sodium, sk, pk, build, log: console.log });
+// Freshness (README §13.4): the manifest `version` is a monotonic integer the shell
+// enforces as a high-water mark. Bump it on every publish so a redeploy is never seen as
+// a downgrade — read the previous bundle's version (if any) and add one.
+let version = 1;
+const prevManifest = join(out, "manifest.bundle");
+if (existsSync(prevManifest)) {
+  try {
+    const prev = verifyManifest(sodium, new Uint8Array(readFileSync(prevManifest)));
+    if (prev && Number.isInteger(prev.manifest.version)) version = prev.manifest.version + 1;
+  } catch { /* unreadable / pre-integer version → start at 1 */ }
+}
+
+const manifest = writeStorageBundle({ dir: out, host, sodium, sk, pk, build, version, log: console.log });
 
 console.log(`  author ${toHex(pk)}`);
 console.log(`  wrote ${out} (app ${manifest.app} v${manifest.version}, ${manifest.modules.length} modules, `

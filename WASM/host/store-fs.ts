@@ -49,11 +49,11 @@ export class FsBlobStore implements BlobStore {
     return { bytes, descriptor: descriptor ?? null };
   }
 
-  has(id: Uint8Array): boolean { return this.fs.has(toHex(id) + BLK); }
+  has(id: Uint8Array): boolean { return this.fs.size(toHex(id) + BLK) >= 0; }
 
   delete(id: Uint8Array): boolean {
     const hex = toHex(id);
-    if (!this.fs.has(hex + BLK)) return false;
+    if (this.fs.size(hex + BLK) < 0) return false;
     this.fs.delete(hex + BLK);
     this.fs.delete(hex + DSC);
     return true;

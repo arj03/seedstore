@@ -60,3 +60,4 @@ export { createConnectedCohort } from "./cluster.js";
 export type { StorageNodeOptions, PutResult } from "./storage-node.js";
 export type { StorageConfig, Identity } from "./core.js";
 export { defaultConfig } from "./core.js";
+export { STORAGE_APP, STORAGE_SIGN_SCOPE, storageSignScope } from "./manifest.js";

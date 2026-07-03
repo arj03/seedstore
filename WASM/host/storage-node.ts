@@ -42,6 +42,7 @@ import { Crypto } from "./crypto.js";
 import { storageNames, type StorageNames } from "./names.js";
 import { registerStorageBridges } from "./bridges.js";
 import { type Identity, type StorageConfig, defaultConfig } from "./core.js";
+import { STORAGE_SIGN_SCOPE, guestSignPrefix } from "./manifest.js";
 import { toHex, fromHex, readU32BE, writeU32BE, concatBytes } from "./util.js";
 
 /** PUT result: the manifest root, the per-file content key K, and where the
@@ -93,6 +94,13 @@ export interface StorageNodeOptions {
   clock?: () => number;
   /** net.send timeout — how long before a peer is treated as unreachable (§8). */
   timeoutMs?: number;
+  /** The guest signing scope (README §16). Descriptors are signed/verified over
+   *  `DOMAIN_guest ‖ scope ‖ core`, so every node in one cohort must share it (a
+   *  descriptor one signs verifies on another). Defaults to the in-process
+   *  `STORAGE_SIGN_SCOPE` (zero author); a cohort that shares a bundle author — the
+   *  shell-run / holder-guest cross-path tests — passes `storageSignScope(author)` so
+   *  its StorageNodes verify what a shell running that bundle signs. */
+  signScope?: Uint8Array;
 }
 
 export class StorageNode {
@@ -110,9 +118,14 @@ export class StorageNode {
   private readonly peers = new Set<PeerId>();
   private readonly clockFn: () => number;
   private readonly guestSource: string;
+  private readonly signScope: Uint8Array;
   private installSeq = 0;
   private repairLoopOn = false;
   private repairTimer: ReturnType<typeof setTimeout> | null = null;
+  // The last initiator-realm call (put/get/repair), so close() can await an in-flight one
+  // before disposing the realm. The initiator serializes calls — the Asyncify bridge is
+  // module-global, so two never overlap — so one handle is enough.
+  private inFlight: Promise<unknown> = Promise.resolve();
 
   // Two realms run the one guest: an async initiator (put/get/repair) created
   // lazily on first use, and a sync holder (handle) created eagerly at boot so a
@@ -129,6 +142,7 @@ export class StorageNode {
     this.identity = identity;
     this.peerId = toHex(identity.publicKey);
     this.guestSource = opts.guestSource;
+    this.signScope = opts.signScope ?? STORAGE_SIGN_SCOPE;
     // Derive replicas / lowWater / smallMaxBlocks from the *caller's* k & m, then
     // let any explicit field in opts.config override — otherwise overriding k/m
     // alone would leave those derived from the (2,2) default (e.g. an unreachable
@@ -200,6 +214,9 @@ export class StorageNode {
       peers: () => this.cohortPeers(),
       fs: this.fs,
       now: () => this.now(),
+      // Scope the guest's SIGN op to this deployment (README §16): the kernel signs
+      // `DOMAIN_guest ‖ scope ‖ msg`, never the raw node key over guest bytes.
+      signScope: this.signScope,
     });
   }
 
@@ -221,6 +238,11 @@ export class StorageNode {
       maxMessageBytes: c.maxMessageBytes,
       putConcurrency: c.putConcurrency, getConcurrency: c.getConcurrency,
       codecName: toHex(this.names.codec), repName: toHex(this.names.reputation),
+      // The scoped-signature prefix `DOMAIN_guest ‖ scope` the guest prepends before
+      // CAP_VERIFY (README §16) — the same bytes the bridge's SIGN op prepends, so the
+      // two paths agree. The seedkernel shell injects the byte-identical value from the
+      // admitted bundle's (author, app); here it comes from this node's scope.
+      signPrefix: toHex(guestSignPrefix(this.signScope)),
     };
     return `const APP = ${JSON.stringify(app)};\n`;
   }
@@ -258,10 +280,20 @@ export class StorageNode {
   }
 
   // ── PUT / GET / repair / share (§6, §7, §9, §4.4) — all run in the guest ──
+  /** Run one initiator entrypoint in the async realm, recording it as in-flight so
+   *  close() can await it before disposing the realm (disposing while a call is parked
+   *  mid-await — a repair pass caught by close, waiting out an unreachable peer's timeout
+   *  — would resume into a freed realm: a QuickJS UseAfterFree abort). */
+  private async runInitiator(entry: string, payload: Uint8Array): Promise<Uint8Array> {
+    const realm = await this.initiatorRealm();
+    const p = realm.call(entry, payload);
+    this.inFlight = p.then(() => {}, () => {});
+    return p;
+  }
+
   /** PUT a file (§6), orchestrated inside the initiator realm. */
   async put(plaintext: Uint8Array): Promise<PutResult> {
-    const realm = await this.initiatorRealm();
-    const r = await realm.call("put", plaintext);
+    const r = await this.runInitiator("put", plaintext);
     // [manifestId 32][replicated u8][chunkCount u32][K 32][idCount u32][ids 32·n]
     const idCount = readU32BE(r, 69);
     const blockIds: Uint8Array[] = [];
@@ -271,16 +303,14 @@ export class StorageNode {
 
   /** GET a file (§7), orchestrated inside the initiator realm. */
   async get(manifestId: Uint8Array, key: Uint8Array): Promise<Uint8Array> {
-    const realm = await this.initiatorRealm();
-    return realm.call("get", concatBytes([manifestId, key]));
+    return this.runInitiator("get", concatBytes([manifestId, key]));
   }
 
   /** Run one repair pass over every chunk this node holds a block of (§9),
    *  orchestrated inside the initiator realm. Returns the number of blocks
    *  (re-)placed. */
   async runRepair(): Promise<number> {
-    const realm = await this.initiatorRealm();
-    return readU32BE(await realm.call("repair", new Uint8Array(0)), 0);
+    return readU32BE(await this.runInitiator("repair", new Uint8Array(0)), 0);
   }
 
   /** Decayed reciprocity score this node holds for a peer (§13), read from the
@@ -347,9 +377,17 @@ export class StorageNode {
    *  running (test cleanup). */
   close(): void {
     this.stopRepairLoop();
-    void this.initiator?.then((r) => r.dispose(), () => { /* creation failed — nothing to free */ });
-    this.holder?.dispose();
+    // Close the transport first so any parked initiator round trip settles (times out as
+    // unreachable) rather than hanging, and no new holder request arrives.
     this.transport.close();
+    // The sync holder realm never suspends (local fs + crypto only), so it is safe to
+    // free at once. The async initiator realm may be parked mid-await (a repair pass
+    // caught by close, waiting out a peer timeout); disposing it now would resume that
+    // computation into a freed realm (QuickJS UseAfterFree). Defer its disposal until the
+    // in-flight call settles.
+    this.holder?.dispose();
+    const disposeInitiator = () => { void this.initiator?.then((r) => r.dispose(), () => { /* creation failed — nothing to free */ }); };
+    this.inFlight.then(disposeInitiator, disposeInitiator);
   }
 
   // ── bootstrap wiring (§19) ──────────────────────────────────────────────
@@ -375,7 +413,7 @@ export class StorageNode {
 
   private installOne(name: Uint8Array, wasm: Uint8Array): void {
     const seq = ++this.installSeq;
-    const payload = this.host.encodeInstallPayload(seq, name, [], null, wasm);
+    const payload = this.host.encodeInstallPayload(seq, name, [], wasm);
     this.host.dispatch(this.host.wrapAndEncode(
       this.identity.privateKey, this.identity.publicKey, CURRENT_VERSION, this.host.deriveBootstrapName("install"), payload,
     ));
