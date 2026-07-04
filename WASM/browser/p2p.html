@@ -20,19 +20,44 @@
   .ok { background:#d8f0d8; } .warn { background:#fde9c8; }
   #token { background:#f0f0f0; padding:.4rem; border-radius:4px; word-break:break-all; }
 </style>
-<!-- Browser-native, no bundler. Only these bare specifiers need wiring; the rest
-     of the host imports are relative. The seedkernel browser host + transport are
-     pulled from ./seedkernel/, this project's host from ./host/, and sumo
-     libsodium from a CDN (vendor an ESM build to run offline). -->
+<!-- Browser-native, no bundler. The host imports the kernel with bare, EXTENSIONLESS
+     specifiers ("seedkernel-wasm/safe-js"), so each is mapped explicitly to its real
+     ./seedkernel/*.js file — a folder-prefix map ("seedkernel-wasm/" → "./seedkernel/")
+     can't be used because it would resolve to an extensionless path a static server
+     404s. "net" is the one that maps to transport.js rather than net.js. safe-js is the
+     QuickJS sandbox the storage node runs the guest in; it imports quickjs-emscripten +
+     the two quickjs-ng wasm variants. Those, plus sumo libsodium, are VENDORED into
+     ./vendor/ by scripts/build-browser-demo.mjs so the demo runs fully offline — each
+     package's runtime files + its .wasm are copied and every bare specifier in their
+     graph (…-core, quickjs-ffi-types, the /emscripten-module subpaths, libsodium-sumo)
+     gets a map entry. The umbrella statically references the four default Bellard
+     variants (quickjs-wasmfile-{release,debug}-{sync,asyncify}) that we never select
+     (safe-js always passes the -ng variants), so those alias to the vendored -ng
+     builds — they resolve without pulling four unused wasm packages. This project's
+     host is relative (./host/). -->
 <script type="importmap">
 {
   "imports": {
-    "seedkernel-wasm/browser": "./seedkernel/browser.js",
-    "seedkernel-wasm/net":     "./seedkernel/transport.js",
-    "seedkernel-wasm/net-rtc": "./seedkernel/net-rtc.js",
-    "seedkernel-wasm/net-ws":  "./seedkernel/net-ws.js",
-    "seedkernel-wasm/fs":      "./seedkernel/fs.js",
-    "libsodium-wrappers-sumo": "https://esm.sh/libsodium-wrappers-sumo@0.8.4"
+    "seedkernel-wasm/browser":   "./seedkernel/browser.js",
+    "seedkernel-wasm/cap-bridge": "./seedkernel/cap-bridge.js",
+    "seedkernel-wasm/fs":        "./seedkernel/fs.js",
+    "seedkernel-wasm/net":       "./seedkernel/transport.js",
+    "seedkernel-wasm/net-rtc":   "./seedkernel/net-rtc.js",
+    "seedkernel-wasm/net-ws":    "./seedkernel/net-ws.js",
+    "seedkernel-wasm/safe-js":   "./seedkernel/safe-js.js",
+    "quickjs-emscripten":                         "./vendor/quickjs-emscripten/index.mjs",
+    "quickjs-emscripten-core":                    "./vendor/quickjs-emscripten-core/index.mjs",
+    "@jitl/quickjs-ffi-types":                    "./vendor/quickjs-ffi-types/index.mjs",
+    "@jitl/quickjs-ng-wasmfile-release-asyncify":                  "./vendor/qjs-async/index.mjs",
+    "@jitl/quickjs-ng-wasmfile-release-asyncify/emscripten-module": "./vendor/qjs-async/emscripten-module.browser.mjs",
+    "@jitl/quickjs-ng-wasmfile-release-sync":                      "./vendor/qjs-sync/index.mjs",
+    "@jitl/quickjs-ng-wasmfile-release-sync/emscripten-module":    "./vendor/qjs-sync/emscripten-module.browser.mjs",
+    "@jitl/quickjs-wasmfile-release-asyncify": "./vendor/qjs-async/index.mjs",
+    "@jitl/quickjs-wasmfile-debug-asyncify":   "./vendor/qjs-async/index.mjs",
+    "@jitl/quickjs-wasmfile-release-sync":     "./vendor/qjs-sync/index.mjs",
+    "@jitl/quickjs-wasmfile-debug-sync":       "./vendor/qjs-sync/index.mjs",
+    "libsodium-wrappers-sumo":   "./vendor/libsodium-wrappers-sumo/libsodium-wrappers.mjs",
+    "libsodium-sumo":            "./vendor/libsodium-sumo/libsodium-sumo.mjs"
   }
 }
 </script>
@@ -70,6 +95,16 @@
     <textarea id="wsPeers" class="mono" rows="3" style="width:100%;box-sizing:border-box" placeholder="abc…64hex@127.0.0.1:47210&#10;def…64hex@127.0.0.1:47211"></textarea>
   </div>
 </div>
+<div class="row muted">
+  cohort bundle author:
+  <input id="author" class="mono" type="text" style="flex:1;min-width:20ch" placeholder="auto-read from ./manifest.bundle — override with a 64-hex pubkey, or blank for a browser-only cohort" />
+</div>
+<p class="muted" style="margin:.2rem 0 0">
+  Descriptor signatures are <strong>scoped to the deployment's bundle author</strong> (README §16): a holder running a
+  signed bundle (a <code>seedloader</code>) only admits blocks signed under that author's scope. This is filled in for you
+  from the deployment's <code>manifest.bundle</code>; override only to join a different cohort, or clear it when every
+  holder is another browser tab / a default zero-author <code>StorageNode</code>. A mismatch makes holders silently decline every block.
+</p>
 <div class="row">
   <button id="connect">Connect</button>
   <span id="status" class="pill warn">offline</span>
@@ -97,7 +132,7 @@
 
 <script type="module">
 import sodium from "libsodium-wrappers-sumo";
-import { createStorageNode } from "./host/browser.js";
+import { createStorageNode, storageSignScope } from "./host/browser.js";
 import { RtcNetwork, relaySignaling } from "seedkernel-wasm/net-rtc";
 import { WsNetwork } from "seedkernel-wasm/net-ws";
 
@@ -146,6 +181,21 @@ const logEl = $("log");
 const log = (m) => { logEl.textContent += m + "\n"; logEl.scrollTop = logEl.scrollHeight; };
 const hex = (b) => [...b].map((x) => x.toString(16).padStart(2, "0")).join("");
 const fromHex = (s) => new Uint8Array(s.match(/.{1,2}/g)?.map((h) => parseInt(h, 16)) ?? []);
+
+// The cohort's signing scope is its bundle author (README §16). The demo stages the
+// deployment's manifest.bundle next to the page (build-browser-demo.mjs); its author is
+// the first 32 bytes. Read it so a browser joining a seedloader cohort matches the
+// holders' scope automatically. Absent (no bundle staged) → null → zero-author default.
+async function detectCohortAuthor() {
+  try {
+    const r = await fetch("./manifest.bundle", { cache: "no-store" });
+    if (!r.ok) return null;
+    const b = new Uint8Array(await r.arrayBuffer());
+    return b.length >= 32 ? hex(b.slice(0, 32)) : null;
+  } catch { return null; }
+}
+// Pre-fill the author field on load so the detected scope is visible before connecting.
+detectCohortAuthor().then((a) => { if (a && !$("author").value.trim()) $("author").value = a; });
 
 let node = null, net = null, dialTimer = null;
 
@@ -202,16 +252,30 @@ async function boot() {
     }
 
     log("loading wasm + booting the storage node on the seedkernel…");
+    // Descriptor signatures are scoped to the cohort's bundle author (README §16). A
+    // holder running a signed bundle (a seedloader) verifies under storageSignScope(author),
+    // so this node must sign under the SAME scope or every block it offers is declined.
+    // The field is auto-read from ./manifest.bundle (detectCohortAuthor); a manual value
+    // overrides it, and a blank field + no bundle → the zero-author default.
+    let authorHex = $("author").value.trim() || (await detectCohortAuthor()) || "";
+    let signScope;
+    if (authorHex) {
+      if (!/^[0-9a-f]{64}$/i.test(authorHex)) throw new Error("cohort bundle author must be a 64-hex (32-byte) public key");
+      signScope = storageSignScope(fromHex(authorHex));
+      $("author").value = authorHex; // reflect the auto-detected scope in the UI
+    }
     // The WS/TCP path carries far larger frames than WebRTC, so it gets bigger
     // blocks (fewer chunks → fewer round trips) and a bigger per-message batch cap;
     // WebRTC stays under the werift ~64 KiB channel on both.
     const config = { ...CONFIG, blockSize: blockSizeFor(mode), maxMessageBytes: maxMessageBytesFor(mode) };
     node = await createStorageNode({
-      network: net, sodium, identity, baseUrl: "./", config, timeoutMs: 5000,
+      network: net, sodium, identity, baseUrl: "./", config, timeoutMs: 5000, signScope,
     });
     // Log the LIVE config the coordinator actually uses (after defaultConfig
     // merge), so a stale/cached build that lost maxMessageBytes is visible here.
     log(`node ready (${node.peerId.slice(0, 8)}…), RS(${node.config.k},${node.config.m}), ${node.config.blockSize / 1024} KiB blocks, batch cap ${Math.round(node.config.maxMessageBytes / 1024)} KiB. handlers installed: ${node.handlersInstalled()}`);
+    log(signScope ? `signing scope: bundle author ${authorHex.slice(0, 8)}… (matches a seedloader cohort)`
+                  : `signing scope: zero-author default — holders running a signed bundle will DECLINE; set the cohort bundle author above if so.`);
 
     $("file").disabled = false;
     lockTransportChoice(); // the network + rendezvous are fixed once the node is up

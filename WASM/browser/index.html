@@ -13,14 +13,35 @@
   .row { margin: .8rem 0; }
   .muted { color: #666; }
 </style>
-<!-- The host code is platform-neutral; only these bare specifiers need wiring.
-     seedkernel/browser is its own node:fs-free kernel host; sumo libsodium is
-     pulled from a CDN (swap for a vendored ESM build to run offline). -->
+<!-- The host code is platform-neutral. The kernel is imported with bare,
+     EXTENSIONLESS specifiers ("seedkernel-wasm/safe-js"), so each maps explicitly to
+     its real ./seedkernel/*.js file (a folder-prefix map would resolve to an
+     extensionless path a static server 404s). "net" maps to transport.js. safe-js is
+     the QuickJS sandbox the storage node runs the guest in; its quickjs-emscripten +
+     quickjs-ng wasm variants, plus sumo libsodium, are VENDORED into ./vendor/ by
+     scripts/build-browser-demo.mjs (runtime files + each package's .wasm, with a map
+     entry per bare specifier in their graph) so the demo runs fully offline. -->
 <script type="importmap">
 {
   "imports": {
-    "seedkernel-wasm/browser": "./seedkernel/browser.js",
-    "libsodium-wrappers-sumo": "https://esm.sh/libsodium-wrappers-sumo@0.8.4"
+    "seedkernel-wasm/browser":   "./seedkernel/browser.js",
+    "seedkernel-wasm/cap-bridge": "./seedkernel/cap-bridge.js",
+    "seedkernel-wasm/fs":        "./seedkernel/fs.js",
+    "seedkernel-wasm/net":       "./seedkernel/transport.js",
+    "seedkernel-wasm/safe-js":   "./seedkernel/safe-js.js",
+    "quickjs-emscripten":                         "./vendor/quickjs-emscripten/index.mjs",
+    "quickjs-emscripten-core":                    "./vendor/quickjs-emscripten-core/index.mjs",
+    "@jitl/quickjs-ffi-types":                    "./vendor/quickjs-ffi-types/index.mjs",
+    "@jitl/quickjs-ng-wasmfile-release-asyncify":                  "./vendor/qjs-async/index.mjs",
+    "@jitl/quickjs-ng-wasmfile-release-asyncify/emscripten-module": "./vendor/qjs-async/emscripten-module.browser.mjs",
+    "@jitl/quickjs-ng-wasmfile-release-sync":                      "./vendor/qjs-sync/index.mjs",
+    "@jitl/quickjs-ng-wasmfile-release-sync/emscripten-module":    "./vendor/qjs-sync/emscripten-module.browser.mjs",
+    "@jitl/quickjs-wasmfile-release-asyncify": "./vendor/qjs-async/index.mjs",
+    "@jitl/quickjs-wasmfile-debug-asyncify":   "./vendor/qjs-async/index.mjs",
+    "@jitl/quickjs-wasmfile-release-sync":     "./vendor/qjs-sync/index.mjs",
+    "@jitl/quickjs-wasmfile-debug-sync":       "./vendor/qjs-sync/index.mjs",
+    "libsodium-wrappers-sumo":   "./vendor/libsodium-wrappers-sumo/libsodium-wrappers.mjs",
+    "libsodium-sumo":            "./vendor/libsodium-sumo/libsodium-sumo.mjs"
   }
 }
 </script>

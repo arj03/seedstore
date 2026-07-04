@@ -80,12 +80,70 @@ async function copyJs(srcDir, dstDir) {
 await copyJs(seedstoreHost, join(out, "host"));
 await copyJs(seedkernelHost, join(out, "seedkernel"));
 
+// ── vendor the browser-only npm deps so the demo runs OFFLINE ────────────────
+// QuickJS (quickjs-emscripten + the two quickjs-ng wasm variants) and sumo libsodium
+// are multi-file ESM packages with their own bare-specifier imports and a .wasm each;
+// the pages used to pull them from esm.sh. Copy the exact runtime files into ./vendor/
+// and let the pages' import map name every bare specifier in their graph (…-core,
+// quickjs-ffi-types, the /emscripten-module subpaths, libsodium-sumo). Each emscripten
+// module finds its wasm via `new URL("emscripten-module.wasm", import.meta.url)`, so the
+// .wasm rides in the same dir; libsodium embeds its wasm as base64 (no sibling). Source
+// from seedkernel's node_modules (where safe-js pulls QuickJS), falling back to seedstore's.
+const nodeModulesDirs = [
+  join(root, "..", "..", "seedkernel", "WASM", "node_modules"),
+  join(root, "node_modules"),
+];
+function pkgDist(pkg, sub) {
+  for (const nm of nodeModulesDirs) {
+    const d = join(nm, ...pkg.split("/"), sub);
+    if (existsSync(d)) return d;
+  }
+  throw new Error(`vendor: ${pkg}/${sub} not found — run npm install (looked in ${nodeModulesDirs.join(", ")}).`);
+}
+// [package, dist subdir, dest under vendor/, explicit files, copy EVERY .mjs in the dir?]
+// The umbrella + core packages are chunked/code-split with hashed names (chunk-*.mjs,
+// module-*.mjs), so copy every .mjs from their dist rather than chase hashes; the leaf
+// packages need only their named entry (+ the emscripten .wasm sibling).
+const VENDOR = [
+  ["quickjs-emscripten",      "dist", "quickjs-emscripten",      ["index.mjs"], true],
+  ["quickjs-emscripten-core", "dist", "quickjs-emscripten-core", ["index.mjs"], true],
+  ["@jitl/quickjs-ffi-types", "dist", "quickjs-ffi-types",       ["index.mjs"], false],
+  ["@jitl/quickjs-ng-wasmfile-release-asyncify", "dist", "qjs-async",
+    ["index.mjs", "ffi.mjs", "emscripten-module.browser.mjs", "emscripten-module.wasm"], false],
+  ["@jitl/quickjs-ng-wasmfile-release-sync", "dist", "qjs-sync",
+    ["index.mjs", "ffi.mjs", "emscripten-module.browser.mjs", "emscripten-module.wasm"], false],
+  ["libsodium-wrappers-sumo", "dist/modules-sumo-esm", "libsodium-wrappers-sumo", ["libsodium-wrappers.mjs"], false],
+  ["libsodium-sumo",          "dist/modules-sumo-esm", "libsodium-sumo",          ["libsodium-sumo.mjs"], false],
+];
+for (const [pkg, sub, dest, files, allMjs] of VENDOR) {
+  const src = pkgDist(pkg, sub);
+  const dstDir = join(out, "vendor", dest);
+  mkdirSync(dstDir, { recursive: true });
+  const names = new Set(files);
+  if (allMjs) for (const n of readdirSync(src)) if (n.endsWith(".mjs")) names.add(n);
+  for (const n of names) await copy(join(src, n), join(dstDir, n));
+}
+
+// The signed bundle manifest, if a bundle has been built (`npm run build:bundle`).
+// p2p.html fetches ./manifest.bundle and reads its author public key (the first 32
+// bytes) to auto-derive the cohort's signing scope, so a browser joining a cohort of
+// bundle-running holders (seedloaders) matches their author scope without the user
+// pasting a key. Absent → the page falls back to the zero-author default. Only the
+// manifest is staged (32-byte author header + JSON); the *.wasm/*.install payloads
+// stay on the holders — the browser needs the author, not the bundle contents.
+const bundleManifest = [join(root, "bundle", "manifest.bundle"), join(build, "bundle", "manifest.bundle")]
+  .find((p) => existsSync(p));
+if (bundleManifest) await copy(bundleManifest, join(out, "manifest.bundle"));
+
 // Every browser page, into the one dir.
 for (const page of ["index.html", "p2p.html"]) {
   await copy(join(root, "browser", page), join(out, page));
 }
 
-console.log(`browser demo staged at ${out}`);
+console.log(`browser demo staged at ${out}  (deps vendored under ./vendor — runs offline)`);
+console.log(bundleManifest
+  ? "cohort author: p2p.html auto-reads ./manifest.bundle (bundle present)"
+  : "cohort author: no ./bundle — p2p.html defaults to zero-author scope (run `npm run build:bundle` for a seedloader cohort)");
 console.log("serve it:   npx http-server build/browser-demo -p 3000");
 console.log("  in-page cohort:        http://localhost:3000/index.html");
 console.log("  real P2P (relay+STUN): npm run demo:relay  +  npm run serve:rtc-holder  → http://localhost:3000/p2p.html");

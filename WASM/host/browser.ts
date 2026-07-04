@@ -37,3 +37,7 @@ export { createConnectedCohort } from "./cluster.js";
 export type { StorageNodeOptions } from "./storage-node.js";
 export type { StorageConfig, Identity } from "./core.js";
 export { defaultConfig } from "./core.js";
+// A browser node joining a cohort of bundle-running holders (a loader/shell) must
+// verify descriptors under that bundle's author scope, not the zero-author default —
+// see p2p.html. Re-export the scope derivation so the page can pass `signScope`.
+export { STORAGE_APP, STORAGE_SIGN_SCOPE, storageSignScope } from "./manifest.js";

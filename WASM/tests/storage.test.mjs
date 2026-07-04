@@ -65,6 +65,28 @@ export async function run(t) {
     nodes.forEach((n) => n.close());
   }
 
+  t.group("large blocks (> the 128 KB default handler scratch) round-trip (§4.1)");
+  {
+    // The p2p demo runs 256 KiB blocks so a WS cohort pays few round trips. A
+    // codec encode/decode request is then k·blockSize bytes — far past the kernel's
+    // 128 KB default handler scratch — so the codec must declare its larger scratch
+    // (exported `scratchSize`) and the host must honor it. Before that wiring the
+    // codec call silently returned no parity and PUT died with "blockIds.length must
+    // equal k+m". Use RS(2,2) at 96 KiB so both the encode request (2·96 KiB) and its
+    // parity response (2·96 KiB) exceed the default, over genuine (k>1) parity.
+    const net = new LoopbackNetwork();
+    const bigCfg = { k: 2, m: 2, blockSize: 96 * 1024 };
+    const nodes = await createConnectedCohort({ count: 6, network: net, sodium, wasm, config: bigCfg, timeoutMs: TIMEOUT });
+    const owner = nodes[0];
+    const data = file(bigCfg.k * bigCfg.blockSize * 3 - 5000, 9); // ~3 chunks, last chunk short
+    const put = await owner.put(data);
+    t.ok(!put.replicated, "a many-block file takes the RS path");
+    t.eq(put.chunkCount, 3, "spans 3 RS chunks");
+    const got = await owner.get(put.manifestId, put.key);
+    t.ok(bytesEqual(got, data), "GET reconstructs a file coded in > 128 KB blocks");
+    nodes.forEach((n) => n.close());
+  }
+
   t.group("small file replication path (§4.1)");
   {
     const net = new LoopbackNetwork();

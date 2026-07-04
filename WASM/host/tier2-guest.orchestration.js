@@ -129,7 +129,15 @@ function moduleCallParts(name, parts) {
 function rsEncode(k, m, blockSize, dataBlocks) {
   const head = new Uint8Array(7);
   head[0] = CODEC_ENCODE; head[1] = k; head[2] = m; wU32(head, 3, blockSize);
-  return splitBlocks(moduleCallParts(CODEC_NAME, [head, ...dataBlocks]), blockSize);
+  const parity = splitBlocks(moduleCallParts(CODEC_NAME, [head, ...dataBlocks]), blockSize);
+  // A codec that returns no/short parity (its handler scratch too small for a
+  // k·blockSize request, or the module missing) would otherwise surface far away as
+  // the descriptor's "blockIds.length must equal k+m". Fail here, where the cause is.
+  if (parity.length !== m) {
+    throw new Error("rsEncode: codec returned " + parity.length + " parity blocks, expected " + m +
+      " — chunk (k=" + k + " × blockSize=" + blockSize + ") likely exceeds the codec handler's scratch");
+  }
+  return parity;
 }
 function rsDecode(k, m, blockSize, present) {
   // Callers (assembleChunk, healCoded) already gate on present.length >= k, but
@@ -344,10 +352,13 @@ function verifyDescriptor(env) {
 function signChunk(d) { return signCore(encodeDescriptorCore(d)); }
 
 // ── placement + fetch (coordinator §6/§7) ────────────────────────────────────
-// Appended to a placement-failure throw: on a fresh PUT a holder only declines on
-// the §14 quota, so "nothing landed" almost always means the holders are full (GET
-// still works — serving a FETCH never checks quota).
-const OUT_OF_STORAGE_HINT = " — holders answered but declined: most likely OUT OF STORAGE (quota/disk full); clear the holders' data dirs or raise their quota, or connect more holders";
+// Appended to a placement-failure throw. A holder declines an OFFER/STORE for one of
+// two reasons, indistinguishable to the initiator: (1) §14 quota full, or (2) the
+// descriptor fails its verify — most often a SIGNING-SCOPE mismatch (§16): the holder
+// verifies under storageSignScope(bundleAuthor) but this node signed under a different
+// scope (e.g. the zero-author default vs. a seedloader running a signed bundle). GET
+// still works either way (serving a FETCH checks neither quota nor the author scope).
+const OUT_OF_STORAGE_HINT = " — holders answered but declined. Two causes look identical here: (a) the holders are OUT OF STORAGE (quota/disk full) — clear their data dirs or raise the quota; or (b) a SIGNING-SCOPE mismatch (§16) — the cohort's holders run a signed bundle and verify under its author scope, but this node signs under a different one (set the cohort's bundle author). Or simply connect more holders";
 // A batched OFFER / STORE / FETCH is split to stay under config().maxMessageBytes —
 // the per-transport cap that keeps one message inside the frame cap AND the request
 // timeout. Transport/operator policy injected via the APP preamble (like quota);

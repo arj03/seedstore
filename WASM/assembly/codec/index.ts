@@ -59,6 +59,11 @@ const MATRIX_SIZE: i32 = 24576;
 const PRIV_WORK_OFF: i32 = PRIV_MATRIX_OFF + MATRIX_SIZE; // big output buffer
 
 export let scratch: i32 = 0;
+// Declare the full 2 MB I/O region to the host (README §4.1 optional export): a
+// storage chunk is up to k·blockSize data (or m·blockSize parity) bytes, far past
+// the 128 KB default, so without this the host would reject a large-block encode
+// request and the codec would silently return no parity.
+export const scratchSize: i32 = SCRATCH_SIZE;
 let priv: i32 = 0;
 let hashNameLen: i32 = 0;
 
