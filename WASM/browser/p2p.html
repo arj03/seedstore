@@ -153,16 +153,23 @@ import { WsNetwork } from "seedkernel-wasm/net-ws";
 // Each holder runs its own OFFER→STORE pipeline in parallel, so both sockets stay
 // saturated. blockSize still matters: bigger blocks = fewer chunks = less per-block
 // CPU (encrypt + RS + Ed25519) and smaller manifests. Capped by the transport —
-// WebRTC (werift) reassembles data-channel messages up to ~64 KiB → 32 KiB;
-// WebSocket carries up to 16 MB → 256 KiB. A per-holder batch is itself split under
+// WebRTC (werift) reassembles data-channel messages up to ~64 KiB → 32 KiB. On WS
+// the binding cap is the HOLDER's maxMessageBytes (serveFetch bounds one FETCH
+// response by it, and the deployed bundles don't override the 1 MiB default): one
+// block + framing must fit it, or the holder silently serves the block as absent and
+// the GET marks the holder tried and eventually fails — so ≤ ~1 MiB−16, and 512 KiB
+// measures ~8% faster PUT / ~25% faster GET than 256 KiB (fewer chunks, half the
+// per-block CPU on both ends). A per-holder batch is itself split under
 // maxMessageBytes (below) into one or a few messages, so no single transfer outruns
-// the frame cap OR the 5 s request timeout — the bug a 10 MB one-shot STORE hit on
-// WS, and a hard break on WebRTC's ~64 KiB channel. blockSize lives in the manifest,
-// so PUT-encode and GET-decode of one file always agree.
-const blockSizeFor = (mode) => (mode === "ws" ? 256 : 32) * 1024;
-// Per-transport batch cap: WS frames hold 16 MB but a multi-MB transfer can outrun
-// the 5 s request timeout, so keep WS batches ~1 MB; WebRTC reassembles only ~64 KiB,
-// so stay under it (one 32 KiB block + headers per message).
+// the frame cap — the bug a 10 MB one-shot STORE hit on WS, and a hard break on
+// WebRTC's ~64 KiB channel. blockSize lives in the manifest, so PUT-encode and
+// GET-decode of one file always agree.
+const blockSizeFor = (mode) => (mode === "ws" ? 512 : 32) * 1024;
+// Per-transport batch cap: WS frames hold 16 MB, but this must MATCH the holders'
+// maxMessageBytes (the deployed bundles keep the 1 MiB default) — a holder serves at
+// most its own cap per FETCH response, so a client that batches wider reads the
+// overflow as "absent" and a GET can fail with every block intact. WebRTC reassembles
+// only ~64 KiB, so stay under it (one 32 KiB block + headers per message).
 const maxMessageBytesFor = (mode) => (mode === "ws" ? 1 << 20 : 48 * 1024);
 // getConcurrency windows the per-holder FETCH sub-batches on GET; putConcurrency
 // windows the per-holder STOREs on PUT. The WebRTC cap forces ~one block per STORE,
@@ -268,8 +275,15 @@ async function boot() {
     // blocks (fewer chunks → fewer round trips) and a bigger per-message batch cap;
     // WebRTC stays under the werift ~64 KiB channel on both.
     const config = { ...CONFIG, blockSize: blockSizeFor(mode), maxMessageBytes: maxMessageBytesFor(mode) };
+    // The request timeout is a STALL bound (Transport re-arms it on every frame from
+    // the peer), so it no longer needs to cover a whole PUT STORE round — only the
+    // longest silence, ≈ one maxMessageBytes batch over the uplink. 20 s on WS
+    // tolerates uplinks down to ~50 KB/s and brief WiFi stalls; the cost is only how
+    // long a genuinely dead peer takes to fail. WebRTC's 48 KiB messages keep gaps
+    // tiny, so it stays snappy at 5 s.
+    const timeoutMs = mode === "ws" ? 20000 : 5000;
     node = await createStorageNode({
-      network: net, sodium, identity, baseUrl: "./", config, timeoutMs: 5000, signScope,
+      network: net, sodium, identity, baseUrl: "./", config, timeoutMs, signScope,
     });
     // Log the LIVE config the coordinator actually uses (after defaultConfig
     // merge), so a stale/cached build that lost maxMessageBytes is visible here.

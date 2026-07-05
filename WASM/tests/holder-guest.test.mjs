@@ -61,7 +61,10 @@ export async function run(t) {
       policyJson, dir, identity, network: net, timeoutMs: TIMEOUT,
       // Quota is operator policy now (not signed into the bundle): the operator
       // supplies it at boot, merged over the manifest config into the guest's APP.
-      config: { quota: 64 * 1024 * 1024 },
+      // blockSize is overridden back to test scale — the signed bundle carries the
+      // PRODUCTION 256 KiB (storage-bundle.mjs), which would make these tiny test
+      // files single-block/replicated instead of exercising the RS path.
+      config: { quota: 64 * 1024 * 1024, blockSize: 64 },
     });
     shell.loadBundle(bundleDir);
     await shell.serveAsHolder();

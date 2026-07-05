@@ -538,6 +538,19 @@ function fetchBlock(id) {
 // sub-batch's result — blocks aligned to ids (bytes|null), or null for the whole slice
 // if the peer was unreachable (partial, never a §8 miss). Shared by the GET gather and
 // the repair audit, so both express the same window through one CAP_NET_SEND_MANY round.
+//
+// Truncation vs miss: a holder bounds one FETCH response by ITS maxMessageBytes
+// (serveFetch), which can be smaller than ours — the caps are per-node operator
+// policy, so they can diverge — and a block past its cap comes back absent even
+// though the holder advertised it moments ago. On the wire that is indistinguishable
+// from a genuine miss, but the SHAPE tells them apart: serveFetch fills a response
+// front-to-back, so an absent TAIL after at least one served block is (possibly) the
+// cap, while an all-absent response is terminal (lost blocks, or a cap too small for
+// even one — serveFetch always serves the first present block, so retrying can't
+// help). Re-request the unanswered tail as a fresh task and report only the answered
+// prefix, so `apply` (and the tried/§8-miss bookkeeping built on it) only ever sees
+// final verdicts. Each re-request shrinks the tail by ≥1, so this terminates; without
+// it, a cap mismatch permanently failed a GET whose every block was intact.
 function runFetchTasks(byPeer, maxIds, apply) {
   const me = myPeer();
   if (byPeer.has(me)) {
@@ -546,7 +559,7 @@ function runFetchTasks(byPeer, maxIds, apply) {
       apply(me, slice, ids, fetchBatch(me, ids));
     }
   }
-  const tasks = []; // { peer, slice, ids }
+  const tasks = []; // { peer, slice, ids } — re-requested tails are appended and picked up by later windows
   for (const peer of byPeer.keys()) {
     if (peer === me) continue;
     for (const slice of sliceN(byPeer.get(peer), maxIds)) tasks.push({ peer, slice, ids: slice.map(fromHex) });
@@ -556,10 +569,19 @@ function runFetchTasks(byPeer, maxIds, apply) {
     const window = tasks.slice(base, base + getW);
     const results = netSendMany(window.map(({ peer, ids }) => ({ peer, type: MSG_FETCH, payload: encodeFetchBatchReq(ids) })));
     for (let ri = 0; ri < results.length; ri++) {
-      const { slice, ids } = window[ri];
-      const decoded = results[ri].ok ? decodeFetchBatchRes(results[ri].bytes) : null;
-      const blocks = decoded === null ? null : ids.map((_, i) => decoded[i] || null);
-      apply(results[ri].peer, slice, ids, blocks);
+      const { peer, slice, ids } = window[ri];
+      if (!results[ri].ok) { apply(results[ri].peer, slice, ids, null); continue; } // unreachable
+      const decoded = decodeFetchBatchRes(results[ri].bytes);
+      const blocks = ids.map((_, i) => decoded[i] || null);
+      let lastFound = -1;
+      for (let i = 0; i < blocks.length; i++) if (blocks[i]) lastFound = i;
+      if (lastFound >= 0 && lastFound < slice.length - 1) {
+        // Possibly-truncated tail — re-request it; report the answered prefix now.
+        tasks.push({ peer, slice: slice.slice(lastFound + 1), ids: ids.slice(lastFound + 1) });
+        apply(results[ri].peer, slice.slice(0, lastFound + 1), ids.slice(0, lastFound + 1), blocks.slice(0, lastFound + 1));
+      } else {
+        apply(results[ri].peer, slice, ids, blocks);
+      }
     }
   }
 }
@@ -1016,28 +1038,35 @@ function acceptStore(blockId, descriptor, bytes) {
   if (!admit(descriptor, blockId, bytes.length)) return false;
   try { storeWrite(blockId, bytes, descriptor); return true; } catch (_e) { return false; }
 }
-// Serve a batched FETCH, but never emit more than one message's worth of bytes:
+// Serve a batched FETCH, but never emit much more than one message's worth of bytes:
 // an honest requester caps itself at fetchMaxIds() so its whole response fits, but a
 // hostile cohort member can name the same id thousands of times in one ~1 MB request
 // and make this sync holder concat thousands × blockSize into one reply. Cap the
 // served bytes at maxMsgBytes (accounting for the response framing) — blocks past the
-// cap come back absent, which the reader already handles by falling back per block, so
-// this is pure hardening with no protocol change. A per-id memo keeps a repeated id
-// from costing a fresh storeGet each time.
+// cap come back absent, which the reader handles by re-requesting the unanswered tail
+// (runFetchTasks), so this is hardening with no protocol change. The FIRST present
+// block is served even when it alone exceeds the cap — the same single-over-cap-item
+// rule as batchBytes — so every request a holder can serve at all makes progress: a
+// requester whose config assumes a bigger cap than ours (the caps are per-node
+// operator policy, so they can diverge) degrades to one block per round trip instead
+// of an absent-forever block it verifiably holds. The DoS bound stays: one block +
+// cap per request. A per-id memo keeps a repeated id from costing a fresh storeGet.
 function serveFetch(ids) {
   const cap = maxMsgBytes();
   const out = new Array(ids.length).fill(null);
   const seen = new Map(); // idHex → bytes|null, so a repeated id is one storeGet
   let used = 4;           // the [count u32] response header
+  let servedAny = false;
   for (let i = 0; i < ids.length; i++) {
     const h = toHex(ids[i]);
     let bytes = seen.get(h);
     if (bytes === undefined) { const sb = storeGet(ids[i]); bytes = sb ? sb.bytes : null; seen.set(h, bytes); }
     if (!bytes) continue;
     const framed = bytes.length + FETCH_FRAME;
-    if (used + framed > cap) continue; // over the frame cap → serve as absent (reader falls back)
+    if (servedAny && used + framed > cap) continue; // over the byte cap → serve as absent (reader re-requests)
     out[i] = bytes;
     used += framed;
+    servedAny = true;
   }
   return out;
 }

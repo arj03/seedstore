@@ -62,6 +62,10 @@ export async function run(t) {
         dir: shellDir, identity: generateKeyPair(sodium),
         network: net, timeoutMs: 40,
         peers: holders.map((h) => h.peerId),
+        // Operator config merges over the signed bundle config: bring blockSize back
+        // to test scale (the bundle ships the PRODUCTION 256 KiB, which would make
+        // this tiny test file single-block/replicated instead of RS across the cohort).
+        config: { blockSize: 64 },
       });
       const loaded = shell.loadBundle(bundleDir);
       t.eq(loaded.installed.join(","), "codec,reputation", "the shell installed the bundle's signed modules");

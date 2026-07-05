@@ -80,7 +80,13 @@ export function writeStorageBundle({ dir, host, sodium, sk, pk, build, version =
   const guestText = readFileSync(join(build, "host-min", "tier2-guest.js"), "utf8");
   writeFileSync(join(dir, "tier2-guest.js"), guestText);
 
-  const cfg = defaultConfig();
+  // The signed config must carry PRODUCTION geometry: defaultConfig()'s bare
+  // blockSize is test-scale (256 BYTES — sized so unit tests exercise multi-block
+  // chunking on tiny payloads), and when it leaked in here unchanged, a
+  // loader-initiated `--put` chunked a 10 MB file into ~41k blocks. 256 KiB keeps a
+  // k=2 codec request at the 512 KiB the deployed codec's scratch is proven on, and
+  // one block + framing well inside maxMessageBytes (the serveFetch response bound).
+  const cfg = defaultConfig(undefined, undefined, 256 * 1024);
   const manifest = {
     app: APP_NAME,
     // A monotonic integer freshness mark per (author, app): the shell enforces it as a
@@ -99,6 +105,12 @@ export function writeStorageBundle({ dir, host, sodium, sk, pk, build, version =
     config: {
       k: cfg.k, m: cfg.m, blockSize: cfg.blockSize,
       replicas: cfg.replicas, lowWater: cfg.lowWater, smallMaxBlocks: cfg.smallMaxBlocks,
+      // Pin the per-message batch cap explicitly: a holder bounds one FETCH response
+      // by ITS value (serveFetch), so the cohort should agree on it deliberately
+      // rather than lean on the guest's fallback. Operator config can still override
+      // at boot (the shell merges over the signed config), and a mismatched client
+      // now degrades to tail re-requests instead of failing (runFetchTasks).
+      maxMessageBytes: cfg.maxMessageBytes,
       codecName: toHex(names.codec), repName: toHex(names.reputation),
       // The scoped-signature prefix `DOMAIN_guest ‖ scope` the guest prepends before
       // CAP_VERIFY (README §16). The shell's SIGN op scopes to (this author, this app),

@@ -52,6 +52,10 @@ export interface StorageConfig {
  *  sync. */
 export const DEFAULT_FANOUT_WINDOW = 16;
 
+/** NB the bare blockSize default is TEST-SCALE — 256 bytes, so unit tests exercise
+ *  multi-block chunking on tiny payloads. Anything producing a deployed config (the
+ *  bundle producer, a demo page) must pass a real block size (e.g. 256 KiB); baking
+ *  this default into a deployment chunks a 10 MB file into ~41k blocks. */
 export function defaultConfig(k = 2, m = 2, blockSize = 256): StorageConfig {
   // Replication beats padding a tiny file while d < (k+m)/(m+1) (§4.1) — e.g.
   // 2 blocks at the default RS(10,6). The largest such d is ceil((k+m)/(m+1))-1.
