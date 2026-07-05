@@ -45,6 +45,12 @@ import { type Identity, type StorageConfig, defaultConfig } from "./core.js";
 import { STORAGE_SIGN_SCOPE, guestSignPrefix } from "./manifest.js";
 import { toHex, fromHex, readU32BE, writeU32BE, concatBytes } from "./util.js";
 
+// Small big-endian encoders for the windowed PUT/GET host seam (util.ts has the u32
+// primitives; these frame the length-prefixed arguments the streaming entries read).
+function u32be(n: number): Uint8Array { const b = new Uint8Array(4); writeU32BE(b, 0, n); return b; }
+function u64be(n: number): Uint8Array { const b = new Uint8Array(8); writeU32BE(b, 0, Math.floor(n / 0x100000000)); writeU32BE(b, 4, n >>> 0); return b; }
+function readU64BE(b: Uint8Array, o: number): number { return readU32BE(b, o) * 0x100000000 + readU32BE(b, o + 4); }
+
 /** PUT result: the manifest root, the per-file content key K, and where the
  *  file landed (every distinct block id placed + the manifest, in placement
  *  order — the manifest names ids, not holders, so this is the only handle on
@@ -291,19 +297,79 @@ export class StorageNode {
     return p;
   }
 
-  /** PUT a file (§6), orchestrated inside the initiator realm. */
+  /** PUT a file (§6), orchestrated inside the initiator realm, STREAMED so the
+   *  confined guest heap never holds the whole file (README §3): the plaintext is
+   *  fed one chunk-aligned window at a time and each window's ciphertext is placed
+   *  and dropped before the next is sent. putStart mints K and reports the window
+   *  size; putWindow/putSmall place each window and return its chunk descriptors;
+   *  putManifest seals the manifest over them. The result is assembled here. */
   async put(plaintext: Uint8Array): Promise<PutResult> {
-    const r = await this.runInitiator("put", plaintext);
-    // [manifestId 32][replicated u8][chunkCount u32][K 32][idCount u32][ids 32·n]
-    const idCount = readU32BE(r, 69);
+    const fileSize = plaintext.length;
+    const meta = await this.runInitiator("putStart", u64be(fileSize));
+    const key = meta.slice(0, 32);
+    const replicated = meta[32] === 1;
+    const windowBytes = readU32BE(meta, 33);
+
+    const descriptors: Uint8Array[] = [];
     const blockIds: Uint8Array[] = [];
-    for (let i = 0; i < idCount; i++) blockIds.push(r.slice(73 + i * 32, 73 + i * 32 + 32));
-    return { manifestId: r.slice(0, 32), replicated: r[32] === 1, chunkCount: readU32BE(r, 33), key: r.slice(37, 69), blockIds };
+    // Decode one window's result: [descCount u32]{[len u32][descriptor]}[idCount u32]{id 32}.
+    const collect = (w: Uint8Array) => {
+      let o = 0;
+      const dc = readU32BE(w, o); o += 4;
+      for (let i = 0; i < dc; i++) { const l = readU32BE(w, o); o += 4; descriptors.push(w.slice(o, o + l)); o += l; }
+      const ic = readU32BE(w, o); o += 4;
+      for (let i = 0; i < ic; i++) { blockIds.push(w.slice(o, o + 32)); o += 32; }
+    };
+
+    if (replicated) {
+      collect(await this.runInitiator("putSmall", concatBytes([key, plaintext])));
+    } else {
+      for (let off = 0; off < fileSize; off += windowBytes) {
+        const slice = plaintext.subarray(off, Math.min(off + windowBytes, fileSize));
+        collect(await this.runInitiator("putWindow", concatBytes([key, u64be(off), slice])));
+      }
+    }
+
+    const manParts: Uint8Array[] = [key, u64be(fileSize), u32be(descriptors.length)];
+    for (const d of descriptors) manParts.push(u32be(d.length), d);
+    const manifestId = await this.runInitiator("putManifest", concatBytes(manParts));
+    blockIds.push(manifestId);
+    return { manifestId, replicated, chunkCount: descriptors.length, key, blockIds };
   }
 
-  /** GET a file (§7), orchestrated inside the initiator realm. */
+  /** GET a file (§7), orchestrated inside the initiator realm, STREAMED so the guest
+   *  reconstructs only one window of chunks at a time; the file is assembled here.
+   *  getStart fetches + verifies the manifest and returns the file size, a window
+   *  granularity, and every chunk descriptor; getChunk reconstructs each window. */
   async get(manifestId: Uint8Array, key: Uint8Array): Promise<Uint8Array> {
-    return this.runInitiator("get", concatBytes([manifestId, key]));
+    const start = await this.runInitiator("getStart", concatBytes([manifestId, key]));
+    const fileSize = readU64BE(start, 0);
+    const windowChunks = readU32BE(start, 8);
+    const chunkCount = readU32BE(start, 12);
+    let o = 16;
+    const envs: Uint8Array[] = [];
+    for (let i = 0; i < chunkCount; i++) { const l = readU32BE(start, o); o += 4; envs.push(start.slice(o, o + l)); o += l; }
+
+    const out = new Uint8Array(fileSize);
+    let written = 0;
+    for (let cs = 0; cs < chunkCount; cs += windowChunks) {
+      const windowEnvs = envs.slice(cs, cs + windowChunks);
+      const parts: Uint8Array[] = [key, u32be(cs), u64be(fileSize), u32be(windowEnvs.length)];
+      for (const e of windowEnvs) parts.push(u32be(e.length), e);
+      const chunk = await this.runInitiator("getChunk", concatBytes(parts));
+      out.set(chunk, written); written += chunk.length;
+    }
+    return out;
+  }
+
+  /** Pre-warm the initiator realm's codec + crypto caps with a throwaway
+   *  encode/decode (no network, no store), so the first PUT/GET doesn't pay V8's
+   *  cold-JIT tax on the latency-sensitive path — a cold first PUT otherwise encodes
+   *  the whole file before the first byte hits the wire. Also boots the lazily-created
+   *  initiator realm now. Idempotent and optional: a client that will PUT/GET calls it
+   *  once after connecting; a pure holder (which serves from the sync realm) need not. */
+  async warm(): Promise<void> {
+    await this.runInitiator("warm", new Uint8Array(0));
   }
 
   /** Run one repair pass over every chunk this node holds a block of (§9),

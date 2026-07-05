@@ -52,6 +52,7 @@ function wU64(out, off, ms) {
   const hi = Math.floor(ms / 0x100000000);
   wU32(out, off, hi); wU32(out, off + 4, ms >>> 0);
 }
+function rU64(b, off) { return rU32(b, off) * 0x100000000 + rU32(b, off + 4); }
 function readF64LE(b) { return new DataView(b.buffer, b.byteOffset, 8).getFloat64(0, true); }
 // fs keys are ASCII (hex + a short suffix); QuickJS has no TextEncoder, so map
 // chars to bytes by hand, the same way toHex/fromHex avoid Buffer.
@@ -413,11 +414,15 @@ function placeBlock(blockId, bytes, descriptor, exclude, count) {
   return placed;
 }
 // Encode + sign one RS chunk: encrypt k data blocks, add m parity, hash, sign.
-function encodeChunk(plaintext, ci, K) {
+// `source` is the plaintext this chunk is cut from — the whole file (localCi ==
+// globalCi) or just a window slice (localCi indexes within the slice). The AEAD
+// counter is the GLOBAL chunk index (§4.4), so a windowed encode is byte-identical
+// to a whole-file one regardless of how the plaintext was sliced.
+function encodeChunk(source, localCi, globalCi, K) {
   const c = config();
-  const start = ci * c.k * c.blockSize;
-  const chunkPlain = plaintext.slice(start, start + c.k * c.blockSize);
-  const ct = encrypt(K, DOMAIN_BODY, ci, padTo(chunkPlain, c.k * c.blockSize));
+  const start = localCi * c.k * c.blockSize;
+  const chunkPlain = source.slice(start, start + c.k * c.blockSize);
+  const ct = encrypt(K, DOMAIN_BODY, globalCi, padTo(chunkPlain, c.k * c.blockSize));
   const dataBlocks = splitBlocks(ct, c.blockSize);
   const blocks = [...dataBlocks, ...rsEncode(c.k, c.m, c.blockSize, dataBlocks)];
   const blockIds = blocks.map(hash);
@@ -684,101 +689,233 @@ function assembleChunk(d, got) {
 }
 
 // ── PUT (§6) ─────────────────────────────────────────────────────────────────
+// A large file is never wholly resident in the confined guest heap: it is encoded
+// and placed in chunk-aligned WINDOWS, and each window's ciphertext blocks are
+// dropped once placed (README §3). The whole-file `put` entry (used by the shell /
+// Go loader) windows over its own in-memory plaintext, which bounds the ≈ n/k×
+// ciphertext amplification; the StorageNode host-driver goes one better and streams
+// the plaintext IN a window at a time (putStart → putWindow/putSmall → putManifest),
+// so not even the 1× plaintext ever fully crosses into the guest.
+
+// Target footprint for one window's plaintext slice; the ciphertext it expands to
+// (≈ n/k×) plus the slice stays a small fraction of the realm heap at any file size.
+const WINDOW_TARGET_BYTES = 4 * 1024 * 1024;
+// A chunk-aligned window size in bytes: as many whole chunks (k·blockSize) as fit
+// under the target, at least one. Kept a multiple of k·blockSize so slicing the file
+// at window boundaries never splits a chunk.
+function putWindowBytes() { const chunkData = config().k * config().blockSize; return Math.max(1, Math.floor(WINDOW_TARGET_BYTES / chunkData)) * chunkData; }
+// Chunks per GET window — the reconstruct side's counterpart, bounding the plaintext
+// a single getChunk holds before it is handed back to the host.
+function getWindowChunks() { const chunkData = config().k * config().blockSize; return Math.max(1, Math.floor(WINDOW_TARGET_BYTES / chunkData)); }
+
+// Replicate a small file r = m+1 times, not coded (§4.1) — a file too small to fill
+// a chunk. Returns its one signed descriptor + the ids that landed. The file is small
+// by definition, so it needs no windowing.
+function placeSmall(plaintext, K) {
+  const c = config();
+  const d = Math.max(1, Math.ceil(plaintext.length / c.blockSize));
+  const ct = encrypt(K, DOMAIN_BODY, 0, padTo(plaintext, d * c.blockSize));
+  const dataBlocks = splitBlocks(ct, c.blockSize);
+  const blockIds = dataBlocks.map(hash);
+  const env = signChunk({ k: d, m: 0, blockSize: c.blockSize, blockIds });
+  const placedIds = [];
+  for (let i = 0; i < d; i++) {
+    if (placeBlock(blockIds[i], dataBlocks[i], env, new Set(), c.replicas).length === 0) {
+      throw new Error("put: no peer accepted a replica" + OUT_OF_STORAGE_HINT);
+    }
+    placedIds.push(blockIds[i]);
+  }
+  return { descriptors: [env], placedIds };
+}
+
+// RS-encode + place the chunks wholly contained in `slice` — a chunk-aligned slice
+// of the file starting at byte offset `baseByteOffset` (a multiple of k·blockSize).
+// Returns this window's signed descriptors + the block ids that landed; the ciphertext
+// blocks fall out of scope on return. A degenerate RS(1,·) repeats an id (parity≡data);
+// the repeat still gets its own peer — k=1 replication — but counts once toward ≥ k.
+function placeWindow(slice, baseByteOffset, K) {
+  const c = config();
+  const chunkData = c.k * c.blockSize;
+  const baseCi = Math.floor(baseByteOffset / chunkData);
+  const numChunks = Math.max(1, Math.ceil(slice.length / chunkData));
+  const chunks = [];
+  for (let lc = 0; lc < numChunks; lc++) chunks.push(encodeChunk(slice, lc, baseCi + lc, K));
+  placeChunksBatched(chunks);
+  const descriptors = [], placedIds = [];
+  for (const ch of chunks) { descriptors.push(ch.descriptor); for (const id of ch.placedIds) placedIds.push(id); }
+  return { descriptors, placedIds };
+}
+
+// Build, encrypt, and replicate the manifest (§4.3) over the collected chunk
+// descriptors. Carried as a one-block replicated chunk (k=1,m=0) with the manifest's
+// own block_id so repair can self-heal it (§9). Returns the manifest block id.
+function placeManifest(K, fileSize, descriptors) {
+  const c = config();
+  const manPlain = encodeManifest({ fileSize, blockSize: c.blockSize, k: c.k, m: c.m, encAlg: ENC_XCHACHA20, chunks: descriptors });
+  const manCt = encrypt(K, DOMAIN_MANIFEST, 0, manPlain);
+  const manifestId = hash(manCt);
+  const manEnv = signChunk({ k: 1, m: 0, blockSize: manCt.length, blockIds: [manifestId] });
+  if (placeBlock(manifestId, manCt, manEnv, new Set(), c.replicas).length === 0) {
+    throw new Error("put: no peer accepted the manifest" + OUT_OF_STORAGE_HINT);
+  }
+  return manifestId;
+}
+
+// result: [manifestId 32][replicated u8][chunkCount u32][K 32][idCount u32][ids 32·n].
+// The blockIds tail is appended AFTER K so offsets 0–68 stay fixed (the shell + Go
+// loader read only the length/hex of the response).
+function buildPutResult(manifestId, replicated, chunkCount, K, placedIds) {
+  const out = new Uint8Array(73 + placedIds.length * 32);
+  out.set(manifestId, 0);
+  out[32] = replicated ? 1 : 0;
+  wU32(out, 33, chunkCount);
+  out.set(K, 37);
+  wU32(out, 69, placedIds.length);
+  for (let i = 0; i < placedIds.length; i++) out.set(placedIds[i], 73 + i * 32);
+  return out;
+}
+// A window's result over the host seam: [descCount u32]{[len u32][descriptor]}[idCount u32]{id 32}.
+function encodeWindowResult(w) {
+  const parts = [];
+  const dc = new Uint8Array(4); wU32(dc, 0, w.descriptors.length); parts.push(dc);
+  for (const d of w.descriptors) { const l = new Uint8Array(4); wU32(l, 0, d.length); parts.push(l, d); }
+  const ic = new Uint8Array(4); wU32(ic, 0, w.placedIds.length); parts.push(ic);
+  for (const id of w.placedIds) parts.push(id);
+  return concat(parts);
+}
+
+// Whole-file PUT (shell / Go loader): windows over its own plaintext argument so the
+// ciphertext amplification is bounded even though the 1× plaintext is resident.
 function doPut(plaintext) {
   const c = config();
   const fileSize = plaintext.length;
   const K = randomKey();
   const totalBlocks = Math.max(1, Math.ceil(fileSize / c.blockSize));
   const replicated = totalBlocks <= c.smallMaxBlocks;
-  const descriptors = [];
-  const placedIds = []; // every block id placed (all chunks' blocks + the manifest), in placement order
-
+  const descriptors = [], placedIds = [];
   if (replicated) {
-    // A file too small to fill a chunk is replicated r = m+1 times, not coded (§4.1).
-    const d = totalBlocks;
-    const ct = encrypt(K, DOMAIN_BODY, 0, padTo(plaintext, d * c.blockSize));
-    const dataBlocks = splitBlocks(ct, c.blockSize);
-    const blockIds = dataBlocks.map(hash);
-    const env = signChunk({ k: d, m: 0, blockSize: c.blockSize, blockIds });
-    for (let i = 0; i < d; i++) {
-      if (placeBlock(blockIds[i], dataBlocks[i], env, new Set(), c.replicas).length === 0) {
-        throw new Error("put: no peer accepted a replica" + OUT_OF_STORAGE_HINT);
-      }
-      placedIds.push(blockIds[i]);
-    }
-    descriptors.push(env);
+    const sm = placeSmall(plaintext, K);
+    for (const d of sm.descriptors) descriptors.push(d);
+    for (const id of sm.placedIds) placedIds.push(id);
   } else {
-    // RS path (§4.1): chunk into k data blocks + m parity, sign each, then place
-    // the whole file through batched per-peer OFFERs (placeChunksBatched). A
-    // degenerate RS(1,·) repeats an id (parity≡data); the repeat still gets its
-    // own peer — k=1 replication — but counts once toward the ≥ k distinct check.
-    const numChunks = Math.ceil(totalBlocks / c.k);
-    const chunks = [];
-    for (let ci = 0; ci < numChunks; ci++) chunks.push(encodeChunk(plaintext, ci, K));
-    placeChunksBatched(chunks);
-    for (const ch of chunks) { descriptors.push(ch.descriptor); for (const id of ch.placedIds) placedIds.push(id); }
+    const wb = putWindowBytes();
+    for (let off = 0; off < fileSize; off += wb) {
+      const w = placeWindow(plaintext.subarray(off, Math.min(off + wb, fileSize)), off, K);
+      for (const d of w.descriptors) descriptors.push(d);
+      for (const id of w.placedIds) placedIds.push(id);
+    }
   }
-
-  // Build, encrypt, and replicate the manifest (§4.3).
-  const manPlain = encodeManifest({
-    fileSize, blockSize: c.blockSize, k: c.k, m: c.m, encAlg: ENC_XCHACHA20, chunks: descriptors,
-  });
-  const manCt = encrypt(K, DOMAIN_MANIFEST, 0, manPlain);
-  const manifestId = hash(manCt);
-  // Signed descriptor for the manifest block so repair can self-heal it (§9).
-  // Carries as a one-block replicated chunk (k = 1, m = 0) with the manifest's
-  // block_id.
-  const manEnv = signChunk({ k: 1, m: 0, blockSize: manCt.length, blockIds: [manifestId] });
-  if (placeBlock(manifestId, manCt, manEnv, new Set(), c.replicas).length === 0) {
-    throw new Error("put: no peer accepted the manifest" + OUT_OF_STORAGE_HINT);
-  }
+  const manifestId = placeManifest(K, fileSize, descriptors);
   placedIds.push(manifestId);
+  return buildPutResult(manifestId, replicated, descriptors.length, K, placedIds);
+}
 
-  // result: [manifestId 32][replicated u8][chunkCount u32][K 32][idCount u32][ids 32·n].
-  // The blockIds tail is appended AFTER K so offsets 0–68 stay fixed (the shell + Go
-  // loader read only the length/hex of the response).
-  const out = new Uint8Array(73 + placedIds.length * 32);
-  out.set(manifestId, 0);
+// ── streamed PUT (StorageNode host-driver) ───────────────────────────────────
+// The host feeds the plaintext one window at a time, so the guest never holds more
+// than a single window. putStart mints K and reports the chunk-aligned window size
+// (and whether the file is small enough to replicate whole); the host then drives
+// putWindow per slice (or putSmall once), collecting the returned descriptors, and
+// finally putManifest. The PUT result is assembled host-side from those pieces.
+function doPutStart(arg) {
+  const c = config();
+  const fileSize = rU64(arg, 0);
+  const K = randomKey();
+  const totalBlocks = Math.max(1, Math.ceil(fileSize / c.blockSize));
+  const replicated = totalBlocks <= c.smallMaxBlocks;
+  const out = new Uint8Array(37);
+  out.set(K, 0);
   out[32] = replicated ? 1 : 0;
-  wU32(out, 33, descriptors.length);
-  out.set(K, 37);
-  wU32(out, 69, placedIds.length);
-  for (let i = 0; i < placedIds.length; i++) out.set(placedIds[i], 73 + i * 32);
+  wU32(out, 33, replicated ? 0 : putWindowBytes());
   return out;
+}
+// [K 32][plaintext]  → window result (the whole small file, replicated).
+function doPutSmall(arg) { return encodeWindowResult(placeSmall(arg.slice(32), arg.slice(0, 32))); }
+// [K 32][baseByteOffset u64][slice]  → window result.
+function doPutWindow(arg) { return encodeWindowResult(placeWindow(arg.slice(40), rU64(arg, 32), arg.slice(0, 32))); }
+// [K 32][fileSize u64][descCount u32]{[len u32][descriptor]}  → [manifestId 32].
+function doPutManifest(arg) {
+  const K = arg.slice(0, 32);
+  const fileSize = rU64(arg, 32);
+  let o = 40;
+  const n = rU32(arg, o); o += 4;
+  const descriptors = [];
+  for (let i = 0; i < n; i++) { const l = rU32(arg, o); o += 4; descriptors.push(arg.slice(o, o + l)); o += l; }
+  return placeManifest(K, fileSize, descriptors);
 }
 
 // ── GET (§7) ─────────────────────────────────────────────────────────────────
+// Fetch, reconstruct (§4.1) and decrypt (§4.4) the plaintext for a run of already-
+// verified chunk descriptors `ds` whose first chunk is global index `chunkStart`.
+// `fileSize` bounds the tail so the last chunk's zero-padding is trimmed. One
+// have/want + batched FETCH per holder (gatherBlocks) over just these chunks' block
+// ids — shared by the whole-file `get` and the streamed getChunk window.
+function reconstructChunks(ds, K, chunkStart, fileSize) {
+  const c = config();
+  const allIds = [];
+  for (const d of ds) for (const id of d.blockIds) allIds.push(id);
+  const holders = haveWant(allIds);
+  const got = gatherBlocks(ds, holders);
+  const chunkData = c.k * c.blockSize;
+  let written = chunkStart * chunkData; // bytes of the file before this run (all prior chunks are full)
+  const parts = [];
+  for (let i = 0; i < ds.length; i++) {
+    const d = ds[i];
+    const chunkCipher = assembleChunk(d, got);
+    const chunkPlain = decrypt(K, DOMAIN_BODY, d.m === 0 ? 0 : chunkStart + i, chunkCipher);
+    const take = Math.min(chunkPlain.length, fileSize - written);
+    parts.push(take === chunkPlain.length ? chunkPlain : chunkPlain.subarray(0, take));
+    written += take;
+  }
+  return concat(parts);
+}
+// Whole-file GET (shell / Go loader). The manifest is encrypted, not signed, so a
+// correct K with a tampered manifest is caught only by the per-chunk signature —
+// verify every descriptor before use (§4.3).
 function doGet(arg) {
   const manifestId = arg.slice(0, 32), K = arg.slice(32, 64);
   const manCt = fetchBlock(manifestId);
   if (!manCt) throw new Error("get: manifest not found in cohort");
   const man = decodeManifest(decrypt(K, DOMAIN_MANIFEST, 0, manCt));
-
-  // Verify every chunk descriptor's signature before using it (§4.3): the manifest is
-  // encrypted, not signed, so a correct K with a tampered manifest is caught only by
-  // the per-chunk signature. One file-wide have/want, then one batched FETCH per holder
-  // (gatherBlocks), instead of a discovery + fetch per chunk.
   const ds = man.chunks.map((env) => {
     const d = verifyDescriptor(env);
     if (!d) throw new Error("get: chunk descriptor signature invalid");
     return d;
   });
-  const allIds = [];
-  for (const d of ds) for (const id of d.blockIds) allIds.push(id);
-  const holders = haveWant(allIds);
-  const got = gatherBlocks(ds, holders);
-
-  const out = new Uint8Array(man.fileSize);
-  let written = 0;
-  for (let ci = 0; ci < ds.length; ci++) {
-    const d = ds[ci];
-    const chunkCipher = assembleChunk(d, got);
-    const chunkPlain = decrypt(K, DOMAIN_BODY, d.m === 0 ? 0 : ci, chunkCipher);
-    const take = Math.min(chunkPlain.length, man.fileSize - written);
-    out.set(chunkPlain.subarray(0, take), written);
-    written += take;
+  return reconstructChunks(ds, K, 0, man.fileSize);
+}
+// ── streamed GET (StorageNode host-driver) ───────────────────────────────────
+// getStart fetches + verifies the manifest and hands the host the file size, a
+// chunk-window granularity, and every verified chunk descriptor; the host then drives
+// getChunk per window and assembles the file itself, so the guest reconstructs only
+// one window's worth of plaintext at a time.
+// [manifestId 32][K 32] → [fileSize u64][windowChunks u32][chunkCount u32]{[len u32][descriptorEnv]}.
+function doGetStart(arg) {
+  const manifestId = arg.slice(0, 32), K = arg.slice(32, 64);
+  const manCt = fetchBlock(manifestId);
+  if (!manCt) throw new Error("get: manifest not found in cohort");
+  const man = decodeManifest(decrypt(K, DOMAIN_MANIFEST, 0, manCt));
+  for (const env of man.chunks) { if (!verifyDescriptor(env)) throw new Error("get: chunk descriptor signature invalid"); }
+  const head = new Uint8Array(16);
+  wU64(head, 0, man.fileSize); wU32(head, 8, getWindowChunks()); wU32(head, 12, man.chunks.length);
+  const parts = [head];
+  for (const env of man.chunks) { const l = new Uint8Array(4); wU32(l, 0, env.length); parts.push(l, env); }
+  return concat(parts);
+}
+// [K 32][chunkStart u32][fileSize u64][chunkCount u32]{[len u32][descriptorEnv]} → plaintext bytes for these chunks.
+function doGetChunk(arg) {
+  const K = arg.slice(0, 32);
+  const chunkStart = rU32(arg, 32);
+  const fileSize = rU64(arg, 36);
+  let o = 44;
+  const n = rU32(arg, o); o += 4;
+  const ds = [];
+  for (let i = 0; i < n; i++) {
+    const l = rU32(arg, o); o += 4;
+    const d = verifyDescriptor(arg.slice(o, o + l)); o += l;
+    if (!d) throw new Error("get: chunk descriptor signature invalid");
+    ds.push(d);
   }
-  return out;
+  return reconstructChunks(ds, K, chunkStart, fileSize);
 }
 
 // ── repair (§9) ────────────────────────────────────────────────────────────--
@@ -1088,7 +1225,40 @@ function doHandle(arg) {
   return EMPTY;
 }
 
+// ── warm (boot-time JIT warmup) ──────────────────────────────────────────────
+// One throwaway RS encode + decode + verify under a random key, with NO network
+// and NO store, run once at boot. It pays V8's cold-JIT tax on the codec (RS) and
+// crypto (XChaCha20 / BLAKE2b / Ed25519) caps up front, off the latency-sensitive
+// path: the first real PUT encodes the WHOLE file before the first byte reaches
+// the wire, so on a cold realm that tax (~0.25 s for a 10 MB PUT) lands entirely
+// in front of the transfer. Self-contained and idempotent; the result is discarded.
+function doWarm() {
+  const c = config();
+  const K = randomKey();
+  const perRound = Math.max(1, c.k) * c.blockSize;
+  const buf = new Uint8Array(perRound);
+  // The cold-JIT tax is per-byte (un-optimized codec/crypto), not per-call, so one
+  // chunk only reaches V8's baseline tier — measured first-PUT encode stays ~2× the
+  // warm floor. Push ~4 MB through (the same volume a real PUT's first chunks take to
+  // tier up), capped at 64 rounds so a tiny test-scale blockSize can't spin forever.
+  const rounds = Math.min(64, Math.max(1, Math.ceil((4 * 1024 * 1024) / perRound)));
+  for (let r = 0; r < rounds; r++) {
+    const chunk = encodeChunk(buf, 0, 0, K);                                    // encrypt + RS-encode + hash + sign
+    verifyDescriptor(chunk.descriptor);                                          // Ed25519 verify (+ §16 scope preimage)
+    // Reconstruct from the k data blocks to warm the GET-side decode seam too.
+    rsDecode(c.k, c.m, c.blockSize, chunk.blocks.slice(0, c.k).map((bytes, index) => ({ index, bytes })));
+  }
+  return EMPTY;
+}
+
 register("put", doPut);
+register("putStart", doPutStart);
+register("putSmall", doPutSmall);
+register("putWindow", doPutWindow);
+register("putManifest", doPutManifest);
 register("get", doGet);
+register("getStart", doGetStart);
+register("getChunk", doGetChunk);
 register("repair", doRepair);
 register("handle", doHandle);
+register("warm", doWarm);

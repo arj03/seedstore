@@ -177,6 +177,12 @@ await new Promise((res, rej) => {
 });
 console.log(`${peerUp.size} peer(s) linked\n`);
 
+// Pay the codec + crypto cold-JIT tax now (throwaway encode/decode, no network), so
+// the first measured PUT reflects steady-state encode, not V8 realm warmup.
+const tw = now();
+await node.warm();
+console.log(`node warmed in ${(now() - tw).toFixed(0)} ms\n`);
+
 // ── data ─────────────────────────────────────────────────────────────────────
 const data = args.has("file")
   ? new Uint8Array(await readFile(args.get("file")))

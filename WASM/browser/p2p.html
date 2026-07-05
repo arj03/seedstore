@@ -291,6 +291,13 @@ async function boot() {
     log(signScope ? `signing scope: bundle author ${authorHex.slice(0, 8)}… (matches a seedloader cohort)`
                   : `signing scope: zero-author default — holders running a signed bundle will DECLINE; set the cohort bundle author above if so.`);
 
+    // Pay the codec + crypto cold-JIT tax now (a throwaway encode/decode, no network,
+    // no store), so the first PUT isn't cold: a cold PUT encodes the WHOLE file before
+    // the first byte reaches the wire, so that ~0.25 s lands entirely ahead of the
+    // transfer. Awaited before enabling PUT so it can't overlap a real initiator call.
+    log("warming codec + crypto (first-PUT JIT)…");
+    await node.warm();
+
     $("file").disabled = false;
     lockTransportChoice(); // the network + rendezvous are fixed once the node is up
     if (mode === "ws") {
