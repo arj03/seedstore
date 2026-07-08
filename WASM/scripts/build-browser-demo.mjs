@@ -15,8 +15,8 @@
 // there to run offline). Needs both builds' minified host: seedstore `npm run build`
 // and seedkernel `npm run build:host && npm run build:host:min`.
 
-import { mkdirSync, copyFileSync, existsSync, readdirSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { mkdirSync, copyFileSync, existsSync, readdirSync, statSync, rmSync } from "node:fs";
+import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -36,6 +36,42 @@ if (!existsSync(join(seedkernelHost, "browser.js"))) {
   process.exit(1);
 }
 
+// ── staleness guard: the browser runs the MINIFIED host, Node tests run build/host ──
+// The two builds diverge silently when `build:host` (tsc) is re-run but `build:host:min`
+// (minify) is not — a real trap after switching branches: tests stay green against the
+// fresh build/host while the browser serves a stale host-min, so the demo runs old code
+// and fails in confusing ways (e.g. a codec/guest mismatch → "blockIds.length must equal
+// k+m"). Catch it here, the last step before the browser, for BOTH repos: if any compiled
+// build/host .js is newer than the whole host-min tree, the minify step lagged. This also
+// covers the cross-repo seam — seedkernel's host-min is trivial to leave stale from here.
+function newestJsMtime(dir) {
+  let newest = 0;
+  for (const name of readdirSync(dir)) {
+    const p = join(dir, name);
+    const st = statSync(p);
+    if (st.isDirectory()) newest = Math.max(newest, newestJsMtime(p));
+    else if (name.endsWith(".js")) newest = Math.max(newest, st.mtimeMs);
+  }
+  return newest;
+}
+function assertMinFresh(label, hostDir, minDir, rebuildCmd) {
+  if (!existsSync(hostDir)) return; // no compiled host to compare against (e.g. a min-only checkout)
+  const host = newestJsMtime(hostDir), min = newestJsMtime(minDir);
+  if (host > min + 1000) { // 1s slack for filesystem mtime granularity
+    console.error(
+      `${label} host-min is STALE: build/host is newer than build/host-min, so the minify ` +
+      `step did not re-run after the last compile.\n` +
+      `The browser would run old code (Node tests read build/host and stay green — this only ` +
+      `bites the browser).\n` +
+      `Fix: ${rebuildCmd}`);
+    process.exit(1);
+  }
+}
+assertMinFresh("seedstore", join(build, "host"), seedstoreHost,
+  "in seedstore/WASM run `npm run build` (or at least `npm run build:host:min`).");
+assertMinFresh("seedkernel", join(root, "..", "..", "seedkernel", "WASM", "build", "host"), seedkernelHost,
+  "in seedkernel/WASM run `npm run build:host && npm run build:host:min`.");
+
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // Copy by overwriting in place — we do NOT wipe `out` first. A recursive delete
@@ -44,7 +80,9 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // stage mid-copy and leaves a half-populated dir. The staged file set is fixed, so
 // overwriting is enough; a transient EPERM/EBUSY/EACCES on a just-written file is
 // retried rather than fatal.
+const staged = new Set(); // every path we write, so we can prune anything else from `out`
 async function copy(src, dst) {
+  staged.add(resolve(dst));
   for (let attempt = 1; ; attempt++) {
     try { copyFileSync(src, dst); return; }
     catch (e) {
@@ -140,10 +178,40 @@ for (const page of ["index.html", "p2p.html"]) {
   await copy(join(root, "browser", page), join(out, page));
 }
 
+// ── prune: remove anything in `out` we did NOT just stage ────────────────────
+// We overwrite in place rather than wiping `out` up front (a wipe-then-recopy races
+// Windows/Defender — see copy() above), so files from an earlier build linger. After
+// a branch switch that means stale host/*.js, seedkernel/*.js, or a leftover signed
+// bundle sit next to fresh code and get served — the same class of confusing failure
+// the staleness guard above prevents. The staged set is authoritative: delete every
+// other file, then drop the dirs left empty, so `out` holds EXACTLY this build. A
+// staged manifest.bundle is in the set (copy() adds it), so it survives; a stale one
+// from a prior build with no bundle now is correctly pruned.
+function prune(dir) {
+  let kept = 0;
+  for (const name of readdirSync(dir)) {
+    const p = join(dir, name);
+    if (statSync(p).isDirectory()) {
+      const childKept = prune(p);
+      if (childKept === 0) { rmSync(p, { recursive: true, force: true }); }
+      else kept += childKept;
+    } else if (staged.has(resolve(p))) {
+      kept++;
+    } else {
+      rmSync(p, { force: true });
+      console.log(`  pruned stale ${relative(out, p)}`);
+    }
+  }
+  return kept;
+}
+prune(out);
+
 console.log(`browser demo staged at ${out}  (deps vendored under ./vendor — runs offline)`);
 console.log(bundleManifest
   ? "cohort author: p2p.html auto-reads ./manifest.bundle (bundle present)"
   : "cohort author: no ./bundle — p2p.html defaults to zero-author scope (run `npm run build:bundle` for a seedloader cohort)");
-console.log("serve it:   npx http-server build/browser-demo -p 3000");
+console.log("serve it:   npm run serve:demo        (re-stages + http-server with caching OFF)");
+console.log("  ── DO NOT use a plain `http-server` without -c-1: its default max-age=3600 makes");
+console.log("     the browser keep a STALE codec.wasm after a rebuild → confusing errors.");
 console.log("  in-page cohort:        http://localhost:3000/index.html");
 console.log("  real P2P (relay+STUN): npm run demo:relay  +  npm run serve:rtc-holder  → http://localhost:3000/p2p.html");
