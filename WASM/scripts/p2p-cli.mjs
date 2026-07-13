@@ -26,7 +26,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { WsNetwork } from "seedkernel-wasm/net-ws";
-import { createStorageNode, loadSodium, storageSignScope } from "../build/host/node.js";
+import { createStorageNode, loadSodium, storageSignScope, defaultConfig } from "../build/host/node.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -46,6 +46,11 @@ if (specs.length === 0) {
 const puts = num("puts", 1);
 const gets = num("gets", 1);
 const sizeMB = num("size", 10);
+// k + m = blocks per chunk = distinct holders (and TCP flows) a chunk spreads across.
+// Default RS(1,1) = 2 flows; raise to match the cohort (e.g. --k 2 --m 2 across 4
+// holders) to test whether more parallel upload flows beat the per-flow cwnd cap.
+const kParam = num("k", 1);
+const mParam = num("m", 1);
 const blockSize = num("block", 256) * 1024;
 const maxMessageBytes = num("batch", 1024) * 1024;
 const windowN = num("window", 64);
@@ -164,10 +169,12 @@ const net = new WsNetwork({
   onPeerDown: (pid) => { node?.removePeer(pid); peerUp.delete(pid); console.log(`link DOWN: ${pid.slice(0, 8)}…`); },
 });
 
-const config = { k: 1, m: 1, blockSize, maxMessageBytes, putConcurrency: windowN, getConcurrency: windowN };
+// Base on defaultConfig so replicas (m+1), lowWater, smallMaxBlocks are derived for
+// the chosen k/m — leaving them undefined breaks the manifest/small-file placement.
+const config = { ...defaultConfig(kParam, mParam, blockSize), maxMessageBytes, putConcurrency: windowN, getConcurrency: windowN };
 let node = await createStorageNode({ network: net, identity, config, timeoutMs, signScope });
 for (const pid of peerUp) node.addPeer(pid);
-console.log(`node ready: RS(1,1), ${blockSize / 1024} KiB blocks, batch ${Math.round(maxMessageBytes / 1024)} KiB, window ${windowN}, timeout ${timeoutMs} ms`);
+console.log(`node ready: RS(${kParam},${mParam}), ${blockSize / 1024} KiB blocks, batch ${Math.round(maxMessageBytes / 1024)} KiB, window ${windowN}, timeout ${timeoutMs} ms`);
 
 for (const spec of specs) net.connect(spec);
 await new Promise((res, rej) => {
