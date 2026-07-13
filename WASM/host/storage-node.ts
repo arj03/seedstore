@@ -63,6 +63,13 @@ export interface PutResult {
   /** True if the file was replicated rather than RS-coded (§4.1). */
   replicated: boolean;
   blockIds: Uint8Array[];
+  /** Replicas that actually landed across all chunks, and how many were intended
+   *  (min(k+m, reachable cohort) per chunk). When landed < intended the PUT is
+   *  durable enough to satisfy the ≥ k floor but UNDER-replicated — a holder was
+   *  reachable yet declined (full/quota) or the cohort is short — so a caller should
+   *  warn rather than report a clean success. */
+  replicasLanded: number;
+  replicasIntended: number;
 }
 
 export interface StorageNodeOptions {
@@ -312,13 +319,17 @@ export class StorageNode {
 
     const descriptors: Uint8Array[] = [];
     const blockIds: Uint8Array[] = [];
-    // Decode one window's result: [descCount u32]{[len u32][descriptor]}[idCount u32]{id 32}.
+    let replicasLanded = 0, replicasIntended = 0;
+    // Decode one window's result:
+    //   [descCount u32]{[len u32][descriptor]}[idCount u32]{id 32}[placed u32][intended u32]
     const collect = (w: Uint8Array) => {
       let o = 0;
       const dc = readU32BE(w, o); o += 4;
       for (let i = 0; i < dc; i++) { const l = readU32BE(w, o); o += 4; descriptors.push(w.slice(o, o + l)); o += l; }
       const ic = readU32BE(w, o); o += 4;
       for (let i = 0; i < ic; i++) { blockIds.push(w.slice(o, o + 32)); o += 32; }
+      replicasLanded += readU32BE(w, o); o += 4;
+      replicasIntended += readU32BE(w, o); o += 4;
     };
 
     if (replicated) {
@@ -334,7 +345,7 @@ export class StorageNode {
     for (const d of descriptors) manParts.push(u32be(d.length), d);
     const manifestId = await this.runInitiator("putManifest", concatBytes(manParts));
     blockIds.push(manifestId);
-    return { manifestId, replicated, chunkCount: descriptors.length, key, blockIds };
+    return { manifestId, replicated, chunkCount: descriptors.length, key, blockIds, replicasLanded, replicasIntended };
   }
 
   /** GET a file (§7), orchestrated inside the initiator realm, STREAMED so the guest

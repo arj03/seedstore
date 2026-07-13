@@ -201,6 +201,9 @@ for (let i = 0; i < puts; i++) {
     const fileMBn = data.length / MB;
     const wireMBn = fileMBn * (node.config.k + node.config.m) / node.config.k;
     console.log(`PUT #${i + 1}: ${ms.toFixed(0)} ms — ${mbs(data.length, ms)} MB/s file, ${mbs(wireMBn * MB, ms)} MB/s wire (${r.chunkCount} chunks)`);
+    if (r.replicasLanded < r.replicasIntended) {
+      console.log(`  ⚠️  UNDER-REPLICATED: ${r.replicasLanded}/${r.replicasIntended} replicas landed — a reachable holder declined (full/quota) or the cohort is smaller than k+m. The file met the ≥k floor but has less redundancy than configured.`);
+    }
     report(e, ms, "send");
   } catch (err) {
     console.log(`PUT #${i + 1} FAILED after ${(now() - t0).toFixed(0)} ms: ${err?.message ?? err}`);

@@ -378,6 +378,13 @@ $("store").onclick = async () => {
     const wireMB = fileMB * (node.config.k + node.config.m) / node.config.k;
     log(`  ${r.replicated ? "replicated (small file)" : r.chunkCount + " RS chunk(s)"} placed on peers; this node holds none`);
     log(`  PUT ${ms.toFixed(0)} ms — ${(fileMB / (ms / 1000)).toFixed(1)} MB/s file, ${(wireMB / (ms / 1000)).toFixed(1)} MB/s on the wire (uploaded ${wireMB.toFixed(1)} MB)`);
+    // A PUT that met the ≥ k floor but placed fewer than the intended k+m replicas is
+    // durable enough to read back yet silently under-replicated — a reachable holder
+    // declined (full/quota) or the room has fewer than k+m holders. Surface it loudly
+    // rather than reporting a clean success (holders full? see the note above).
+    if (r.replicasLanded < r.replicasIntended) {
+      log(`  ⚠️ UNDER-REPLICATED: only ${r.replicasLanded}/${r.replicasIntended} replicas landed — a holder is full/declining or the room has fewer than ${REQUIRED_PEERS} holders. Readable now, but below the configured redundancy.`);
+    }
     log(`  token ready — paste it into another tab's GET box.`);
   } catch (e) {
     const msg = e?.message ?? String(e);

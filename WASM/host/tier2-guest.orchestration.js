@@ -719,13 +719,17 @@ function placeSmall(plaintext, K) {
   const blockIds = dataBlocks.map(hash);
   const env = signChunk({ k: d, m: 0, blockSize: c.blockSize, blockIds });
   const placedIds = [];
+  const perBlockTarget = Math.min(c.replicas, cohortPeers().length);
+  let placed = 0;
   for (let i = 0; i < d; i++) {
-    if (placeBlock(blockIds[i], dataBlocks[i], env, new Set(), c.replicas).length === 0) {
+    const peers = placeBlock(blockIds[i], dataBlocks[i], env, new Set(), c.replicas);
+    if (peers.length === 0) {
       throw new Error("put: no peer accepted a replica" + OUT_OF_STORAGE_HINT);
     }
+    placed += peers.length;
     placedIds.push(blockIds[i]);
   }
-  return { descriptors: [env], placedIds };
+  return { descriptors: [env], placedIds, placed, intended: d * perBlockTarget };
 }
 
 // RS-encode + place the chunks wholly contained in `slice` — a chunk-aligned slice
@@ -742,8 +746,19 @@ function placeWindow(slice, baseByteOffset, K) {
   for (let lc = 0; lc < numChunks; lc++) chunks.push(encodeChunk(slice, lc, baseCi + lc, K));
   placeChunksBatched(chunks);
   const descriptors = [], placedIds = [];
-  for (const ch of chunks) { descriptors.push(ch.descriptor); for (const id of ch.placedIds) placedIds.push(id); }
-  return { descriptors, placedIds };
+  // Durability accounting: count REPLICAS placed (distinct peers per block, via
+  // placedPeer), not distinct block ids — a degenerate RS(1,·) collapses the parity
+  // id onto the data id, so counting ids would report 1/chunk even when 2 peers hold
+  // it. intended is capped at the reachable cohort so a genuinely small cohort is not
+  // flagged; a reachable-but-declining (full) holder makes placed < intended.
+  const perChunkTarget = Math.min(c.k + c.m, cohortPeers().length);
+  let placed = 0;
+  for (const ch of chunks) {
+    descriptors.push(ch.descriptor);
+    for (const id of ch.placedIds) placedIds.push(id);
+    for (const p of ch.placedPeer) if (p) placed++;
+  }
+  return { descriptors, placedIds, placed, intended: chunks.length * perChunkTarget };
 }
 
 // Build, encrypt, and replicate the manifest (§4.3) over the collected chunk
@@ -774,13 +789,18 @@ function buildPutResult(manifestId, replicated, chunkCount, K, placedIds) {
   for (let i = 0; i < placedIds.length; i++) out.set(placedIds[i], 73 + i * 32);
   return out;
 }
-// A window's result over the host seam: [descCount u32]{[len u32][descriptor]}[idCount u32]{id 32}.
+// A window's result over the host seam:
+//   [descCount u32]{[len u32][descriptor]}[idCount u32]{id 32}[placed u32][intended u32]
+// The trailing (placed, intended) is the window's replica accounting (§8): how many
+// replicas actually landed vs how many were reachable-and-intended, so the host can
+// warn on a silently under-replicated PUT (a full/declining holder).
 function encodeWindowResult(w) {
   const parts = [];
   const dc = new Uint8Array(4); wU32(dc, 0, w.descriptors.length); parts.push(dc);
   for (const d of w.descriptors) { const l = new Uint8Array(4); wU32(l, 0, d.length); parts.push(l, d); }
   const ic = new Uint8Array(4); wU32(ic, 0, w.placedIds.length); parts.push(ic);
   for (const id of w.placedIds) parts.push(id);
+  const tail = new Uint8Array(8); wU32(tail, 0, w.placed || 0); wU32(tail, 4, w.intended || 0); parts.push(tail);
   return concat(parts);
 }
 
