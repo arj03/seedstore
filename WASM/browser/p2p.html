@@ -164,7 +164,12 @@ import { WsNetwork } from "seedkernel-wasm/net-ws";
 // the frame cap — the bug a 10 MB one-shot STORE hit on WS, and a hard break on
 // WebRTC's ~64 KiB channel. blockSize lives in the manifest, so PUT-encode and
 // GET-decode of one file always agree.
-const blockSizeFor = (mode) => (mode === "ws" ? 512 : 32) * 1024;
+// Live A/B tuning knobs via URL query (all optional, browser-only):
+//   ?window=<MB> streamed PUT/GET window · ?heap=<MB> initiator realm heap ·
+//   ?conns=<N> parallel conns/holder (WS only) · ?block=<KiB> block size.
+const params = new URLSearchParams(location.search);
+const qNum = (k, d) => { const v = Number(params.get(k)); return Number.isFinite(v) && v > 0 ? v : d; };
+const blockSizeFor = (mode) => qNum("block", mode === "ws" ? 512 : 32) * 1024;
 // Per-transport batch cap: WS frames hold 16 MB, but this must MATCH the holders'
 // maxMessageBytes (the deployed bundles keep the 1 MiB default) — a holder serves at
 // most its own cap per FETCH response, so a client that batches wider reads the
@@ -178,6 +183,22 @@ const maxMessageBytesFor = (mode) => (mode === "ws" ? 1 << 20 : 48 * 1024);
 // wide (each holder's link windowed independently; both holders still run in parallel).
 const CONFIG = { k: 1, m: 1, blockSize: 32 * 1024, getConcurrency: 64, putConcurrency: 64 };
 const REQUIRED_PEERS = CONFIG.k + CONFIG.m; // distinct holders a PUT needs
+
+// Streamed-window + heap knobs (README §3): the host driver awaits each window's full
+// OFFER→STORE→ack before the next, so a too-small window idles the wire between windows
+// — a bigger window is a first-order PUT/GET win on the fat WS/TCP path. Peak guest heap
+// ≈ 3× window at RS(1,1), so the heap must stay well above it (24 MiB window ⇒ ~72 MiB,
+// ≪ the 256 MiB default). WebRTC's ~48 KiB frames make it round-trip-bound anyway, so a
+// smaller window there keeps the per-window frame count sane.
+const windowTargetBytesFor = (mode) => qNum("window", mode === "ws" ? 24 : 8) * 1024 * 1024;
+const realmMemoryBytesFor = () => qNum("heap", 256) * 1024 * 1024;
+// Parallel TCP flows per holder — WS only (WebRTC is one data channel). Stripes bulk
+// frames across N sockets to fill a link a single flow can't, once the window no longer
+// idles the wire. Default 2: measured ~+18-40% PUT over 1 flow (2- AND 4-holder cohorts,
+// browser + CLI) and never slower now the window barrier is gone. Holders must run the
+// multi-link routing core (a legacy single-link holder collapses the 2nd conn). ?conns=1
+// to A/B against a single flow.
+const connsPerPeerFor = (mode) => (mode === "ws" ? qNum("conns", 2) : 1);
 
 // Public STUN so peers on different machines/NATs can still find a path; for
 // same-machine tabs host candidates connect without it.
@@ -201,8 +222,13 @@ async function detectCohortAuthor() {
     return b.length >= 32 ? hex(b.slice(0, 32)) : null;
   } catch { return null; }
 }
-// Pre-fill the author field on load so the detected scope is visible before connecting.
-detectCohortAuthor().then((a) => { if (a && !$("author").value.trim()) $("author").value = a; });
+// Pre-fill the author field on load so the scope is visible before connecting. An
+// explicit ?author=<hex> wins (so an A/B URL carries the cohort scope and can't be
+// forgotten); otherwise fall back to the staged bundle's author. NB the scope is fixed
+// when the node BOOTS (Connect) — editing the field after connecting has no effect.
+const urlAuthor = params.get("author")?.trim();
+if (urlAuthor) $("author").value = urlAuthor;
+else detectCohortAuthor().then((a) => { if (a && !$("author").value.trim()) $("author").value = a; });
 
 let node = null, net = null, dialTimer = null;
 
@@ -249,7 +275,7 @@ async function boot() {
 
     const mode = transport();
     if (mode === "ws") {
-      net = new WsNetwork({ identity, sodium, onPeerUp, onPeerDown });
+      net = new WsNetwork({ identity, sodium, onPeerUp, onPeerDown, connsPerPeer: connsPerPeerFor(mode) });
     } else {
       const base = $("relay").value.trim().replace(/\/+$/, "");
       const room = $("room").value.trim();
@@ -274,7 +300,8 @@ async function boot() {
     // The WS/TCP path carries far larger frames than WebRTC, so it gets bigger
     // blocks (fewer chunks → fewer round trips) and a bigger per-message batch cap;
     // WebRTC stays under the werift ~64 KiB channel on both.
-    const config = { ...CONFIG, blockSize: blockSizeFor(mode), maxMessageBytes: maxMessageBytesFor(mode) };
+    const config = { ...CONFIG, blockSize: blockSizeFor(mode), maxMessageBytes: maxMessageBytesFor(mode),
+      windowTargetBytes: windowTargetBytesFor(mode), realmMemoryBytes: realmMemoryBytesFor() };
     // The request timeout is a STALL bound (Transport re-arms it on every frame from
     // the peer), so it no longer needs to cover a whole PUT STORE round — only the
     // longest silence, ≈ one maxMessageBytes batch over the uplink. 20 s on WS
@@ -287,7 +314,9 @@ async function boot() {
     });
     // Log the LIVE config the coordinator actually uses (after defaultConfig
     // merge), so a stale/cached build that lost maxMessageBytes is visible here.
-    log(`node ready (${node.peerId.slice(0, 8)}…), RS(${node.config.k},${node.config.m}), ${node.config.blockSize / 1024} KiB blocks, batch cap ${Math.round(node.config.maxMessageBytes / 1024)} KiB. handlers installed: ${node.handlersInstalled()}`);
+    const winMiB = Math.round((node.config.windowTargetBytes ?? 4 * 1024 * 1024) / (1024 * 1024));
+    const heapMiB = Math.round((node.config.realmMemoryBytes ?? 64 * 1024 * 1024) / (1024 * 1024));
+    log(`node ready (${node.peerId.slice(0, 8)}…), RS(${node.config.k},${node.config.m}), ${node.config.blockSize / 1024} KiB blocks, batch cap ${Math.round(node.config.maxMessageBytes / 1024)} KiB, window ${winMiB} MiB, heap ${heapMiB} MiB${mode === "ws" ? `, conns/peer ${connsPerPeerFor(mode)}` : ""}. handlers installed: ${node.handlersInstalled()}`);
     log(signScope ? `signing scope: bundle author ${authorHex.slice(0, 8)}… (matches a seedloader cohort)`
                   : `signing scope: zero-author default — holders running a signed bundle will DECLINE; set the cohort bundle author above if so.`);
 

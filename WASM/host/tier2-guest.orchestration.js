@@ -699,14 +699,18 @@ function assembleChunk(d, got) {
 
 // Target footprint for one window's plaintext slice; the ciphertext it expands to
 // (≈ n/k×) plus the slice stays a small fraction of the realm heap at any file size.
+// The host driver awaits each window fully (OFFER→STORE→ack) before feeding the next,
+// so on a fat/low-loss link a too-small window idles the wire between windows; the
+// deployment can raise it (with realmMemoryBytes) via APP.windowTargetBytes.
 const WINDOW_TARGET_BYTES = 4 * 1024 * 1024;
+function windowTarget() { const v = config().windowTargetBytes; return (typeof v === "number" && v > 0) ? v : WINDOW_TARGET_BYTES; }
 // A chunk-aligned window size in bytes: as many whole chunks (k·blockSize) as fit
 // under the target, at least one. Kept a multiple of k·blockSize so slicing the file
 // at window boundaries never splits a chunk.
-function putWindowBytes() { const chunkData = config().k * config().blockSize; return Math.max(1, Math.floor(WINDOW_TARGET_BYTES / chunkData)) * chunkData; }
+function putWindowBytes() { const chunkData = config().k * config().blockSize; return Math.max(1, Math.floor(windowTarget() / chunkData)) * chunkData; }
 // Chunks per GET window — the reconstruct side's counterpart, bounding the plaintext
 // a single getChunk holds before it is handed back to the host.
-function getWindowChunks() { const chunkData = config().k * config().blockSize; return Math.max(1, Math.floor(WINDOW_TARGET_BYTES / chunkData)); }
+function getWindowChunks() { const chunkData = config().k * config().blockSize; return Math.max(1, Math.floor(windowTarget() / chunkData)); }
 
 // Replicate a small file r = m+1 times, not coded (§4.1) — a file too small to fill
 // a chunk. Returns its one signed descriptor + the ids that landed. The file is small

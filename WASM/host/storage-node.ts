@@ -250,6 +250,9 @@ export class StorageNode {
       // FETCH under, so it batches byte-for-byte as the spec intends.
       maxMessageBytes: c.maxMessageBytes,
       putConcurrency: c.putConcurrency, getConcurrency: c.getConcurrency,
+      // Streamed PUT/GET window (§3): undefined ⇒ the guest's 4 MiB default. Bigger
+      // windows amortise the per-window OFFER→STORE→ack barrier on a fat/low-loss link.
+      windowTargetBytes: c.windowTargetBytes,
       codecName: toHex(this.names.codec), repName: toHex(this.names.reputation),
       // The scoped-signature prefix `DOMAIN_guest ‖ scope` the guest prepends before
       // CAP_VERIFY (README §16) — the same bytes the bridge's SIGN op prepends, so the
@@ -269,7 +272,7 @@ export class StorageNode {
   /** The async initiator realm (put/get/repair), created lazily on first use. */
   private initiatorRealm(): Promise<SafeRealm> {
     if (!this.initiator) {
-      this.initiator = createSafeRealm({ source: this.guestFullSource(), bridge: this.buildBridge() });
+      this.initiator = createSafeRealm({ source: this.guestFullSource(), bridge: this.buildBridge(), memoryLimitBytes: this.config.realmMemoryBytes });
     }
     return this.initiator;
   }

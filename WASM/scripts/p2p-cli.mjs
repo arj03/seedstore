@@ -51,9 +51,22 @@ const sizeMB = num("size", 10);
 // holders) to test whether more parallel upload flows beat the per-flow cwnd cap.
 const kParam = num("k", 1);
 const mParam = num("m", 1);
+// Parallel connections per holder — bulk transfers stripe frames across them so N TCP
+// flows fill a link one flow can't, once the window no longer idles the wire. Independent
+// of k/m: raises flows-per-holder rather than holders-per-chunk. Default 2 (measured
+// ~+18-40% PUT over 1 flow); --conns 1 to A/B. Holders must run the multi-link core.
+const connsN = num("conns", 2);
 const blockSize = num("block", 256) * 1024;
 const maxMessageBytes = num("batch", 1024) * 1024;
 const windowN = num("window", 64);
+// Streamed PUT/GET window (--wtarget MB): the host feeds the guest one chunk-aligned
+// window at a time and awaits it fully before the next, so a small window idles the
+// wire between windows on a fat link. Bigger windows = fewer barriers but a larger
+// guest heap footprint (peak ≈ 3× window at RS(1,1)), so raise --heap (realm memory,
+// MB) with it. Defaults 24/256 = the measured-best config; --wtarget 4 --heap 64
+// reproduces the old barrier, --wtarget 0 uses the guest's built-in 4 MiB fallback.
+const wtargetMB = num("wtarget", 24);
+const heapMB = num("heap", 256);
 const timeoutMs = num("timeout", 5000);
 
 const hex = (b) => [...b].map((x) => x.toString(16).padStart(2, "0")).join("");
@@ -165,16 +178,19 @@ const net = new WsNetwork({
   identity,
   sodium: wrapTransportSodium(sodium),
   webSocketFactory: wsFactory,
+  connsPerPeer: connsN,
   onPeerUp: (pid) => { node?.addPeer(pid); peerUp.add(pid); console.log(`link up: ${pid.slice(0, 8)}…`); if (peerUp.size >= specs.length) onQuorum?.(); },
   onPeerDown: (pid) => { node?.removePeer(pid); peerUp.delete(pid); console.log(`link DOWN: ${pid.slice(0, 8)}…`); },
 });
 
 // Base on defaultConfig so replicas (m+1), lowWater, smallMaxBlocks are derived for
 // the chosen k/m — leaving them undefined breaks the manifest/small-file placement.
-const config = { ...defaultConfig(kParam, mParam, blockSize), maxMessageBytes, putConcurrency: windowN, getConcurrency: windowN };
+const config = { ...defaultConfig(kParam, mParam, blockSize), maxMessageBytes, putConcurrency: windowN, getConcurrency: windowN,
+  ...(wtargetMB > 0 ? { windowTargetBytes: Math.round(wtargetMB * 1024 * 1024) } : {}),
+  ...(heapMB > 0 ? { realmMemoryBytes: Math.round(heapMB * 1024 * 1024) } : {}) };
 let node = await createStorageNode({ network: net, identity, config, timeoutMs, signScope });
 for (const pid of peerUp) node.addPeer(pid);
-console.log(`node ready: RS(${kParam},${mParam}), ${blockSize / 1024} KiB blocks, batch ${Math.round(maxMessageBytes / 1024)} KiB, window ${windowN}, timeout ${timeoutMs} ms`);
+console.log(`node ready: RS(${kParam},${mParam}), ${blockSize / 1024} KiB blocks, batch ${Math.round(maxMessageBytes / 1024)} KiB, window ${windowN}, conns/peer ${connsN}, wtarget ${wtargetMB > 0 ? wtargetMB + " MB" : "4 MiB (default)"}, heap ${heapMB > 0 ? heapMB + " MB" : "64 MiB (default)"}, timeout ${timeoutMs} ms`);
 
 for (const spec of specs) net.connect(spec);
 await new Promise((res, rej) => {

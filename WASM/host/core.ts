@@ -43,6 +43,18 @@ export interface StorageConfig {
    *  channel reassembles only ~64 KB, so the browser demo drops it to ~48 KB. (The
    *  browser picks the value from the connection mode.) */
   maxMessageBytes: number;
+  /** Target plaintext bytes per streamed PUT/GET window (§3). The host driver feeds
+   *  the guest one chunk-aligned window at a time and awaits it fully — OFFER, STORE,
+   *  and acks — before the next, so the whole window's ciphertext is dropped before
+   *  more plaintext crosses in and the guest heap never holds the file. Bigger windows
+   *  mean fewer inter-window barriers (less link idle on a fat/low-loss path) but a
+   *  larger peak guest footprint (≈ n/k× the window in ciphertext), so raise
+   *  realmMemoryBytes alongside it. Omit for the 4 MiB default. */
+  windowTargetBytes?: number;
+  /** Hard cap on the initiator realm's QuickJS heap (safe-js default 64 MiB). Raise
+   *  it to run larger windowTargetBytes without the guest OOMing. Omit for the
+   *  default. */
+  realmMemoryBytes?: number;
 }
 
 /** Default fan-out window for putConcurrency / getConcurrency: how many per-holder
