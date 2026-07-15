@@ -54,8 +54,10 @@ Hashing, the length-preserving stream cipher (`crypto_stream_xchacha20_xor`),
 and signatures are **reused** from the runtime's libsodium (the sumo build, which
 exposes the raw stream cipher) — never bundled — exactly as §16 requires; the
 guest reaches them as generic `cap-bridge` primitives and builds its own
-descriptor envelope and nonce convention on top. (The sign primitive is
-currently raw; the spec now scopes it — see the alignment guide below.)
+descriptor envelope and nonce convention on top. (Signatures are **scoped**: the
+kernel's `SIGN` op binds every guest signature to `DOMAIN_guest ‖ (author, app)`,
+so a descriptor signed by one app can never validate in another — see the
+signing-scope section below.)
 
 **Why two realms.** The initiator orchestration is inherently async (it fans out
 over `net` and awaits), so it runs in an Asyncify QuickJS realm where a host call
@@ -68,82 +70,79 @@ can). `StorageNode` (`host/storage-node.ts`) keeps a host-side copy of both side
 as the reference/parity path — the same role the host-side classes play in the
 tests — but the **shipped** node runs the confined guest.
 
-## Aligning with the seedkernel `simplify` spec — the next implementation step
+## Signing scope, existence, and bundle versioning
 
-The kernel spec (seedkernel README, `simplify` branch) tightened several
-contracts this implementation predates; the spec-side story is in the
+A handful of kernel contracts shape how the guest signs, checks existence, and
+versions its bundle; the spec-side story is in the
 [seed store spec](../README.md) (§16, *"The signing call exists — but it is
-scoped"*). This section is the code map. The runtime pieces land in
-**seedkernel** first — this repo consumes them through the `seedkernel-wasm`
-dependency — and the storage work is confined to the guest, the host parity
-mirror, and the bundle producer.
+scoped"*). This section is the code map. The runtime pieces live in
+**seedkernel** and this repo consumes them through the `seedkernel-wasm`
+dependency; the storage work is confined to the guest, the host parity mirror,
+and the bundle producer.
 
-**Runtime prerequisites (seedkernel, consumed here):**
+**What the runtime provides (seedkernel, consumed here):**
 
 - **Scoped `SIGN`** (`cap-bridge`): the op signs `DOMAIN_guest ‖ scope ‖ msg`,
   with `scope = author_pk ‖ app_len u8 ‖ app` derived from the *admitted bundle
-  manifest*, never from the caller. `VERIFY` stays raw (verification is not an
-  oracle).
-- **Op table renumber**: `FS_HAS` is deleted (existence is `FS_SIZE ≥ 0`) and
-  the ops become contiguous 1–18, grouped by domain (`crypto` 1–6, `net` 7–10,
-  `fs` 11–16, `module` 17, `clock` 18). The guest preamble and the bridge
-  switch regenerate together, so nothing in this repo hard-codes a number —
-  only the `CAP_FS_HAS` *call site* has to go.
-- **`./fs` drops `has`**: the iface becomes `get`/`put`/`size`/`list`/`delete`/`stat`.
-- **Transport**: `PeerLink` becomes a real AKE (ephemeral X25519 in HELLO, AUTH
-  signs the full transcript, post-AUTH frames are forward-secret
-  ChaCha20-Poly1305 records) and the separate `bulk 0x02` frame kind is deleted
-  — req/res is the only plane, which is exactly how this layer already moves
-  blocks (see Scope below).
+  manifest*, never from the caller (`guestSignScope`). `VERIFY` stays raw —
+  verification is not an oracle.
+- **Contiguous op table**: there is no `FS_HAS` — existence is `FS_SIZE ≥ 0` —
+  and the ops are contiguous 1–18, grouped by domain (`crypto` 1–6, `net` 7–10,
+  `fs` 11–16, `module` 17, `clock` 18). The guest preamble and the bridge switch
+  are generated together, so nothing in this repo hard-codes a number.
+- **`./fs`**: the iface is `get`/`put`/`size`/`list`/`delete`/`stat` — no `has`.
+- **Transport**: `PeerLink` is a real AKE (ephemeral X25519 in HELLO, AUTH signs
+  the full transcript, post-AUTH frames are forward-secret ChaCha20-Poly1305
+  records) and there is no separate `bulk` frame kind — req/res is the only
+  plane, which is exactly how this layer already moves blocks (see Scope below).
 - **Bundle freshness**: `loadBundle` enforces a monotonic integer manifest
-  `version` per `(author, app)` against a persisted high-water mark.
+  `version` per `(author, app)` against a persisted high-water mark, refusing a
+  downgrade.
 
-**Storage changes (this repo):**
+**How the guest and host build on them:**
 
-1. **`signCore` gains the prefix on both paths**
+1. **Signatures are scoped on both paths**
    (`host/tier2-guest.orchestration.js`). The descriptor envelope stays
    `[authorPk 32][sig 64][core ..]` — the prefix is preimage-only, never stored
-   — but the signature `signCore` gets back from `CAP_SIGN` is now over
-   `DOMAIN_guest ‖ scope ‖ core`, so `verifyEnv` must reconstruct that same
-   preimage before calling `CAP_VERIFY`, and the host mirror
-   (`signDescriptor`/`verifyDescriptor` in `host/manifest.ts`) must produce and
-   check byte-identical preimages or the `tier2-port`/`holder-guest` parity
-   tests fail. The guest needs the scope bytes to rebuild verify preimages:
-   inject them host-derived alongside the generated op preamble / `const APP` —
-   the shell derives them from the admitted manifest, `storage-node.ts` derives
-   the identical bytes for the in-process path. One consequence to weigh
-   (kernel §13.2): rotating the bundle author key changes the scope and orphans
-   previously signed descriptors, so a deployment that anticipates handover
-   records the scope inside its signed formats.
-2. **The descriptor's leading byte becomes the format tag** (spec §16). The
-   descriptor core already leads with a version byte — `manifest-core.ts`
-   rejects `core[0] !== 1` — so declare that byte the signed-format tag
-   (descriptor = `0x01`) and reserve distinct values for the Part II signed
-   formats (tombstone, file head) before they exist. The tag sits inside
-   `core`, so it is already under the signature and inside the scoped preimage
-   with no further change.
-3. **`storeHas` moves to `FS_SIZE ≥ 0`**
-   (`host/tier2-guest.orchestration.js`): drop the `CAP_FS_HAS` call and answer
-   from the existing `fsSize` seam — distinguishing absent (bridge −1) from
-   present-but-empty, which the current `fsSize` collapses to 0. Same move
-   host-side: `store-fs.ts` calls `fs.has(...)` twice; both become
-   `fs.size(...) >= 0` (the seedstore `BlobStore.has` iface itself is
-   unchanged — only its backing call moves).
-4. **`build-bundle` emits an integer, monotonic `version`**
-   (`scripts/storage-bundle.mjs` currently writes `version: "1"`, a string):
-   make it an integer and bump it on every publish — the shell then refuses a
-   stale bundle directory as a downgrade instead of silently reloading it.
-5. **Tests to touch**: `manifest` (tamper-evidence now over the tagged, scoped
-   preimage), `bridges` (store existence via size), `tier2-port` /
-   `holder-guest` (parity across the scoped sign/verify paths), `shell-run`
-   (bundle version freshness), `net` (rides the new encrypted record layer
-   transparently — assert nothing plaintext-specific about the wire).
+   — but `signCore` passes the bare core to the scoped `CAP_SIGN`, which signs
+   `DOMAIN_guest ‖ scope ‖ core`, and `verifyEnv` reconstructs that same preimage
+   before the raw `CAP_VERIFY`. The host mirror
+   (`signDescriptor`/`verifyDescriptor` in `host/manifest.ts`) produces and
+   checks byte-identical preimages, so the `tier2-port`/`holder-guest` parity
+   tests hold. The guest gets the scope bytes host-derived: `storage-node.ts`
+   injects `signPrefix` into the `const APP` block from
+   `guestSignPrefix(signScope)` — the shell derives the scope from the admitted
+   manifest, an in-process `StorageNode` from `STORAGE_SIGN_SCOPE` (zero author,
+   app). One consequence (kernel §13.2): rotating the bundle author key changes
+   the scope and orphans previously signed descriptors, so a deployment that
+   anticipates handover records the scope inside its signed formats.
+2. **The descriptor's leading byte is the signed-format tag** (spec §16). The
+   descriptor core leads with `TAG_DESCRIPTOR = 0x01` (`manifest-core.ts`), and
+   the Part II signed formats reserve their own values before they exist
+   (`TAG_TOMBSTONE = 0x02`, `TAG_HEAD = 0x03`). The tag sits inside `core`, so
+   it is already under the signature and inside the scoped preimage.
+3. **`storeHas` answers from `FS_SIZE ≥ 0`**
+   (`host/tier2-guest.orchestration.js`): there is no `CAP_FS_HAS` call — the
+   raw `CAP_FS_SIZE` returns `0xFFFFFFFF` for an absent key, which `storeHas`
+   distinguishes from present-but-empty (the `fsSize` seam collapses the sentinel
+   to 0 for sizing). Same move host-side: `store-fs.ts` asks `fs.size(...) >= 0`
+   (the seedstore `BlobStore.has` iface itself is unchanged — only its backing
+   call differs).
+4. **The bundle carries an integer, monotonic `version`**
+   (`scripts/storage-bundle.mjs`): an integer, guarded by `Number.isInteger`,
+   bumped on every publish — so the shell refuses a stale bundle directory as a
+   downgrade instead of silently reloading it.
+5. **The tests that pin this**: `manifest` (tamper-evidence over the tagged,
+   scoped preimage), `tier2-port` / `holder-guest` (parity across the scoped
+   sign/verify paths), `shell-run` (bundle version freshness — a downgrade is
+   refused), `net` (`FsBlobStore` existence via `size ≥ 0`, riding the encrypted
+   record layer transparently).
 
-**What deliberately does not change:** the codec and reputation WASM, the
-HAVE/OFFER/STORE/FETCH wire format and its windowing, content addressing, the
-nonce convention, and the quota. The storage *structure* is untouched; the
-changes are confined to how signatures are prefixed, how existence is asked,
-and how the bundle versions itself.
+**Purely storage-side, independent of all this:** the codec and reputation
+WASM, the HAVE/OFFER/STORE/FETCH wire format and its windowing, content
+addressing, the nonce convention, and the quota. The storage *structure* is the
+app's own; only how signatures are prefixed, how existence is asked, and how the
+bundle versions itself follow the kernel contracts above.
 
 ## Build
 
@@ -444,7 +443,7 @@ annotated — so stripping them roughly halves the wire size (42 → 21 KB gz). 
 "minifier" is a ~70-line dependency-free comment stripper (`scripts/minify.mjs`),
 **not** a bundler or terser: it preserves string/template contents and gates every
 emitted file through `node --check`, so a stripper mistake fails the build rather
-than shipping broken JS. The same step now runs in seedkernel too, shrinking that
+than shipping broken JS. The same step runs in seedkernel too, shrinking that
 shared host from 11 to ~5 KB gz; `npm run build:browser` stages both minified
 hosts (`build/host-min`) into the demo.
 
@@ -482,10 +481,10 @@ called out in the code: the Suspected/Lost grace window (§8) is represented by
 "verified-live vs not", admission/eviction (§14) is quota + the sibling rule
 rather than the full eviction-score, and the bulk plane (§3) rides the same
 awaited request/response channel rather than a separate unsigned frame stream —
-no longer a simplification but exactly what the kernel transport now specifies:
-its separate bulk frame kind was removed, so block bytes ride ordinary req/res
-bodies (inside the encrypted record layer) and content-addressing stays the
-app-level admission check.
+not a simplification at all but exactly what the kernel transport specifies: it
+has no separate bulk frame kind, so block bytes ride ordinary req/res bodies
+(inside the encrypted record layer) and content-addressing stays the app-level
+admission check.
 
 PUT also places **best-effort**: it spreads a chunk's *n = k+m* blocks across as
 many distinct holders as the cohort offers (one block per holder, the §6/§10
