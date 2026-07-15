@@ -24,6 +24,7 @@ import { fileURLToPath } from "node:url";
 import { boot } from "seedkernel-wasm/shell";
 import {
   loadSodium, loadWasmBytes, generateKeyPair, LoopbackNetwork, createConnectedCohort,
+  storageSignScope,
 } from "../build/host/node.js";
 import { toHex, bytesEqual, concatBytes } from "../build/host/util.js";
 import { buildBundle } from "./bundle-fixture.mjs";
@@ -60,7 +61,10 @@ export async function run(t) {
       policyJson, dir, identity, network: net, timeoutMs: TIMEOUT,
       // Quota is operator policy now (not signed into the bundle): the operator
       // supplies it at boot, merged over the manifest config into the guest's APP.
-      config: { quota: 64 * 1024 * 1024 },
+      // blockSize is overridden back to test scale — the signed bundle carries the
+      // PRODUCTION 256 KiB (storage-bundle.mjs), which would make these tiny test
+      // files single-block/replicated instead of exercising the RS path.
+      config: { quota: 64 * 1024 * 1024, blockSize: 64 },
     });
     shell.loadBundle(bundleDir);
     await shell.serveAsHolder();
@@ -103,7 +107,11 @@ export async function run(t) {
       // A host-side StorageNode (plain JS — no QuickJS) is a second, concurrent
       // initiator + holder in the same cohort, so two PUTs overlap without two
       // async QuickJS realms ever overlapping host calls.
-      const [sn] = await createConnectedCohort({ count: 1, network: net, sodium, wasm, timeoutMs: TIMEOUT });
+      const [sn] = await createConnectedCohort({
+        count: 1, network: net, sodium, wasm, timeoutMs: TIMEOUT,
+        // Same deployment as the shells: verify descriptors under the bundle author's scope.
+        signScope: storageSignScope(author.publicKey),
+      });
       for (const e of shells) { sn.addPeer(e.peerId); e.shell.addPeer(sn.peerId); }
       try {
         const dataA = file(800, 11), dataB = file(800, 12);
@@ -135,7 +143,11 @@ export async function run(t) {
       // Pure holders — they never initiate, so they need no peers of their own.
       const shells = [];
       for (let i = 0; i < 5; i++) shells.push(await bootShell(net));
-      const [sn] = await createConnectedCohort({ count: 1, network: net, sodium, wasm, timeoutMs: TIMEOUT });
+      const [sn] = await createConnectedCohort({
+        count: 1, network: net, sodium, wasm, timeoutMs: TIMEOUT,
+        // Same deployment as the shells: verify descriptors under the bundle author's scope.
+        signScope: storageSignScope(author.publicKey),
+      });
       for (const e of shells) sn.addPeer(e.peerId);
       try {
         // Written by the trusted host-side path, served entirely by confined shells.
@@ -151,7 +163,13 @@ export async function run(t) {
       }
     }
   } finally {
-    for (const d of tmpDirs) rmSync(d, { recursive: true, force: true });
+    for (const d of tmpDirs) {
+      rmSync(d, { recursive: true, force: true });
+      // boot() writes the freshness high-water mark as a sibling of each shell's data dir
+      // (outside the guest-writable dir), so it survives the dir's rmSync. Remove it too or
+      // every run orphans a *.freshness.json in the OS tmpdir. Harmless no-op for bundleDir.
+      rmSync(`${d}.freshness.json`, { force: true });
+    }
   }
 }
 

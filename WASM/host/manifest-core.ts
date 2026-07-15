@@ -15,6 +15,16 @@ import { bytesEqual, writeU32BE, readU32BE, concatBytes } from "./util.js";
 
 export const BLOCK_ID_LEN = 32;
 
+// ── signed-format tags (README §16) ──────────────────────────────────────────
+// Every *signed* storage object opens with a distinct leading byte, so an object of
+// one type can never be replayed as another (the kernel's sub-separation rule applied
+// to storage's own vocabulary). The tag sits inside the signed `core`, so it is already
+// under the signature and inside the scoped preimage with no extra framing. Descriptor
+// is 0x01; the Part II signed formats reserve their own before they exist.
+export const TAG_DESCRIPTOR = 0x01;
+export const TAG_TOMBSTONE = 0x02; // reserved: the §25 block.tombstone (not yet implemented)
+export const TAG_HEAD = 0x03;      // reserved: the §27.3 mutable file head (not yet implemented)
+
 // ── chunk descriptor ───────────────────────────────────────────────────────
 
 export interface Descriptor {
@@ -24,12 +34,13 @@ export interface Descriptor {
   blockIds: Uint8Array[]; // n = k + m ids, by generator-row index
 }
 
-/** The descriptor's signed core — the bytes the author signs over (§4.3). */
+/** The descriptor's signed core — the bytes the author signs over (§4.3). Leads with
+ *  the descriptor format tag (§16). */
 export function encodeDescriptorCore(d: Descriptor): Uint8Array {
   const n = d.blockIds.length;
   if (n !== d.k + d.m) throw new Error("descriptor: blockIds.length must equal k+m");
   const head = new Uint8Array(1 + 1 + 1 + 4 + 1);
-  head[0] = 1;             // version
+  head[0] = TAG_DESCRIPTOR; // leading format tag (§16)
   head[1] = d.k;
   head[2] = d.m;
   writeU32BE(head, 3, d.blockSize);
@@ -38,7 +49,7 @@ export function encodeDescriptorCore(d: Descriptor): Uint8Array {
 }
 
 export function decodeDescriptorCore(core: Uint8Array): Descriptor {
-  if (core.length < 8 || core[0] !== 1) throw new Error("descriptor: bad core");
+  if (core.length < 8 || core[0] !== TAG_DESCRIPTOR) throw new Error("descriptor: bad core");
   const k = core[1], m = core[2];
   const blockSize = readU32BE(core, 3);
   if (k < 1) throw new Error("descriptor: k must be >= 1");

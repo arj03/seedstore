@@ -11,11 +11,14 @@
 // link a real RTT and it shows up.
 //
 // One control request/response is two sends, so the round-trip latency a caller
-// observes is 2 × delayMs. Frame layout (host/net.ts): [kind u8][corr u32][type
-// u8][payload…]. We read `kind` to pair a request (KIND_REQ) with its response
-// (KIND_RES), and `type` to separate the disc.have/want discovery fan-out (which
-// is *inherently* concurrent, MsgType.HAVE) from the placement/fetch work whose
-// concurrency the coordinator's window actually controls.
+// observes is 2 × delayMs. Frame layout (host/net.ts):
+//   req = [kind u8][corr u32][type u8][payload…]
+//   res = [kind u8][corr u32][payload…]      (no type — the requester matches by corr)
+// We read `kind` to pair a request (KIND_REQ) with its response (KIND_RES). Only
+// the request carries `type`, so we remember it keyed by (requester, corr) and
+// recover it when the typeless response comes back — that lets us separate the
+// disc.have/want discovery fan-out (inherently concurrent, MsgType.HAVE) from the
+// placement/fetch work whose concurrency the coordinator's window controls.
 
 const KIND_REQ = 0, KIND_RES = 1;
 const TYPE_HAVE = 1; // MsgType.HAVE — discovery fan-out, excluded from the "work" signal
@@ -39,6 +42,7 @@ export class LatencyNetwork {
     this.byType = {};           // KIND_REQ count per MsgType — OFFER/FETCH batching shows up here
     this.inflightByType = {};   // current in-flight per MsgType
     this.maxInflightByType = {}; // peak in-flight per MsgType — isolates one path's pipeline (e.g. STORE)
+    this.pendingType = new Map(); // (requester|corr) → type, so a typeless response recovers its type
     this.framesDelivered = 0;
   }
 
@@ -52,7 +56,20 @@ export class LatencyNetwork {
     const sink = this.sinks.get(to);
     if (!sink) return;
     const copy = frame.slice();
-    const kind = copy[0], type = copy[5], isWork = type !== TYPE_HAVE;
+    const kind = copy[0];
+    // corr (u32 BE at bytes 1..4) pairs a response with its request. The request
+    // carries `type` at byte 5; the response does not, so look it up by corr.
+    const corr = ((copy[1] << 24) | (copy[2] << 16) | (copy[3] << 8) | copy[4]) >>> 0;
+    let type;
+    if (kind === KIND_REQ) {
+      type = copy[5];
+      this.pendingType.set(`${from}|${corr}`, type); // requester is the sender of a request
+    } else {
+      const key = `${to}|${corr}`;                   // …and the recipient of its response
+      type = this.pendingType.get(key);
+      this.pendingType.delete(key);
+    }
+    const isWork = type !== TYPE_HAVE;
     if (kind === KIND_REQ) {
       this.requests++;
       this.byType[type] = (this.byType[type] ?? 0) + 1;

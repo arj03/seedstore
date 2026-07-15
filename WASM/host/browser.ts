@@ -12,8 +12,11 @@ import type { WasmBytes } from "./node.js";
 /** Fetch the four WASM modules + the guest program relative to the page. */
 export async function loadWasmBytes(baseUrl: string | URL = "./"): Promise<WasmBytes> {
   const base = typeof baseUrl === "string" ? baseUrl : baseUrl.href;
-  const get = async (name: string) => new Uint8Array(await (await fetch(base + name)).arrayBuffer());
-  const text = async (name: string) => (await fetch(base + name)).text();
+  // no-store: the wasm modules and guest are versioned together with the host JS, so a
+  // stale HTTP-cached copy (e.g. tier2-guest.js after a rebuild) would silently shadow
+  // a fresh host — a "no entrypoint 'x'" mismatch that a normal reload won't clear.
+  const get = async (name: string) => new Uint8Array(await (await fetch(base + name, { cache: "no-store" })).arrayBuffer());
+  const text = async (name: string) => (await fetch(base + name, { cache: "no-store" })).text();
   const [kernelBytes, bootstrapBytes, codecBytes, reputationBytes, guestSource] = await Promise.all([
     get("kernel.wasm"), get("bootstrap.wasm"), get("codec.wasm"), get("reputation.wasm"),
     text("tier2-guest.js"),
@@ -37,3 +40,7 @@ export { createConnectedCohort } from "./cluster.js";
 export type { StorageNodeOptions } from "./storage-node.js";
 export type { StorageConfig, Identity } from "./core.js";
 export { defaultConfig } from "./core.js";
+// A browser node joining a cohort of bundle-running holders (a loader/shell) must
+// verify descriptors under that bundle's author scope, not the zero-author default —
+// see p2p.html. Re-export the scope derivation so the page can pass `signScope`.
+export { STORAGE_APP, STORAGE_SIGN_SCOPE, storageSignScope } from "./manifest.js";

@@ -17,6 +17,10 @@ export interface CohortOptions {
   config?: Partial<StorageConfig>;
   quota?: number;
   timeoutMs?: number;
+  /** Shared signing scope for the cohort (README §16). Omit for the in-process default
+   *  (`STORAGE_SIGN_SCOPE`); pass `storageSignScope(bundleAuthor)` when these nodes must
+   *  verify descriptors a shell running that bundle signs (the cross-path tests). */
+  signScope?: Uint8Array;
 }
 
 /** Create `count` storage nodes on `network` and connect them into one cohort. */
@@ -34,6 +38,7 @@ export async function createConnectedCohort(opts: CohortOptions): Promise<Storag
       config: opts.config,
       quota: opts.quota,
       timeoutMs: opts.timeoutMs,
+      signScope: opts.signScope,
     }));
   }
   for (let i = 0; i < nodes.length; i++) {

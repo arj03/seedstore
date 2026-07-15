@@ -4,8 +4,9 @@
 // whole onion together.
 
 import {
-  LoopbackNetwork, loadWasmBytes, loadSodium, createConnectedCohort,
+  LoopbackNetwork, loadWasmBytes, loadSodium, createConnectedCohort, StorageNode,
 } from "../build/host/node.js";
+import { encodeFetchBatchReq, decodeFetchBatchRes } from "../build/host/protocol.js";
 import { parseSignedDescriptor } from "../build/host/manifest.js";
 import { toHex, fromHex, bytesEqual } from "../build/host/util.js";
 import { liveBlockCount } from "./helpers.mjs";
@@ -62,6 +63,28 @@ export async function run(t) {
     const holders = nodes.filter((n) => n !== owner && n.store.list().length > 0);
     t.ok(holders.length >= 4, "blocks placed across several distinct peers");
     t.eq(owner.store.list().length, 0, "owner holds no blocks — durability leans on the cohort");
+    nodes.forEach((n) => n.close());
+  }
+
+  t.group("large blocks (> the 128 KB default handler scratch) round-trip (§4.1)");
+  {
+    // The p2p demo runs 256 KiB blocks so a WS cohort pays few round trips. A
+    // codec encode/decode request is then k·blockSize bytes — far past the kernel's
+    // 128 KB default handler scratch — so the codec must declare its larger scratch
+    // (exported `scratchSize`) and the host must honor it. Before that wiring the
+    // codec call silently returned no parity and PUT died with "blockIds.length must
+    // equal k+m". Use RS(2,2) at 96 KiB so both the encode request (2·96 KiB) and its
+    // parity response (2·96 KiB) exceed the default, over genuine (k>1) parity.
+    const net = new LoopbackNetwork();
+    const bigCfg = { k: 2, m: 2, blockSize: 96 * 1024 };
+    const nodes = await createConnectedCohort({ count: 6, network: net, sodium, wasm, config: bigCfg, timeoutMs: TIMEOUT });
+    const owner = nodes[0];
+    const data = file(bigCfg.k * bigCfg.blockSize * 3 - 5000, 9); // ~3 chunks, last chunk short
+    const put = await owner.put(data);
+    t.ok(!put.replicated, "a many-block file takes the RS path");
+    t.eq(put.chunkCount, 3, "spans 3 RS chunks");
+    const got = await owner.get(put.manifestId, put.key);
+    t.ok(bytesEqual(got, data), "GET reconstructs a file coded in > 128 KB blocks");
     nodes.forEach((n) => n.close());
   }
 
@@ -321,6 +344,46 @@ export async function run(t) {
     const put = await owner.put(data); // threw before best-effort placement
     t.ok(put.blockIds.length > 0, "PUT places across the 3 available holders instead of failing");
     t.ok(bytesEqual(await owner.get(put.manifestId, put.key), data), "GET reconstructs from a sub-n placement");
+    nodes.forEach((n) => n.close());
+  }
+
+  t.group("maxMessageBytes mismatch: a holder's smaller FETCH cap degrades, never fails (§18)");
+  {
+    // maxMessageBytes is per-node operator policy, so a cohort can diverge: this owner
+    // sizes FETCH sub-batches for 4 blocks per response (cap 280 = 4·(64+5) + header),
+    // while its holders serve at most ~1 block per response (cap 100). Every block past
+    // a holder's cap comes back absent-on-the-wire despite being held — the failure that
+    // used to mark the holder as tried and permanently fail the GET. serveFetch must
+    // always serve the first present block, and the reader must re-request the
+    // unanswered tail (runFetchTasks), so the mismatch costs round trips, not data.
+    const net = new LoopbackNetwork();
+    const ownerCfg = { k: 2, m: 2, blockSize: 64, maxMessageBytes: 280 };
+    const holderCfg = { ...ownerCfg, maxMessageBytes: 100 };
+    const mk = (cfg) => StorageNode.create({ network: net, sodium, ...wasm, config: cfg, timeoutMs: TIMEOUT });
+    const owner = await mk(ownerCfg);
+    const holders = [await mk(holderCfg), await mk(holderCfg), await mk(holderCfg), await mk(holderCfg)];
+    const nodes = [owner, ...holders];
+    for (let i = 0; i < nodes.length; i++) {
+      for (let j = i + 1; j < nodes.length; j++) StorageNode.connect(nodes[i], nodes[j]);
+    }
+
+    const data = file(256, 41); // 4 blocks → 2 RS(2,2) chunks, block i of each on holder i
+    const put = await owner.put(data);
+    t.ok(!put.replicated, "the file takes the RS path");
+
+    // Pin the scenario at the wire: a raw 2-id FETCH to a holder that stores both
+    // must come back truncated — first block served (the progress guarantee), second
+    // absent (over the holder's 100-byte cap). If this ever stops truncating, the
+    // GET below no longer exercises the mismatch.
+    const holder = holders.find((h) => h.store.list().length >= 2);
+    t.ok(!!holder, "a holder carries at least two blocks");
+    const [idA, idB] = holder.store.list();
+    const raw = await owner.transport.request(holder.peerId, 3 /* MSG_FETCH */, encodeFetchBatchReq([idA, idB]));
+    const served = decodeFetchBatchRes(raw);
+    t.ok(served[0] !== null && bytesEqual(served[0], holder.store.get(idA).bytes), "the first present block is always served, even near the cap");
+    t.eq(served[1], null, "the second block is truncated by the holder's smaller cap");
+
+    t.ok(bytesEqual(await owner.get(put.manifestId, put.key), data), "GET completes across the cap mismatch (tail re-requested, not marked tried)");
     nodes.forEach((n) => n.close());
   }
 }

@@ -9,6 +9,7 @@ import {
   encodeDescriptorCore, decodeDescriptorCore,
   signDescriptor, verifyDescriptor, descriptorContains,
   encodeManifest, decodeManifest, ENC_XCHACHA20,
+  storageSignScope,
 } from "../build/host/manifest.js";
 import { bytesEqual } from "../build/host/util.js";
 
@@ -79,6 +80,14 @@ export async function run(t) {
     const forged = signDescriptor(sodium, d, holder.publicKey, holder.privateKey);
     const fv = verifyDescriptor(sodium, forged);
     t.ok(fv !== null && !bytesEqual(fv.authorPk, author.publicKey), "holder re-sign is detectable (different author)");
+
+    // The signature is bound to its signing scope (§16): the same author + core signed
+    // under a different scope does not verify under the default one — a storage signature
+    // cannot be replayed into another deployment's (author, app) namespace.
+    const otherScope = storageSignScope(holder.publicKey);
+    const scoped = signDescriptor(sodium, d, author.publicKey, author.privateKey, otherScope);
+    t.ok(verifyDescriptor(sodium, scoped) === null, "a descriptor signed under a different scope is rejected");
+    t.ok(verifyDescriptor(sodium, scoped, otherScope) !== null, "…but verifies under its own scope");
   }
 
   t.group("manifest: encode/decode + encrypt round trip (§4.3, §4.4)");

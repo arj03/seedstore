@@ -5,6 +5,7 @@
   "type": "module",
   "description": "Peer-to-peer storage layer for seedkernel (README spec, Part I). Pure Reed–Solomon codec + reputation in WASM; storage bridges and orchestration in the host.",
   "scripts": {
+    "clean": "node scripts/clean.mjs",
     "copy-kernel": "node scripts/copy-kernel.mjs",
     "build:codec": "asc assembly/codec/index.ts --config asconfig.codec.json --target release",
     "build:reputation": "asc assembly/reputation/index.ts --config asconfig.reputation.json --target release",
@@ -14,6 +15,7 @@
     "build:host:min": "node scripts/minify.mjs",
     "build:bundle": "node scripts/build-bundle.mjs",
     "build:browser-demo": "node scripts/build-browser-demo.mjs",
+    "serve:demo": "npm run build:browser-demo && npx --yes http-server build/browser-demo -p 3000 -c-1",
     "serve:rtc-holder": "bun scripts/serve-rtc-holder.mjs",
     "smoke:rtc": "node scripts/smoke-rtc.mjs",
     "demo:relay": "node ../../seedkernel/WASM/scripts/relay.mjs",

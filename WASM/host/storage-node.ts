@@ -42,7 +42,14 @@ import { Crypto } from "./crypto.js";
 import { storageNames, type StorageNames } from "./names.js";
 import { registerStorageBridges } from "./bridges.js";
 import { type Identity, type StorageConfig, defaultConfig } from "./core.js";
-import { toHex, fromHex, readU32BE, writeU32BE, concatBytes } from "./util.js";
+import { STORAGE_SIGN_SCOPE, guestSignPrefix } from "./manifest.js";
+import { toHex, fromHex, readU32BE, writeU32BE, writeU64BE, readU64BE, concatBytes } from "./util.js";
+
+// Fresh-array constructors for the windowed PUT/GET host seam: they frame the length-
+// prefixed arguments the streaming entries read. The u32/u64 read+write primitives live
+// in util.ts (readU64BE is imported above); these just allocate one field's worth.
+function u32be(n: number): Uint8Array { const b = new Uint8Array(4); writeU32BE(b, 0, n); return b; }
+function u64be(n: number): Uint8Array { const b = new Uint8Array(8); writeU64BE(b, 0, n); return b; }
 
 /** PUT result: the manifest root, the per-file content key K, and where the
  *  file landed (every distinct block id placed + the manifest, in placement
@@ -56,6 +63,13 @@ export interface PutResult {
   /** True if the file was replicated rather than RS-coded (§4.1). */
   replicated: boolean;
   blockIds: Uint8Array[];
+  /** Replicas that actually landed across all chunks, and how many were intended
+   *  (min(k+m, reachable cohort) per chunk). When landed < intended the PUT is
+   *  durable enough to satisfy the ≥ k floor but UNDER-replicated — a holder was
+   *  reachable yet declined (full/quota) or the cohort is short — so a caller should
+   *  warn rather than report a clean success. */
+  replicasLanded: number;
+  replicasIntended: number;
 }
 
 export interface StorageNodeOptions {
@@ -93,6 +107,13 @@ export interface StorageNodeOptions {
   clock?: () => number;
   /** net.send timeout — how long before a peer is treated as unreachable (§8). */
   timeoutMs?: number;
+  /** The guest signing scope (README §16). Descriptors are signed/verified over
+   *  `DOMAIN_guest ‖ scope ‖ core`, so every node in one cohort must share it (a
+   *  descriptor one signs verifies on another). Defaults to the in-process
+   *  `STORAGE_SIGN_SCOPE` (zero author); a cohort that shares a bundle author — the
+   *  shell-run / holder-guest cross-path tests — passes `storageSignScope(author)` so
+   *  its StorageNodes verify what a shell running that bundle signs. */
+  signScope?: Uint8Array;
 }
 
 export class StorageNode {
@@ -110,9 +131,17 @@ export class StorageNode {
   private readonly peers = new Set<PeerId>();
   private readonly clockFn: () => number;
   private readonly guestSource: string;
+  private readonly signScope: Uint8Array;
   private installSeq = 0;
   private repairLoopOn = false;
   private repairTimer: ReturnType<typeof setTimeout> | null = null;
+  // The tail of the initiator-realm call chain (put/get/repair). runInitiator chains
+  // every call onto it, so they run strictly one at a time (see there) and close() can
+  // await the whole chain — not just the most recent window call — before disposing the
+  // realm. `closed` short-circuits any call arriving after close() with a clean rejection
+  // instead of a mid-flight "realm disposed" error.
+  private inFlight: Promise<unknown> = Promise.resolve();
+  private closed = false;
 
   // Two realms run the one guest: an async initiator (put/get/repair) created
   // lazily on first use, and a sync holder (handle) created eagerly at boot so a
@@ -129,6 +158,7 @@ export class StorageNode {
     this.identity = identity;
     this.peerId = toHex(identity.publicKey);
     this.guestSource = opts.guestSource;
+    this.signScope = opts.signScope ?? STORAGE_SIGN_SCOPE;
     // Derive replicas / lowWater / smallMaxBlocks from the *caller's* k & m, then
     // let any explicit field in opts.config override — otherwise overriding k/m
     // alone would leave those derived from the (2,2) default (e.g. an unreachable
@@ -152,15 +182,12 @@ export class StorageNode {
       opts.kernelBytes as BufferSource, opts.bootstrapBytes as BufferSource, opts.sodium as never,
     );
     host.registerSignature(host.deriveBootstrapName("signature"));
-    host.registerInstaller(
-      host.deriveBootstrapName("install"),
-      host.deriveBootstrapName("installer.lookup"),
-      host.deriveBootstrapName("installer.caps_of"),
-    );
-    // Single-deployment reference posture: accept audited handler bytes and
-    // acknowledge their declared caps. A real deployment narrows this to a
-    // content-hash allowlist + closed author set (§19).
-    host.setApproveInstall(referencePolicy(host, () => true, () => true));
+    host.registerInstaller(host.deriveBootstrapName("install"));
+    // Single-deployment reference posture: accept audited handler bytes from any
+    // author. A real deployment narrows this to a content-hash allowlist + closed
+    // author set (§19). Capabilities are no longer install-declared — the JS
+    // sandbox is the confinement, so the policy governs WHO may bind a name only.
+    host.setApproveInstall(referencePolicy(host, () => true));
 
     const identity = opts.identity ?? (() => {
       const kp = opts.sodium.crypto_sign_keypair();
@@ -200,6 +227,9 @@ export class StorageNode {
       peers: () => this.cohortPeers(),
       fs: this.fs,
       now: () => this.now(),
+      // Scope the guest's SIGN op to this deployment (README §16): the kernel signs
+      // `DOMAIN_guest ‖ scope ‖ msg`, never the raw node key over guest bytes.
+      signScope: this.signScope,
     });
   }
 
@@ -220,7 +250,15 @@ export class StorageNode {
       // FETCH under, so it batches byte-for-byte as the spec intends.
       maxMessageBytes: c.maxMessageBytes,
       putConcurrency: c.putConcurrency, getConcurrency: c.getConcurrency,
+      // Streamed PUT/GET window (§3): undefined ⇒ the guest's 4 MiB default. Bigger
+      // windows amortise the per-window OFFER→STORE→ack barrier on a fat/low-loss link.
+      windowTargetBytes: c.windowTargetBytes,
       codecName: toHex(this.names.codec), repName: toHex(this.names.reputation),
+      // The scoped-signature prefix `DOMAIN_guest ‖ scope` the guest prepends before
+      // CAP_VERIFY (README §16) — the same bytes the bridge's SIGN op prepends, so the
+      // two paths agree. The seedkernel shell injects the byte-identical value from the
+      // admitted bundle's (author, app); here it comes from this node's scope.
+      signPrefix: toHex(guestSignPrefix(this.signScope)),
     };
     return `const APP = ${JSON.stringify(app)};\n`;
   }
@@ -234,7 +272,7 @@ export class StorageNode {
   /** The async initiator realm (put/get/repair), created lazily on first use. */
   private initiatorRealm(): Promise<SafeRealm> {
     if (!this.initiator) {
-      this.initiator = createSafeRealm({ source: this.guestFullSource(), bridge: this.buildBridge() });
+      this.initiator = createSafeRealm({ source: this.guestFullSource(), bridge: this.buildBridge(), memoryLimitBytes: this.config.realmMemoryBytes });
     }
     return this.initiator;
   }
@@ -258,29 +296,109 @@ export class StorageNode {
   }
 
   // ── PUT / GET / repair / share (§6, §7, §9, §4.4) — all run in the guest ──
-  /** PUT a file (§6), orchestrated inside the initiator realm. */
-  async put(plaintext: Uint8Array): Promise<PutResult> {
+  /** Run one initiator entrypoint in the async realm, recording it as in-flight so
+   *  close() can await it before disposing the realm (disposing while a call is parked
+   *  mid-await — a repair pass caught by close, waiting out an unreachable peer's timeout
+   *  — would resume into a freed realm: a QuickJS UseAfterFree abort). */
+  private async runInitiator(entry: string, payload: Uint8Array): Promise<Uint8Array> {
+    if (this.closed) throw new Error("storage node closed");
     const realm = await this.initiatorRealm();
-    const r = await realm.call("put", plaintext);
-    // [manifestId 32][replicated u8][chunkCount u32][K 32][idCount u32][ids 32·n]
-    const idCount = readU32BE(r, 69);
-    const blockIds: Uint8Array[] = [];
-    for (let i = 0; i < idCount; i++) blockIds.push(r.slice(73 + i * 32, 73 + i * 32 + 32));
-    return { manifestId: r.slice(0, 32), replicated: r[32] === 1, chunkCount: readU32BE(r, 33), key: r.slice(37, 69), blockIds };
+    // Chain onto the previous call so the initiator runs strictly one at a time. The
+    // Asyncify bridge is module-global (§2.1), so two overlapping initiator calls hard-
+    // abort the realm; serializing here makes that impossible even if application code
+    // overlaps two put()s (or a put() with a get()) — the streamed design issues many
+    // window calls per operation, so an interleave is far likelier than under the old
+    // single-call entrypoints. It also keeps `inFlight` a true tail: close() awaits the
+    // whole chain, so an earlier parked call can't still resume into a freed realm.
+    const p = this.inFlight.then(() => realm.call(entry, payload));
+    this.inFlight = p.then(() => {}, () => {});
+    return p;
   }
 
-  /** GET a file (§7), orchestrated inside the initiator realm. */
+  /** PUT a file (§6), orchestrated inside the initiator realm, STREAMED so the
+   *  confined guest heap never holds the whole file (README §3): the plaintext is
+   *  fed one chunk-aligned window at a time and each window's ciphertext is placed
+   *  and dropped before the next is sent. putStart mints K and reports the window
+   *  size; putWindow/putSmall place each window and return its chunk descriptors;
+   *  putManifest seals the manifest over them. The result is assembled here. */
+  async put(plaintext: Uint8Array): Promise<PutResult> {
+    const fileSize = plaintext.length;
+    const meta = await this.runInitiator("putStart", u64be(fileSize));
+    const key = meta.slice(0, 32);
+    const replicated = meta[32] === 1;
+    const windowBytes = readU32BE(meta, 33);
+
+    const descriptors: Uint8Array[] = [];
+    const blockIds: Uint8Array[] = [];
+    let replicasLanded = 0, replicasIntended = 0;
+    // Decode one window's result:
+    //   [descCount u32]{[len u32][descriptor]}[idCount u32]{id 32}[placed u32][intended u32]
+    const collect = (w: Uint8Array) => {
+      let o = 0;
+      const dc = readU32BE(w, o); o += 4;
+      for (let i = 0; i < dc; i++) { const l = readU32BE(w, o); o += 4; descriptors.push(w.slice(o, o + l)); o += l; }
+      const ic = readU32BE(w, o); o += 4;
+      for (let i = 0; i < ic; i++) { blockIds.push(w.slice(o, o + 32)); o += 32; }
+      replicasLanded += readU32BE(w, o); o += 4;
+      replicasIntended += readU32BE(w, o); o += 4;
+    };
+
+    if (replicated) {
+      collect(await this.runInitiator("putSmall", concatBytes([key, plaintext])));
+    } else {
+      for (let off = 0; off < fileSize; off += windowBytes) {
+        const slice = plaintext.subarray(off, Math.min(off + windowBytes, fileSize));
+        collect(await this.runInitiator("putWindow", concatBytes([key, u64be(off), slice])));
+      }
+    }
+
+    const manParts: Uint8Array[] = [key, u64be(fileSize), u32be(descriptors.length)];
+    for (const d of descriptors) manParts.push(u32be(d.length), d);
+    const manifestId = await this.runInitiator("putManifest", concatBytes(manParts));
+    blockIds.push(manifestId);
+    return { manifestId, replicated, chunkCount: descriptors.length, key, blockIds, replicasLanded, replicasIntended };
+  }
+
+  /** GET a file (§7), orchestrated inside the initiator realm, STREAMED so the guest
+   *  reconstructs only one window of chunks at a time; the file is assembled here.
+   *  getStart fetches + verifies the manifest and returns the file size, a window
+   *  granularity, and every chunk descriptor; getChunk reconstructs each window. */
   async get(manifestId: Uint8Array, key: Uint8Array): Promise<Uint8Array> {
-    const realm = await this.initiatorRealm();
-    return realm.call("get", concatBytes([manifestId, key]));
+    const start = await this.runInitiator("getStart", concatBytes([manifestId, key]));
+    const fileSize = readU64BE(start, 0);
+    const windowChunks = readU32BE(start, 8);
+    const chunkCount = readU32BE(start, 12);
+    let o = 16;
+    const envs: Uint8Array[] = [];
+    for (let i = 0; i < chunkCount; i++) { const l = readU32BE(start, o); o += 4; envs.push(start.slice(o, o + l)); o += l; }
+
+    const out = new Uint8Array(fileSize);
+    let written = 0;
+    for (let cs = 0; cs < chunkCount; cs += windowChunks) {
+      const windowEnvs = envs.slice(cs, cs + windowChunks);
+      const parts: Uint8Array[] = [key, u32be(cs), u64be(fileSize), u32be(windowEnvs.length)];
+      for (const e of windowEnvs) parts.push(u32be(e.length), e);
+      const chunk = await this.runInitiator("getChunk", concatBytes(parts));
+      out.set(chunk, written); written += chunk.length;
+    }
+    return out;
+  }
+
+  /** Pre-warm the initiator realm's codec + crypto caps with a throwaway
+   *  encode/decode (no network, no store), so the first PUT/GET doesn't pay V8's
+   *  cold-JIT tax on the latency-sensitive path — a cold first PUT otherwise encodes
+   *  the whole file before the first byte hits the wire. Also boots the lazily-created
+   *  initiator realm now. Idempotent and optional: a client that will PUT/GET calls it
+   *  once after connecting; a pure holder (which serves from the sync realm) need not. */
+  async warm(): Promise<void> {
+    await this.runInitiator("warm", new Uint8Array(0));
   }
 
   /** Run one repair pass over every chunk this node holds a block of (§9),
    *  orchestrated inside the initiator realm. Returns the number of blocks
    *  (re-)placed. */
   async runRepair(): Promise<number> {
-    const realm = await this.initiatorRealm();
-    return readU32BE(await realm.call("repair", new Uint8Array(0)), 0);
+    return readU32BE(await this.runInitiator("repair", new Uint8Array(0)), 0);
   }
 
   /** Decayed reciprocity score this node holds for a peer (§13), read from the
@@ -346,10 +464,21 @@ export class StorageNode {
   /** Tear down both guest realms + the transport, stopping the repair loop if
    *  running (test cleanup). */
   close(): void {
+    this.closed = true; // reject any initiator call raised after this (e.g. the next window
+                        // of a mid-flight streamed put) cleanly, rather than letting it hit
+                        // the freed realm — a diagnosable "storage node closed", not a crash.
     this.stopRepairLoop();
-    void this.initiator?.then((r) => r.dispose(), () => { /* creation failed — nothing to free */ });
-    this.holder?.dispose();
+    // Close the transport first so any parked initiator round trip settles (times out as
+    // unreachable) rather than hanging, and no new holder request arrives.
     this.transport.close();
+    // The sync holder realm never suspends (local fs + crypto only), so it is safe to
+    // free at once. The async initiator realm may be parked mid-await (a repair pass
+    // caught by close, waiting out a peer timeout); disposing it now would resume that
+    // computation into a freed realm (QuickJS UseAfterFree). Defer its disposal until the
+    // in-flight call settles.
+    this.holder?.dispose();
+    const disposeInitiator = () => { void this.initiator?.then((r) => r.dispose(), () => { /* creation failed — nothing to free */ }); };
+    this.inFlight.then(disposeInitiator, disposeInitiator);
   }
 
   // ── bootstrap wiring (§19) ──────────────────────────────────────────────
@@ -375,7 +504,7 @@ export class StorageNode {
 
   private installOne(name: Uint8Array, wasm: Uint8Array): void {
     const seq = ++this.installSeq;
-    const payload = this.host.encodeInstallPayload(seq, name, [], null, wasm);
+    const payload = this.host.encodeInstallPayload(seq, name, wasm);
     this.host.dispatch(this.host.wrapAndEncode(
       this.identity.privateKey, this.identity.publicKey, CURRENT_VERSION, this.host.deriveBootstrapName("install"), payload,
     ));

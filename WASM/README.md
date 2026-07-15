@@ -54,18 +54,70 @@ Hashing, the length-preserving stream cipher (`crypto_stream_xchacha20_xor`),
 and signatures are **reused** from the runtime's libsodium (the sumo build, which
 exposes the raw stream cipher) — never bundled — exactly as §16 requires; the
 guest reaches them as generic `cap-bridge` primitives and builds its own
-descriptor envelope and nonce convention on top.
+descriptor envelope and nonce convention on top of the scoped `SIGN`
+(seedkernel §13.2) — how storage prefixes and checks it is below.
 
-**Why two realms.** The initiator orchestration is inherently async (it fans out
-over `net` and awaits), so it runs in an Asyncify QuickJS realm where a host call
-*looks* synchronous while the host round-trips. The holder side, by contrast,
-answers purely from local `fs` + crypto and never round-trips — so it runs in a
-separate **synchronous** (non-Asyncify) realm, which lets it respond to an
-incoming request *while the node's own initiator realm is parked mid-`await`* (two
-async realms can't overlap host calls; a sync one, a different WASM instance,
-can). `StorageNode` (`host/storage-node.ts`) keeps a host-side copy of both sides
-as the reference/parity path — the same role the host-side classes play in the
-tests — but the **shipped** node runs the confined guest.
+**The two realms.** Storage uses both confinement realms seedkernel provides
+(§13.3): the initiator (PUT/GET/repair) is async — it fans out over `net` and
+awaits — so it runs in the Asyncify realm, while the holder side answers from
+local `fs` + crypto without yielding, so it runs in the sync realm and can serve
+a request *while this node's own initiator realm is parked mid-`await`*.
+`StorageNode` (`host/storage-node.ts`) keeps a host-side copy of both sides as
+the reference/parity path — the role the host-side classes play in the tests —
+but the **shipped** node runs the confined guest.
+
+## Signing scope, existence, and bundle versioning
+
+Three seedkernel runtime contracts reach into the storage code, and each has a
+seedstore-side counterpart worth pinning down. The contracts themselves are
+documented on the runtime side — the **scoped `SIGN`** op (a guest signature is
+over `DOMAIN_guest ‖ scope ‖ msg`, the `scope` host-derived from the admitted
+manifest; `VERIFY` stays raw — seedkernel §13.2), **existence-by-size** (no
+`FS_HAS`; a key exists iff `FS_SIZE ≥ 0`, and `./fs` is
+`get`/`put`/`size`/`list`/`delete`/`stat` — seedkernel §13.1–§13.2), and the
+**monotonic bundle `version`** that refuses a downgrade (seedkernel §13.4). The
+spec-side story is in the [seed store spec](../README.md) (§16). This section is
+the code map for where each lands in this repo — the guest, the host parity
+mirror, and the bundle producer:
+
+1. **Signatures are scoped on both paths**
+   (`host/tier2-guest.orchestration.js`). The descriptor envelope stays
+   `[authorPk 32][sig 64][core ..]` — the prefix is preimage-only, never stored
+   — but `signCore` passes the bare core to the scoped `CAP_SIGN`, which signs
+   `DOMAIN_guest ‖ scope ‖ core`, and `verifyEnv` reconstructs that same preimage
+   before the raw `CAP_VERIFY`. The host mirror
+   (`signDescriptor`/`verifyDescriptor` in `host/manifest.ts`) produces and
+   checks byte-identical preimages, so the `tier2-port`/`holder-guest` parity
+   tests hold. The guest gets the scope bytes host-derived: `storage-node.ts`
+   injects `signPrefix` into the `const APP` block from
+   `guestSignPrefix(signScope)` — the shell derives the scope from the admitted
+   manifest, an in-process `StorageNode` from `STORAGE_SIGN_SCOPE` (zero author,
+   app).
+2. **The descriptor's leading byte is the signed-format tag** (spec §16). The
+   descriptor core leads with `TAG_DESCRIPTOR = 0x01` (`manifest-core.ts`), and
+   the Part II signed formats reserve their own values before they exist
+   (`TAG_TOMBSTONE = 0x02`, `TAG_HEAD = 0x03`). The tag sits inside `core`, so
+   it is already under the signature and inside the scoped preimage.
+3. **`storeHas` answers from `FS_SIZE ≥ 0`**
+   (`host/tier2-guest.orchestration.js`): the `fsSize` seam distinguishes absent
+   (the bridge's −1 sentinel) from present-but-empty, so there is no `has` call
+   to make. Same move host-side — `store-fs.ts` asks `fs.size(...) >= 0` — with
+   the seedstore `BlobStore.has` iface itself unchanged, only its backing call.
+4. **The bundle carries an integer, monotonic `version`**
+   (`scripts/storage-bundle.mjs`): guarded by `Number.isInteger` and bumped on
+   every publish, so the shell's freshness check (§13.4) has a real high-water
+   mark to enforce.
+5. **The tests that pin this**: `manifest` (tamper-evidence over the tagged,
+   scoped preimage), `tier2-port` / `holder-guest` (parity across the scoped
+   sign/verify paths), `shell-run` (bundle version freshness — a downgrade is
+   refused), `net` (`FsBlobStore` existence via `size ≥ 0`, riding the encrypted
+   record layer transparently).
+
+**Purely storage-side, independent of all this:** the codec and reputation
+WASM, the HAVE/OFFER/STORE/FETCH wire format and its windowing, content
+addressing, the nonce convention, and the quota. The storage *structure* is the
+app's own; only how signatures are prefixed, how existence is asked, and how the
+bundle versions itself follow the kernel contracts above.
 
 ## Build
 
@@ -98,8 +150,9 @@ npm run build:bundle      # → ./bundle/ (manifest + codec/reputation wasm + in
                           #   signed by ./seedstore-author.key (minted on first run; keep it secret)
 ```
 
-The shell admits content only from authors named in a policy file. Take the
-author public key it printed (`author …`) and allow it:
+The shell admits content only from authors named in its policy file
+(seedkernel §13.5). Take the author public key it printed (`author …`) and allow
+it:
 
 ```sh
 echo '{ "authors": ["<author-pubkey-hex>"] }' > allowed-keys.json
@@ -142,10 +195,10 @@ node "$SHELL" --policy allowed-keys.json --bundle ./bundle --dir ./client \
 
 `--get` is `<manifest-id>:<key>` — the pair PUT printed; without `--out` the bytes
 go to stdout. The manifest-id locates the file; the key `K` decrypts it (lose `K`
-and the holders keep only permanent noise, §11). Useful shell flags: `--ws-listen
-host:port` (a browser edge over WebSocket), `--peers <pk>@host:port,…` (the cohort),
-`--timeout ms`, `--dir` (the `fs.*` backend directory), `--key` (the node's
-persisted kernel keypair). A node with no listener is a pure client; one with
+and the holders keep only permanent noise, §11). The shell flags themselves
+(`--listen`/`--ws-listen`/`--peers`/`--dir`/`--key`/`--timeout`) are the generic
+ones (seedkernel §13.8); `--put`, `--get`, and the storage bundle are what this
+node adds. A node with no listener is a pure client; one with
 `--listen`/`--ws-listen` keeps serving until Ctrl-C.
 
 > A self-contained single-file binary is `bun build --compile` of the shell
@@ -366,7 +419,7 @@ annotated — so stripping them roughly halves the wire size (42 → 21 KB gz). 
 "minifier" is a ~70-line dependency-free comment stripper (`scripts/minify.mjs`),
 **not** a bundler or terser: it preserves string/template contents and gates every
 emitted file through `node --check`, so a stripper mistake fails the build rather
-than shipping broken JS. The same step now runs in seedkernel too, shrinking that
+than shipping broken JS. The same step runs in seedkernel too, shrinking that
 shared host from 11 to ~5 KB gz; `npm run build:browser` stages both minified
 hosts (`build/host-min`) into the demo.
 
@@ -403,7 +456,11 @@ A few Part I behaviours are modelled in a deliberately simple reference form and
 called out in the code: the Suspected/Lost grace window (§8) is represented by
 "verified-live vs not", admission/eviction (§14) is quota + the sibling rule
 rather than the full eviction-score, and the bulk plane (§3) rides the same
-awaited request/response channel rather than a separate unsigned frame stream.
+awaited request/response channel rather than a separate unsigned frame stream —
+not a simplification at all but exactly what the kernel transport specifies: it
+has no separate bulk frame kind, so block bytes ride ordinary req/res bodies
+(inside the encrypted record layer) and content-addressing stays the app-level
+admission check.
 
 PUT also places **best-effort**: it spreads a chunk's *n = k+m* blocks across as
 many distinct holders as the cohort offers (one block per holder, the §6/§10
