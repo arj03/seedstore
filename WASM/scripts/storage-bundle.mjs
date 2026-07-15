@@ -19,7 +19,7 @@ import { CURRENT_VERSION } from "seedkernel-wasm";
 import { signManifest } from "seedkernel-wasm/bundle";
 import { CAP, guestSignScope } from "seedkernel-wasm/cap-bridge";
 import { storageNames } from "../build/host/names.js";
-import { defaultConfig } from "../build/host/core.js";
+import { defaultConfig, PRODUCTION_BLOCK_SIZE } from "../build/host/core.js";
 import { guestSignPrefix } from "../build/host/manifest.js";
 import { toHex } from "../build/host/util.js";
 
@@ -80,13 +80,12 @@ export function writeStorageBundle({ dir, host, sodium, sk, pk, build, version =
   const guestText = readFileSync(join(build, "host-min", "tier2-guest.js"), "utf8");
   writeFileSync(join(dir, "tier2-guest.js"), guestText);
 
-  // The signed config must carry PRODUCTION geometry: defaultConfig()'s bare
-  // blockSize is test-scale (256 BYTES — sized so unit tests exercise multi-block
-  // chunking on tiny payloads), and when it leaked in here unchanged, a
-  // loader-initiated `--put` chunked a 10 MB file into ~41k blocks. 256 KiB keeps a
-  // k=2 codec request at the 512 KiB the deployed codec's scratch is proven on, and
-  // one block + framing well inside maxMessageBytes (the serveFetch response bound).
-  const cfg = defaultConfig(undefined, undefined, 256 * 1024);
+  // The signed config must carry PRODUCTION geometry: defaultConfig()'s bare blockSize is
+  // test-scale (256 BYTES — sized so unit tests exercise multi-block chunking on tiny
+  // payloads), and when it leaked in here unchanged, a loader-initiated `--put` chunked a
+  // 10 MB file into ~41k blocks. PRODUCTION_BLOCK_SIZE is the one named deployment geometry
+  // (why 256 KiB: see its doc in core.ts), so this site and the CLI can't drift apart.
+  const cfg = defaultConfig(undefined, undefined, PRODUCTION_BLOCK_SIZE);
   const manifest = {
     app: APP_NAME,
     // A monotonic integer freshness mark per (author, app): the shell enforces it as a

@@ -43,13 +43,13 @@ import { storageNames, type StorageNames } from "./names.js";
 import { registerStorageBridges } from "./bridges.js";
 import { type Identity, type StorageConfig, defaultConfig } from "./core.js";
 import { STORAGE_SIGN_SCOPE, guestSignPrefix } from "./manifest.js";
-import { toHex, fromHex, readU32BE, writeU32BE, concatBytes } from "./util.js";
+import { toHex, fromHex, readU32BE, writeU32BE, writeU64BE, readU64BE, concatBytes } from "./util.js";
 
-// Small big-endian encoders for the windowed PUT/GET host seam (util.ts has the u32
-// primitives; these frame the length-prefixed arguments the streaming entries read).
+// Fresh-array constructors for the windowed PUT/GET host seam: they frame the length-
+// prefixed arguments the streaming entries read. The u32/u64 read+write primitives live
+// in util.ts (readU64BE is imported above); these just allocate one field's worth.
 function u32be(n: number): Uint8Array { const b = new Uint8Array(4); writeU32BE(b, 0, n); return b; }
-function u64be(n: number): Uint8Array { const b = new Uint8Array(8); writeU32BE(b, 0, Math.floor(n / 0x100000000)); writeU32BE(b, 4, n >>> 0); return b; }
-function readU64BE(b: Uint8Array, o: number): number { return readU32BE(b, o) * 0x100000000 + readU32BE(b, o + 4); }
+function u64be(n: number): Uint8Array { const b = new Uint8Array(8); writeU64BE(b, 0, n); return b; }
 
 /** PUT result: the manifest root, the per-file content key K, and where the
  *  file landed (every distinct block id placed + the manifest, in placement
@@ -135,10 +135,13 @@ export class StorageNode {
   private installSeq = 0;
   private repairLoopOn = false;
   private repairTimer: ReturnType<typeof setTimeout> | null = null;
-  // The last initiator-realm call (put/get/repair), so close() can await an in-flight one
-  // before disposing the realm. The initiator serializes calls — the Asyncify bridge is
-  // module-global, so two never overlap — so one handle is enough.
+  // The tail of the initiator-realm call chain (put/get/repair). runInitiator chains
+  // every call onto it, so they run strictly one at a time (see there) and close() can
+  // await the whole chain — not just the most recent window call — before disposing the
+  // realm. `closed` short-circuits any call arriving after close() with a clean rejection
+  // instead of a mid-flight "realm disposed" error.
   private inFlight: Promise<unknown> = Promise.resolve();
+  private closed = false;
 
   // Two realms run the one guest: an async initiator (put/get/repair) created
   // lazily on first use, and a sync holder (handle) created eagerly at boot so a
@@ -301,8 +304,16 @@ export class StorageNode {
    *  mid-await — a repair pass caught by close, waiting out an unreachable peer's timeout
    *  — would resume into a freed realm: a QuickJS UseAfterFree abort). */
   private async runInitiator(entry: string, payload: Uint8Array): Promise<Uint8Array> {
+    if (this.closed) throw new Error("storage node closed");
     const realm = await this.initiatorRealm();
-    const p = realm.call(entry, payload);
+    // Chain onto the previous call so the initiator runs strictly one at a time. The
+    // Asyncify bridge is module-global (§2.1), so two overlapping initiator calls hard-
+    // abort the realm; serializing here makes that impossible even if application code
+    // overlaps two put()s (or a put() with a get()) — the streamed design issues many
+    // window calls per operation, so an interleave is far likelier than under the old
+    // single-call entrypoints. It also keeps `inFlight` a true tail: close() awaits the
+    // whole chain, so an earlier parked call can't still resume into a freed realm.
+    const p = this.inFlight.then(() => realm.call(entry, payload));
     this.inFlight = p.then(() => {}, () => {});
     return p;
   }
@@ -456,6 +467,9 @@ export class StorageNode {
   /** Tear down both guest realms + the transport, stopping the repair loop if
    *  running (test cleanup). */
   close(): void {
+    this.closed = true; // reject any initiator call raised after this (e.g. the next window
+                        // of a mid-flight streamed put) cleanly, rather than letting it hit
+                        // the freed realm — a diagnosable "storage node closed", not a crash.
     this.stopRepairLoop();
     // Close the transport first so any parked initiator round trip settles (times out as
     // unreachable) rather than hanging, and no new holder request arrives.

@@ -2,5 +2,6 @@ node_modules/
 build/
 bundle/
 *.key
+*.version
 *.lock
 package-lock.json

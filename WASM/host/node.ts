@@ -59,5 +59,8 @@ export {
 export { createConnectedCohort } from "./cluster.js";
 export type { StorageNodeOptions, PutResult } from "./storage-node.js";
 export type { StorageConfig, Identity } from "./core.js";
-export { defaultConfig } from "./core.js";
+export { defaultConfig, PRODUCTION_BLOCK_SIZE } from "./core.js";
 export { STORAGE_APP, STORAGE_SIGN_SCOPE, storageSignScope } from "./manifest.js";
+// Byte helpers, re-exported so scripts driving a node (scripts/p2p-cli.mjs) don't
+// re-declare their own hex pair.
+export { toHex, fromHex } from "./util.js";

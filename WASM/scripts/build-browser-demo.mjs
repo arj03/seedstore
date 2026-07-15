@@ -55,7 +55,10 @@ function newestJsMtime(dir) {
   return newest;
 }
 function assertMinFresh(label, hostDir, minDir, rebuildCmd) {
-  if (!existsSync(hostDir)) return; // no compiled host to compare against (e.g. a min-only checkout)
+  // Need both trees to compare mtimes: no compiled host (a min-only checkout) or no min
+  // dir at all → nothing to assert. (The min dirs are also checked earlier before staging,
+  // so a missing min here is only reachable if this guard is reused in another order.)
+  if (!existsSync(hostDir) || !existsSync(minDir)) return;
   const host = newestJsMtime(hostDir), min = newestJsMtime(minDir);
   if (host > min + 1000) { // 1s slack for filesystem mtime granularity
     console.error(

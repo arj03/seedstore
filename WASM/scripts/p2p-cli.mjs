@@ -26,7 +26,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { WsNetwork } from "seedkernel-wasm/net-ws";
-import { createStorageNode, loadSodium, storageSignScope, defaultConfig } from "../build/host/node.js";
+import { createStorageNode, loadSodium, storageSignScope, defaultConfig, PRODUCTION_BLOCK_SIZE, toHex, fromHex } from "../build/host/node.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -34,6 +34,9 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const args = new Map();
 for (let i = 2; i < process.argv.length; i++) {
   const a = process.argv[i];
+  // A next token starting with "--" is read as the next flag, not this flag's value (so a
+  // bare `--flag` reads as "true"). No knob here takes a "--"-leading value, so this is
+  // fine; a genuinely-negative value would need to be spelled without a leading "--".
   if (a.startsWith("--")) args.set(a.slice(2), process.argv[i + 1] && !process.argv[i + 1].startsWith("--") ? process.argv[++i] : "true");
 }
 const num = (k, d) => (args.has(k) ? Number(args.get(k)) : d);
@@ -56,7 +59,7 @@ const mParam = num("m", 1);
 // of k/m: raises flows-per-holder rather than holders-per-chunk. Default 2 (measured
 // ~+18-40% PUT over 1 flow); --conns 1 to A/B. Holders must run the multi-link core.
 const connsN = num("conns", 2);
-const blockSize = num("block", 256) * 1024;
+const blockSize = num("block", PRODUCTION_BLOCK_SIZE / 1024) * 1024;
 const maxMessageBytes = num("batch", 1024) * 1024;
 const windowN = num("window", 64);
 // Streamed PUT/GET window (--wtarget MB): the host feeds the guest one chunk-aligned
@@ -69,8 +72,7 @@ const wtargetMB = num("wtarget", 24);
 const heapMB = num("heap", 256);
 const timeoutMs = num("timeout", 5000);
 
-const hex = (b) => [...b].map((x) => x.toString(16).padStart(2, "0")).join("");
-const fromHex = (s) => new Uint8Array(s.match(/.{1,2}/g)?.map((h) => parseInt(h, 16)) ?? []);
+const hex = toHex; // toHex/fromHex come from the host build (node.js) — one hex pair, not a re-decl
 const now = () => performance.now();
 const MB = 1024 * 1024;
 const mbs = (bytes, ms) => (bytes / MB / (ms / 1000)).toFixed(1);

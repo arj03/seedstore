@@ -97,7 +97,7 @@
 </div>
 <div class="row muted">
   cohort bundle author:
-  <input id="author" class="mono" type="text" style="flex:1;min-width:20ch" placeholder="auto-read from ./manifest.bundle — override with a 64-hex pubkey, or blank for a browser-only cohort" />
+  <input id="author" class="mono" type="text" style="width:28rem;max-width:100%" placeholder="auto-read from ./manifest.bundle — override with a 64-hex pubkey, or blank for a browser-only cohort" />
 </div>
 <p class="muted" style="margin:.2rem 0 0">
   Descriptor signatures are <strong>scoped to the deployment's bundle author</strong> (README §16): a holder running a
@@ -169,6 +169,11 @@ import { WsNetwork } from "seedkernel-wasm/net-ws";
 //   ?conns=<N> parallel conns/holder (WS only) · ?block=<KiB> block size.
 const params = new URLSearchParams(location.search);
 const qNum = (k, d) => { const v = Number(params.get(k)); return Number.isFinite(v) && v > 0 ? v : d; };
+// Block size is per-transport here, deliberately NOT core.ts's PRODUCTION_BLOCK_SIZE (256
+// KiB, what the signed bundle uses): WS carries far bigger frames so 512 KiB measures ~8%
+// faster PUT / ~25% faster GET (fewer chunks, half the per-block CPU), while WebRTC must
+// stay under its ~64 KiB channel (32 KiB). The bundle's holders don't care what block size
+// a client PUTs at — blockSize rides in the manifest, so GET-decode always agrees.
 const blockSizeFor = (mode) => qNum("block", mode === "ws" ? 512 : 32) * 1024;
 // Per-transport batch cap: WS frames hold 16 MB, but this must MATCH the holders'
 // maxMessageBytes (the deployed bundles keep the 1 MiB default) — a holder serves at
@@ -189,7 +194,9 @@ const REQUIRED_PEERS = CONFIG.k + CONFIG.m; // distinct holders a PUT needs
 // — a bigger window is a first-order PUT/GET win on the fat WS/TCP path. Peak guest heap
 // ≈ 3× window at RS(1,1), so the heap must stay well above it (24 MiB window ⇒ ~72 MiB,
 // ≪ the 256 MiB default). WebRTC's ~48 KiB frames make it round-trip-bound anyway, so a
-// smaller window there keeps the per-window frame count sane.
+// smaller window there keeps the per-window frame count sane. NB `?window=0` falls back to
+// this page default (qNum treats ≤0 as unset) — unlike p2p-cli's `--wtarget 0`, which means
+// "use the guest's built-in 4 MiB fallback"; same knob, different zero across the two tools.
 const windowTargetBytesFor = (mode) => qNum("window", mode === "ws" ? 24 : 8) * 1024 * 1024;
 const realmMemoryBytesFor = () => qNum("heap", 256) * 1024 * 1024;
 // Parallel TCP flows per holder — WS only (WebRTC is one data channel). Stripes bulk
@@ -386,6 +393,9 @@ function armDialWatchdog() {
 function lockTransportChoice() {
   for (const r of document.querySelectorAll('input[name="transport"]')) r.disabled = true;
   $("relay").disabled = true; $("room").disabled = true;
+  // The signing scope is fixed when the node BOOTS, so editing the author after connecting
+  // does nothing — disable it too so the field can't lie about what scope this node uses.
+  $("author").disabled = true;
 }
 
 $("store").onclick = async () => {
@@ -412,7 +422,7 @@ $("store").onclick = async () => {
     // declined (full/quota) or the room has fewer than k+m holders. Surface it loudly
     // rather than reporting a clean success (holders full? see the note above).
     if (r.replicasLanded < r.replicasIntended) {
-      log(`  ⚠️ UNDER-REPLICATED: only ${r.replicasLanded}/${r.replicasIntended} replicas landed — a holder is full/declining or the room has fewer than ${REQUIRED_PEERS} holders. Readable now, but below the configured redundancy.`);
+      log(`  ⚠️ UNDER-REPLICATED: only ${r.replicasLanded}/${r.replicasIntended} replicas landed — a holder is full/declining or the room has fewer holders than the intended replica count (k+m for an RS file, m+1 for a small one). Readable now, but below the configured redundancy.`);
     }
     log(`  token ready — paste it into another tab's GET box.`);
   } catch (e) {

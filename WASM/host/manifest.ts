@@ -17,7 +17,14 @@ import {
   encodeDescriptorCore, parseSignedDescriptor, type Descriptor, type SignedDescriptor,
 } from "./manifest-core.js";
 import { concatBytes } from "./util.js";
-import { guestSignScope } from "seedkernel-wasm/cap-bridge";
+import { guestSignScope, guestSignPrefix } from "seedkernel-wasm/cap-bridge";
+
+// The scoped-signature prefix `DOMAIN_guest ‖ scope` (README §16) comes straight from the
+// kernel — the SAME function the SIGN op prepends and the shell injects — so the host
+// mirror and the guest verify path share one definition of the kernel's domain tag. It
+// used to be re-derived here from a hand-copied "seedkernel-guest-sig-v1\0"; if the kernel
+// revved that string the mirror would silently diverge and every descriptor verify fail.
+export { guestSignPrefix };
 
 export {
   BLOCK_ID_LEN, ENC_XCHACHA20,
@@ -38,11 +45,6 @@ export type { Descriptor, SignedDescriptor, Manifest } from "./manifest-core.js"
  *  scope when they share a bundle author). */
 export const STORAGE_APP = "seedstore";
 
-/** The kernel's guest-signing domain tag (seedkernel cap-bridge `DOMAIN_GUEST`). It is
- *  not exported from the kernel, so it is mirrored here; it must track the kernel's
- *  string exactly, since the SIGN op prepends it and the verify path reconstructs it. */
-const DOMAIN_GUEST_SIG = new TextEncoder().encode("seedkernel-guest-sig-v1\0");
-
 /** The signing scope `author_pk ‖ app_len u8 ‖ app` for a storage deployment
  *  (seedkernel `guestSignScope`). The bundle path scopes to the admitted manifest's
  *  `(author, app)`; a host-side StorageNode with no bundle scopes to `(zero, app)`. */
@@ -56,16 +58,12 @@ export function storageSignScope(authorPk: Uint8Array): Uint8Array {
  *  shell-run / holder-guest cross-path tests) overrides this with `storageSignScope`. */
 export const STORAGE_SIGN_SCOPE = storageSignScope(new Uint8Array(32));
 
-/** The full scoped-signature prefix `DOMAIN_guest ‖ scope`. Injected into the guest
- *  (`APP.signPrefix`), which prepends it to a descriptor core before CAP_VERIFY; the
- *  kernel's SIGN op prepends the identical bytes, so the two paths agree by construction. */
-export function guestSignPrefix(scope: Uint8Array): Uint8Array {
-  return concatBytes([DOMAIN_GUEST_SIG, scope]);
-}
-
-/** The scoped preimage the author signs / a verifier checks: `DOMAIN_guest ‖ scope ‖ core`. */
+/** The scoped preimage the author signs / a verifier checks: `DOMAIN_guest ‖ scope ‖ core`.
+ *  `guestSignPrefix(scope)` is `DOMAIN_guest ‖ scope`, from the kernel, so this reconstructs
+ *  the byte-identical bytes the kernel's SIGN op prepends — the injected guest verify prefix
+ *  (`APP.signPrefix`) is the same value. */
 function signPreimage(scope: Uint8Array, core: Uint8Array): Uint8Array {
-  return concatBytes([DOMAIN_GUEST_SIG, scope, core]);
+  return concatBytes([guestSignPrefix(scope), core]);
 }
 
 /** A signed chunk descriptor as stored alongside every block and listed in the

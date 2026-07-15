@@ -64,10 +64,19 @@ export interface StorageConfig {
  *  sync. */
 export const DEFAULT_FANOUT_WINDOW = 16;
 
+/** The block size a real DEPLOYMENT uses — the single value the signed bundle and the
+ *  CLI derive their geometry from, so "production geometry" is one named constant, not a
+ *  magic number copied per site. 256 KiB keeps a k=2 codec request at the 512 KiB the
+ *  deployed codec's scratch is proven on, and one block + framing well inside the default
+ *  maxMessageBytes (the serveFetch response bound). The browser demo deliberately picks a
+ *  per-transport size instead (bigger on WS, tiny on WebRTC's ~64 KiB channel), so it does
+ *  NOT consume this — but see it referenced there for why those diverge. */
+export const PRODUCTION_BLOCK_SIZE = 256 * 1024;
+
 /** NB the bare blockSize default is TEST-SCALE — 256 bytes, so unit tests exercise
  *  multi-block chunking on tiny payloads. Anything producing a deployed config (the
- *  bundle producer, a demo page) must pass a real block size (e.g. 256 KiB); baking
- *  this default into a deployment chunks a 10 MB file into ~41k blocks. */
+ *  bundle producer, a demo page) must pass a real block size (PRODUCTION_BLOCK_SIZE);
+ *  baking this default into a deployment chunks a 10 MB file into ~41k blocks. */
 export function defaultConfig(k = 2, m = 2, blockSize = 256): StorageConfig {
   // Replication beats padding a tiny file while d < (k+m)/(m+1) (§4.1) — e.g.
   // 2 blocks at the default RS(10,6). The largest such d is ceil((k+m)/(m+1))-1.

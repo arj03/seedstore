@@ -549,13 +549,18 @@ function fetchBlock(id) {
 // policy, so they can diverge — and a block past its cap comes back absent even
 // though the holder advertised it moments ago. On the wire that is indistinguishable
 // from a genuine miss, but the SHAPE tells them apart: serveFetch fills a response
-// front-to-back, so an absent TAIL after at least one served block is (possibly) the
-// cap, while an all-absent response is terminal (lost blocks, or a cap too small for
-// even one — serveFetch always serves the first present block, so retrying can't
-// help). Re-request the unanswered tail as a fresh task and report only the answered
-// prefix, so `apply` (and the tried/§8-miss bookkeeping built on it) only ever sees
-// final verdicts. Each re-request shrinks the tail by ≥1, so this terminates; without
-// it, a cap mismatch permanently failed a GET whose every block was intact.
+// front-to-back and STOPS at the first over-cap block (it breaks), so every block absent
+// for the cap forms a contiguous TAIL — an absent tail after at least one served block is
+// (possibly) the cap, while an *interior* absent is a genuine miss and an all-absent
+// response is terminal (lost blocks, or a cap too small for even one — serveFetch always
+// serves the first present block, so retrying can't help). Re-request the unanswered tail
+// as a fresh task and report only the answered prefix, so `apply` (and the tried/§8-miss
+// bookkeeping built on it) only ever sees final verdicts. Each re-request shrinks the tail
+// by ≥1, so this terminates; without it, a cap mismatch permanently failed a GET whose
+// every block was intact. The cost of the tail heuristic: a genuinely-missing trailing
+// block is re-requested once (indistinguishable from truncation on the wire) before being
+// ruled a miss, so it takes one extra FETCH round trip that the old all-or-nothing verdict
+// reached in one — a fair trade for never failing a recoverable GET.
 function runFetchTasks(byPeer, maxIds, apply) {
   const me = myPeer();
   if (byPeer.has(me)) {
@@ -1212,6 +1217,14 @@ function acceptStore(blockId, descriptor, bytes) {
 // operator policy, so they can diverge) degrades to one block per round trip instead
 // of an absent-forever block it verifiably holds. The DoS bound stays: one block +
 // cap per request. A per-id memo keeps a repeated id from costing a fresh storeGet.
+//
+// STOP at the first over-cap block (break, not continue): don't skip it to squeeze a
+// smaller later one in. That is what makes runFetchTasks' front-to-back invariant true
+// BY CONSTRUCTION rather than by the incidental fact that one FETCH batch's ids share a
+// blockSize — every block absent for the cap lands in a contiguous TAIL, exactly the
+// shape the reader re-requests, so an *interior* absent unambiguously means a genuine
+// miss (a §8 lost block), never truncation. With uniform block sizes break and continue
+// are behaviour-identical; break just removes the size assumption.
 function serveFetch(ids) {
   const cap = maxMsgBytes();
   const out = new Array(ids.length).fill(null);
@@ -1222,9 +1235,9 @@ function serveFetch(ids) {
     const h = toHex(ids[i]);
     let bytes = seen.get(h);
     if (bytes === undefined) { const sb = storeGet(ids[i]); bytes = sb ? sb.bytes : null; seen.set(h, bytes); }
-    if (!bytes) continue;
+    if (!bytes) continue; // genuinely absent block — leave it null and keep serving
     const framed = bytes.length + FETCH_FRAME;
-    if (servedAny && used + framed > cap) continue; // over the byte cap → serve as absent (reader re-requests)
+    if (servedAny && used + framed > cap) break; // over the byte cap → stop, leaving a contiguous absent tail the reader re-requests
     out[i] = bytes;
     used += framed;
     servedAny = true;
