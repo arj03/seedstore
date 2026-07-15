@@ -353,10 +353,11 @@ async function boot() {
 }
 
 // First click boots the node + network; in WebSocket mode every later click re-dials the
-// (still-editable) peers box. net.connect() is idempotent — already-linked or in-flight
-// peers are no-ops, and a dial that failed was cleared from the dialing set, so only the
-// dead peers are retried. This is the recovery path: a dial that can't reach a node no
-// longer wedges the page behind a permanently-disabled Connect button.
+// (still-editable) peers box. net.connect() is an idempotent top-up — a fully-linked peer
+// is a no-op, a peer that lost some of its parallel flows re-opens just the missing ones,
+// and a fully-dead peer is redialed. This is the recovery path: a dial that can't reach a
+// node (or a flow that dropped mid-session) no longer wedges the page behind a
+// permanently-disabled Connect button or a silently-degraded connection.
 $("connect").onclick = async () => {
   if (!node) { await boot(); return; }
   if (transport() === "ws") dialWs();

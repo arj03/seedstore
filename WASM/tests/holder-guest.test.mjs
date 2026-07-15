@@ -163,7 +163,13 @@ export async function run(t) {
       }
     }
   } finally {
-    for (const d of tmpDirs) rmSync(d, { recursive: true, force: true });
+    for (const d of tmpDirs) {
+      rmSync(d, { recursive: true, force: true });
+      // boot() writes the freshness high-water mark as a sibling of each shell's data dir
+      // (outside the guest-writable dir), so it survives the dir's rmSync. Remove it too or
+      // every run orphans a *.freshness.json in the OS tmpdir. Harmless no-op for bundleDir.
+      rmSync(`${d}.freshness.json`, { force: true });
+    }
   }
 }
 

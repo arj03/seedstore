@@ -100,6 +100,10 @@ export async function run(t) {
       holders.forEach((h) => h.close());
       rmSync(bundleDir, { recursive: true, force: true });
       rmSync(shellDir, { recursive: true, force: true });
+      // boot() writes the freshness high-water mark as a sibling of the data dir
+      // (deliberately outside the guest-writable dir), so it survives the dir's rmSync —
+      // remove it too or every run orphans a *.freshness.json in the OS tmpdir.
+      rmSync(`${shellDir}.freshness.json`, { force: true });
     }
   }
 
@@ -132,6 +136,7 @@ export async function run(t) {
       rmSync(hiDir, { recursive: true, force: true });
       rmSync(loDir, { recursive: true, force: true });
       rmSync(shellDir, { recursive: true, force: true });
+      rmSync(`${shellDir}.freshness.json`, { force: true }); // sibling of the data dir — see above
     }
   }
 }
