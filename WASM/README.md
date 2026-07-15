@@ -54,52 +54,31 @@ Hashing, the length-preserving stream cipher (`crypto_stream_xchacha20_xor`),
 and signatures are **reused** from the runtime's libsodium (the sumo build, which
 exposes the raw stream cipher) — never bundled — exactly as §16 requires; the
 guest reaches them as generic `cap-bridge` primitives and builds its own
-descriptor envelope and nonce convention on top. (Signatures are **scoped**: the
-kernel's `SIGN` op binds every guest signature to `DOMAIN_guest ‖ (author, app)`,
-so a descriptor signed by one app can never validate in another — see the
-signing-scope section below.)
+descriptor envelope and nonce convention on top of the scoped `SIGN`
+(seedkernel §13.2) — how storage prefixes and checks it is below.
 
-**Why two realms.** The initiator orchestration is inherently async (it fans out
-over `net` and awaits), so it runs in an Asyncify QuickJS realm where a host call
-*looks* synchronous while the host round-trips. The holder side, by contrast,
-answers purely from local `fs` + crypto and never round-trips — so it runs in a
-separate **synchronous** (non-Asyncify) realm, which lets it respond to an
-incoming request *while the node's own initiator realm is parked mid-`await`* (two
-async realms can't overlap host calls; a sync one, a different WASM instance,
-can). `StorageNode` (`host/storage-node.ts`) keeps a host-side copy of both sides
-as the reference/parity path — the same role the host-side classes play in the
-tests — but the **shipped** node runs the confined guest.
+**The two realms.** Storage uses both confinement realms seedkernel provides
+(§13.3): the initiator (PUT/GET/repair) is async — it fans out over `net` and
+awaits — so it runs in the Asyncify realm, while the holder side answers from
+local `fs` + crypto without yielding, so it runs in the sync realm and can serve
+a request *while this node's own initiator realm is parked mid-`await`*.
+`StorageNode` (`host/storage-node.ts`) keeps a host-side copy of both sides as
+the reference/parity path — the role the host-side classes play in the tests —
+but the **shipped** node runs the confined guest.
 
 ## Signing scope, existence, and bundle versioning
 
-A handful of kernel contracts shape how the guest signs, checks existence, and
-versions its bundle; the spec-side story is in the
-[seed store spec](../README.md) (§16, *"The signing call exists — but it is
-scoped"*). This section is the code map. The runtime pieces live in
-**seedkernel** and this repo consumes them through the `seedkernel-wasm`
-dependency; the storage work is confined to the guest, the host parity mirror,
-and the bundle producer.
-
-**What the runtime provides (seedkernel, consumed here):**
-
-- **Scoped `SIGN`** (`cap-bridge`): the op signs `DOMAIN_guest ‖ scope ‖ msg`,
-  with `scope = author_pk ‖ app_len u8 ‖ app` derived from the *admitted bundle
-  manifest*, never from the caller (`guestSignScope`). `VERIFY` stays raw —
-  verification is not an oracle.
-- **Contiguous op table**: there is no `FS_HAS` — existence is `FS_SIZE ≥ 0` —
-  and the ops are contiguous 1–18, grouped by domain (`crypto` 1–6, `net` 7–10,
-  `fs` 11–16, `module` 17, `clock` 18). The guest preamble and the bridge switch
-  are generated together, so nothing in this repo hard-codes a number.
-- **`./fs`**: the iface is `get`/`put`/`size`/`list`/`delete`/`stat` — no `has`.
-- **Transport**: `PeerLink` is a real AKE (ephemeral X25519 in HELLO, AUTH signs
-  the full transcript, post-AUTH frames are forward-secret ChaCha20-Poly1305
-  records) and there is no separate `bulk` frame kind — req/res is the only
-  plane, which is exactly how this layer already moves blocks (see Scope below).
-- **Bundle freshness**: `loadBundle` enforces a monotonic integer manifest
-  `version` per `(author, app)` against a persisted high-water mark, refusing a
-  downgrade.
-
-**How the guest and host build on them:**
+Three seedkernel runtime contracts reach into the storage code, and each has a
+seedstore-side counterpart worth pinning down. The contracts themselves are
+documented on the runtime side — the **scoped `SIGN`** op (a guest signature is
+over `DOMAIN_guest ‖ scope ‖ msg`, the `scope` host-derived from the admitted
+manifest; `VERIFY` stays raw — seedkernel §13.2), **existence-by-size** (no
+`FS_HAS`; a key exists iff `FS_SIZE ≥ 0`, and `./fs` is
+`get`/`put`/`size`/`list`/`delete`/`stat` — seedkernel §13.1–§13.2), and the
+**monotonic bundle `version`** that refuses a downgrade (seedkernel §13.4). The
+spec-side story is in the [seed store spec](../README.md) (§16). This section is
+the code map for where each lands in this repo — the guest, the host parity
+mirror, and the bundle producer:
 
 1. **Signatures are scoped on both paths**
    (`host/tier2-guest.orchestration.js`). The descriptor envelope stays
@@ -113,25 +92,21 @@ and the bundle producer.
    injects `signPrefix` into the `const APP` block from
    `guestSignPrefix(signScope)` — the shell derives the scope from the admitted
    manifest, an in-process `StorageNode` from `STORAGE_SIGN_SCOPE` (zero author,
-   app). One consequence (kernel §13.2): rotating the bundle author key changes
-   the scope and orphans previously signed descriptors, so a deployment that
-   anticipates handover records the scope inside its signed formats.
+   app).
 2. **The descriptor's leading byte is the signed-format tag** (spec §16). The
    descriptor core leads with `TAG_DESCRIPTOR = 0x01` (`manifest-core.ts`), and
    the Part II signed formats reserve their own values before they exist
    (`TAG_TOMBSTONE = 0x02`, `TAG_HEAD = 0x03`). The tag sits inside `core`, so
    it is already under the signature and inside the scoped preimage.
 3. **`storeHas` answers from `FS_SIZE ≥ 0`**
-   (`host/tier2-guest.orchestration.js`): there is no `CAP_FS_HAS` call — the
-   raw `CAP_FS_SIZE` returns `0xFFFFFFFF` for an absent key, which `storeHas`
-   distinguishes from present-but-empty (the `fsSize` seam collapses the sentinel
-   to 0 for sizing). Same move host-side: `store-fs.ts` asks `fs.size(...) >= 0`
-   (the seedstore `BlobStore.has` iface itself is unchanged — only its backing
-   call differs).
+   (`host/tier2-guest.orchestration.js`): the `fsSize` seam distinguishes absent
+   (the bridge's −1 sentinel) from present-but-empty, so there is no `has` call
+   to make. Same move host-side — `store-fs.ts` asks `fs.size(...) >= 0` — with
+   the seedstore `BlobStore.has` iface itself unchanged, only its backing call.
 4. **The bundle carries an integer, monotonic `version`**
-   (`scripts/storage-bundle.mjs`): an integer, guarded by `Number.isInteger`,
-   bumped on every publish — so the shell refuses a stale bundle directory as a
-   downgrade instead of silently reloading it.
+   (`scripts/storage-bundle.mjs`): guarded by `Number.isInteger` and bumped on
+   every publish, so the shell's freshness check (§13.4) has a real high-water
+   mark to enforce.
 5. **The tests that pin this**: `manifest` (tamper-evidence over the tagged,
    scoped preimage), `tier2-port` / `holder-guest` (parity across the scoped
    sign/verify paths), `shell-run` (bundle version freshness — a downgrade is
@@ -175,8 +150,9 @@ npm run build:bundle      # → ./bundle/ (manifest + codec/reputation wasm + in
                           #   signed by ./seedstore-author.key (minted on first run; keep it secret)
 ```
 
-The shell admits content only from authors named in a policy file. Take the
-author public key it printed (`author …`) and allow it:
+The shell admits content only from authors named in its policy file
+(seedkernel §13.5). Take the author public key it printed (`author …`) and allow
+it:
 
 ```sh
 echo '{ "authors": ["<author-pubkey-hex>"] }' > allowed-keys.json
@@ -219,10 +195,10 @@ node "$SHELL" --policy allowed-keys.json --bundle ./bundle --dir ./client \
 
 `--get` is `<manifest-id>:<key>` — the pair PUT printed; without `--out` the bytes
 go to stdout. The manifest-id locates the file; the key `K` decrypts it (lose `K`
-and the holders keep only permanent noise, §11). Useful shell flags: `--ws-listen
-host:port` (a browser edge over WebSocket), `--peers <pk>@host:port,…` (the cohort),
-`--timeout ms`, `--dir` (the `fs.*` backend directory), `--key` (the node's
-persisted kernel keypair). A node with no listener is a pure client; one with
+and the holders keep only permanent noise, §11). The shell flags themselves
+(`--listen`/`--ws-listen`/`--peers`/`--dir`/`--key`/`--timeout`) are the generic
+ones (seedkernel §13.8); `--put`, `--get`, and the storage bundle are what this
+node adds. A node with no listener is a pure client; one with
 `--listen`/`--ws-listen` keeps serving until Ctrl-C.
 
 > A self-contained single-file binary is `bun build --compile` of the shell
