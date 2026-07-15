@@ -219,25 +219,14 @@ function netSend(peer, type, payload) {
   const r = host.call(CAP_NET_SEND, concat([head, payload]));
   return r[0] === 1 ? r.slice(1) : null; // null = peer unreachable within the window
 }
-function netRequestMany(peers, type, payload) {
-  const head = new Uint8Array(5); head[0] = type; wU32(head, 1, peers.length);
-  const plen = new Uint8Array(4); wU32(plen, 0, payload.length);
-  const r = host.call(CAP_NET_REQUEST_MANY, concat([head, ...peers.map(fromHex), plen, payload]));
-  const out = []; let o = 0; const n = rU32(r, o); o += 4;
-  for (let i = 0; i < n; i++) {
-    const peer = toHex(r.slice(o, o + 32)); o += 32;
-    const ok = r[o] === 1; o += 1;
-    const len = rU32(r, o); o += 4;
-    out.push({ peer, ok, bytes: ok ? r.slice(o, o + len) : null }); o += ok ? len : 0;
-  }
-  return out;
-}
 // Per-peer fan-out (§6/§7): a DISTINCT request per peer, fanned out CONCURRENTLY by
-// the shared transport (CAP_NET_SEND_MANY = the general case of requestMany). This
-// is the one concurrency a confined sync guest can express — it issues one batched
-// cap per round and blocks; the host fans out; the guest never needs a Promise.all.
-// `requests` = [{ peer, type, payload }]; results align to input order, an
-// unreachable peer coming back `ok:false`/`bytes:null` (partial, never a throw).
+// the shared transport (CAP_NET_SEND_MANY). A broadcast of one shared payload to
+// many peers (disc.have/want) is just N identical entries — there is no separate
+// all-payloads-equal cap. This is the one concurrency a confined sync guest can
+// express — it issues one batched cap per round and blocks; the host fans out; the
+// guest never needs a Promise.all. `requests` = [{ peer, type, payload }]; results
+// align to input order, an unreachable peer coming back `ok:false`/`bytes:null`
+// (partial, never a throw).
 function netSendMany(requests) {
   const head = new Uint8Array(4); wU32(head, 0, requests.length);
   const parts = [head];
@@ -256,8 +245,9 @@ function netSendMany(requests) {
   return out;
 }
 // disc.have/want (§5.2): one round trip to the cohort; the host fans out in
-// parallel (net.requestMany) so the guest never needs a Promise.all. A node is
-// itself a holder of whatever its own store keeps (repair runs on holders).
+// parallel (net.sendMany — the same HAVE request broadcast to every holder as N
+// identical entries) so the guest never needs a Promise.all. A node is itself a
+// holder of whatever its own store keeps (repair runs on holders).
 function haveWant(ids) {
   const holders = new Map();
   for (const id of ids) holders.set(toHex(id), new Set());
@@ -270,7 +260,8 @@ function haveWant(ids) {
   // the per-slice masks — a holder accumulates across slices.
   const maxIds = Math.max(1, Math.floor((maxMsgBytes() - 4) / HAVE_ID_LEN));
   for (const slice of sliceN(ids, maxIds)) {
-    for (const res of netRequestMany(peers, MSG_HAVE, encodeHaveReq(slice))) {
+    const haveReq = encodeHaveReq(slice); // one shared request, broadcast to every peer
+    for (const res of netSendMany(peers.map((p) => ({ peer: p, type: MSG_HAVE, payload: haveReq })))) {
       if (!res.ok) continue;
       const held = res.bytes;
       for (let i = 0; i < slice.length && i < held.length; i++) {

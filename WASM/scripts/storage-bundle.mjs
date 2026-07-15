@@ -8,7 +8,9 @@
 // Two deliberate choices live here, once:
 //   • `caps` declares capability *domains* (cap-bridge CAP_DOMAINS keys), not op
 //     numbers. The shell expands them to the enforced op set + wires only the
-//     matching backends; `ops` is just the ABI catalog. Storage reaches all five.
+//     matching backends. Storage reaches all five. (There is no `ops` catalog in
+//     the manifest — the guest's ABI is the injected CAP_* preamble, not signed
+//     content; the grant is `caps`.)
 //   • `quota` is absent from the signed config. It is OPERATOR policy, supplied at
 //     boot (seedkernel ShellOptions.config), never baked into author-signed content.
 
@@ -17,7 +19,7 @@ import { join } from "node:path";
 
 import { CURRENT_VERSION } from "seedkernel-wasm";
 import { signManifest } from "seedkernel-wasm/bundle";
-import { CAP, guestSignScope } from "seedkernel-wasm/cap-bridge";
+import { guestSignScope } from "seedkernel-wasm/cap-bridge";
 import { storageNames } from "../build/host/names.js";
 import { defaultConfig, PRODUCTION_BLOCK_SIZE } from "../build/host/core.js";
 import { guestSignPrefix } from "../build/host/manifest.js";
@@ -56,16 +58,18 @@ export function writeStorageBundle({ dir, host, sodium, sk, pk, build, version =
   ];
   mkdirSync(dir, { recursive: true });
 
-  // The two pure handlers (§17): no declared caps. Each install is author-signed so
-  // the shell can dispatch it verbatim through its policy gate.
+  // The two pure handlers (§17). Each install is author-signed so the shell can
+  // dispatch it verbatim through its policy gate.
   let seq = 0;
   const modules = modSpecs.map((m) => {
     const wasm = new Uint8Array(readFileSync(join(build, m.file)));
-    const payload = host.encodeInstallPayload(++seq, m.kernelName, [], wasm);
+    const payload = host.encodeInstallPayload(++seq, m.kernelName, wasm);
     const install = host.wrapAndEncode(sk, pk, CURRENT_VERSION, installName, payload);
     writeFileSync(join(dir, m.file), wasm);
     writeFileSync(join(dir, `${m.name}.install`), install);
-    log(`  ${m.name}: install bytesHash ${toHex(host.genesisHash(payload))}`); // for policy.modules
+    // bytesHash = genesisHash(wasm) (§7.1) — the id a policy.modules allowlist matches
+    // (identical to the manifest module `hash` below).
+    log(`  ${m.name}: install bytesHash ${toHex(host.genesisHash(wasm))}`);
     return {
       name: m.name, file: m.file, hash: toHex(host.genesisHash(wasm)),
       install: `${m.name}.install`, kernelName: toHex(m.kernelName),
@@ -93,10 +97,8 @@ export function writeStorageBundle({ dir, host, sodium, sk, pk, build, version =
     version,
     modules,
     guest: { file: "tier2-guest.js", hash: toHex(host.genesisHash(new TextEncoder().encode(guestText))) },
-    // `ops` documents the seam ABI (the full catalog the guest was built against);
-    // the shell enforces via `caps`, not this.
-    ops: { ...CAP },
-    // The enforced capability grant (domains, not op numbers).
+    // The enforced capability grant (domains, not op numbers). The guest's op ABI
+    // is the CAP_* preamble the shell injects at load, not a signed catalog.
     caps: [...STORAGE_CAPS],
     // App constants the shell injects as `const APP = …`: the storage geometry + the
     // codec/reputation kernel names the guest module-calls. NB: no `quota` — that is

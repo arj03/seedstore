@@ -1,9 +1,9 @@
 // Build the seedstore app bundle (the runtime split): the signed
 // content a generic seedkernel-shell loads to *become* a storage node —
 // codec.wasm + reputation.wasm + tier2-guest.js + a signed manifest declaring the
-// op catalog and required caps. The shell verifies + governs + installs it; this
-// script is the offline producer that holds the author key. The bundle *content*
-// (modules/guest/ops/caps/config) is assembled in scripts/storage-bundle.mjs, the
+// required caps. The shell verifies + governs + installs it; this script is the
+// offline producer that holds the author key. The bundle *content*
+// (modules/guest/caps/config) is assembled in scripts/storage-bundle.mjs, the
 // one place the test fixture also uses, so the two can never drift.
 //
 //   node scripts/build-bundle.mjs            (writes ./bundle, signs with ./seedstore-author.key)
@@ -20,7 +20,6 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { loadKernelHost, loadSodium } from "seedkernel-wasm";
-import { CAP } from "seedkernel-wasm/cap-bridge";
 import { verifyManifest } from "seedkernel-wasm/bundle";
 import { writeStorageBundle } from "./storage-bundle.mjs";
 
@@ -90,4 +89,4 @@ writeFileSync(versionPath, `${manifest.version}\n`);
 
 console.log(`  author ${toHex(pk)}`);
 console.log(`  wrote ${out} (app ${manifest.app} v${manifest.version}, ${manifest.modules.length} modules, `
-  + `${Object.keys(CAP).length} ops, caps ${manifest.caps.join("+")})`);
+  + `caps ${manifest.caps.join("+")})`);

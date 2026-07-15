@@ -182,15 +182,12 @@ export class StorageNode {
       opts.kernelBytes as BufferSource, opts.bootstrapBytes as BufferSource, opts.sodium as never,
     );
     host.registerSignature(host.deriveBootstrapName("signature"));
-    host.registerInstaller(
-      host.deriveBootstrapName("install"),
-      host.deriveBootstrapName("installer.lookup"),
-      host.deriveBootstrapName("installer.caps_of"),
-    );
-    // Single-deployment reference posture: accept audited handler bytes and
-    // acknowledge their declared caps. A real deployment narrows this to a
-    // content-hash allowlist + closed author set (§19).
-    host.setApproveInstall(referencePolicy(host, () => true, () => true));
+    host.registerInstaller(host.deriveBootstrapName("install"));
+    // Single-deployment reference posture: accept audited handler bytes from any
+    // author. A real deployment narrows this to a content-hash allowlist + closed
+    // author set (§19). Capabilities are no longer install-declared — the JS
+    // sandbox is the confinement, so the policy governs WHO may bind a name only.
+    host.setApproveInstall(referencePolicy(host, () => true));
 
     const identity = opts.identity ?? (() => {
       const kp = opts.sodium.crypto_sign_keypair();
@@ -507,7 +504,7 @@ export class StorageNode {
 
   private installOne(name: Uint8Array, wasm: Uint8Array): void {
     const seq = ++this.installSeq;
-    const payload = this.host.encodeInstallPayload(seq, name, [], wasm);
+    const payload = this.host.encodeInstallPayload(seq, name, wasm);
     this.host.dispatch(this.host.wrapAndEncode(
       this.identity.privateKey, this.identity.publicKey, CURRENT_VERSION, this.host.deriveBootstrapName("install"), payload,
     ));

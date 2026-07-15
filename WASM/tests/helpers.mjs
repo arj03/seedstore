@@ -32,8 +32,8 @@ export function newKey() {
 }
 
 /** A KernelHost with signature + installer + an allow-all reference policy
- *  (first install + capability acknowledgement both granted) — the trusted
- *  single-deployment posture of a reference node. */
+ *  (any author may bind a name) — the trusted single-deployment posture of a
+ *  reference node. */
 export async function loadHost() {
   await sodium.ready;
   const kernel = readFileSync(paths.kernel);
@@ -41,11 +41,9 @@ export async function loadHost() {
   const host = await KernelHost.load(kernel, boot, sodium);
   const signatureName = host.deriveBootstrapName("signature");
   const installName = host.deriveBootstrapName("install");
-  const lookupName = host.deriveBootstrapName("installer.lookup");
-  const capsOfName = host.deriveBootstrapName("installer.caps_of");
   host.registerSignature(signatureName);
-  host.registerInstaller(installName, lookupName, capsOfName);
-  host.setApproveInstall(referencePolicy(host, () => true, () => true));
+  host.registerInstaller(installName);
+  host.setApproveInstall(referencePolicy(host, () => true));
   return { host, installName };
 }
 
