@@ -2,8 +2,9 @@
 // the offline producer (scripts/build-bundle.mjs) and the test fixture
 // (tests/bundle-fixture.mjs) so the two can never drift (the `caps` field used to).
 // Given a kernel host + author key + the build dir, it writes the whole bundle
-// directory: each module's wasm + its author-signed install envelope, the guest,
-// and the signed manifest.
+// directory: each module's wasm, the guest, and the signed manifest. The manifest
+// commits to every module's genesisHash, so the shell installs the verified bytes
+// directly under the declared kernel name (seedkernel §13.4).
 //
 // Two deliberate choices live here, once:
 //   • `caps` declares capability *domains* (cap-bridge CAP_DOMAINS keys), not op
@@ -17,7 +18,6 @@
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 
-import { CURRENT_VERSION } from "seedkernel-wasm";
 import { signManifest } from "seedkernel-wasm/bundle";
 import { guestSignScope } from "seedkernel-wasm/cap-bridge";
 import { storageNames } from "../build/host/names.js";
@@ -40,7 +40,7 @@ const STORAGE_CAPS = ["crypto", "net", "fs", "module", "clock"];
  * @param {string} o.dir      output directory for the bundle
  * @param {any}    o.host     a loaded KernelHost with the signature handler registered
  * @param {any}    o.sodium   loaded libsodium
- * @param {Uint8Array} o.sk   author secret key (signs the manifest + installs)
+ * @param {Uint8Array} o.sk   author secret key (signs the manifest)
  * @param {Uint8Array} o.pk   author public key
  * @param {string} o.build    seedstore build/ dir (holds kernel/codec wasm + staged guest)
  * @param {number} [o.version] monotonic-per-(author,app) freshness mark (README §13.4);
@@ -51,29 +51,24 @@ const STORAGE_CAPS = ["crypto", "net", "fs", "module", "clock"];
 export function writeStorageBundle({ dir, host, sodium, sk, pk, build, version = 1, log = () => {} }) {
   if (!Number.isInteger(version)) throw new Error("writeStorageBundle: version must be an integer");
   const names = storageNames(host);
-  const installName = host.deriveBootstrapName("install");
   const modSpecs = [
     { name: "codec", file: "codec.wasm", kernelName: names.codec },
     { name: "reputation", file: "reputation.wasm", kernelName: names.reputation },
   ];
   mkdirSync(dir, { recursive: true });
 
-  // The two pure handlers (§17). Each install is author-signed so the shell can
-  // dispatch it verbatim through its policy gate.
-  let seq = 0;
+  // The two pure handlers (§17). The manifest commits to each module's genesisHash;
+  // the shell verifies the bytes against it and installs them directly under
+  // `kernelName`, re-checking author + module hash under the same policy gate
+  // (seedkernel §13.4).
   const modules = modSpecs.map((m) => {
     const wasm = new Uint8Array(readFileSync(join(build, m.file)));
-    const payload = host.encodeInstallPayload(++seq, m.kernelName, wasm);
-    const install = host.wrapAndEncode(sk, pk, CURRENT_VERSION, installName, payload);
     writeFileSync(join(dir, m.file), wasm);
-    writeFileSync(join(dir, `${m.name}.install`), install);
-    // bytesHash = genesisHash(wasm) (§7.1) — the id a policy.modules allowlist matches
-    // (identical to the manifest module `hash` below).
-    log(`  ${m.name}: install bytesHash ${toHex(host.genesisHash(wasm))}`);
-    return {
-      name: m.name, file: m.file, hash: toHex(host.genesisHash(wasm)),
-      install: `${m.name}.install`, kernelName: toHex(m.kernelName),
-    };
+    // hash = genesisHash(wasm): the `bytes_hash` a policy.modules allowlist matches
+    // (seedkernel §7.1) and the manifest module `hash` the loader checks the file against.
+    const hash = toHex(host.genesisHash(wasm));
+    log(`  ${m.name}: bytesHash ${hash}`);
+    return { name: m.name, file: m.file, hash, kernelName: toHex(m.kernelName) };
   });
 
   // The zero-authority orchestration guest, shipped *minified* (the shell injects

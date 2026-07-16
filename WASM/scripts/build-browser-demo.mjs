@@ -170,8 +170,8 @@ for (const [pkg, sub, dest, files, allMjs] of VENDOR) {
 // bytes) to auto-derive the cohort's signing scope, so a browser joining a cohort of
 // bundle-running holders (seedloaders) matches their author scope without the user
 // pasting a key. Absent → the page falls back to the zero-author default. Only the
-// manifest is staged (32-byte author header + JSON); the *.wasm/*.install payloads
-// stay on the holders — the browser needs the author, not the bundle contents.
+// manifest is staged (32-byte author header + JSON); the *.wasm payloads stay on
+// the holders — the browser needs the author, not the bundle contents.
 const bundleManifest = [join(root, "bundle", "manifest.bundle"), join(build, "bundle", "manifest.bundle")]
   .find((p) => existsSync(p));
 if (bundleManifest) await copy(bundleManifest, join(out, "manifest.bundle"));

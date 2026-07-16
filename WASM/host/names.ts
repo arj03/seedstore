@@ -4,7 +4,8 @@
 // on them without coordination.
 
 /** Anything that can derive a kernel name from a canonical string. KernelHost
- *  satisfies this via deriveBootstrapName (SHA-3-256 over a fixed prefix). */
+ *  satisfies this via deriveBootstrapName (literal-ASCII "seedkernel.bootstrap.v1:"
+ *  + canonical — plain, not genesis-hash-derived; seedkernel §5.1). */
 export interface NameDeriver {
   deriveBootstrapName(canonical: string): Uint8Array;
 }

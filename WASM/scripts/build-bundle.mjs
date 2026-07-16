@@ -11,7 +11,8 @@
 // Output (a directory the shell loads with --bundle):
 //   bundle/manifest.bundle   signed manifest envelope
 //   bundle/codec.wasm  bundle/reputation.wasm  bundle/tier2-guest.js
-//   bundle/codec.install  bundle/reputation.install   author-signed install envelopes
+// The signed manifest commits to each module's hash; the shell verifies the bytes
+// against it and installs them directly (seedkernel §13.4).
 //
 // Run `npm run build` first so build/ holds the compiled host + wasm.
 
@@ -32,8 +33,8 @@ const { toHex, fromHex } = await import(new URL("../build/host/util.js", import.
 
 const sodium = await loadSodium();
 const host = await loadKernelHost(join(build, "kernel.wasm"), join(build, "bootstrap.wasm"));
-// Needed to sign install envelopes (wrapAndEncode); this host is offline scaffolding.
-host.registerSignature(host.deriveBootstrapName("signature"));
+// This host is offline scaffolding — used only to derive the module kernel names and
+// hash the module bytes (genesisHash) the manifest commits to; it signs nothing.
 
 // Author identity: the key the bundle is signed with (and that installs are
 // signed with). A deployment's policy lists this public key as an allowed author.

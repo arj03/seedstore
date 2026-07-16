@@ -14,6 +14,5 @@ import { writeStorageBundle } from "../scripts/storage-bundle.mjs";
  *  @param version optional manifest freshness mark (README §13.4); defaults to 1. */
 export async function buildBundle(dir, author, sodium, build, version = 1) {
   const host = await loadKernelHost(join(build, "kernel.wasm"), join(build, "bootstrap.wasm"));
-  host.registerSignature(host.deriveBootstrapName("signature"));
   writeStorageBundle({ dir, host, sodium, sk: author.privateKey, pk: author.publicKey, build, version });
 }
