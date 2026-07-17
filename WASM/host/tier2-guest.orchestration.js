@@ -540,23 +540,15 @@ function fetchBlock(id) {
 // if the peer was unreachable (partial, never a §8 miss). Shared by the GET gather and
 // the repair audit, so both express the same window through one CAP_NET_SEND_MANY round.
 //
-// Truncation vs miss: a holder bounds one FETCH response by ITS maxMessageBytes
-// (serveFetch), which can be smaller than ours — the caps are per-node operator
-// policy, so they can diverge — and a block past its cap comes back absent even
-// though the holder advertised it moments ago. On the wire that is indistinguishable
-// from a genuine miss, but the SHAPE tells them apart: serveFetch fills a response
-// front-to-back and STOPS at the first over-cap block (it breaks), so every block absent
-// for the cap forms a contiguous TAIL — an absent tail after at least one served block is
-// (possibly) the cap, while an *interior* absent is a genuine miss and an all-absent
-// response is terminal (lost blocks, or a cap too small for even one — serveFetch always
-// serves the first present block, so retrying can't help). Re-request the unanswered tail
-// as a fresh task and report only the answered prefix, so `apply` (and the tried/§8-miss
-// bookkeeping built on it) only ever sees final verdicts. Each re-request shrinks the tail
-// by ≥1, so this terminates; without it, a cap mismatch permanently failed a GET whose
-// every block was intact. The cost of the tail heuristic: a genuinely-missing trailing
-// block is re-requested once (indistinguishable from truncation on the wire) before being
-// ruled a miss, so it takes one extra FETCH round trip that the old all-or-nothing verdict
-// reached in one — a fair trade for never failing a recoverable GET.
+// Truncation vs miss is a wire bit: a holder bounds one FETCH response by ITS
+// maxMessageBytes (serveFetch), which can be smaller than ours (the caps are per-node
+// operator policy, so they diverge). A block it has but couldn't fit comes back tagged
+// FETCH_UNANSWERED, distinct from an ABSENT genuine miss (§18). Re-request exactly the
+// unanswered blocks as a fresh task; report present/absent as final verdicts, so `apply`
+// (and the tried/§8-miss bookkeeping on it) only ever sees decided blocks. serveFetch
+// always serves the first present block, so each re-request round resolves ≥1 block, which
+// terminates. A genuine miss is ABSENT even past the cap, so it is ruled a miss in one
+// round trip.
 function runFetchTasks(byPeer, maxIds, apply) {
   const me = myPeer();
   if (byPeer.has(me)) {
@@ -565,7 +557,7 @@ function runFetchTasks(byPeer, maxIds, apply) {
       apply(me, slice, ids, fetchBatch(me, ids));
     }
   }
-  const tasks = []; // { peer, slice, ids } — re-requested tails are appended and picked up by later windows
+  const tasks = []; // { peer, slice, ids } — re-requested unanswered blocks are appended and picked up by later windows
   for (const peer of byPeer.keys()) {
     if (peer === me) continue;
     for (const slice of sliceN(byPeer.get(peer), maxIds)) tasks.push({ peer, slice, ids: slice.map(fromHex) });
@@ -578,16 +570,16 @@ function runFetchTasks(byPeer, maxIds, apply) {
       const { peer, slice, ids } = window[ri];
       if (!results[ri].ok) { apply(results[ri].peer, slice, ids, null); continue; } // unreachable
       const decoded = decodeFetchBatchRes(results[ri].bytes);
-      const blocks = ids.map((_, i) => decoded[i] || null);
-      let lastFound = -1;
-      for (let i = 0; i < blocks.length; i++) if (blocks[i]) lastFound = i;
-      if (lastFound >= 0 && lastFound < slice.length - 1) {
-        // Possibly-truncated tail — re-request it; report the answered prefix now.
-        tasks.push({ peer, slice: slice.slice(lastFound + 1), ids: ids.slice(lastFound + 1) });
-        apply(results[ri].peer, slice.slice(0, lastFound + 1), ids.slice(0, lastFound + 1), blocks.slice(0, lastFound + 1));
-      } else {
-        apply(results[ri].peer, slice, ids, blocks);
+      // Split the holder's answers over the ids we asked: FETCH_UNANSWERED blocks (no room
+      // under the holder's cap) re-queue as a fresh task; present/absent are final verdicts
+      // for `apply`. A short/malformed response leaves an id undefined, ruled absent.
+      const reSlice = [], reIds = [], aSlice = [], aIds = [], aBlocks = [];
+      for (let i = 0; i < slice.length; i++) {
+        if (decoded[i] === FETCH_UNANSWERED) { reSlice.push(slice[i]); reIds.push(ids[i]); }
+        else { aSlice.push(slice[i]); aIds.push(ids[i]); aBlocks.push(decoded[i] || null); }
       }
+      if (reSlice.length) tasks.push({ peer, slice: reSlice, ids: reIds });
+      if (aSlice.length) apply(results[ri].peer, aSlice, aIds, aBlocks);
     }
   }
 }
@@ -1219,24 +1211,16 @@ function acceptStore(blockId, descriptor, bytes) {
 // Serve a batched FETCH, but never emit much more than one message's worth of bytes:
 // an honest requester caps itself at fetchMaxIds() so its whole response fits, but a
 // hostile cohort member can name the same id thousands of times in one ~1 MB request
-// and make this sync holder concat thousands × blockSize into one reply. Cap the
-// served bytes at maxMsgBytes (accounting for the response framing) — blocks past the
-// cap come back absent, which the reader handles by re-requesting the unanswered tail
-// (runFetchTasks), so this is hardening with no protocol change. The FIRST present
-// block is served even when it alone exceeds the cap — the same single-over-cap-item
-// rule as batchBytes — so every request a holder can serve at all makes progress: a
-// requester whose config assumes a bigger cap than ours (the caps are per-node
-// operator policy, so they can diverge) degrades to one block per round trip instead
-// of an absent-forever block it verifiably holds. The DoS bound stays: one block +
-// cap per request. A per-id memo keeps a repeated id from costing a fresh storeGet.
-//
-// STOP at the first over-cap block (break, not continue): don't skip it to squeeze a
-// smaller later one in. That is what makes runFetchTasks' front-to-back invariant true
-// BY CONSTRUCTION rather than by the incidental fact that one FETCH batch's ids share a
-// blockSize — every block absent for the cap lands in a contiguous TAIL, exactly the
-// shape the reader re-requests, so an *interior* absent unambiguously means a genuine
-// miss (a §8 lost block), never truncation. With uniform block sizes break and continue
-// are behaviour-identical; break just removes the size assumption.
+// and make this sync holder concat thousands × blockSize into one reply. Cap the served
+// bytes at maxMsgBytes (accounting for the response framing). A block the holder has but
+// that won't fit under the cap is tagged FETCH_UNANSWERED, so the reader re-requests
+// exactly those (runFetchTasks); a block it doesn't have is ABSENT. The FIRST present
+// block is served even when it alone exceeds the cap — the same single-over-cap-item rule
+// as batchBytes — so every request a holder can serve at all makes progress: a requester
+// whose config assumes a bigger cap than ours (the caps are per-node operator policy, so
+// they can diverge) degrades to one block per round trip instead of an absent-forever
+// block it verifiably holds. The DoS bound stays: one block + cap per request. A per-id
+// memo keeps a repeated id from costing a fresh storeGet.
 function serveFetch(ids) {
   const cap = maxMsgBytes();
   const out = new Array(ids.length).fill(null);
@@ -1247,9 +1231,9 @@ function serveFetch(ids) {
     const h = toHex(ids[i]);
     let bytes = seen.get(h);
     if (bytes === undefined) { const sb = storeGet(ids[i]); bytes = sb ? sb.bytes : null; seen.set(h, bytes); }
-    if (!bytes) continue; // genuinely absent block — leave it null and keep serving
+    if (!bytes) continue; // genuine miss — leave it ABSENT (null)
     const framed = bytes.length + FETCH_FRAME;
-    if (servedAny && used + framed > cap) break; // over the byte cap → stop, leaving a contiguous absent tail the reader re-requests
+    if (servedAny && used + framed > cap) { out[i] = FETCH_UNANSWERED; continue; } // held but over the byte cap → mark for re-ask
     out[i] = bytes;
     used += framed;
     servedAny = true;

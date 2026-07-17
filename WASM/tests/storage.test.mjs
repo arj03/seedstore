@@ -6,7 +6,7 @@
 import {
   LoopbackNetwork, loadWasmBytes, loadSodium, createConnectedCohort, StorageNode,
 } from "../build/host/node.js";
-import { encodeFetchBatchReq, decodeFetchBatchRes } from "../build/host/protocol.js";
+import { encodeFetchBatchReq, decodeFetchBatchRes, FETCH_UNANSWERED } from "../build/host/protocol.js";
 import { parseSignedDescriptor } from "../build/host/manifest.js";
 import { toHex, fromHex, bytesEqual } from "../build/host/util.js";
 import { liveBlockCount } from "./helpers.mjs";
@@ -352,11 +352,11 @@ export async function run(t) {
   {
     // maxMessageBytes is per-node operator policy, so a cohort can diverge: this owner
     // sizes FETCH sub-batches for 4 blocks per response (cap 280 = 4·(64+5) + header),
-    // while its holders serve at most ~1 block per response (cap 100). Every block past
-    // a holder's cap comes back absent-on-the-wire despite being held — the failure that
-    // used to mark the holder as tried and permanently fail the GET. serveFetch must
-    // always serve the first present block, and the reader must re-request the
-    // unanswered tail (runFetchTasks), so the mismatch costs round trips, not data.
+    // while its holders serve at most ~1 block per response (cap 100). A block past a
+    // holder's cap comes back tagged FETCH_UNANSWERED — held, but no room this response —
+    // distinct from a genuine miss. serveFetch must always serve the first present block,
+    // and the reader must re-request exactly the unanswered blocks (runFetchTasks), so the
+    // mismatch costs round trips, not data.
     const net = new LoopbackNetwork();
     const ownerCfg = { k: 2, m: 2, blockSize: 64, maxMessageBytes: 280 };
     const holderCfg = { ...ownerCfg, maxMessageBytes: 100 };
@@ -373,18 +373,18 @@ export async function run(t) {
     t.ok(!put.replicated, "the file takes the RS path");
 
     // Pin the scenario at the wire: a raw 2-id FETCH to a holder that stores both
-    // must come back truncated — first block served (the progress guarantee), second
-    // absent (over the holder's 100-byte cap). If this ever stops truncating, the
-    // GET below no longer exercises the mismatch.
+    // must come back with the first block served (the progress guarantee) and the second
+    // marked UNANSWERED (over the holder's 100-byte cap, but held). If this ever stops
+    // hitting the cap, the GET below no longer exercises the mismatch.
     const holder = holders.find((h) => h.store.list().length >= 2);
     t.ok(!!holder, "a holder carries at least two blocks");
     const [idA, idB] = holder.store.list();
     const raw = await owner.transport.request(holder.peerId, 3 /* MSG_FETCH */, encodeFetchBatchReq([idA, idB]));
     const served = decodeFetchBatchRes(raw);
     t.ok(served[0] !== null && bytesEqual(served[0], holder.store.get(idA).bytes), "the first present block is always served, even near the cap");
-    t.eq(served[1], null, "the second block is truncated by the holder's smaller cap");
+    t.eq(served[1], FETCH_UNANSWERED, "the second block is marked UNANSWERED by the holder's smaller cap");
 
-    t.ok(bytesEqual(await owner.get(put.manifestId, put.key), data), "GET completes across the cap mismatch (tail re-requested, not marked tried)");
+    t.ok(bytesEqual(await owner.get(put.manifestId, put.key), data), "GET completes across the cap mismatch (unanswered block re-requested, not marked tried)");
     nodes.forEach((n) => n.close());
   }
 }

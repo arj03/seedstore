@@ -12,7 +12,7 @@ import {
   encodeOfferBatch, decodeOfferBatch, encodeOfferMask, decodeOfferMask,
   encodeStoreBatch, decodeStoreBatch, encodeStoreMask, decodeStoreMask,
   encodeFetchBatchReq, decodeFetchBatchReq, encodeFetchBatchRes, decodeFetchBatchRes,
-  MsgType,
+  FETCH_UNANSWERED, MsgType,
 } from "../build/host/protocol.js";
 import { signDescriptor } from "../build/host/manifest.js";
 import {
@@ -73,17 +73,20 @@ export async function run(t) {
     t.ok(decodeStoreMask(encodeStoreMask(mask)).every((v, i) => v === mask[i]), "stored-mask round-trips");
   }
 
-  t.group("FETCH batch req + res round-trip, present and absent blocks");
+  t.group("FETCH batch req + res round-trip, present / absent / unanswered blocks");
   {
-    const ids = [id(10), id(11), id(12)];
+    const ids = [id(10), id(11), id(12), id(13)];
     t.ok(decodeFetchBatchReq(encodeFetchBatchReq(ids)).every((x, i) => bytesEqual(x, ids[i])), "id list round-trips");
 
-    const blocks = [bytes(500, 1), null, bytes(32 * 1024, 2)]; // middle one not held
+    // A genuine miss (null → ABSENT), a held-but-capped block (FETCH_UNANSWERED, re-ask),
+    // and two present blocks — every found-byte state on one wire.
+    const blocks = [bytes(500, 1), null, FETCH_UNANSWERED, bytes(32 * 1024, 2)];
     const back = decodeFetchBatchRes(encodeFetchBatchRes(blocks));
-    t.eq(back.length, 3, "one entry per requested id");
+    t.eq(back.length, 4, "one entry per requested id");
     t.ok(back[0] && bytesEqual(back[0], blocks[0]), "present block round-trips");
     t.eq(back[1], null, "absent block decodes as null");
-    t.ok(back[2] && bytesEqual(back[2], blocks[2]), "second present (large) block round-trips");
+    t.eq(back[2], FETCH_UNANSWERED, "unanswered block decodes as the re-ask marker");
+    t.ok(back[3] && bytesEqual(back[3], blocks[3]), "second present (large) block round-trips");
   }
 
   // ── holder-side batched admission (StorageNode.admitBatch over the transport) ──

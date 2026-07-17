@@ -156,9 +156,26 @@ export function decodeStoreMask(buf: Uint8Array): boolean[] {
 
 // ── FETCH (block.fetch_req / block.data, §7, §8) ────────────────────────────
 // A batch names every block wanted from one peer; the response returns them in
-// request order, each tagged present/absent so the reader can fall back to
-// another holder for the misses. Each returned block is still hash-verified by
-// the reader (§4.2) — the holder is never trusted to have served the right bytes.
+// request order, each tagged by a found byte the reader acts on directly. Each
+// returned block is still hash-verified by the reader (§4.2) — the holder is
+// never trusted to have served the right bytes.
+//
+// The found byte has three states, so "didn't serve" and "couldn't fit" are distinct
+// on the wire and the reader need not infer cap-truncation from the response's shape:
+//   1 PRESENT     — the block follows as [len u32][bytes].
+//   0 ABSENT      — a genuine miss; the reader falls to another holder.
+//   2 UNANSWERED  — the holder has the block but its own per-response byte cap
+//                   (maxMessageBytes, per-node operator policy, so caps diverge) left
+//                   no room for it. The reader re-requests exactly these as a fresh
+//                   FETCH, never treating them as misses.
+export const FETCH_ABSENT = 0, FETCH_PRESENT = 1, FETCH_UNANSWERED = 2;
+
+/** One FETCH response entry: the block bytes if PRESENT, null for a genuine miss
+ *  (ABSENT), or the FETCH_UNANSWERED marker when the holder has the block but its
+ *  response cap left no room (re-ask). serveFetch produces these; runFetchTasks acts
+ *  on them. */
+export type FetchEntry = Uint8Array | null | typeof FETCH_UNANSWERED;
+
 export function encodeFetchBatchReq(ids: Uint8Array[]): Uint8Array {
   const head = new Uint8Array(4);
   writeU32BE(head, 0, ids.length);
@@ -172,28 +189,30 @@ export function decodeFetchBatchReq(buf: Uint8Array): Uint8Array[] {
   for (let i = 0; i < count; i++) out.push(buf.slice(4 + i * 32, 4 + (i + 1) * 32));
   return out;
 }
-export function encodeFetchBatchRes(blocks: (Uint8Array | null)[]): Uint8Array {
+export function encodeFetchBatchRes(blocks: FetchEntry[]): Uint8Array {
   const head = new Uint8Array(4);
   writeU32BE(head, 0, blocks.length);
   const parts: Uint8Array[] = [head];
   for (const b of blocks) {
-    if (!b) { parts.push(new Uint8Array([0])); continue; }
+    if (b === FETCH_UNANSWERED) { parts.push(new Uint8Array([FETCH_UNANSWERED])); continue; }
+    if (!b) { parts.push(new Uint8Array([FETCH_ABSENT])); continue; }
     const h = new Uint8Array(5);
-    h[0] = 1;
+    h[0] = FETCH_PRESENT;
     writeU32BE(h, 1, b.length);
     parts.push(h, b);
   }
   return concatBytes(parts);
 }
-export function decodeFetchBatchRes(buf: Uint8Array): (Uint8Array | null)[] {
+export function decodeFetchBatchRes(buf: Uint8Array): FetchEntry[] {
   const count = readU32BE(buf, 0);
   if (buf.length < 4) throw new Error("protocol: decodeFetchBatchRes truncated header");
-  const out: (Uint8Array | null)[] = [];
+  const out: FetchEntry[] = [];
   let o = 4;
   for (let i = 0; i < count; i++) {
     if (o >= buf.length) throw new Error("protocol: decodeFetchBatchRes truncated found");
     const found = buf[o]; o += 1;
-    if (found !== 1) { out.push(null); continue; }
+    if (found === FETCH_UNANSWERED) { out.push(FETCH_UNANSWERED); continue; }
+    if (found !== FETCH_PRESENT) { out.push(null); continue; }
     if (o + 4 > buf.length) throw new Error("protocol: decodeFetchBatchRes truncated len");
     const len = readU32BE(buf, o); o += 4;
     if (o + len > buf.length) throw new Error("protocol: decodeFetchBatchRes truncated block");
