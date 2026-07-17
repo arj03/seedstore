@@ -89,26 +89,26 @@ export const ENC_XCHACHA20 = 1;
 
 export interface Manifest {
   fileSize: number;
-  blockSize: number;
-  k: number;
-  m: number;
   encAlg: number;            // §4.4
   chunks: Uint8Array[];      // signed descriptor envelopes, in file order
 }
 
+// The manifest header does NOT carry (k, m, blockSize): the geometry is the chunk
+// descriptor's, which is self-describing (§4.1/§4.3) — GET and repair read k/m/blockSize
+// from each signed descriptor, never from a manifest field or deployment config that
+// could disagree. The manifest holds only what is genuinely per-file: the size, the
+// encryption algorithm, and the ordered list of chunk descriptors.
+
 /** The manifest plaintext (§4.3). It is then encrypted under K and replicated
  *  across cohort peers; manifest_id = genesis_hash(ciphertext). */
 export function encodeManifest(man: Manifest): Uint8Array {
-  const head = new Uint8Array(1 + 8 + 4 + 1 + 1 + 1 + 4);
+  const head = new Uint8Array(1 + 8 + 1 + 4);
   let o = 0;
   head[o++] = 1; // version
   // file_size as u64 BE
   const hi = Math.floor(man.fileSize / 0x100000000);
   writeU32BE(head, o, hi); o += 4;
   writeU32BE(head, o, man.fileSize >>> 0); o += 4;
-  writeU32BE(head, o, man.blockSize); o += 4;
-  head[o++] = man.k;
-  head[o++] = man.m;
   head[o++] = man.encAlg;
   writeU32BE(head, o, man.chunks.length); o += 4;
   const parts: Uint8Array[] = [head];
@@ -121,17 +121,14 @@ export function encodeManifest(man: Manifest): Uint8Array {
 }
 
 export function decodeManifest(buf: Uint8Array): Manifest {
-  if (buf.length < 19 || buf[0] !== 1) throw new Error("manifest: bad header");
+  if (buf.length < 14 || buf[0] !== 1) throw new Error("manifest: bad header");
   let o = 1;
   const hi = readU32BE(buf, o); o += 4;
   const lo = readU32BE(buf, o); o += 4;
   const fileSize = hi * 0x100000000 + lo;
-  const blockSize = readU32BE(buf, o); o += 4;
-  const k = buf[o++], m = buf[o++], encAlg = buf[o++];
+  const encAlg = buf[o++];
   const chunkCount = readU32BE(buf, o); o += 4;
   if (fileSize > 0x10000000000) throw new Error("manifest: fileSize out of bounds"); // 2^40 ≈ 1 TiB sanity cap (the file is assembled in one buffer)
-  if (blockSize < 1) throw new Error("manifest: blockSize must be >= 1");
-  if (k < 1) throw new Error("manifest: k must be >= 1");
   if (chunkCount === 0) throw new Error("manifest: chunkCount must be >= 1");
   const chunks: Uint8Array[] = [];
   for (let i = 0; i < chunkCount; i++) {
@@ -140,5 +137,5 @@ export function decodeManifest(buf: Uint8Array): Manifest {
     if (o + len > buf.length) throw new Error("manifest: truncated chunk");
     chunks.push(buf.slice(o, o + len)); o += len;
   }
-  return { fileSize, blockSize, k, m, encAlg, chunks };
+  return { fileSize, encAlg, chunks };
 }

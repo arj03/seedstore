@@ -89,6 +89,13 @@ const REP_NAME = fromHex(APP.repName);
 const SIGN_PREFIX = fromHex(APP.signPrefix);
 
 function config() { return APP; }
+// replicas (r = m + 1) and smallMaxBlocks are §4.1 MATH, not injected knobs: they are
+// fixed by (k, m), so the guest derives them here rather than reading an APP field that
+// could disagree with k/m. replicas is the copy count for a file too small to fill a
+// chunk; smallMaxBlocks is the largest such file (in blocks) — replication beats padding
+// while d < (k+m)/(m+1), so the largest replicated d is ceil((k+m)/(m+1)) − 1.
+function replicas() { return config().m + 1; }
+function smallMaxBlocks() { const c = config(); return Math.max(1, Math.ceil((c.k + c.m) / (c.m + 1)) - 1); }
 
 // ── crypto primitives + storage framing ──
 function hash(bytes) { return host.call(CAP_HASH, bytes); }
@@ -365,12 +372,10 @@ function fetchMaxIds() { return Math.max(1, Math.floor(maxMsgBytes() / (config()
 // STORE messages PER PEER (peers concurrent → peak W·peers); getWindow bounds FETCH
 // messages TOTAL across the cohort (peak W), so a confined sync guest pipelines a
 // holder's many ~1-block messages instead of paying one round trip apiece (the
-// tight-cap WebRTC case the lock-step fan-out was meant to keep windowed). The
-// StorageNode always injects the config value; this default only bites a driver that
-// omits it — keep it equal to core.ts DEFAULT_FANOUT_WINDOW (the host defaultConfig).
-const DEFAULT_FANOUT_WINDOW = 16;
-function putWindow() { const v = config().putConcurrency; return (typeof v === "number" && v > 0) ? v : DEFAULT_FANOUT_WINDOW; }
-function getWindow() { const v = config().getConcurrency; return (typeof v === "number" && v > 0) ? v : DEFAULT_FANOUT_WINDOW; }
+// tight-cap WebRTC case the lock-step fan-out was meant to keep windowed). Injected in
+// full by the driver (core.ts homes the default); the guest reads APP and never guesses.
+function putWindow() { return config().putConcurrency; }
+function getWindow() { return config().getConcurrency; }
 function sliceN(arr, size) {
   if (arr.length <= size) return [arr];
   const out = [];
@@ -697,16 +702,20 @@ function assembleChunk(d, got) {
 // (≈ n/k×) plus the slice stays a small fraction of the realm heap at any file size.
 // The host driver awaits each window fully (OFFER→STORE→ack) before feeding the next,
 // so on a fat/low-loss link a too-small window idles the wire between windows; the
-// deployment can raise it (with realmMemoryBytes) via APP.windowTargetBytes.
-const WINDOW_TARGET_BYTES = 4 * 1024 * 1024;
-function windowTarget() { const v = config().windowTargetBytes; return (typeof v === "number" && v > 0) ? v : WINDOW_TARGET_BYTES; }
+// deployment raises it (with realmMemoryBytes) via APP.windowTargetBytes. Injected in
+// full by the driver (core.ts homes the default); the guest reads APP and never guesses.
+// This is the reader's/writer's OWN memory policy, not file geometry, so it stays a
+// config value even on the descriptor-authoritative GET path.
+function windowTarget() { return config().windowTargetBytes; }
 // A chunk-aligned window size in bytes: as many whole chunks (k·blockSize) as fit
 // under the target, at least one. Kept a multiple of k·blockSize so slicing the file
-// at window boundaries never splits a chunk.
+// at window boundaries never splits a chunk. This is the WRITE side, so k·blockSize is
+// the config the writer encodes with.
 function putWindowBytes() { const chunkData = config().k * config().blockSize; return Math.max(1, Math.floor(windowTarget() / chunkData)) * chunkData; }
-// Chunks per GET window — the reconstruct side's counterpart, bounding the plaintext
-// a single getChunk holds before it is handed back to the host.
-function getWindowChunks() { const chunkData = config().k * config().blockSize; return Math.max(1, Math.floor(windowTarget() / chunkData)); }
+// Chunks per GET window — the reconstruct side's counterpart, bounding the plaintext a
+// single getChunk holds before it is handed back to the host. `chunkData` (k·blockSize)
+// is the DESCRIPTOR's geometry (§4.3), passed in by the reader, never config's.
+function getWindowChunks(chunkData) { return Math.max(1, Math.floor(windowTarget() / chunkData)); }
 
 // Replicate a small file r = m+1 times, not coded (§4.1) — a file too small to fill
 // a chunk. Returns its one signed descriptor + the ids that landed. The file is small
@@ -719,10 +728,10 @@ function placeSmall(plaintext, K) {
   const blockIds = dataBlocks.map(hash);
   const env = signChunk({ k: d, m: 0, blockSize: c.blockSize, blockIds });
   const placedIds = [];
-  const perBlockTarget = Math.min(c.replicas, cohortPeers().length);
+  const perBlockTarget = Math.min(replicas(), cohortPeers().length);
   let placed = 0;
   for (let i = 0; i < d; i++) {
-    const peers = placeBlock(blockIds[i], dataBlocks[i], env, new Set(), c.replicas);
+    const peers = placeBlock(blockIds[i], dataBlocks[i], env, new Set(), replicas());
     if (peers.length === 0) {
       throw new Error("put: no peer accepted a replica" + OUT_OF_STORAGE_HINT);
     }
@@ -765,12 +774,11 @@ function placeWindow(slice, baseByteOffset, K) {
 // descriptors. Carried as a one-block replicated chunk (k=1,m=0) with the manifest's
 // own block_id so repair can self-heal it (§9). Returns the manifest block id.
 function placeManifest(K, fileSize, descriptors) {
-  const c = config();
-  const manPlain = encodeManifest({ fileSize, blockSize: c.blockSize, k: c.k, m: c.m, encAlg: ENC_XCHACHA20, chunks: descriptors });
+  const manPlain = encodeManifest({ fileSize, encAlg: ENC_XCHACHA20, chunks: descriptors });
   const manCt = encrypt(K, DOMAIN_MANIFEST, 0, manPlain);
   const manifestId = hash(manCt);
   const manEnv = signChunk({ k: 1, m: 0, blockSize: manCt.length, blockIds: [manifestId] });
-  if (placeBlock(manifestId, manCt, manEnv, new Set(), c.replicas).length === 0) {
+  if (placeBlock(manifestId, manCt, manEnv, new Set(), replicas()).length === 0) {
     throw new Error("put: no peer accepted the manifest" + OUT_OF_STORAGE_HINT);
   }
   return manifestId;
@@ -811,7 +819,7 @@ function doPut(plaintext) {
   const fileSize = plaintext.length;
   const K = randomKey();
   const totalBlocks = Math.max(1, Math.ceil(fileSize / c.blockSize));
-  const replicated = totalBlocks <= c.smallMaxBlocks;
+  const replicated = totalBlocks <= smallMaxBlocks();
   const descriptors = [], placedIds = [];
   if (replicated) {
     const sm = placeSmall(plaintext, K);
@@ -841,7 +849,7 @@ function doPutStart(arg) {
   const fileSize = rU64(arg, 0);
   const K = randomKey();
   const totalBlocks = Math.max(1, Math.ceil(fileSize / c.blockSize));
-  const replicated = totalBlocks <= c.smallMaxBlocks;
+  const replicated = totalBlocks <= smallMaxBlocks();
   const out = new Uint8Array(37);
   out.set(K, 0);
   out[32] = replicated ? 1 : 0;
@@ -870,12 +878,17 @@ function doPutManifest(arg) {
 // have/want + batched FETCH per holder (gatherBlocks) over just these chunks' block
 // ids — shared by the whole-file `get` and the streamed getChunk window.
 function reconstructChunks(ds, K, chunkStart, fileSize) {
-  const c = config();
   const allIds = [];
   for (const d of ds) for (const id of d.blockIds) allIds.push(id);
   const holders = haveWant(allIds);
   const got = gatherBlocks(ds, holders);
-  const chunkData = c.k * c.blockSize;
+  // Geometry is the DESCRIPTOR's, never config's (§4.1/§4.3): descriptors are self-
+  // describing, so a reader/repairer needs no config and — the point of the fix — a file
+  // decodes (assembleChunk/rsDecode use d.k/d.blockSize) and offsets by the SAME numbers,
+  // never one by the descriptor and the other by a config that could disagree. Every full
+  // chunk contributes k·blockSize plaintext bytes; only the file's final chunk is shorter
+  // (trailing padding, trimmed below), and all of a file's chunks share one geometry.
+  const chunkData = ds.length ? ds[0].k * ds[0].blockSize : 0;
   let written = chunkStart * chunkData; // bytes of the file before this run (all prior chunks are full)
   const parts = [];
   for (let i = 0; i < ds.length; i++) {
@@ -914,9 +927,17 @@ function doGetStart(arg) {
   const manCt = fetchBlock(manifestId);
   if (!manCt) throw new Error("get: manifest not found in cohort");
   const man = decodeManifest(decrypt(K, DOMAIN_MANIFEST, 0, manCt));
-  for (const env of man.chunks) { if (!verifyDescriptor(env)) throw new Error("get: chunk descriptor signature invalid"); }
+  let first = null;
+  for (const env of man.chunks) {
+    const d = verifyDescriptor(env);
+    if (!d) throw new Error("get: chunk descriptor signature invalid");
+    if (!first) first = d;
+  }
+  // Window granularity from the chunk's OWN geometry (§4.3), not config: a full chunk is
+  // k·blockSize plaintext, and the reader holds windowTarget()-worth at a time.
+  const chunkData = first ? first.k * first.blockSize : 1;
   const head = new Uint8Array(16);
-  wU64(head, 0, man.fileSize); wU32(head, 8, getWindowChunks()); wU32(head, 12, man.chunks.length);
+  wU64(head, 0, man.fileSize); wU32(head, 8, getWindowChunks(chunkData)); wU32(head, 12, man.chunks.length);
   const parts = [head];
   for (const env of man.chunks) { const l = new Uint8Array(4); wU32(l, 0, env.length); parts.push(l, env); }
   return concat(parts);
@@ -984,15 +1005,15 @@ function liveHolders(ids) {
 // Replicated chunk (§4.1): repair is a single block copy from any live holder — the
 // copy the audit already fetched and verified (`verified`), never a fresh have/want.
 function healReplicated(d, descEnv, holders, verified) {
-  const c = config();
+  const r = replicas();
   let replaced = 0;
   for (const id of d.blockIds) {
     const h = toHex(id);
     const set = holders.get(h) || new Set();
-    if (set.size >= c.replicas) continue;
+    if (set.size >= r) continue;
     const data = verified.get(h);        // present iff a live holder served it (set.size > 0)
     if (!data) continue;                 // no live holder this pass — nothing to copy from
-    replaced += placeBlock(id, data, descEnv, set, c.replicas - set.size).length;
+    replaced += placeBlock(id, data, descEnv, set, r - set.size).length;
   }
   return replaced;
 }
@@ -1101,14 +1122,14 @@ function doRepair() {
 // parked mid-await (the runtime split). bytesUsed mirrors
 // FsBlobStore's byte budget, rebuilt lazily from the fs the first time it matters.
 let bytesUsed = -1;
-// The §14 byte budget is OPERATOR policy, not author content: the StorageNode
-// injects its store's quota, and a seedkernel shell merges the operator's config
-// over the (author-signed) manifest. When neither supplies one, fall back to a
-// default so a holder never admits unbounded — the budget is never baked into the
-// signed bundle. Keep this equal to store-local.ts DEFAULT_QUOTA_BYTES (the host-side
-// store default); this fallback only bites a driver that injects no quota.
-const DEFAULT_QUOTA = 64 * 1024 * 1024;
-function quota() { return APP.quota != null ? APP.quota : DEFAULT_QUOTA; }
+// The §14 byte budget is OPERATOR policy, not author content: the StorageNode injects
+// its store's quota, and a seedkernel shell merges the operator's config over the
+// (author-signed) manifest — so it is always present in the injected APP, never baked
+// into the signed bundle. The guest reads it and never guesses a *generous* default: if
+// a driver under-injects (a shell holder booted with no operator quota — the shell keeps
+// no default of its own), fall to 0 and FAIL CLOSED, so the holder admits nothing rather
+// than becoming an unbounded sink. Reads (FETCH) never check quota, so serving still works.
+function quota() { return APP.quota != null ? APP.quota : 0; }
 // CAP_FS_SIZE returns 0xffffffff for an absent key (fs.size → -1 over the bridge).
 // fsSizeRaw preserves that sentinel — it is how existence is asked (storeHas), since
 // there is no CAP_FS_HAS. fsSize maps the sentinel to 0 so sizing a bare block's missing

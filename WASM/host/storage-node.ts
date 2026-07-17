@@ -159,10 +159,11 @@ export class StorageNode {
     this.peerId = toHex(identity.publicKey);
     this.guestSource = opts.guestSource;
     this.signScope = opts.signScope ?? STORAGE_SIGN_SCOPE;
-    // Derive replicas / lowWater / smallMaxBlocks from the *caller's* k & m, then
-    // let any explicit field in opts.config override — otherwise overriding k/m
-    // alone would leave those derived from the (2,2) default (e.g. an unreachable
-    // lowWater > n on the demo's RS(1,1)).
+    // Derive lowWater from the *caller's* k & m, then let any explicit field in
+    // opts.config override — otherwise overriding k/m alone would leave lowWater
+    // derived from the (2,2) default (e.g. an unreachable lowWater > n on the demo's
+    // RS(1,1)). replicas (m+1) and smallMaxBlocks are §4.1 math the guest computes
+    // from k/m, not config fields, so there is nothing to keep in sync here.
     const c = opts.config;
     this.config = { ...defaultConfig(c?.k, c?.m, c?.blockSize), ...c };
     this.clockFn = opts.clock ?? (() => Date.now());
@@ -239,9 +240,11 @@ export class StorageNode {
    *  manifest's `config` field. */
   private appPreamble(): string {
     const c = this.config;
+    // The APP injection is TOTAL: every value the guest reads is here and concrete —
+    // the guest reads APP and never falls back to a guessed default. replicas and
+    // smallMaxBlocks are absent because they are §4.1 math the guest derives from k/m.
     const app = {
-      k: c.k, m: c.m, blockSize: c.blockSize,
-      replicas: c.replicas, lowWater: c.lowWater, smallMaxBlocks: c.smallMaxBlocks,
+      k: c.k, m: c.m, blockSize: c.blockSize, lowWater: c.lowWater,
       // The holder side's byte budget (§14) — the same quota FsBlobStore enforces,
       // surfaced so the confined `handle` path admits exactly as the host store does.
       quota: this.store.stat().quota,
@@ -250,8 +253,8 @@ export class StorageNode {
       // FETCH under, so it batches byte-for-byte as the spec intends.
       maxMessageBytes: c.maxMessageBytes,
       putConcurrency: c.putConcurrency, getConcurrency: c.getConcurrency,
-      // Streamed PUT/GET window (§3): undefined ⇒ the guest's 4 MiB default. Bigger
-      // windows amortise the per-window OFFER→STORE→ack barrier on a fat/low-loss link.
+      // Streamed PUT/GET window (§3), always concrete (core.ts homes the 4 MiB default).
+      // Bigger windows amortise the per-window OFFER→STORE→ack barrier on a fat/low-loss link.
       windowTargetBytes: c.windowTargetBytes,
       codecName: toHex(this.names.codec), repName: toHex(this.names.reputation),
       // The scoped-signature prefix `DOMAIN_guest ‖ scope` the guest prepends before

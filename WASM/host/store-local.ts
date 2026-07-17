@@ -12,9 +12,9 @@ import { toHex, fromHex } from "./util.js";
 /** Default committed-tier byte budget (§14) when the operator sets none: 64 MiB.
  *  The single source for every host-side store default — MemoryBlobStore, FsBlobStore,
  *  and StorageNode's `quota` option all read it, so the budget can't drift between
- *  backends. The confined guest holder keeps its OWN fallback (tier2-guest's
- *  DEFAULT_QUOTA) because it runs in a separate realm with no imports; keep the two in
- *  sync. */
+ *  backends. The confined guest holder keeps no copy of its own — it reads the quota
+ *  the driver injects into APP (StorageNode from this store's stat; a shell from the
+ *  operator's boot config). */
 export const DEFAULT_QUOTA_BYTES = 64 * 1024 * 1024;
 
 /** What a holder keeps for one block: the ciphertext and the signed descriptor

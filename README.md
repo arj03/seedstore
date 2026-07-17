@@ -108,7 +108,7 @@ A file is encrypted (§4.4) and the ciphertext is cut into fixed-size **blocks**
 
 Defaults: `k = 10, m = 6` → `n = 16`, 1.6× storage overhead, surviving the loss of any 6 of a chunk's 16 holders. Compare naïve 3× replication, which survives only 2 losses at nearly double the cost. Reed–Solomon is **systematic** — the *k* data blocks are the ciphertext verbatim — so when all *k* data blocks are present a read just concatenates them and never decodes; the GF(2^8) decode runs only to heal around missing blocks. Encode/decode is simple, self-contained byte arithmetic that compiles to a small WASM handler needing no capabilities, and it operates on whatever bytes it is given — here, ciphertext (§4.4) — so reconstructing a missing block never requires the file's key.
 
-`(k, m)` is a single **deployment-wide constant** (default `RS(10, 6)`, above), not a per-file choice — one value recorded once for the whole store, so it need not travel in every descriptor and there is nothing per-chunk to tamper with. Pinned with it is the **RS construction** — field polynomial, generator matrix, and column order (default: systematic RS over `GF(2^8)`, primitive polynomial `0x11D`, Cauchy matrix in fixed column order) — because `(k, m)` fixes the *code* but not the *bytes*, and §9's keyless repair only holds when every peer's encoder emits byte-identical parity for a given `block_id`. Per-file durability dialing (cold archives at `RS(20, 20)`, hot ephemeral data at `RS(4, 2)`) is a deployment refinement, not part of the minimal core (§28).
+`(k, m)` is a single **deployment-wide constant** (default `RS(10, 6)`, above), not a per-file choice — one value the whole store agrees on. Each chunk descriptor nonetheless records its own `(k, m, B)` (§4.3) rather than leaning on that constant: the geometry is a handful of bytes carried *under the author's signature*, so a descriptor is **self-describing** — a repairer (§9) needs no deployment config to audit and rebuild a chunk, a reader offsets and decodes by the *same* numbers with nothing to disagree, and a cohort can even run mixed geometry — while a holder still cannot forge those bytes (the signature won't re-verify). Pinned with `(k, m)` is the **RS construction** — field polynomial, generator matrix, and column order (default: systematic RS over `GF(2^8)`, primitive polynomial `0x11D`, Cauchy matrix in fixed column order) — because `(k, m)` fixes the *code* but not the *bytes*, and §9's keyless repair only holds when every peer's encoder emits byte-identical parity for a given `block_id`. Per-file durability dialing (cold archives at `RS(20, 20)`, hot ephemeral data at `RS(4, 2)`) is a deployment refinement, not part of the minimal core (§28).
 
 **This alignment — `chunk = k blocks` — is what collapses the data model.** A block *is* an erasure shard *is* the unit on the wire, so there is no distinct "fragment" object to slice, list, or address; a chunk's descriptor is simply its list of `n` block-ids, and one block per message is always true by construction. (Fixed-size chunking is also the simplest; a deployment that wants cross-file dedup can swap in content-defined chunking, at the cost of variable-length blocks that no longer map one-to-one onto shards.)
 
@@ -127,6 +127,8 @@ Two small objects describe a file: a per-chunk **descriptor** and the file's **m
 ```
 descriptor D:
   tag                  // leading format tag — distinct per signed storage format (§16)
+  k, m, B              // this chunk's own geometry — self-describing (§4.1), so a
+                       //   repairer needs no deployment config and reads never disagree
   block_ids[0..n)      // the n blocks of this chunk, by index (0..k data, k..n parity)
 signed by the file's author (the §2 identity)
 ```
@@ -138,7 +140,8 @@ Every peer that accepts a block first verifies its descriptor: the author's sign
 ```
 manifest (a hand-rolled fixed binary layout — small enough to need no serialization library; itself encrypted and replicated, §4.3):
   version
-  file_size, B                          // block size
+  file_size                             // block size B and (k, m) are NOT here — they
+                                        //   live in each self-describing descriptor (§4.1)
   enc:    { alg }                       // §4.4; absent if stored in clear
   chunks: [ descriptor, ... ]           // the signed chunk descriptors, in order
 manifest_id = content_hash(manifest_root)
@@ -146,7 +149,7 @@ manifest_id = content_hash(manifest_root)
 
 The manifest is encrypted under the file's content key and **replicated across cohort peers** — the same handful of copies any block gets — so it has no single point of failure and there is no index server. Because it is tiny, this needs none of the chunk/erasure machinery the file body uses; a manifest that outgrows one block simply splits into blocks listed by a small replicated root, and `manifest_id` is the hash of that root (for a manifest that fits one block, the root *is* that block). A file is referenced by `manifest_id`; that one hash, under a signature, is what travels in a 64 KB kernel envelope. Crucially, the manifest says *what* blocks a file is made of, never *which* peers hold them — that is discovered live via have/want (§5), so the holder map stays current under churn and repair instead of going stale in a fixed file.
 
-The descriptor carries no chunk index: a chunk's position in the file is given by its order in the manifest's `chunks` list, and a block-holder repairing a chunk never needs the position — only the sibling block-ids — so a unique-by-content `block_ids` set is the whole identity. The same descriptor object thus lives in **two homes**: inside the (encrypted) manifest, so a reader gets every chunk's shape at once; and in the clear alongside each stored block, so a repairer who lacks the manifest still has its chunk's shape and can verify it from the author's public key alone. It is small and signed, so duplicating it is cheap and tamper-evident in both places.
+The descriptor carries no chunk index: a chunk's position in the file is given by its order in the manifest's `chunks` list, and a block-holder repairing a chunk never needs the position — only the sibling block-ids and the chunk's own `(k, m, B)` — so those, unique-by-content, are the whole identity. The same descriptor object thus lives in **two homes**: inside the (encrypted) manifest, so a reader gets every chunk's shape at once; and in the clear alongside each stored block, so a repairer who lacks the manifest still has its chunk's shape and can verify it from the author's public key alone. It is small and signed, so duplicating it is cheap and tamper-evident in both places.
 
 ### 4.4 Encryption (the load-bearing privacy mechanism)
 
@@ -232,7 +235,7 @@ Grace lives in the observer's bookkeeping, not on the wire — and skipping it i
 
 ## 9. Self-healing / repair
 
-Repair is per-chunk, and it is performed by the chunk's own **block-holders**. Anyone holding a block also holds that chunk's signed descriptor (§4.3) — the sibling block-ids — which, with the deployment's `(k, m)`, is all you need to audit and rebuild it, and reconstruction runs on ciphertext, so a repairer never needs the file's key (only the author's public key, to check the descriptor). The sharing group *reads*; any block-holder *repairs*. No peer is special and no one is appointed; the work gets done by whoever notices first.
+Repair is per-chunk, and it is performed by the chunk's own **block-holders**. Anyone holding a block also holds that chunk's signed descriptor (§4.3) — the sibling block-ids and the chunk's own `(k, m)` — which is all you need to audit and rebuild it, with no deployment config to consult, and reconstruction runs on ciphertext, so a repairer never needs the file's key (only the author's public key, to check the descriptor). The sharing group *reads*; any block-holder *repairs*. No peer is special and no one is appointed; the work gets done by whoever notices first.
 
 This is what makes repair redundant. The peers able to heal a chunk are exactly the peers storing it — about `n` of them — so repair survives as long as a single block-holder is online, and the repair-redundancy automatically scales with the durability `m` you chose. (The alternative, tying repair to whoever can read the manifest, would make a private file's owner the sole possible repairer — a single point of failure for healing even when the bytes themselves are amply redundant.)
 

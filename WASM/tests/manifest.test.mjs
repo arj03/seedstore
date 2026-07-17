@@ -98,10 +98,13 @@ export async function run(t) {
       for (let i = 0; i < 4; i++) ids.push(crypto.hash(new Uint8Array([c, i])));
       return signDescriptor(sodium, { k: 2, m: 2, blockSize: 512, blockIds: ids }, author.publicKey, author.privateKey);
     });
-    const man = { fileSize: 12345, blockSize: 512, k: 2, m: 2, encAlg: ENC_XCHACHA20, chunks: envs };
+    // The manifest header carries no (k, m, blockSize): geometry is the descriptor's,
+    // self-describing (§4.1/§4.3). Only genuinely per-file metadata travels here.
+    const man = { fileSize: 12345, encAlg: ENC_XCHACHA20, chunks: envs };
     const plain = encodeManifest(man);
     const back = decodeManifest(plain);
     t.eq(back.fileSize, 12345, "file size preserved");
+    t.eq(back.encAlg, ENC_XCHACHA20, "enc alg preserved");
     t.eq(back.chunks.length, 2, "two chunk descriptors");
     t.ok(back.chunks.every((e, i) => bytesEqual(e, envs[i])), "descriptor envelopes preserved");
 

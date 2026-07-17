@@ -13,12 +13,8 @@ export interface StorageConfig {
   k: number;
   m: number;
   blockSize: number;
-  /** r = m + 1 replicas for a file too small to fill a chunk (§4.1). */
-  replicas: number;
   /** Repair fires when live_blocks < lowWater; default k + ceil(m/2) (§8, §9). */
   lowWater: number;
-  /** Files of at most this many blocks are replicated, not RS-coded (§4.1). */
-  smallMaxBlocks: number;
   /** How many per-holder STORE sub-batches a PUT pushes concurrently
    *  (putConcurrency) and per-holder FETCH sub-batches a GET pulls
    *  (getConcurrency). OFFER/STORE/FETCH are batched per holder, so the round-trip
@@ -47,20 +43,24 @@ export interface StorageConfig {
    *  more plaintext crosses in and the guest heap never holds the file. Bigger windows
    *  mean fewer inter-window barriers (less link idle on a fat/low-loss path) but a
    *  larger peak guest footprint (≈ n/k× the window in ciphertext), so raise
-   *  realmMemoryBytes alongside it. Omit for the 4 MiB default. */
-  windowTargetBytes?: number;
+   *  realmMemoryBytes alongside it. Always set (defaultConfig homes the 4 MiB default);
+   *  the confined guest reads it from the injected APP and never keeps its own copy. */
+  windowTargetBytes: number;
   /** Hard cap on the initiator realm's QuickJS heap (safe-js default 64 MiB). Raise
-   *  it to run larger windowTargetBytes without the guest OOMing. Omit for the
-   *  default. */
+   *  it to run larger windowTargetBytes without the guest OOMing. Host-only (passed to
+   *  createSafeRealm, not injected into the guest APP). Omit for the default. */
   realmMemoryBytes?: number;
 }
 
 /** Default fan-out window for putConcurrency / getConcurrency: how many per-holder
- *  STORE/FETCH sub-batches are pushed/pulled concurrently. The confined guest keeps
- *  its OWN copy (tier2-guest's DEFAULT_FANOUT_WINDOW, used only when the driver omits
- *  the window) because it runs in a separate realm with no imports; keep the two in
- *  sync. */
+ *  STORE/FETCH sub-batches are pushed/pulled concurrently. core.ts is the single home
+ *  of the guest's config defaults — the confined guest reads the injected APP and keeps
+ *  no copy of its own. */
 export const DEFAULT_FANOUT_WINDOW = 16;
+
+/** Default target plaintext bytes per streamed PUT/GET window (§3): 4 MiB. Homed here
+ *  (not in the guest) for the same reason as DEFAULT_FANOUT_WINDOW. */
+export const DEFAULT_WINDOW_TARGET_BYTES = 4 * 1024 * 1024;
 
 /** The block size a real DEPLOYMENT uses — the single value the signed bundle and the
  *  CLI derive their geometry from, so "production geometry" is one named constant, not a
@@ -76,22 +76,20 @@ export const PRODUCTION_BLOCK_SIZE = 256 * 1024;
  *  bundle producer, a demo page) must pass a real block size (PRODUCTION_BLOCK_SIZE);
  *  baking this default into a deployment chunks a 10 MB file into ~41k blocks. */
 export function defaultConfig(k = 2, m = 2, blockSize = 256): StorageConfig {
-  // Replication beats padding a tiny file while d < (k+m)/(m+1) (§4.1) — e.g.
-  // 2 blocks at the default RS(10,6). The largest such d is ceil((k+m)/(m+1))-1.
-  const smallMaxBlocks = Math.max(1, Math.ceil((k + m) / (m + 1)) - 1);
+  // replicas (r = m + 1) and smallMaxBlocks are NOT config fields — they are math
+  // derived from (k, m) per §4.1, computed in the guest, so they can't drift from k/m.
   return {
     k,
     m,
     blockSize,
-    replicas: m + 1,
     lowWater: k + Math.ceil(m / 2),
-    smallMaxBlocks,
     putConcurrency: DEFAULT_FANOUT_WINDOW,
     getConcurrency: DEFAULT_FANOUT_WINDOW,
     // ~1 MiB: a batch transfers well inside a typical request timeout and keeps a
     // synchronous holder's per-message work small, while still collapsing per-block
     // round trips. A transport with a tighter frame cap (WebRTC) lowers it.
     maxMessageBytes: 1 << 20,
+    windowTargetBytes: DEFAULT_WINDOW_TARGET_BYTES,
   };
 }
 

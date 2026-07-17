@@ -163,10 +163,11 @@ export async function run(t) {
     const cfg = { k: 1, m: 1, blockSize: 64 };            // the p2p.html demo config
     const nodes = await createConnectedCohort({ count: 5, network: net, sodium, wasm, config: cfg, timeoutMs: TIMEOUT });
     const owner = nodes[0];
-    // Overriding k/m must re-derive the durability fields, not keep the (2,2)
-    // defaults — an unreachable lowWater > n would make repair never settle.
+    // Overriding k/m must re-derive lowWater, not keep the (2,2) default — an
+    // unreachable lowWater > n would make repair never settle. (replicas = m+1 is no
+    // longer a config field; the guest derives it — the "2 holders" checks below
+    // exercise that end-to-end.)
     t.eq(owner.config.lowWater, 2, "lowWater re-derived for RS(1,1) (k + ceil(m/2))");
-    t.eq(owner.config.replicas, 2, "replicas re-derived for RS(1,1) (m + 1)");
 
     const data = file(256, 11);                            // 4 blocks → 4 RS(1,1) chunks
     const put = await owner.put(data);
@@ -203,7 +204,7 @@ export async function run(t) {
     const cfg = { k: 1, m: 4, blockSize: 64 };
     const nodes = await createConnectedCohort({ count: 7, network: net, sodium, wasm, config: cfg, timeoutMs: TIMEOUT }); // owner + 6 holders >= n=5
     const owner = nodes[0];
-    t.eq(owner.config.replicas, 5, "replicas re-derived for RS(1,4) (m + 1)");
+    t.eq(owner.config.lowWater, 3, "lowWater re-derived for RS(1,4) (k + ceil(m/2))"); // replicas = m+1 = 5 is guest math now
     const data = file(256, 41);                            // 4 blocks → coded path
     const put = await owner.put(data);
     t.ok(!put.replicated, "multi-block k=1 file takes the coded path");

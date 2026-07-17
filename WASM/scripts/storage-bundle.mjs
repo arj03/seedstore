@@ -99,14 +99,19 @@ export function writeStorageBundle({ dir, host, sodium, sk, pk, build, version =
     // codec/reputation kernel names the guest module-calls. NB: no `quota` — that is
     // operator policy supplied at boot, not author-signed content.
     config: {
-      k: cfg.k, m: cfg.m, blockSize: cfg.blockSize,
-      replicas: cfg.replicas, lowWater: cfg.lowWater, smallMaxBlocks: cfg.smallMaxBlocks,
-      // Pin the per-message batch cap explicitly: a holder bounds one FETCH response
-      // by ITS value (serveFetch), so the cohort should agree on it deliberately
-      // rather than lean on the guest's fallback. Operator config can still override
-      // at boot (the shell merges over the signed config), and a mismatched client
-      // now degrades to tail re-requests instead of failing (runFetchTasks).
+      k: cfg.k, m: cfg.m, blockSize: cfg.blockSize, lowWater: cfg.lowWater,
+      // The APP injection is TOTAL: the guest reads APP and never guesses a default, so
+      // the signed config must carry every value the guest reads (except `quota`, which
+      // is operator policy merged at boot — see above — and replicas/smallMaxBlocks,
+      // which are §4.1 math the guest derives from k/m). Transport/operator knobs pinned
+      // here: a holder bounds one FETCH response by ITS maxMessageBytes (serveFetch), so
+      // the cohort agrees on it deliberately, and the fan-out/window knobs match core.ts's
+      // defaults. Operator config can still override any of these at boot (the shell
+      // merges over the signed config), and a mismatched client degrades to tail
+      // re-requests instead of failing (runFetchTasks).
       maxMessageBytes: cfg.maxMessageBytes,
+      putConcurrency: cfg.putConcurrency, getConcurrency: cfg.getConcurrency,
+      windowTargetBytes: cfg.windowTargetBytes,
       codecName: toHex(names.codec), repName: toHex(names.reputation),
       // The scoped-signature prefix `DOMAIN_guest ‖ scope` the guest prepends before
       // CAP_VERIFY (README §16). The shell's SIGN op scopes to (this author, this app),
