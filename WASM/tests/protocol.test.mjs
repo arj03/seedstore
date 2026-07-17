@@ -9,8 +9,8 @@
 //     still be correct.
 
 import {
-  encodeOfferBatch, decodeOfferBatch, encodeOfferMask, decodeOfferMask,
-  encodeStoreBatch, decodeStoreBatch, encodeStoreMask, decodeStoreMask,
+  encodeOfferBatch, decodeOfferBatch, encodeMask, decodeMask,
+  encodeStoreBatch, decodeStoreBatch,
   encodeFetchBatchReq, decodeFetchBatchReq, encodeFetchBatchRes, decodeFetchBatchRes,
   FETCH_UNANSWERED, MsgType,
 } from "../build/host/protocol.js";
@@ -51,7 +51,7 @@ export async function run(t) {
     t.ok(same, "blockId, size, and (variable-length, possibly null) descriptor all round-trip");
 
     const mask = [true, false, true];
-    t.ok(decodeOfferMask(encodeOfferMask(mask)).every((v, i) => v === mask[i]), "accept-mask round-trips");
+    t.ok(decodeMask(encodeMask(mask)).every((v, i) => v === mask[i]), "accept-mask round-trips");
   }
 
   t.group("STORE batch + stored-mask round-trip the wire");
@@ -70,7 +70,7 @@ export async function run(t) {
     }
     t.ok(same, "blockId, (possibly null) descriptor, and variable-length bytes all round-trip");
     const mask = [true, true, false];
-    t.ok(decodeStoreMask(encodeStoreMask(mask)).every((v, i) => v === mask[i]), "stored-mask round-trips");
+    t.ok(decodeMask(encodeMask(mask)).every((v, i) => v === mask[i]), "stored-mask round-trips");
   }
 
   t.group("FETCH batch req + res round-trip, present / absent / unanswered blocks");
@@ -105,7 +105,7 @@ export async function run(t) {
         { blockId: sib0, size: 100, descriptor: env },
         { blockId: sib1, size: 100, descriptor: env }, // sibling of sib0 — must not both pass
       ];
-      const mask = decodeOfferMask(await a.transport.request(b.peerId, MsgType.OFFER, encodeOfferBatch(offers)));
+      const mask = decodeMask(await a.transport.request(b.peerId, MsgType.OFFER, encodeOfferBatch(offers)));
       t.eq(mask[0], true, "the holder accepts the first block of the chunk");
       t.eq(mask[1], false, "it declines the second — a sibling provisionally accepted in the same batch (§6)");
     } finally { a.close(); b.close(); }
@@ -123,7 +123,7 @@ export async function run(t) {
         { blockId: id(31), size: 100, descriptor: null },
         { blockId: id(32), size: 100, descriptor: null }, // would overrun the 250-byte budget
       ];
-      const mask = decodeOfferMask(await a.transport.request(b.peerId, MsgType.OFFER, encodeOfferBatch(offers)));
+      const mask = decodeMask(await a.transport.request(b.peerId, MsgType.OFFER, encodeOfferBatch(offers)));
       t.eq(mask[0], true, "first block fits the quota");
       t.eq(mask[1], true, "second still fits (cumulative 200 ≤ 250)");
       t.eq(mask[2], false, "third declined — the running budget is spent (§14)");
@@ -138,7 +138,7 @@ export async function run(t) {
     try {
       const b0 = bytes(1000, 1), b1 = bytes(1000, 2);
       const i0 = b.crypto.hash(b0), i1 = b.crypto.hash(b1); // content-addressed (acceptStore hashes)
-      const stored = decodeStoreMask(await a.transport.request(b.peerId, MsgType.STORE, encodeStoreBatch([
+      const stored = decodeMask(await a.transport.request(b.peerId, MsgType.STORE, encodeStoreBatch([
         { blockId: i0, descriptor: null, bytes: b0 },
         { blockId: i1, descriptor: null, bytes: b1 }, // would overrun the 1500-byte budget
       ])));

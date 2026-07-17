@@ -71,7 +71,7 @@ export async function run(t) {
     t.eq(put.result.blockIds.length, N * n + 1, "every chunk block + the manifest was placed");
   }
 
-  t.group("PUT windows the per-holder STOREs so they pipeline (putConcurrency), not one serial round trip per block");
+  t.group("PUT windows the per-holder STOREs so they pipeline (putWindow), not one serial round trip per block");
   {
     // The WebRTC case: a small frame cap forces ~one block per STORE message (two
     // won't fit), so a big file becomes many single-block STOREs. OFFER descriptors
@@ -87,11 +87,11 @@ export async function run(t) {
     const cfg = { ...config, blockSize: bs, maxMessageBytes: cap };
     const replicas = config.m + 1;                   // manifest copies (defaultConfig: m+1)
 
-    // Same file, same cohort shape, same cap — only the window differs. putConcurrency
+    // Same file, same cohort shape, same cap — only the window differs. putWindow
     // = 1 reproduces the OLD serial-per-holder STORE loop (a window of 1 is strictly
-    // serial); putConcurrency = 64 is the fix.
-    const serial = await onCohort({ ...cfg, putConcurrency: 1 }, (o) => o.put(webrtcData));
-    const windowed = await onCohort({ ...cfg, putConcurrency: 64 }, (o) => o.put(webrtcData));
+    // serial); putWindow = 64 is the fix.
+    const serial = await onCohort({ ...cfg, putWindow: 1 }, (o) => o.put(webrtcData));
+    const windowed = await onCohort({ ...cfg, putWindow: 64 }, (o) => o.put(webrtcData));
 
     const storeSerial = serial.peakByType[STORE] ?? 0;
     const storeWindowed = windowed.peakByType[STORE] ?? 0;
@@ -111,8 +111,8 @@ export async function run(t) {
     // once: a single holder alone overlaps its Nw blocks, far past the serial peak.
     t.ok(storeWindowed >= Nw, `windowed STORE pipelines past serial: ${storeWindowed} in flight (≥ ${Nw}, vs ${storeSerial} serial)`);
     t.ok(storeWindowed > storeSerial * 2, `the window multiplies in-flight STOREs (${storeWindowed} vs ${storeSerial})`);
-    // …but stays bounded by putConcurrency × holders — flow-control, not a flood.
-    t.ok(storeWindowed <= 64 * n, `windowed STORE stays bounded by putConcurrency × holders: ${storeWindowed} ≤ ${64 * n}`);
+    // …but stays bounded by putWindow × holders — flow-control, not a flood.
+    t.ok(storeWindowed <= 64 * n, `windowed STORE stays bounded by putWindow × holders: ${storeWindowed} ≤ ${64 * n}`);
 
     // Correctness is unchanged: the windowed PUT still places every block + manifest.
     t.eq(windowed.result.blockIds.length, Nw * n + 1, "windowed PUT placed every chunk block + the manifest");
@@ -124,7 +124,7 @@ export async function run(t) {
     // manifest; the batched GET issues ≈ one FETCH per distinct holder + the
     // manifest, and assembles byte-identically.
     const net = new LatencyNetwork(DELAY);
-    const nodes = await createConnectedCohort({ count: 6, network: net, sodium, wasm, config: { ...config, putConcurrency: W, getConcurrency: W }, timeoutMs: TIMEOUT });
+    const nodes = await createConnectedCohort({ count: 6, network: net, sodium, wasm, config: { ...config, putWindow: W, getWindow: W }, timeoutMs: TIMEOUT });
     const owner = nodes[0];
     const put = await owner.put(data);
 
@@ -184,7 +184,7 @@ export async function run(t) {
     nodes.forEach((nn) => nn.close());
   }
 
-  t.group("GET windows the per-holder FETCHes so they pipeline (getConcurrency), not one serial round trip per block");
+  t.group("GET windows the per-holder FETCHes so they pipeline (getWindow), not one serial round trip per block");
   {
     // The WebRTC tight-cap twin of the STORE-window group above: ~one block per FETCH
     // message turns a holder's blocks into many single-block messages, and the window
@@ -198,8 +198,8 @@ export async function run(t) {
     const webrtcData = file(Nw * config.k * bs, 9);    // exactly Nw RS chunks
     const cfg = { ...config, blockSize: bs, maxMessageBytes: cap };
 
-    async function getPeak(getConcurrency) {
-      const r = await onCohort({ ...cfg, getConcurrency }, async (owner, net) => {
+    async function getPeak(getWindow) {
+      const r = await onCohort({ ...cfg, getWindow }, async (owner, net) => {
         const put = await owner.put(webrtcData);
         net.reset();
         return owner.get(put.manifestId, put.key);

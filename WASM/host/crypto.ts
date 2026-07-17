@@ -37,9 +37,6 @@ export class Crypto {
   hash(bytes: Uint8Array): Uint8Array {
     return this.sodium.crypto_generichash(BLOCK_ID_BYTES, bytes);
   }
-  blockId(bytes: Uint8Array): Uint8Array {
-    return this.hash(bytes);
-  }
 
   /** 24-byte nonce = [domain u8][index u32 BE][zero padding] (§4.4). One nonce
    *  per chunk (or per manifest), so (K, nonce) never repeats for a fresh K. */

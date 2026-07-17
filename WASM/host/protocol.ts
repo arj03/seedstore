@@ -25,6 +25,18 @@ export const MsgType = {
              // (§22) is the throughput upgrade.
 } as const;
 
+// ── the response mask shared by HAVE, OFFER, and STORE ──────────────────────
+// All three replies are the same shape: one byte per batch entry, 1 or 0. HAVE's
+// is "held", OFFER's is "accepted", STORE's is "stored" — one codec, three uses.
+export function encodeMask(bits: boolean[]): Uint8Array {
+  const out = new Uint8Array(bits.length);
+  for (let i = 0; i < bits.length; i++) out[i] = bits[i] ? 1 : 0;
+  return out;
+}
+export function decodeMask(buf: Uint8Array): boolean[] {
+  return Array.from(buf, (b) => b === 1);
+}
+
 // ── HAVE (disc.have/want, §5) ──────────────────────────────────────────────
 // "I want these block_ids" / "of those, here is what I hold." A have/want only
 // ever names ids the asker already holds — there is no list-all (§5.2).
@@ -41,15 +53,8 @@ export function decodeHaveReq(buf: Uint8Array): Uint8Array[] {
   for (let i = 0; i < count; i++) out.push(buf.slice(4 + i * 32, 4 + (i + 1) * 32));
   return out;
 }
-export function encodeHaveRes(held: boolean[]): Uint8Array {
-  const out = new Uint8Array(held.length);
-  for (let i = 0; i < held.length; i++) out[i] = held[i] ? 1 : 0;
-  return out;
-}
-export function decodeHaveRes(buf: Uint8Array): boolean[] {
-  if (buf.length < 1) throw new Error("protocol: decodeHaveRes truncated");
-  return Array.from(buf, (b) => b === 1);
-}
+// The HAVE response ("of those, here is what I hold") is a plain held-mask —
+// encodeMask / decodeMask above.
 
 // ── OFFER (block.offer, §6) ────────────────────────────────────────────────
 // Each entry carries block_id, size, and the signed chunk descriptor so the
@@ -91,14 +96,7 @@ export function decodeOfferBatch(buf: Uint8Array): Offer[] {
   }
   return out;
 }
-export function encodeOfferMask(accepts: boolean[]): Uint8Array {
-  const out = new Uint8Array(accepts.length);
-  for (let i = 0; i < accepts.length; i++) out[i] = accepts[i] ? 1 : 0;
-  return out;
-}
-export function decodeOfferMask(buf: Uint8Array): boolean[] {
-  return Array.from(buf, (b) => b === 1);
-}
+// The OFFER response is a per-block accept-mask — encodeMask / decodeMask above.
 
 // ── STORE (the push, §6 step 4) ─────────────────────────────────────────────
 // Batched per holder: every block headed to a peer streams in one message, and
@@ -145,14 +143,7 @@ export function decodeStoreBatch(buf: Uint8Array): StoreReq[] {
   }
   return out;
 }
-export function encodeStoreMask(stored: boolean[]): Uint8Array {
-  const out = new Uint8Array(stored.length);
-  for (let i = 0; i < stored.length; i++) out[i] = stored[i] ? 1 : 0;
-  return out;
-}
-export function decodeStoreMask(buf: Uint8Array): boolean[] {
-  return Array.from(buf, (b) => b === 1);
-}
+// The STORE response is a per-block stored-mask — encodeMask / decodeMask above.
 
 // ── FETCH (block.fetch_req / block.data, §7, §8) ────────────────────────────
 // A batch names every block wanted from one peer; the response returns them in

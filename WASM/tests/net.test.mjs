@@ -21,7 +21,7 @@ import { NodeFs } from "seedkernel-wasm/fs-node";
 // by the cohort below to canonicalise dial direction (lower pubkey dials higher).
 import { bytesCompare } from "seedkernel-wasm/net";
 import {
-  MsgType, encodeHaveReq, decodeHaveRes, encodeStoreBatch, decodeStoreMask, encodeFetchBatchReq, decodeFetchBatchRes,
+  MsgType, encodeHaveReq, decodeMask, encodeStoreBatch, encodeFetchBatchReq, decodeFetchBatchRes,
 } from "../build/host/protocol.js";
 import { toHex, fromHex, bytesEqual } from "../build/host/util.js";
 
@@ -198,14 +198,14 @@ export async function run(t) {
       const bid = S.crypto.hash(bytes);
 
       const have0 = await B.transport.request(S.peerId, MsgType.HAVE, encodeHaveReq([bid]));
-      t.eq(decodeHaveRes(have0)[0], false, "HAVE → false before the block exists (over ws)");
+      t.eq(decodeMask(have0)[0], false, "HAVE → false before the block exists (over ws)");
 
-      const stored = decodeStoreMask(await B.transport.request(S.peerId, MsgType.STORE, encodeStoreBatch([{ blockId: bid, descriptor: null, bytes }])));
+      const stored = decodeMask(await B.transport.request(S.peerId, MsgType.STORE, encodeStoreBatch([{ blockId: bid, descriptor: null, bytes }])));
       t.eq(stored[0], true, "STORE acknowledged over ws");
       t.ok(S.store.has(bid), "server now holds the block");
 
       const have1 = await B.transport.request(S.peerId, MsgType.HAVE, encodeHaveReq([bid]));
-      t.eq(decodeHaveRes(have1)[0], true, "HAVE → true after STORE (over ws)");
+      t.eq(decodeMask(have1)[0], true, "HAVE → true after STORE (over ws)");
 
       const fetched = await B.transport.request(S.peerId, MsgType.FETCH, encodeFetchBatchReq([bid]));
       const back = decodeFetchBatchRes(fetched)[0];

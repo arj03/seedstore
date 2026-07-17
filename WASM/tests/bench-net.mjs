@@ -4,7 +4,7 @@
 // zero-latency LoopbackNetwork, so none of them can see the cost that dominates a
 // real cross-machine cohort: wall-clock ≈ (serial round-trip count) × RTT. This
 // drives a real round-trip latency through the link and sweeps the guest's chunk
-// window (putConcurrency on PUT, getConcurrency on GET — the guest reads them from
+// window (putWindow on PUT, getWindow on GET — the guest reads them from
 // its injected APP config) so the serial-vs-windowed gap — and the point past which
 // widening the window stops helping — is visible for BOTH directions. PUT/GET run
 // the confined guest (the only path), reached over the per-peer fan-out cap. (Within
@@ -56,7 +56,7 @@ async function measure(W) {
   // n = k + m = 4 distinct holders per chunk; give the cohort a little headroom.
   const nodes = await createConnectedCohort({
     count: 6, network: net, sodium, wasm,
-    config: { ...config, putConcurrency: W, getConcurrency: W }, timeoutMs,
+    config: { ...config, putWindow: W, getWindow: W }, timeoutMs,
   });
   const owner = nodes[0];
 
@@ -83,7 +83,7 @@ const tput = (ms) => (FILE_MB / (ms / 1000)).toFixed(1);
 
 const blocksPerMsg = Math.max(1, Math.floor(maxMessageBytes / blockSize));
 console.log(`\nPUT/GET over a ${RTT_MS} ms-RTT cohort — RS(${config.k},${config.m}), ${BLOCK_KIB} KiB blocks, ${CAP_KIB} KiB cap (~${blocksPerMsg} block/msg), ${FILE_MB} MB → ${numChunks} chunks`);
-console.log(`(a serial PUT issues ~${numChunks * (config.k + config.m) * 2} request/response round trips; the window overlaps them — W is putConcurrency on PUT, getConcurrency on GET)\n`);
+console.log(`(a serial PUT issues ~${numChunks * (config.k + config.m) * 2} request/response round trips; the window overlaps them — W is putWindow on PUT, getWindow on GET)\n`);
 console.log(`   W   PUT (ms)   MB/s   peak     GET (ms)   MB/s   peak    bytes`);
 console.log(`  ──  ────────  ─────  ────    ────────  ─────  ────    ─────`);
 

@@ -16,8 +16,8 @@ export interface StorageConfig {
   /** Repair fires when live_blocks < lowWater; default k + ceil(m/2) (§8, §9). */
   lowWater: number;
   /** How many per-holder STORE sub-batches a PUT pushes concurrently
-   *  (putConcurrency) and per-holder FETCH sub-batches a GET pulls
-   *  (getConcurrency). OFFER/STORE/FETCH are batched per holder, so the round-trip
+   *  (putWindow) and per-holder FETCH sub-batches a GET pulls
+   *  (getWindow). OFFER/STORE/FETCH are batched per holder, so the round-trip
    *  count no longer scales with the file; these window the bulk transfers when a
    *  transport's frame cap splits a holder's blocks across many messages. The
    *  window binds hardest under a small cap (WebRTC's ~64 KB channel forces ~one
@@ -26,8 +26,8 @@ export interface StorageConfig {
    *  so it is a no-op. The synchronous guest can't overlap host calls itself, so it
    *  expresses the same window through one batched CAP_NET_SEND_MANY round (W
    *  per-peer requests fanned out host-side) — same peak in flight, one cap at a time. */
-  putConcurrency: number;
-  getConcurrency: number;
+  putWindow: number;
+  getWindow: number;
   /** Max bytes in one batched OFFER/STORE/FETCH message. Every per-holder batch is
    *  split to stay under it, so a single message both fits the transport's frame cap
    *  AND transfers within the request timeout — and the holder (synchronous in the
@@ -52,7 +52,7 @@ export interface StorageConfig {
   realmMemoryBytes?: number;
 }
 
-/** Default fan-out window for putConcurrency / getConcurrency: how many per-holder
+/** Default fan-out window for putWindow / getWindow: how many per-holder
  *  STORE/FETCH sub-batches are pushed/pulled concurrently. core.ts is the single home
  *  of the guest's config defaults — the confined guest reads the injected APP and keeps
  *  no copy of its own. */
@@ -83,8 +83,8 @@ export function defaultConfig(k = 2, m = 2, blockSize = 256): StorageConfig {
     m,
     blockSize,
     lowWater: k + Math.ceil(m / 2),
-    putConcurrency: DEFAULT_FANOUT_WINDOW,
-    getConcurrency: DEFAULT_FANOUT_WINDOW,
+    putWindow: DEFAULT_FANOUT_WINDOW,
+    getWindow: DEFAULT_FANOUT_WINDOW,
     // ~1 MiB: a batch transfers well inside a typical request timeout and keeps a
     // synchronous holder's per-message work small, while still collapsing per-block
     // round trips. A transport with a tighter frame cap (WebRTC) lowers it.

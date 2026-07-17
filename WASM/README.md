@@ -336,7 +336,7 @@ tests/bench.mjs` reproduces these.
 **End to end, the link bounds throughput, not the codec.** A multi-MB file is
 many blocks, and a WebRTC data channel caps a message at ~one 32 KiB block, so a
 naïve transfer pays one round trip *per block*. The coordinator avoids that by
-**windowing** — `putConcurrency`/`getConcurrency` keep many blocks per holder in
+**windowing** — `putWindow`/`getWindow` keep many blocks per holder in
 flight at once — so wall-clock tracks `RTT × (chunks ÷ window)`, not `RTT ×
 blocks`. Over a 10 ms-RTT, WebRTC-capped link (4 MB, RS(2,2), 32 KiB blocks,
 window 32):

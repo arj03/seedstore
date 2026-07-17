@@ -110,7 +110,7 @@ export function writeStorageBundle({ dir, host, sodium, sk, pk, build, version =
       // merges over the signed config), and a mismatched client degrades to tail
       // re-requests instead of failing (runFetchTasks).
       maxMessageBytes: cfg.maxMessageBytes,
-      putConcurrency: cfg.putConcurrency, getConcurrency: cfg.getConcurrency,
+      putWindow: cfg.putWindow, getWindow: cfg.getWindow,
       windowTargetBytes: cfg.windowTargetBytes,
       codecName: toHex(names.codec), repName: toHex(names.reputation),
       // The scoped-signature prefix `DOMAIN_guest ‖ scope` the guest prepends before

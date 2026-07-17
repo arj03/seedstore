@@ -12,7 +12,7 @@
 
 import { loadSodium, loadWasmBytes } from "../build/host/node.js";
 import { StorageNode } from "../build/host/storage-node.js";
-import { MsgType, encodeHaveReq, decodeHaveRes } from "../build/host/protocol.js";
+import { MsgType, encodeHaveReq, decodeMask } from "../build/host/protocol.js";
 import { bytesEqual } from "../build/host/util.js";
 import { RtcNetwork, relaySignaling } from "seedkernel-wasm/net-rtc";
 import { weriftPeerConnectionFactory } from "seedkernel-wasm/net-rtc-node";
@@ -111,7 +111,7 @@ try {
   let onAll = true;
   for (const p of owner.node.cohortPeers()) {
     const res = await owner.node.transport.request(p, MsgType.HAVE, encodeHaveReq(r.blockIds));
-    const held = decodeHaveRes(res).filter(Boolean).length;
+    const held = decodeMask(res).filter(Boolean).length;
     console.log(`  ${p.slice(0, 8)}…  ${held}/${r.blockIds.length} blocks`);
     if (held < r.blockIds.length) onAll = false;
   }

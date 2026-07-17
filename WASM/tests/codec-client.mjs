@@ -82,7 +82,7 @@ export class CodecClient {
   }
 
   /** block_id via the codec's host-crypto path (§4.2). Equivalent to
-   *  crypto.blockId; used where the WASM path is what we want to exercise. */
+   *  crypto.hash; used where the WASM path is what we want to exercise. */
   blockId(bytes) {
     const req = new Uint8Array(1 + bytes.length);
     req[0] = OP_BLOCKID; req.set(bytes, 1);

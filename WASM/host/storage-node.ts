@@ -43,7 +43,8 @@ import { storageNames, type StorageNames } from "./names.js";
 import { registerStorageBridges } from "./bridges.js";
 import { type Identity, type StorageConfig, defaultConfig } from "./core.js";
 import { STORAGE_SIGN_SCOPE, guestSignPrefix } from "./manifest.js";
-import { toHex, fromHex, readU32BE, writeU32BE, writeU64BE, readU64BE, concatBytes } from "./util.js";
+import { encodeScoreReq } from "./reputation-core.js";
+import { toHex, readU32BE, writeU32BE, writeU64BE, readU64BE, concatBytes } from "./util.js";
 
 // Fresh-array constructors for the windowed PUT/GET host seam: they frame the length-
 // prefixed arguments the streaming entries read. The u32/u64 read+write primitives live
@@ -252,7 +253,7 @@ export class StorageNode {
       // batch cap and the fan-out windows the guest splits/pipelines OFFER/STORE/
       // FETCH under, so it batches byte-for-byte as the spec intends.
       maxMessageBytes: c.maxMessageBytes,
-      putConcurrency: c.putConcurrency, getConcurrency: c.getConcurrency,
+      putWindow: c.putWindow, getWindow: c.getWindow,
       // Streamed PUT/GET window (§3), always concrete (core.ts homes the 4 MiB default).
       // Bigger windows amortise the per-window OFFER→STORE→ack barrier on a fat/low-loss link.
       windowTargetBytes: c.windowTargetBytes,
@@ -408,13 +409,7 @@ export class StorageNode {
    *  installed reputation handler — the same state the guest's verification-fetch
    *  observations write (the guest reaches it the same way, via MODULE_CALL). */
   score(peerPk: Uint8Array): number {
-    const now = this.now();
-    const req = new Uint8Array(41);
-    req[0] = 2; // OP_SCORE (reputation handler ABI, assembly/reputation/index.ts)
-    req.set(peerPk, 1);
-    writeU32BE(req, 33, Math.floor(now / 0x100000000));
-    writeU32BE(req, 37, now >>> 0);
-    const res = this.host.callHandler(this.names.reputation, req);
+    const res = this.host.callHandler(this.names.reputation, encodeScoreReq(peerPk, this.now()));
     if (!res || res.length < 8) return 0;
     return new DataView(res.buffer, res.byteOffset, 8).getFloat64(0, true);
   }
@@ -517,6 +512,4 @@ export class StorageNode {
   handlersInstalled(): boolean {
     return this.host.isRegistered(this.names.codec) && this.host.isRegistered(this.names.reputation);
   }
-
-  pubkeyOf(peerId: PeerId): Uint8Array { return fromHex(peerId); }
 }
