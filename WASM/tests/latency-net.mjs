@@ -46,12 +46,19 @@ export class LatencyNetwork {
     this.framesDelivered = 0;
   }
 
-  register(peerId, sink) { this.sinks.set(peerId, sink); }
-  unregister(peerId) { this.sinks.delete(peerId); }
+  // A per-node endpoint (seedkernel host/net.ts): bound to `id`, so every send it
+  // makes attributes `from = id` — the Transport above never handles `from`.
+  endpoint(id) {
+    return {
+      send: (to, frame) => this.deliver(id, to, frame),
+      onFrame: (sink) => { this.sinks.set(id, sink); },
+      close: () => { this.sinks.delete(id); },
+    };
+  }
   setOnline(peerId, online) { if (online) this.offline.delete(peerId); else this.offline.add(peerId); }
   isOnline(peerId) { return this.sinks.has(peerId) && !this.offline.has(peerId); }
 
-  send(from, to, frame) {
+  deliver(from, to, frame) {
     if (this.offline.has(from) || this.offline.has(to)) return; // dropped
     const sink = this.sinks.get(to);
     if (!sink) return;

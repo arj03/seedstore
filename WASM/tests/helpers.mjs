@@ -38,10 +38,10 @@ export async function loadHost() {
   await sodium.ready;
   const kernel = readFileSync(paths.kernel);
   const signature = readFileSync(paths.signature);
-  const host = await KernelHost.load(kernel, signature, sodium);
+  const host = await KernelHost.load(kernel, sodium);
   const signatureName = host.deriveBootstrapName("signature");
   const installName = host.deriveBootstrapName("install");
-  host.registerSignature(signatureName);
+  host.registerSignature(signatureName, signature);
   host.registerInstaller(installName);
   host.setApproveInstall(referencePolicy(host, () => true));
   return { host, installName };

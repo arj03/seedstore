@@ -67,7 +67,7 @@ export async function run(t) {
       config: { quota: 64 * 1024 * 1024, blockSize: 64 },
     });
     shell.loadBundle(bundleDir);
-    await shell.serveAsHolder();
+    await shell.serve();
     return { shell, peerId: toHex(identity.publicKey) };
   }
   const connectAll = (entries) => {
