@@ -10,17 +10,17 @@ This design assumes a **closed, social network**: you store with and among peers
 
 **Design principles (inherited from the kernel, applied to storage):**
 
-- The storage layer adds **no new kernel concepts**. It is bridges + app handlers + message names, gated by the existing capability and signature machinery.
+- The storage layer adds **no new kernel concepts**. It is capability backends + confined app logic + a small message vocabulary, gated by the existing capability and signature machinery.
 - **Integrity comes from content addressing, not from signatures.** A block is named by its hash; a block either hashes to its name or it is discarded. This is what lets bulk transfer skip the per-message verify (§3).
 - **Identity comes from the signature module.** A peer *is* its kernel pubkey. Reciprocity and authority key on that one identity.
 - **Redundancy is erasure coding, not replication.** Any *k* of *n* blocks reconstruct a chunk, so up to *n − k* holders can vanish with no data loss, at a fraction of replication's overhead.
 - **Placement is by relationship, not by global address.** A chunk's blocks live on peers in your cohort, chosen by negotiation. Who holds what is discovered live from the cohort rather than pinned anywhere, and there is no global index — the absence of that index is a feature, not a gap (§5).
 - **Confidentiality is structural.** The wire is encrypted; stored data is encrypted so holders only ever see ciphertext; and there is no public directory mapping content to holders.
 - **Trust is local before it is global.** The base system rewards good citizens by direct, pairwise reciprocity you witness yourself (§13); portable, verifiable reputation across peers you have never dealt with is an optional layer (§20), not a baseline requirement.
-- **The trusted base is small and separate from the logic.** Only the I/O bridges (`store.local`, `net.send`, `clock.now`, `rand`) and the crypto services are trusted host code; all storage *logic* — `codec`, `reputation`, and the `coordinator`/`cohort`/`repair` orchestration — is **confined** (WASM or a zero-authority sandboxed-JS realm), reaching I/O only through capability-gated bridges. Trusting a node means trusting the small, stable base, not the larger, upgradeable logic (§2.1).
-- **Browser nodes and long-running peers run the same protocol**, differing only in their `store.local` backend and default quota.
+- **The trusted base is small and separate from the logic.** Only the I/O backends of the four capability domains (`store`, `net`, `clock`, `rand`) and the crypto services are trusted host code; all storage *logic* — `codec`, `reputation`, and the `coordinator`/`cohort`/`repair` orchestration — is **confined** (WASM or a zero-authority sandboxed-JS realm), reaching I/O only through capability-gated bridges. Trusting a node means trusting the small, stable base, not the larger, upgradeable logic (§2.1).
+- **Browser nodes and long-running peers run the same protocol**, differing only in their `store` backend and default quota.
 
-The reference composition stacks: storage app handlers → cohort + repair handlers → storage bridges (`store.local`, `net.send`, `clock.now`, `rand`) → installer → signature → kernel.
+The reference composition stacks: the storage bundle (pure `codec`/`reputation` handlers + the confined orchestration and holder logic) → the capability domains (`store`, `net`, `clock`, `rand`) → installer → signature → kernel.
 
 ---
 
@@ -32,13 +32,13 @@ The reference composition stacks: storage app handlers → cohort + repair handl
 - **Manifest** — the file's root object: the list of chunk descriptors plus the wrapped content key. The only thing you need to *read* a whole file. It does *not* name holders; which peer holds a block is discovered live from the cohort.
 - **Cohort** — the bounded set of peers you have a storage relationship with. Discovery, placement, and repair all happen inside it. There is no global overlay.
 - **Have/want** — the discovery primitive: peers tell each other which block-ids they hold or want. One round trip, no crypto protocol.
-- **`store.local`** — the I/O bridge (capability `store`) that reads/writes the node's donated blob store: filesystem on a server, OPFS/IndexedDB in a browser.
+- **`store`** — the capability domain (§16) whose backend reads/writes the node's donated blob store: filesystem on a server, OPFS/IndexedDB in a browser (§12).
 
 ```
 file ─encrypt─► ciphertext ─slice into k─► data blocks ─RS(k,m)─► n blocks (k data + m parity)
                                                                    │ each block = one content-addressed ciphertext block
                                                                    ▼
-                              placement: negotiate with cohort peers (block.offer / accept)
+                              placement: negotiate with cohort peers (offer / accept, §18)
                                                                    ▼
                     push block + chunk descriptor ──► distinct cohort peers      locate later via have/want
 ```
@@ -55,11 +55,11 @@ Nothing here changes the envelope, the dispatch rule, or `SetHandler`. Storage s
 
 **Identity.** Every operation that needs "who" keys on the kernel identity: control-plane envelopes read `signature.signer`, and storage's own signed objects verify against the same kernel pubkeys (§16). The author of a manifest, the signer of a chunk descriptor, the peer whose reciprocity standing moves — all are that one identity. There is no separate account system.
 
-**Names.** All storage messages are envelopes with storage names. App handlers install under author-scoped names so two deployments' storage apps never collide.
+**Names.** The storage handlers bind kernel names derived deterministically from canonical strings — the kernel's own bootstrap-name rule — so every node agrees on them without coordination; the live peer RPC is typed messages on the transport channel (§3, §18), not named dispatch. Deployments are kept apart not by names but by policy and scope: the installer's closed author set decides who may bind a name (§19), and the scoped signature (§16) keeps one deployment's signed objects from verifying in another's.
 
 **Capabilities.** Storage's confined logic reaches I/O only through the capability *domains* granted in its signed bundle manifest (seedkernel §12.2, §12.4) — an explicit, human-auditable list the operator authorizes by choosing to run the bundle; the runtime wires only the matching backends, and nothing outside the grant even resolves. A pure-compute handler (the codec — chunking, erasure coding, manifest building — and the reputation math) holds **no** caps — it is computation, and the structural sandbox guarantees it can touch no I/O even if compromised.
 
-**Transport.** Seed store needs an authenticated channel between peers that carries kernel envelopes, with each frame's signer pinned to the channel identity; any such transport works — and the kernel's node↔node transport provides exactly this on every byte-pipe (TCP, WebSocket, WebRTC): an authenticated key exchange whose record layer encrypts and integrity-protects every frame (seedkernel §12.6). It adds one capability-gated `net.send` for *addressed unicast* to a specific cohort peer, and bulk blocks ride the existing data channel as unsigned, hash-verified frames (§3); a dedicated bulk channel is an optional performance upgrade (§22).
+**Transport.** Seed store needs an authenticated channel between peers that carries kernel envelopes, with each frame's signer pinned to the channel identity; any such transport works — and the kernel's node↔node transport provides exactly this on every byte-pipe (TCP, WebSocket, WebRTC): an authenticated key exchange whose record layer encrypts and integrity-protects every frame (seedkernel §12.6). It adds one capability-gated `net` unicast for *addressing* a specific cohort peer, and bulk blocks ride the existing data channel as unsigned, hash-verified payloads of the ordinary storage messages (§3, §18); a dedicated bulk channel is an optional performance upgrade (§22).
 
 **Crypto.** Storage reuses the kernel's cryptography rather than shipping its own, so the only cryptographic-grade algorithm in storage WASM is **Reed–Solomon** (libsodium has no erasure coding); hashing, stream encryption, and key-sealing are all calls into the libsodium the kernel already loads, exposed as the no-cap host services of §16. Two consequences shape the rest of this doc: a chunk descriptor is signed and checked through the host's *scoped* signing service (§16) — the host fixes the domain-and-scope prefix on both paths — never by crypto code shipped in storage WASM; and confidentiality — the one facility the kernel protocol omits (authentication-only at the kernel layer, seedkernel §14) — is added client-side over that same libsodium (§4.4), not bundled. The payoff is storage handlers that are logic + RS, tens of KB, with no second copy of a crypto library.
 
@@ -73,7 +73,7 @@ Running a seed store node extends your trusted computing base (TCB) — but the 
 
 **Tier 0 — kernel base.** seedkernel itself: kernel, signature, installer. The root of trust; everything else composes on top.
 
-**Tier 1 — I/O base (trusted).** The host-native bridges — `store.local`, `net.send`, `clock.now`, `rand` (§16) — plus the no-cap crypto services over libsodium. These *must* be trusted: they are the only code that performs real I/O. They are deliberately small, each bound to exactly one capability, audited, and change rarely. This is the *whole* of what seed store adds to your TCB.
+**Tier 1 — I/O base (trusted).** The host backends behind the four capability domains — `store`, `net`, `clock`, `rand` (§16) — plus the no-cap crypto services over libsodium. These *must* be trusted: they are the only code that performs real I/O. They are deliberately small, each bound to exactly one capability, audited, and change rarely. This is the *whole* of what seed store adds to your TCB.
 
 **Tier 2 — logic (confined, upgradeable).** Everything else: `codec`, `reputation`, and the `coordinator`/`cohort`/`repair` orchestration (§17). This is pure logic. It is **confined** — no ambient access to disk, network, or clock — and reaches I/O *only* through the Tier-1 bridges its capability grant wires. The grant is not something the logic declares for itself: the **operator** grants capability domains in the signed bundle manifest (§2, seedkernel §12.4), and the runtime wires only those backends — an ungranted domain's bindings simply do not exist in the realm. So upgrading the logic does *not* re-grant full trust: a new version (same author, seedkernel §7.4) runs in the same sandbox, structurally bounded to whatever its manifest grants — and because the grant is signed, versioned content rather than ambient authority, a widened grant is a visible manifest change, never a silent acquisition.
 
@@ -90,13 +90,13 @@ The line that matters: **"trusting seed store" means trusting Tier 1 (small, sta
 
 ## 3. The bulk-data problem (64 KB) and the two planes
 
-The single hardest constraint is that **no envelope may exceed 64 KB**, and it is a fixed protocol constant, not a knob. So a multi-megabyte file cannot be one message, and even a single chunk is many messages. Seed store splits into two planes:
+The single hardest constraint is that **no envelope may exceed 64 KB**, and it is a fixed protocol constant, not a knob. So a multi-megabyte file can never ride the kernel's dispatch path; bulk bytes must live beside it, referenced by hash. Seed store splits into two planes:
 
-**Control plane — kernel envelopes.** Manifest root hashes, have/want exchanges, placement offers, fetch requests, receipts, repair coordination. These are small, identity-bearing, and signed where authorization matters. They flow through the normal dispatch pipeline and pay the per-message verify — fine, because they are infrequent relative to bytes moved.
+**Control plane — small peer-to-peer messages.** Manifest root hashes, have/want exchanges, placement offers, fetch requests, repair coordination. The storage RPC between two cohort peers (§18) rides the kernel transport's authenticated channel and needs **no per-message signature**: the channel's key exchange pins the remote's kernel identity and its record layer encrypts, integrity-protects, and replay-protects every frame (seedkernel §12.6), so the channel itself is the sender authentication. What *is* signed is what must outlive a channel or carry authority beyond it — install messages (§19), the sealed-key share (§4.4), and above all the chunk descriptor riding inside placement messages (§4.3), signed by the file's *author*, not the message's sender. Signed where authorization matters, channel-authenticated everywhere else.
 
-**Bulk plane — content-addressed blocks.** Blocks are **self-verifying by hash**, so they need no signature for integrity. In the base design they ride the existing data channel as **unsigned, hash-verified frames** — each frame is `[claimed block_id ∥ bytes]`, the claimed id a routing label only: the receiver drops any frame whose claimed id it did not request — so unsolicited bulk costs nothing, not even a hash — then verifies `content_hash(bytes) == claimed id` on the rest (the hash, never the label, is the authority) and drops on mismatch. This stays entirely inside the seedkernel message model, inherits the channel's encryption and pubkey pinning, and avoids per-block verify cost because there is no signature to check. (A dedicated bulk data channel for higher throughput on large files is an optional upgrade — §22.)
+**Bulk plane — content-addressed blocks.** Blocks are **self-verifying by hash**, so they need no signature for integrity. In the base design they ride *inside* the same channel's messages — the push half of a `store` and the reply half of a `fetch` (§18) — as unsigned, hash-named bytes: the receiver verifies `content_hash(bytes) == block_id` against an id it asked for or admitted, and drops on mismatch — the hash, never the framing, is the authority. This stays entirely inside the kernel transport, inherits the channel's encryption and pubkey pinning, and avoids per-block verify cost because there is no signature to check. (A dedicated bulk data channel with its own raw framing, for higher throughput on large files, is an optional upgrade — §22.)
 
-The rule is the same either way: **the control plane carries hashes and authorization; the bulk plane carries hash-named bytes that authenticate themselves.** Transfers are flow-controlled with a simple windowed request/ack (`block.fetch_req` lists wanted block-ids; the holder streams `block.data`s; the receiver acks ranges) so a browser node doesn't blow its heap on a large file.
+The rule is the same either way: **the control plane carries hashes and authorization; the bulk plane carries hash-named bytes that authenticate themselves.** Transfers are batched and windowed rather than per-block: one message carries many blocks, every message stays under a per-transport byte cap, and a peer keeps only a bounded window of capped messages in flight (§18, §28) — so round trips scale with peers rather than blocks, and a browser node never holds more than a window of a large file in memory.
 
 ---
 
@@ -173,7 +173,7 @@ A node keeps connections to a **bounded set of peers it has a relationship with*
 - *Who currently holds block B?* — ask the cohort. A have/want carrying the block-ids turns up whoever has them right now; nothing is pinned in advance, so the answer is always current.
 - *Are there extra replicas, and is a given peer still holding its blocks?* — the same one-round exchange: "I want these `block_id`s" / "I have these `block_id`s." No lookup walk, no cryptographic protocol, no rate-limit machinery.
 
-A have/want only ever **names ids the asker already holds**; it confirms or denies those and never returns a peer's full inventory. There is no "list everything you have" message anywhere in the protocol, so files cannot be enumerated — *don't share = can't probe*.
+A have/want only ever **names ids the asker already knows** — ids it holds, or was handed in a manifest or descriptor; the reply confirms or denies exactly those and never returns a peer's full inventory. There is no "list everything you have" message anywhere in the protocol, so files cannot be enumerated — *don't share = can't probe*.
 
 Block-ids are hashes of random-key ciphertext (§4.4), so to a peer outside a file's sharing group they are opaque noise, and on the wire they are encrypted. The only parties who can interpret a have/want entry are those who already hold the file's key — i.e. people you deliberately shared with.
 
@@ -191,12 +191,12 @@ What leaks, and why it is acceptable here: a peer you exchange have/want with le
 
 1. **Chunk & encrypt.** The owner generates a random content key `K` (via `rand`) and feeds the file to the `codec` (cap-free) block-by-block, encrypting each chunk under `K` (§4.4).
 2. **Erasure-code.** The `codec` (cap-free) turns each chunk's *k* data blocks into *m* parity blocks, computes all `n` block-ids, and forms the chunk's descriptor, which the owner signs (§4.3). A file too small to fill a chunk skips this step and is replicated `r = m + 1` times instead (§4.1).
-3. **Place by negotiation.** For each block, the `store.coordinator` picks candidate cohort peers — ordered by reciprocity standing (§13) and current reachability — and sends `block.offer(block_id, size, signed descriptor)`. A peer with free quota and willingness replies `block.accept`; otherwise `block.decline` and the coordinator moves to the next candidate. There is no global placement function; placement is a short private negotiation within the cohort.
+3. **Place by negotiation.** For each block, the `store.coordinator` picks candidate cohort peers — ordered by reciprocity standing (§13) and current reachability — and sends an `offer` (block_id, size, signed descriptor — §18). A peer with free quota and willingness accepts; a decline moves the coordinator to the next candidate. There is no global placement function; placement is a short private negotiation within the cohort.
 4. **Push.** On accept, the coordinator streams the block over the bulk plane (§3) together with its signed chunk descriptor, so the holder can verify it and later help heal the chunk.
 5. **Build & store the manifest.** The `codec` assembles the signed descriptors and encryption header and encrypts the manifest under `K`, which is then **replicated across cohort peers** (§4.3). The manifest lists block-ids, not holders; which peer took which block is rediscovered live via have/want, so placement can shift under repair without the manifest going stale.
 6. **Publish.** `manifest_id` is what the owner keeps and shares (with `K` sealed to each recipient, §4.4), wrapped in a signed 64 KB envelope.
 
-The `n` blocks of a chunk are placed on **distinct peers** (the coordinator enforces no-two-blocks-of-a-chunk-same-holder), so losing one peer costs at most one block of any chunk — the core of the §10 invariant. Because every `block.offer` carries the chunk's descriptor (§4.3), a holder enforces this itself, declining an offer for a chunk it already holds a sibling of — so the invariant survives a careless or malicious placer, a repairer (§9) included, not just an honest coordinator. Where the deployment can tell peers apart, placement also spreads a chunk across distinct *social clusters* (one person's devices, one tight friend-group), so a correlated failure or collusion costs one block rather than several (§10).
+The `n` blocks of a chunk are placed on **distinct peers** (the coordinator enforces no-two-blocks-of-a-chunk-same-holder), so losing one peer costs at most one block of any chunk — the core of the §10 invariant. Because every `offer` carries the chunk's descriptor (§4.3), a holder enforces this itself, declining an offer for a chunk it already holds a sibling of — so the invariant survives a careless or malicious placer, a repairer (§9) included, not just an honest coordinator. Where the deployment can tell peers apart, placement also spreads a chunk across distinct *social clusters* (one person's devices, one tight friend-group), so a correlated failure or collusion costs one block rather than several (§10).
 
 ---
 
@@ -221,6 +221,8 @@ Peers are expected to disappear and come back. The protocol distinguishes a tran
 - **Live** — recently reachable *and* recently served a verification-fetch for the block (or a sampled sibling).
 - **Suspected** — unreachable within a **grace window** `G` (default 24 h). *No repair.* This is precisely "a node may be offline for a period": a laptop closed overnight, a phone in a tunnel, a server rebooting all sit here and recover for free when they reappear.
 - **Lost** — unreachable beyond `G`, or repeatedly failing to serve a block it advertises. Eligible to be counted as missing for repair. (A node may first corroborate the unreachability with a second observer to avoid acting on a one-sided eclipse, but it need not: repair is idempotent (§9), so acting on a single observation is safe — at worst it briefly over-replicates.)
+
+Grace lives in the observer's bookkeeping, not on the wire — and skipping it is *safe*, just wasteful: repair is idempotent (§9), so a node that treats every failed audit as Lost at once merely re-spreads blocks a sleeping laptop still holds, and the surplus is reclaimed as ordinary over-replication (§14). The reference implementation currently takes exactly that trade — it keeps no liveness state and heals on first miss — so `G` is a knob of the design (§28), not yet of the implementation; add the Suspected tier when cohort churn makes the extra repair traffic matter.
 
 **Redundancy measure.** For a chunk, `live_blocks` = number of distinct blocks with at least one Live holder. Data is safe while `live_blocks ≥ k`; the healthy target is `n = k + m`. Repair triggers on a **low-water mark** strictly above `k` (§9), never waiting until the chunk is one loss from death.
 
@@ -287,15 +289,15 @@ A deployment that wants *prompt*, signed space-reclamation — actively telling 
 
 ## 12. Donating storage
 
-"Donate whatever storage you have available" is the `store.local` bridge plus a host-configured quota.
+"Donate whatever storage you have available" is the `store` capability domain plus a host-configured quota.
 
-**`store.local` (capability `store`)** is a host-native bridge with operations `put(block_id, bytes)`, `get(block_id) → bytes`, `size(block_id) → n | −1` (existence is `size ≥ 0` — there is no separate `has`, mirroring the kernel's fs surface), `delete(block_id)`, `list(prefix)`, and `stat() → { quota, used, free }`. Like every bridge it runs the caller-capability check before touching disk, so only handlers that declared `store` at install time can reach it. A holder stores opaque `(block_id → ciphertext)` pairs plus the small signed descriptor (§4.3): it needs no file key and learns nothing about what it is holding beyond the chunk's shape.
+**The `store` domain (§16)** exposes `put(block_id, bytes)`, `get(block_id) → bytes`, `size(block_id) → n | −1` (existence is `size ≥ 0` — there is no separate `has`, mirroring the kernel's fs surface), `delete(block_id)`, `list()`, and `stat() → { quota, used, free }`. Like every capability domain it exists in a realm only under the operator's grant (§2.1), so only logic granted `store` in the bundle manifest can reach disk at all. A holder stores opaque `(block_id → ciphertext)` pairs plus the small signed descriptor (§4.3): it needs no file key and learns nothing about what it is holding beyond the chunk's shape.
 
 **Backends differ by host, protocol does not:**
 - **Long-running peer:** a directory on disk; quota is a config number; effectively always Live.
 - **Browser node:** OPFS or IndexedDB; quota bounded by the browser's storage budget; eviction-aware (treat browser-evicted blocks as Lost and let repair handle them). The browser shell exposes a "donate N GB" control to set the quota.
 
-**Quota honesty is enforced, not assumed.** A node advertises free space, but no peer trusts the number — it trusts the node's track record of *actually serving the data it accepted* (§8, §13). Lying about capacity gets you data you then fail to serve, which costs reciprocity standing. `store.local.stat()` is for the owner's own accounting and admission control (refuse `block.offer` when full), not a network-trusted figure.
+**Quota honesty is enforced, not assumed.** A node advertises free space, but no peer trusts the number — it trusts the node's track record of *actually serving the data it accepted* (§8, §13). Lying about capacity gets you data you then fail to serve, which costs reciprocity standing. The `store` domain's `stat()` is for the owner's own accounting and admission control (declining `offer`s when full), not a network-trusted figure.
 
 ---
 
@@ -310,12 +312,12 @@ Each node keeps, per peer, a small **decayed reciprocity balance** built only fr
 - **Reciprocity** — netted against how much you currently store *for* that peer, so the score reflects a running give-and-take.
 - **Recency** — old observations decay, so a peer that stops serving fades, and the state never grows without bound.
 
-`reputation.score(pubkey) → score` is a read-only query over these counters, used by placement (§6), by holders deciding whether to accept a `block.offer`, and by readers choosing whom to fetch from first. The whole computation is arithmetic over locally-witnessed events, so it lives in the pure, cap-free `reputation` handler (§17) — and a deployment that stores only among devices one person owns can replace it with a constant.
+`reputation.score(pubkey) → score` is a read-only query over these counters, used by placement (§6), by holders deciding whether to accept an `offer` (§18), and by readers choosing whom to fetch from first. The whole computation is arithmetic over locally-witnessed events, so it lives in the pure, cap-free `reputation` handler (§17) — and a deployment that stores only among devices one person owns can replace it with a constant.
 
 ### 13.2 What it buys (the incentive loop)
 
 Reciprocity is spendable as **priority**, which closes the loop without money:
-- **Durability for your own data.** Peers you have reliably served accept your `block.offer`s readily and hold for you; a peer you have never reciprocated with is free to throttle you or ask you to contribute first.
+- **Durability for your own data.** Peers you have reliably served accept your `offer`s readily and hold for you; a peer you have never reciprocated with is free to throttle you or ask you to contribute first.
 - **A storage allowance proportional to contribution.** A soft, tit-for-tat budget: roughly, the cohort durably holds for you about as much as you have reliably held for others. Leeching is therefore self-limiting, and donating storage is directly valuable to the donor.
 - **Preferential read bandwidth and faster repair participation.** Good citizens are chosen first to serve and to repair, and so get more chances to raise their score — the loop compounds.
 
@@ -329,10 +331,10 @@ Honest, available nodes climb; nodes that withhold, lie about capacity, or churn
 
 A node has finite donated space and will be offered far more than it can hold, so it needs a policy for what to accept and what to drop. This is not a new subsystem — it is the local face of the reciprocity loop (§13). The one structural idea is **two tiers of storage**:
 
-- **Committed** — blocks a node accepted (`block.accept`) and now earns standing by reliably serving (§8, §13). These are not dropped casually: shedding one abruptly means failing its next verification-fetch and losing standing. A node sheds a commitment only by **graceful release** — re-placing the block on another peer, or letting repair pick it up — accepting that durability dips until redundancy is restored.
+- **Committed** — blocks a node accepted (an `offer` it granted, §18) and now earns standing by reliably serving (§8, §13). These are not dropped casually: shedding one abruptly means failing its next verification-fetch and losing standing. A node sheds a commitment only by **graceful release** — re-placing the block on another peer, or letting repair pick it up — accepting that durability dips until redundancy is restored.
 - **Opportunistic cache** — blocks picked up while serving reads, or extra replicas beyond `n`. Free to evict at any time, no commitment, no reciprocity cost.
 
-**Admission (when a `block.offer` arrives).** Accept weighted by: reciprocity (prefer peers who store for you), social closeness, and how under-replicated the chunk is — a repair offer that lifts a chunk off its low-water mark outranks a routine first placement. Reserve a fraction of quota for commitments so cache cannot crowd out durability, and refuse offers outright when the committed tier is full.
+**Admission (when an `offer` arrives).** Accept weighted by: reciprocity (prefer peers who store for you), social closeness, and how under-replicated the chunk is — a repair offer that lifts a chunk off its low-water mark outranks a routine first placement. Reserve a fraction of quota for commitments so cache cannot crowd out durability, and refuse offers outright when the committed tier is full.
 
 **Eviction (under quota pressure).** Drop cache first, favoring blocks that are cold *and* **verifiably** well-replicated elsewhere — redundancy counted only from holders this node has itself recently verification-fetched (§8), or weighted by the advertiser's standing, never from raw have/want — so a peer cannot spoof abundance with cheap `have`s to make you evict the only real copy. Protect rare or globally under-replicated blocks (the ones repair would struggle to regenerate). Only if still pressed does a node gracefully release its lowest-value commitments — typically those for low-reciprocity peers. Long-unserved orphan blocks — including those of a crypto-shredded file (§11) — are first out the door, which is how dead data is reclaimed without an explicit delete. (If the §25 tombstone layer is enabled, tombstoned blocks are dropped on sight rather than waiting to go cold.)
 
@@ -360,16 +362,18 @@ Optional hardening for cohorts that are less than fully trusted is documented se
 
 ---
 
-## 16. New bridges (host-native, `SetHandler`-installed, one capability each)
+## 16. Capability domains and host services
 
-| Bridge | Cap | Payload (request) | Host action |
-| --- | --- | --- | --- |
-| `store.local` | `store` | op-tagged: `put`/`get`/`size`/`delete`/`list`/`stat` (§12; existence is `size ≥ 0`) | read/write the donated blob store (FS or OPFS/IndexedDB) |
-| `net.send` | `net` | `[peer_id_len][peer_id][bytes...]` | addressed unicast to a cohort peer over its data channel (open/reuse) |
-| `clock.now` | `clock` | (empty) | u64 unix ms — grace windows, repair jitter, score decay |
-| `rand` | `rand` | `[n]` | n cryptographically-random bytes — content keys and key-sealing (nonces are derived, not drawn, §4.4) |
+Storage's confined logic reaches the world through two kinds of host surface: four **capability domains** — real I/O, operator-granted, one small backend each — and a handful of **no-cap host services** — pure computation over the kernel's libsodium, free for any handler to call. Together these are the whole of Tier 1 (§2.1). The domains are not storage-specific kernel objects: they are the kernel's generic capability bridge (seedkernel §12.2) with the matching backends wired in, and an ungranted domain's operations simply do not exist in the realm (§2.1).
 
-`net.send` is the one genuinely new transport primitive (it adds addressed unicast). Async by nature, so it returns a correlation id and the host later delivers the response back to the originating handler. `clock.now` and `rand` are conventional bridges a deployment likely already has.
+| Domain | Backend |
+| --- | --- |
+| `store` | the donated blob store (§12): opaque key → bytes on FS or OPFS/IndexedDB; existence is `size ≥ 0`, plus the local quota `stat` |
+| `net` | addressed unicast to a cohort peer over its authenticated data channel (open/reuse): request/response with a timeout, plus a batched fan-out that reaches many peers in one call |
+| `clock` | u64 unix ms — liveness, repair jitter, score decay |
+| `rand` | n cryptographically-random bytes — content keys and key-sealing (nonces are derived, not drawn, §4.4) |
+
+`net` is the one genuinely new transport primitive (it adds addressed unicast). It is async by nature, and the confined caller simply **blocks on the bridge** until the host delivers the response or times out — the sandbox's bridge is a blocking seam (§2.1), so there is no correlation-id machinery anywhere in the protocol; the only concurrency the confined logic expresses is the batched fan-out, which the host runs in parallel and answers as one result. `clock` and `rand` are conventional backends a deployment likely already has.
 
 **Crypto is reused, not added.** Hashing and the §4.4 confidentiality primitives are thin host services over the **libsodium the kernel already loads** (seedkernel §6.2, §10.2): `hash` (**BLAKE2b-256** via `crypto_generichash` — the `content_hash` used for block-ids), `stream` (length-preserving encryption via `crypto_stream_xchacha20_xor` under a content key; the same op decrypts), and `box_seal`/`box_open` (sealing `K` to a recipient's kernel key). These perform no I/O, so — like `signature.signer` — they need **no capability**, which is what lets `codec` stay pure (§17). **Why a storage-local hash:** block-ids never cross into the kernel — they are pure content addressing within storage (§4.2) — so the content hash is storage's own choice, not the kernel's genesis hash, and **BLAKE2b** is fast and *also* already in this same libsodium, so it adds no bytes. Signing and verifying are host services of the same no-cap shape — with one crucial qualifier, next paragraph: the signing call storage holds is *scoped*, never raw. Storage therefore ships **no crypto of its own except Reed–Solomon** (libsodium has no erasure coding), reusing the same libsodium the deployment already carries rather than bundling a second copy — with one footnote the implementation surfaced: the raw, MAC-less `crypto_stream_xchacha20_xor` (§4.4) lives only in libsodium's **"sumo" build** (~278 KB; the standard build is ~217 KB but exposes only tag-adding AEAD/secretbox, which would break the exactly-`B`-byte block), so a storage-capable node loads the sumo build and shares that one instance with the kernel.
 
@@ -379,7 +383,7 @@ Optional hardening for cohorts that are less than fully trusted is documented se
 
 ## 17. App logic — Tier-2, confined (§2.1)
 
-All storage *logic* is Tier-2: confined, capability-bounded, and reaching I/O only through the §16 bridges. It comes in the two confined forms of §2.1 — **WASM** for the pure hot compute, and a **zero-authority sandboxed-JS realm** for the async orchestration. Both are bounded identically: an explicit operator-granted cap set (§2.1), no ambient I/O.
+All storage *logic* is Tier-2: confined, capability-bounded, and reaching I/O only through the §16 capability domains. It comes in the two confined forms of §2.1 — **WASM** for the pure hot compute, and a **zero-authority sandboxed-JS realm** for the async orchestration. Both are bounded identically: an explicit operator-granted cap set (§2.1), no ambient I/O.
 
 | Handler | Form | Caps | Role |
 | --- | --- | --- | --- |
@@ -389,23 +393,24 @@ All storage *logic* is Tier-2: confined, capability-bounded, and reaching I/O on
 | `store.coordinator` | sandboxed-JS | `store`, `net`, `clock`, `rand` | orchestrate PUT/GET incl. placement negotiation and content-key generation; windowed transfer; admission, eviction (§14) and reciprocity accounting (§13) |
 | `repair` | sandboxed-JS | `store`, `net`, `clock` | the repair loop: measure redundancy via have/want + verification-fetch, reconstruct on ciphertext (§9) |
 
-The two pure handlers (`codec`, `reputation`) hold **no** capabilities, so the structural sandbox guarantees they can never reach disk or network even if buggy — the Reed–Solomon coding and the trust math are exactly where you want that guarantee. (The crypto proper lives in the host's libsodium, §16, reached by a no-cap call, so `codec` keeps its purity.) The orchestration handlers run in a **sandboxed-JS realm** (§2.1) rather than as wasm because they are inherently async and multi-step — negotiating with peers, streaming blocks, awaiting responses — which the *synchronous* handler ABI (§4, seedkernel §4) expresses only through awkward correlation-id continuations; the realm lets them stay ordinary async JS while still being confined to their granted caps. Discovery and placement are deliberately light: a single small `cohort` realm keeps the peer set and runs have/want, and placement is just negotiation folded into `store.coordinator`. There is **no separate proof handler** — proving a holder still has data is an ordinary verification-fetch on the existing fetch path, scored locally by `reputation`. Mutating handlers (`store.coordinator`, `repair`) that act under a signer's authority consume a per-signer sequence number to reject replays: each peer persists the highest sequence it has accepted per signer and drops anything not strictly greater. (Every Part I mutator is addressed unicast, so this is plain replay rejection — there is no gossiped state-change to reconcile.)
+The two pure handlers (`codec`, `reputation`) hold **no** capabilities, so the structural sandbox guarantees they can never reach disk or network even if buggy — the Reed–Solomon coding and the trust math are exactly where you want that guarantee. (The crypto proper lives in the host's libsodium, §16, reached by a no-cap call, so `codec` keeps its purity.) The orchestration handlers run in a **sandboxed-JS realm** (§2.1) rather than as wasm because they are inherently async and multi-step — negotiating with peers, streaming blocks, awaiting responses — which the *synchronous* handler ABI (§4, seedkernel §4) expresses only through awkward correlation-id continuations; the realm lets them stay ordinary async JS while still being confined to their granted caps. Discovery and placement are deliberately light: a single small `cohort` realm keeps the peer set and runs have/want, and placement is just negotiation folded into `store.coordinator`. There is **no separate proof handler** — proving a holder still has data is an ordinary verification-fetch on the existing fetch path, scored locally by `reputation`. Part I needs no replay machinery of its own: every mutator is an awaited request on the pinned, replay-protected channel (§3), and the one state-changing payload — a stored block — is idempotent by content addressing (§4.2). (The mutable head of §27.3, replicated rather than unicast, is the first object that needs a per-signer sequence, and it carries its own.)
 
 > **In the runtime** this table *is* the seed store bundle (seedkernel §12.4): `codec` and `reputation` install as WASM modules, while `cohort`, `store.coordinator`, and `repair` — plus the holder side (admission, sibling rule, content-addressing, quota, store writes) — fold into the bundle's one guest program, confined per §2.1; their caps arrive as the manifest's capability domains.
 
 ---
 
-## 18. Message catalog (control plane; every message ≤ 64 KB)
+## 18. Message catalog (the whole control plane: four request/response pairs)
 
-| Name | Direction | Payload sketch |
+Every storage message is a request/response between two cohort peers on the authenticated channel (§3), and there are exactly four. None carries a signature of its own — the channel pins the sender (§3); the only signed object on the wire is the chunk descriptor riding inside `offer` and `store` (§4.3). All four are **batched**: one message carries many blocks' worth, bounded by a per-transport byte cap (§28), so round trips scale with peers, not blocks.
+
+| Message | Request | Response |
 | --- | --- | --- |
-| `store.put_req` / `store.put_done` | user ↔ coordinator | file blocks in / `manifest_id` out |
-| `store.get_req` / `store.get_done` | user ↔ coordinator | `manifest_id` in / file blocks out |
-| `block.offer` / `block.accept` / `block.decline` | coordinator ↔ peer | `block_id`, size, **signed chunk descriptor** (§4.3) / accept / reason |
-| `block.fetch_req` / `block.data` / `block.ack` | reader ↔ holder | wanted block-ids / a block (bulk plane) / window ack |
-| `disc.have` / `disc.want` | peer ↔ peer | block-ids held / block-ids wanted (the discovery layer, §5) |
+| `have` | block-ids the asker wants located (§5) | per-id held / not-held mask |
+| `offer` | per block headed to this peer: `block_id`, size, **signed descriptor** (§6) | per-block accept/decline mask — quota (§14) and the sibling rule (§6), judged over the whole batch |
+| `store` | per accepted block: `block_id`, signed descriptor, the bytes (§6 step 4 — the bulk plane's push carrier, §3) | per-block stored/failed mask — the **binding** admission point: content address (§4.2), sibling rule, and quota are re-checked here, so `offer` stays advisory |
+| `fetch` | wanted block-ids (§7; also the §8 verification-fetch) | the blocks, present/absent per id (the bulk plane's pull carrier, §3), each hash-verified by the receiver (§4.2) |
 
-Control messages that authorize a state change (the mutators in §17) carry a leading sequence number and are dropped on replay. Repair adds no message of its own — it runs on have/want, `block.fetch_req`, and `block.offer` (§9). Bulk `block.data`s carry no signature; they are validated by `content_hash(bytes) == block_id` (§3). The optional verifiable-reputation layer (§20) adds `proof.challenge` / `proof.receipt` and `rep.gossip`, and the optional tombstone layer (§25) adds the signed `block.tombstone`; the base protocol uses none of them.
+PUT and GET are not messages — they are the coordinator's local API, and it speaks only these four to the cohort. Repair adds no message of its own: it runs on `have`, `fetch`, `offer`, and `store` (§9). The optional verifiable-reputation layer (§20) adds `proof.challenge` / `proof.receipt` and `rep.gossip`, and the optional tombstone layer (§25) adds its signed tombstone; the base protocol uses none of them.
 
 ---
 
@@ -413,12 +418,12 @@ Control messages that authorize a state change (the mutators in §17) carry a le
 
 On top of the kernel bootstrap, a storage-capable node additionally:
 
-1. Installs the storage bridges it offers: `store.local` (always, to donate space), `net.send`, `clock.now`, `rand`.
-2. Wires an installer policy that admits the storage app handlers — restrictive, *never* open, e.g. a content-hash allowlist of audited storage-handler bytecode plus a closed author set for who may publish upgrades.
-3. Receives the storage app handlers as signed install messages (`codec`, `cohort`, `store.coordinator`, `repair`, `reputation`). An install binds code to a name, never authority — each unit's caps in §17 come from the operator's grant (§2.1), not from anything the install declares.
+1. Wires the backends for the capability domains it will grant (§16): the donated blob store behind `store` (always, to donate space), plus `net`, `clock`, `rand`.
+2. Wires an installer policy that admits the storage bundle — restrictive, *never* open, e.g. a content-hash allowlist of the audited bundle plus a closed author set for who may publish upgrades.
+3. Admits the signed storage bundle (§2.1, §17): the pure `codec` and `reputation` WASM handlers install by name, and the orchestration + holder logic loads into its confined realms with exactly the capability domains the bundle manifest grants. An install binds code to a name, never authority — authority is the operator's grant (§2.1), not anything the code declares.
 4. Joins its cohort: connects to known peers (by introduction or a rendezvous point), exchanges have/want, and starts serving.
 
-A node that only wants to *store and serve* installs the holder-side path (`store.local`, `cohort`, the accept/serve half of `store.coordinator`), adding `repair` + `codec` only if it will also help heal; it never needs the writer's PUT path. A read-only client needs `codec` plus the GET path. The onion composes per-role.
+A node that only wants to *store and serve* runs the holder side (the `store` domain plus the guest's serve path — admission, the sibling rule, `fetch`), adding the repair loop + `codec` only if it will also help heal; it never needs the writer's PUT path. A read-only client needs `codec` plus the GET path. The onion composes per-role.
 
 ---
 
@@ -445,7 +450,7 @@ Because a block is small and self-verifying, **the served block *is* the proof o
 
 ### 20.2 Transitive trust
 
-A peer's reputation is then computed from the receipts *others signed about it*, weighted by **volume & longevity** (passing challenges for more data, over more time), **challenger diversity** (receipts from many *distinct* peers beat many from one), **recency under a hard age bound** `X` (receipts older than `X`, e.g. 90 days, are discarded rather than kept — this decays a peer that stops serving and bounds how much state anyone stores), and **retrieval success** (serving real `block.fetch_req`s, not just challenges).
+A peer's reputation is then computed from the receipts *others signed about it*, weighted by **volume & longevity** (passing challenges for more data, over more time), **challenger diversity** (receipts from many *distinct* peers beat many from one), **recency under a hard age bound** `X` (receipts older than `X`, e.g. 90 days, are discarded rather than kept — this decays a peer that stops serving and bounds how much state anyone stores), and **retrieval success** (serving real `fetch`es, not just challenges).
 
 The load-bearing rule: when receipts are gossiped (`rep.gossip`) they **must be weighted transitively, never summed flat**, or a clique manufactures its own diversity by signing each other glowing receipts. Concretely this is **EigenTrust-style transitive trust, personalized to the evaluator**. Each peer normalizes its locally-witnessed scores (§13) into a trust vector, then propagates trust over the gossiped receipt graph by damped power iteration — a peer's transitive score is the fixpoint of
 
@@ -467,7 +472,7 @@ The win scales with *k* — large for cold archives (`RS(20,20)` → painful 20-
 
 ## 22. A dedicated bulk channel
 
-The base bulk plane (§3) rides the existing data channel as unsigned, hash-verified frames — simplest, and entirely inside the kernel message model. For higher throughput on large files, a deployment can run a **dedicated bulk data channel** alongside the kernel-envelope channel on the same connection. The control plane negotiates a transfer (block-ids, order, window) over signed kernel messages; raw blocks then stream over the bulk channel. This is the most performant option for large files, at the cost of a second channel to manage. The integrity rule is unchanged: every block is validated by `content_hash(bytes) == block_id`.
+The base bulk plane (§3) carries blocks inside the batched `store`/`fetch` messages — simplest, and entirely inside the kernel transport. For higher throughput on large files, a deployment can run a **dedicated bulk data channel** alongside the control channel on the same connection. The control plane negotiates a transfer (block-ids, order, window) over the §18 messages; raw blocks then stream over the bulk channel as bare frames `[claimed block_id ∥ bytes]` — the claimed id a routing label only: the receiver drops any frame whose claimed id it did not request (unsolicited bulk costs nothing, not even a hash), then verifies `content_hash(bytes) == claimed id` on the rest and drops on mismatch; the hash, never the label, is the authority. This is the most performant option for large files, at the cost of a second channel to manage. The integrity rule is unchanged either way: every block is validated by `content_hash(bytes) == block_id`.
 
 ## 23. Hardening a less-trusted cohort
 
@@ -485,7 +490,7 @@ The base design uses a random per-file key, so two users storing the same file p
 
 Add only if a deployment wants to reclaim disk *promptly* rather than letting crypto-shredded data age out through eviction (§11, §14); a friends-or-devices store works fine without it.
 
-To get the bytes off disk quickly, the owner publishes a **signed `block.tombstone`** for the chunk's block-ids (its signed bytes open with the tombstone's own distinct format tag, §16, so no descriptor or head can be replayed as one), gossiped through the cohort. A holder that receives it verifies the signature, drops the blocks, and stops counting them. Online holders comply at once; offline holders comply when they reconnect and see the tombstone; and the tombstone also tells block-holders to **stop repairing** that chunk, so it is allowed to decay below low-water and be reclaimed instead of healed back to life. Anything a tombstone never reaches still ages out through normal eviction (§14) — the Part I fallback is always underneath.
+To get the bytes off disk quickly, the owner publishes a **signed tombstone** for the chunk's block-ids (its signed bytes open with the tombstone's own distinct format tag, §16, so no descriptor or head can be replayed as one), gossiped through the cohort. A holder that receives it verifies the signature, drops the blocks, and stops counting them. Online holders comply at once; offline holders comply when they reconnect and see the tombstone; and the tombstone also tells block-holders to **stop repairing** that chunk, so it is allowed to decay below low-water and be reclaimed instead of healed back to life. Anything a tombstone never reaches still ages out through normal eviction (§14) — the Part I fallback is always underneath.
 
 **Authority.** A tombstone is honored only when signed by the manifest's author (the §2 identity) — the same trust root that signs chunk descriptors (§4.3). For a shared file the simple rule is that only the owner's tombstone removes the data; a member who no longer wants it just drops its own copy and stops repairing — it cannot delete for everyone.
 
@@ -538,7 +543,7 @@ file head (signed by the owner — the §2 identity):
   seq            // monotonic per (signer, file_id)
 ```
 
-It reuses machinery the kernel already has: §17's mutators already "consume a per-signer sequence number to reject replays," so a head *is* that — the highest `seq` from the file's author wins, and a stale head is dropped exactly like a replayed mutator. The head is small, signed, and replicated/gossiped through the cohort like any other control message; resolving a file becomes one extra hop (head → `manifest_id`) before the §7 GET. **Single-writer is the whole easy case** — your own files across your own devices, or one owner per file — and it is all this extension covers. **Concurrent multi-writer editing is a different problem** the design does not solve: two heads at the same `seq` are a genuine conflict, and reconciling them needs last-writer-wins, a merge policy, or a CRDT over the manifest — out of scope here, and a reason to keep mutable files single-author unless you are prepared to build that.
+Replay protection is the head's own `seq` — the first per-signer sequence anywhere in the design (§17): the highest `seq` from the file's author wins, and a stale or replayed head is simply dropped. The head is small, signed, and replicated/gossiped through the cohort like any other control message; resolving a file becomes one extra hop (head → `manifest_id`) before the §7 GET. **Single-writer is the whole easy case** — your own files across your own devices, or one owner per file — and it is all this extension covers. **Concurrent multi-writer editing is a different problem** the design does not solve: two heads at the same `seq` are a genuine conflict, and reconciling them needs last-writer-wins, a merge policy, or a CRDT over the manifest — out of scope here, and a reason to keep mutable files single-author unless you are prepared to build that.
 
 ### 27.4 History and reclamation
 

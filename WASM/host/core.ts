@@ -19,8 +19,6 @@ export interface StorageConfig {
   lowWater: number;
   /** Files of at most this many blocks are replicated, not RS-coded (§4.1). */
   smallMaxBlocks: number;
-  /** Grace window G: an unreachable holder is Suspected, not Lost (§8). */
-  graceMs: number;
   /** How many per-holder STORE sub-batches a PUT pushes concurrently
    *  (putConcurrency) and per-holder FETCH sub-batches a GET pulls
    *  (getConcurrency). OFFER/STORE/FETCH are batched per holder, so the round-trip
@@ -88,7 +86,6 @@ export function defaultConfig(k = 2, m = 2, blockSize = 256): StorageConfig {
     replicas: m + 1,
     lowWater: k + Math.ceil(m / 2),
     smallMaxBlocks,
-    graceMs: 24 * 3600 * 1000,
     putConcurrency: DEFAULT_FANOUT_WINDOW,
     getConcurrency: DEFAULT_FANOUT_WINDOW,
     // ~1 MiB: a batch transfers well inside a typical request timeout and keeps a
