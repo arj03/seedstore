@@ -4,7 +4,7 @@
 // Given a kernel host + author key + the build dir, it writes the whole bundle
 // directory: each module's wasm, the guest, and the signed manifest. The manifest
 // commits to every module's genesisHash, so the shell installs the verified bytes
-// directly under the declared kernel name (seedkernel §13.4).
+// directly under the declared kernel name (seedkernel §12.4).
 //
 // Two deliberate choices live here, once:
 //   • `caps` declares capability *domains* (cap-bridge CAP_DOMAINS keys), not op
@@ -43,7 +43,7 @@ const STORAGE_CAPS = ["crypto", "net", "fs", "module", "clock"];
  * @param {Uint8Array} o.sk   author secret key (signs the manifest)
  * @param {Uint8Array} o.pk   author public key
  * @param {string} o.build    seedstore build/ dir (holds kernel/codec wasm + staged guest)
- * @param {number} [o.version] monotonic-per-(author,app) freshness mark (README §13.4);
+ * @param {number} [o.version] monotonic-per-(author,app) freshness mark (README §12.4);
  *                             the shell refuses a load below its high-water mark. Integer.
  * @param {(s:string)=>void} [o.log]  optional progress logger
  * @returns the manifest object that was signed (for logging/inspection).
@@ -60,7 +60,7 @@ export function writeStorageBundle({ dir, host, sodium, sk, pk, build, version =
   // The two pure handlers (§17). The manifest commits to each module's genesisHash;
   // the shell verifies the bytes against it and installs them directly under
   // `kernelName`, re-checking author + module hash under the same policy gate
-  // (seedkernel §13.4).
+  // (seedkernel §12.4).
   const modules = modSpecs.map((m) => {
     const wasm = new Uint8Array(readFileSync(join(build, m.file)));
     writeFileSync(join(dir, m.file), wasm);
@@ -88,7 +88,7 @@ export function writeStorageBundle({ dir, host, sodium, sk, pk, build, version =
   const manifest = {
     app: APP_NAME,
     // A monotonic integer freshness mark per (author, app): the shell enforces it as a
-    // high-water mark and refuses a downgrade (README §13.4). Bump it on every publish.
+    // high-water mark and refuses a downgrade (README §12.4). Bump it on every publish.
     version,
     modules,
     guest: { file: "tier2-guest.js", hash: toHex(host.genesisHash(new TextEncoder().encode(guestText))) },

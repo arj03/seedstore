@@ -1,6 +1,6 @@
 // Stage a self-contained browser demo into build/browser-demo — ALL browser pages
 // plus the assets they share, so there is ONE staged dir (not one per page):
-//   - the four WASM modules (kernel, bootstrap, codec, reputation)
+//   - the four WASM modules (kernel, signature, codec, reputation)
 //   - this project's compiled host, minified (build/host-min → host/)
 //   - seedkernel's node:fs-free browser host, minified (build/host-min → seedkernel/)
 //   - the pages:
@@ -102,7 +102,7 @@ async function copy(src, dst) {
 mkdirSync(out, { recursive: true });
 
 // WASM modules the pages fetch relative to themselves.
-for (const f of ["kernel.wasm", "bootstrap.wasm", "codec.wasm", "reputation.wasm"]) {
+for (const f of ["kernel.wasm", "signature.wasm", "codec.wasm", "reputation.wasm"]) {
   await copy(join(build, f), join(out, f));
 }
 

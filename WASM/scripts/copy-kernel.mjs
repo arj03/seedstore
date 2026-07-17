@@ -1,4 +1,4 @@
-// Copy the prebuilt kernel.wasm + bootstrap.wasm from the sibling seedkernel
+// Copy the prebuilt kernel.wasm + signature.wasm from the sibling seedkernel
 // checkout into this project's build/ dir. seedstore runs a node *on* the
 // seedkernel — it does not re-implement the kernel — so the two core modules
 // are taken verbatim from upstream (path dependency, README "How it composes
@@ -18,14 +18,14 @@ const root = join(__dirname, "..");
 const kernelBuild = join(root, "..", "..", "seedkernel", "WASM", "build");
 const outDir = join(root, "build");
 
-const files = ["kernel.wasm", "bootstrap.wasm"];
+const files = ["kernel.wasm", "signature.wasm"];
 
 mkdirSync(outDir, { recursive: true });
 
 // The Tier-2 guest is no longer a single hand-authored file: it is STITCHED from the
 // shared pure core (host/{util,protocol,manifest-core}.ts) + the orchestration body
 // by scripts/build-guest.mjs, which runs after `tsc` (it needs the compiled core).
-// So copy-kernel only stages the kernel/bootstrap wasm here.
+// So copy-kernel only stages the kernel/signature wasm here.
 
 let missing = false;
 for (const f of files) {

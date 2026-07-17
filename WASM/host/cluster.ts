@@ -31,7 +31,7 @@ export async function createConnectedCohort(opts: CohortOptions): Promise<Storag
       network: opts.network,
       sodium: opts.sodium,
       kernelBytes: opts.wasm.kernelBytes,
-      bootstrapBytes: opts.wasm.bootstrapBytes,
+      signatureBytes: opts.wasm.signatureBytes,
       codecBytes: opts.wasm.codecBytes,
       reputationBytes: opts.wasm.reputationBytes,
       guestSource: opts.wasm.guestSource,

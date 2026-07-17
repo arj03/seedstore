@@ -57,7 +57,7 @@ export async function run(t) {
     tmpDirs.push(dir);
     const identity = generateKeyPair(sodium);
     const shell = await boot({
-      kernelBytes: wasm.kernelBytes, bootstrapBytes: wasm.bootstrapBytes,
+      kernelBytes: wasm.kernelBytes, signatureBytes: wasm.signatureBytes,
       policyJson, dir, identity, network: net, timeoutMs: TIMEOUT,
       // Quota is operator policy now (not signed into the bundle): the operator
       // supplies it at boot, merged over the manifest config into the guest's APP.

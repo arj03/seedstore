@@ -3,7 +3,7 @@
 // confined guest (host/tier2-guest.js), run inside seedkernel's safe-js realms
 // over the generic capability bridge. StorageNode only:
 //
-//   - loads kernel.wasm + bootstrap.wasm and wires signature + installer
+//   - loads kernel.wasm + signature.wasm and wires signature + installer
 //   - registers the storage bridges (crypto.* no-cap; store/net/clock/rand
 //     cap-gated) and installs the pure codec + reputation handlers
 //   - runs the guest's *initiator* entrypoints (put / get / repair) in an async
@@ -22,7 +22,7 @@
 // so this module loads unchanged in both Node and the browser (§1, §20). For the
 // same reason StorageNode never reads the guest text from disk — the caller
 // supplies it (`guestSource`): node.js reads it off disk, browser.js fetches it.
-import { KernelHost, referencePolicy, CURRENT_VERSION } from "seedkernel-wasm/browser";
+import { KernelHost, referencePolicy } from "seedkernel-wasm/browser";
 import { createCapBridge, capPreamble } from "seedkernel-wasm/cap-bridge";
 // The generic zero-authority sandbox lives in the kernel as `safe-js`: an async
 // realm for the initiator (put/get/repair) and a sync realm for the holder
@@ -76,7 +76,7 @@ export interface StorageNodeOptions {
   network: Network;
   sodium: Sodium;
   kernelBytes: Uint8Array;
-  bootstrapBytes: Uint8Array;
+  signatureBytes: Uint8Array;
   codecBytes: Uint8Array;
   reputationBytes: Uint8Array;
   /** The stitched guest program text (build/host/tier2-guest.js). The whole
@@ -179,7 +179,7 @@ export class StorageNode {
   static async create(opts: StorageNodeOptions): Promise<StorageNode> {
     await opts.sodium.ready;
     const host = await KernelHost.load(
-      opts.kernelBytes as BufferSource, opts.bootstrapBytes as BufferSource, opts.sodium as never,
+      opts.kernelBytes as BufferSource, opts.signatureBytes as BufferSource, opts.sodium as never,
     );
     host.registerSignature(host.deriveBootstrapName("signature"));
     host.registerInstaller(host.deriveBootstrapName("install"));
@@ -506,7 +506,7 @@ export class StorageNode {
     const seq = ++this.installSeq;
     const payload = this.host.encodeInstallPayload(seq, name, wasm);
     this.host.dispatch(this.host.wrapAndEncode(
-      this.identity.privateKey, this.identity.publicKey, CURRENT_VERSION, this.host.deriveBootstrapName("install"), payload,
+      this.identity.privateKey, this.identity.publicKey, this.host.deriveBootstrapName("install"), payload,
     ));
   }
 

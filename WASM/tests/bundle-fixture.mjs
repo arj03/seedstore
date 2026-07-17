@@ -11,8 +11,8 @@ import { loadKernelHost } from "seedkernel-wasm";
 import { writeStorageBundle } from "../scripts/storage-bundle.mjs";
 
 /** @param build absolute path to seedstore's build/ dir (holds kernel/codec wasm + the staged guest).
- *  @param version optional manifest freshness mark (README §13.4); defaults to 1. */
+ *  @param version optional manifest freshness mark (README §12.4); defaults to 1. */
 export async function buildBundle(dir, author, sodium, build, version = 1) {
-  const host = await loadKernelHost(join(build, "kernel.wasm"), join(build, "bootstrap.wasm"));
+  const host = await loadKernelHost(join(build, "kernel.wasm"), join(build, "signature.wasm"));
   writeStorageBundle({ dir, host, sodium, sk: author.privateKey, pk: author.publicKey, build, version });
 }

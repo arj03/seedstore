@@ -16,7 +16,7 @@ export const root = join(__dirname, "..");
 
 export const paths = {
   kernel: join(root, "build/kernel.wasm"),
-  bootstrap: join(root, "build/bootstrap.wasm"),
+  signature: join(root, "build/signature.wasm"),
   codec: join(root, "build/codec.wasm"),
   reputation: join(root, "build/reputation.wasm"),
 };
@@ -37,8 +37,8 @@ export function newKey() {
 export async function loadHost() {
   await sodium.ready;
   const kernel = readFileSync(paths.kernel);
-  const boot = readFileSync(paths.bootstrap);
-  const host = await KernelHost.load(kernel, boot, sodium);
+  const signature = readFileSync(paths.signature);
+  const host = await KernelHost.load(kernel, signature, sodium);
   const signatureName = host.deriveBootstrapName("signature");
   const installName = host.deriveBootstrapName("install");
   host.registerSignature(signatureName);

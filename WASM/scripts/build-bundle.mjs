@@ -12,7 +12,7 @@
 //   bundle/manifest.bundle   signed manifest envelope
 //   bundle/codec.wasm  bundle/reputation.wasm  bundle/tier2-guest.js
 // The signed manifest commits to each module's hash; the shell verifies the bytes
-// against it and installs them directly (seedkernel §13.4).
+// against it and installs them directly (seedkernel §12.4).
 //
 // Run `npm run build` first so build/ holds the compiled host + wasm.
 
@@ -32,7 +32,7 @@ const out = join(root, "bundle");
 const { toHex, fromHex } = await import(new URL("../build/host/util.js", import.meta.url));
 
 const sodium = await loadSodium();
-const host = await loadKernelHost(join(build, "kernel.wasm"), join(build, "bootstrap.wasm"));
+const host = await loadKernelHost(join(build, "kernel.wasm"), join(build, "signature.wasm"));
 // This host is offline scaffolding — used only to derive the module kernel names and
 // hash the module bytes (genesisHash) the manifest commits to; it signs nothing.
 
@@ -52,7 +52,7 @@ if (existsSync(keyPath)) {
   console.log(`  minted author key → ${keyPath}`);
 }
 
-// Freshness (README §13.4): the manifest `version` is a monotonic integer the shell
+// Freshness (README §12.4): the manifest `version` is a monotonic integer the shell
 // enforces as a high-water mark, so a redeploy must bump it or a deployed shell refuses it
 // as a downgrade. Persist the mark NEXT TO THE AUTHOR KEY — the key is what defines the
 // (author, app) namespace the version is monotonic within, and it persists where bundle/ is
@@ -78,7 +78,7 @@ if (existsSync(versionPath)) {
     `  ⚠ author key exists but no version high-water mark (${versionPath}) and no prior bundle in ${out} — ` +
     `restarting version at 1.\n` +
     `    If you have already published under this author, a deployed shell will REFUSE this bundle as a ` +
-    `downgrade (README §13.4). Put the real last-published version number in ${versionPath} and re-run.`);
+    `downgrade (README §12.4). Put the real last-published version number in ${versionPath} and re-run.`);
 }
 const version = prevVersion + 1;
 

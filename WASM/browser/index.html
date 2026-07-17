@@ -80,7 +80,7 @@ let nodes, net, lastPut;
 (async () => {
   log("readying libsodium (sumo)…");
   await sodium.ready;
-  log("loading wasm: kernel, bootstrap, codec, reputation…");
+  log("loading wasm: kernel, signature, codec, reputation…");
   const wasm = await loadWasmBytes("./");
   net = new LoopbackNetwork();
   log("booting a cohort of 6 nodes on the seedkernel…");

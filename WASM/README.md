@@ -55,10 +55,10 @@ and signatures are **reused** from the runtime's libsodium (the sumo build, whic
 exposes the raw stream cipher) — never bundled — exactly as §16 requires; the
 guest reaches them as generic `cap-bridge` primitives and builds its own
 descriptor envelope and nonce convention on top of the scoped `SIGN`
-(seedkernel §13.2) — how storage prefixes and checks it is below.
+(seedkernel §12.2) — how storage prefixes and checks it is below.
 
 **The two realms.** Storage uses both confinement realms seedkernel provides
-(§13.3): the initiator (PUT/GET/repair) is async — it fans out over `net` and
+(§12.3): the initiator (PUT/GET/repair) is async — it fans out over `net` and
 awaits — so it runs in the Asyncify realm, while the holder side answers from
 local `fs` + crypto without yielding, so it runs in the sync realm and can serve
 a request *while this node's own initiator realm is parked mid-`await`*.
@@ -72,10 +72,10 @@ Three seedkernel runtime contracts reach into the storage code, and each has a
 seedstore-side counterpart worth pinning down. The contracts themselves are
 documented on the runtime side — the **scoped `SIGN`** op (a guest signature is
 over `DOMAIN_guest ‖ scope ‖ msg`, the `scope` host-derived from the admitted
-manifest; `VERIFY` stays raw — seedkernel §13.2), **existence-by-size** (no
+manifest; `VERIFY` stays raw — seedkernel §12.2), **existence-by-size** (no
 `FS_HAS`; a key exists iff `FS_SIZE ≥ 0`, and `./fs` is
-`get`/`put`/`size`/`list`/`delete`/`stat` — seedkernel §13.1–§13.2), and the
-**monotonic bundle `version`** that refuses a downgrade (seedkernel §13.4). The
+`get`/`put`/`size`/`list`/`delete`/`stat` — seedkernel §12.1–§12.2), and the
+**monotonic bundle `version`** that refuses a downgrade (seedkernel §12.4). The
 spec-side story is in the [seed store spec](../README.md) (§16). This section is
 the code map for where each lands in this repo — the guest, the host parity
 mirror, and the bundle producer:
@@ -105,7 +105,7 @@ mirror, and the bundle producer:
    the seedstore `BlobStore.has` iface itself unchanged, only its backing call.
 4. **The bundle carries an integer, monotonic `version`**
    (`scripts/storage-bundle.mjs`): guarded by `Number.isInteger` and bumped on
-   every publish, so the shell's freshness check (§13.4) has a real high-water
+   every publish, so the shell's freshness check (§12.4) has a real high-water
    mark to enforce.
 5. **The tests that pin this**: `manifest` (tamper-evidence over the tagged,
    scoped preimage), `tier2-port` / `holder-guest` (parity across the scoped
@@ -132,12 +132,12 @@ Then, here:
 
 ```sh
 npm install        # one dependency: the sibling seedkernel-wasm (sumo libsodium + QuickJS live there)
-npm run build      # copy kernel.wasm/bootstrap.wasm, compile codec+reputation WASM, stage the guest, compile host TS
+npm run build      # copy kernel.wasm/signature.wasm, compile codec+reputation WASM, stage the guest, compile host TS
 npm test           # build + run the full test suite (Node); `bun tests/run.mjs` runs it on Bun
 ```
 
 `npm run build` produces `build/codec.wasm`, `build/reputation.wasm`, the copied
-`build/kernel.wasm` + `build/bootstrap.wasm`, the staged `build/host/tier2-guest.js`,
+`build/kernel.wasm` + `build/signature.wasm`, the staged `build/host/tier2-guest.js`,
 and the compiled host in `build/host/`.
 
 ## Run a node from the command line
@@ -151,7 +151,7 @@ npm run build:bundle      # → ./bundle/ (manifest + codec/reputation wasm + in
 ```
 
 The shell admits content only from authors named in its policy file
-(seedkernel §13.5). Take the author public key it printed (`author …`) and allow
+(seedkernel §12.5). Take the author public key it printed (`author …`) and allow
 it:
 
 ```sh
@@ -197,12 +197,12 @@ node "$SHELL" --policy allowed-keys.json --bundle ./bundle --dir ./client \
 go to stdout. The manifest-id locates the file; the key `K` decrypts it (lose `K`
 and the holders keep only permanent noise, §11). The shell flags themselves
 (`--listen`/`--ws-listen`/`--peers`/`--dir`/`--key`/`--timeout`) are the generic
-ones (seedkernel §13.8); `--put`, `--get`, and the storage bundle are what this
+ones (seedkernel §12.8); `--put`, `--get`, and the storage bundle are what this
 node adds. A node with no listener is a pure client; one with
 `--listen`/`--ws-listen` keeps serving until Ctrl-C.
 
 > A self-contained single-file binary is `bun build --compile` of the shell
-> (`seedkernel/WASM/host/main-bun.ts`) with kernel + bootstrap embedded; it loads
+> (`seedkernel/WASM/host/main-bun.ts`) with kernel + signature embedded; it loads
 > the same bundle. The shell is application-neutral, so this binary can host any
 > signed app, not just storage.
 
@@ -254,7 +254,7 @@ punches the path through NAT, and no server sits in the data path. A file droppe
 one is encrypted and erasure-coded (RS(1,1)) across the others; any node rebuilds it
 from the retrieval token. Run the cohort either as **3+ tabs** in the same room, or
 as one tab plus **console holders** — the same `RtcNetwork`, driven on the Node/Bun
-side by werift's pure-JS WebRTC (§13.6):
+side by werift's pure-JS WebRTC (§12.6):
 
 ```sh
 npm run demo:relay          # the signaling relay (Node), ws://localhost:8080
@@ -398,7 +398,7 @@ cores and the guest — it never loads a line of the host-side TypeScript:
 | `tier2-guest.js` — the confined guest, shipped minified in the bundle | 29 KB | **7.6 KB** |
 
 riding on the seedkernel shell it shares with any app — `kernel.wasm` +
-`bootstrap.wasm` (12.4 KB), the `KernelHost` JS (28 KB / **5 KB gz**), and the
+`signature.wasm` (11.6 KB), the `KernelHost` JS (28 KB / **5 KB gz**), and the
 sumo libsodium (278 KB, reused not bundled). So **seedstore's own runtime
 footprint is ~15 KB of WASM + ~8 KB of gzipped JS (the guest)** (§2, §16: "logic +
 RS, tens of KB, no second copy of a crypto library").

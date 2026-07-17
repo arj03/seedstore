@@ -17,11 +17,11 @@ export async function loadWasmBytes(baseUrl: string | URL = "./"): Promise<WasmB
   // a fresh host — a "no entrypoint 'x'" mismatch that a normal reload won't clear.
   const get = async (name: string) => new Uint8Array(await (await fetch(base + name, { cache: "no-store" })).arrayBuffer());
   const text = async (name: string) => (await fetch(base + name, { cache: "no-store" })).text();
-  const [kernelBytes, bootstrapBytes, codecBytes, reputationBytes, guestSource] = await Promise.all([
-    get("kernel.wasm"), get("bootstrap.wasm"), get("codec.wasm"), get("reputation.wasm"),
+  const [kernelBytes, signatureBytes, codecBytes, reputationBytes, guestSource] = await Promise.all([
+    get("kernel.wasm"), get("signature.wasm"), get("codec.wasm"), get("reputation.wasm"),
     text("tier2-guest.js"),
   ]);
-  return { kernelBytes, bootstrapBytes, codecBytes, reputationBytes, guestSource };
+  return { kernelBytes, signatureBytes, codecBytes, reputationBytes, guestSource };
 }
 
 /** Boot one storage node in the browser. Pass a readied sumo libsodium. */

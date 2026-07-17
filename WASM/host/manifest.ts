@@ -33,7 +33,7 @@ export {
 } from "./manifest-core.js";
 export type { Descriptor, SignedDescriptor, Manifest } from "./manifest-core.js";
 
-// ── scoped signing (README §16, seedkernel §13.2/§15) ────────────────────────
+// ── scoped signing (README §16, seedkernel §12.2/§14) ────────────────────────
 // The guest's SIGN op is a *scoped* oracle: the kernel signs `DOMAIN_guest ‖ scope ‖
 // msg`, never the raw message, so a storage signature verifies only as a storage
 // signature — never as a kernel envelope, a bundle manifest, or a channel handshake,

@@ -57,7 +57,7 @@ export async function run(t) {
 
       // The shell knows only its policy + the kernel; storage arrives as content.
       shell = await boot({
-        kernelBytes: wasm.kernelBytes, bootstrapBytes: wasm.bootstrapBytes,
+        kernelBytes: wasm.kernelBytes, signatureBytes: wasm.signatureBytes,
         policyJson: JSON.stringify({ authors: [toHex(author.publicKey)] }),
         dir: shellDir, identity: generateKeyPair(sodium),
         network: net, timeoutMs: 40,
@@ -86,7 +86,7 @@ export async function run(t) {
       // A shell whose policy does not allow the bundle author refuses to load it.
       const shell2Dir = mkdtempSync(join(tmpdir(), "seedstore-shell2-"));
       const shell2 = await boot({
-        kernelBytes: wasm.kernelBytes, bootstrapBytes: wasm.bootstrapBytes,
+        kernelBytes: wasm.kernelBytes, signatureBytes: wasm.signatureBytes,
         policyJson: JSON.stringify({ authors: [toHex(generateKeyPair(sodium).publicKey)] }),
         dir: shell2Dir, identity: generateKeyPair(sodium), network: net,
       });
@@ -107,7 +107,7 @@ export async function run(t) {
     }
   }
 
-  t.group("shell: bundle version freshness — a downgrade is refused (§13.4)");
+  t.group("shell: bundle version freshness — a downgrade is refused (§12.4)");
   {
     // The manifest `version` is a monotonic integer high-water mark per (author, app).
     // Once a shell loads version 5 it refuses a same-author version-3 directory as a
@@ -123,7 +123,7 @@ export async function run(t) {
       await buildBundle(hiDir, author, sodium, build, 5);
       await buildBundle(loDir, author, sodium, build, 3);
       shell = await boot({
-        kernelBytes: wasm.kernelBytes, bootstrapBytes: wasm.bootstrapBytes,
+        kernelBytes: wasm.kernelBytes, signatureBytes: wasm.signatureBytes,
         policyJson: JSON.stringify({ authors: [toHex(author.publicKey)] }),
         dir: shellDir, identity: generateKeyPair(sodium), network: net, timeoutMs: 40,
       });
