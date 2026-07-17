@@ -409,7 +409,8 @@ function placeBlock(blockId, bytes, descriptor, exclude, count) {
   }
   return placed;
 }
-// Encode + sign one RS chunk: encrypt k data blocks, add m parity, hash, sign.
+// Encode + sign one chunk: encrypt k data blocks, then either add m parity (k ≥ 2, a
+// coded chunk) or replicate the lone block r = m+1 ways (k = 1, see below), hash, sign.
 // `source` is the plaintext this chunk is cut from — the whole file (localCi ==
 // globalCi) or just a window slice (localCi indexes within the slice). The AEAD
 // counter is the GLOBAL chunk index (§4.4), so a windowed encode is byte-identical
@@ -420,6 +421,19 @@ function encodeChunk(source, localCi, globalCi, K) {
   const chunkPlain = source.slice(start, start + c.k * c.blockSize);
   const ct = encrypt(K, DOMAIN_BODY, globalCi, padTo(chunkPlain, c.k * c.blockSize));
   const dataBlocks = splitBlocks(ct, c.blockSize);
+  if (c.k === 1) {
+    // RS(1,m) is replication in disguise: its m parity blocks are byte-identical to the
+    // lone data block (parity ≡ data), so the chunk is ONE block placed on r = m+1
+    // distinct peers. Sign it as a replicated descriptor (m=0, the single id) and skip
+    // the codec entirely — coding is k ≥ 2 only, so every id in a descriptor is unique
+    // and the repair path never reasons about a repeated id. The r identical placement
+    // slots below fan the one block onto r peers through placeChunksBatched.
+    const block = dataBlocks[0];
+    const id = hash(block);
+    const r = c.m + 1;
+    const descriptor = signChunk({ k: 1, m: 0, blockSize: c.blockSize, blockIds: [id] });
+    return { blockIds: new Array(r).fill(id), blocks: new Array(r).fill(block), descriptor, placedPeer: new Array(r).fill(null), placedIds: [] };
+  }
   const blocks = [...dataBlocks, ...rsEncode(c.k, c.m, c.blockSize, dataBlocks)];
   const blockIds = blocks.map(hash);
   const descriptor = signChunk({ k: c.k, m: c.m, blockSize: c.blockSize, blockIds });
@@ -733,11 +747,12 @@ function placeSmall(plaintext, K) {
   return { descriptors: [env], placedIds, placed, intended: d * perBlockTarget };
 }
 
-// RS-encode + place the chunks wholly contained in `slice` — a chunk-aligned slice
-// of the file starting at byte offset `baseByteOffset` (a multiple of k·blockSize).
-// Returns this window's signed descriptors + the block ids that landed; the ciphertext
-// blocks fall out of scope on return. A degenerate RS(1,·) repeats an id (parity≡data);
-// the repeat still gets its own peer — k=1 replication — but counts once toward ≥ k.
+// Encode + place the chunks wholly contained in `slice` — a chunk-aligned slice of the
+// file starting at byte offset `baseByteOffset` (a multiple of k·blockSize). Returns
+// this window's signed descriptors + the block ids that landed; the ciphertext blocks
+// fall out of scope on return. A k ≥ 2 window is RS-coded (n distinct blocks per chunk,
+// one per peer); a k = 1 window is replication (one block per chunk, r = m+1 copies on
+// r distinct peers) — encodeChunk decides, placeChunksBatched fans both out the same way.
 function placeWindow(slice, baseByteOffset, K) {
   const c = config();
   const chunkData = c.k * c.blockSize;
@@ -747,10 +762,10 @@ function placeWindow(slice, baseByteOffset, K) {
   for (let lc = 0; lc < numChunks; lc++) chunks.push(encodeChunk(slice, lc, baseCi + lc, K));
   placeChunksBatched(chunks);
   const descriptors = [], placedIds = [];
-  // Durability accounting: count REPLICAS placed (distinct peers per block, via
-  // placedPeer), not distinct block ids — a degenerate RS(1,·) collapses the parity
-  // id onto the data id, so counting ids would report 1/chunk even when 2 peers hold
-  // it. intended is capped at the reachable cohort so a genuinely small cohort is not
+  // Durability accounting: count REPLICA PLACEMENTS — one stored (block, peer), via
+  // placedPeer — not distinct block ids. A k=1 chunk is one id replicated onto r peers,
+  // so counting ids would report 1/chunk even when r peers hold it; placedPeer counts
+  // all r. intended is capped at the reachable cohort so a genuinely small cohort is not
   // flagged; a reachable-but-declining (full) holder makes placed < intended.
   const perChunkTarget = Math.min(c.k + c.m, cohortPeers().length);
   let placed = 0;
@@ -886,7 +901,10 @@ function reconstructChunks(ds, K, chunkStart, fileSize) {
   for (let i = 0; i < ds.length; i++) {
     const d = ds[i];
     const chunkCipher = assembleChunk(d, got);
-    const chunkPlain = decrypt(K, DOMAIN_BODY, d.m === 0 ? 0 : chunkStart + i, chunkCipher);
+    // AEAD counter = the GLOBAL chunk index (§4.4), matching encodeChunk. A replicated
+    // chunk (m=0) is no special case: placeSmall's whole-file chunk is index 0, and a
+    // windowed k=1 chunk carries its own index, so both decrypt at chunkStart + i.
+    const chunkPlain = decrypt(K, DOMAIN_BODY, chunkStart + i, chunkCipher);
     const take = Math.min(chunkPlain.length, fileSize - written);
     parts.push(take === chunkPlain.length ? chunkPlain : chunkPlain.subarray(0, take));
     written += take;
@@ -1009,31 +1027,19 @@ function healReplicated(d, descEnv, holders, verified) {
   }
   return replaced;
 }
-// A chunk's distinct block-ids → their bytes + multiplicity (how many slots each
-// fills). Ordinary RS gives every id multiplicity 1; a degenerate k=1 code, whose
-// parity is byte-identical to its data, collapses several slots onto one id (§9).
-function distinctBlocks(blockIds) {
-  const out = new Map(); // hex → { id, count }
-  for (const id of blockIds) {
-    const h = toHex(id);
-    const e = out.get(h);
-    if (e) e.count++; else out.set(h, { id, count: 1 });
-  }
-  return out;
-}
-// Coded chunk (§9): bring every block back to full redundancy. A block some holder
-// still serves but too few hold — a degenerate code's repeated id, or a lost extra
-// replica — is copied to fresh peers; a block no live holder serves is reconstructed
-// from any k present blocks, re-certified against its signed block_id, then placed.
-// Each id lands on as many distinct holders as it has slots (§6/§10).
-function healCoded(d, descEnv, holders, distinct, verified) {
-  // Reconstruct any entirely-missing id once, up front, from k present blocks — reusing
-  // the copies the audit (liveHolders) already fetched and verified, so a block that
-  // still has a live holder costs no extra round trip. (A missing id, held by no live
-  // holder, isn't in `verified`; it's decoded here and copied below.)
+// Coded chunk (§9): restore any block no live holder serves. Coding is k ≥ 2, so every
+// id in the descriptor is distinct and each of the n blocks wants exactly one live
+// holder (§6/§10) — a block that still has one is left alone; a lost one is reconstructed
+// from any k present blocks, re-certified against its signed block_id, then placed on a
+// fresh peer.
+function healCoded(d, descEnv, holders, verified) {
+  // Reconstruct any entirely-missing block once, up front, from k present blocks —
+  // reusing the copies the audit (liveHolders) already fetched and verified, so a block
+  // that still has a live holder costs no extra round trip. (A missing block, held by no
+  // live holder, isn't in `verified`; it's decoded here and copied below.)
   const regenerated = new Map();
   let anyMissing = false;
-  for (const h of distinct.keys()) if ((holders.get(h) || new Set()).size === 0) { anyMissing = true; break; }
+  for (const id of d.blockIds) if ((holders.get(toHex(id)) || new Set()).size === 0) { anyMissing = true; break; }
   if (anyMissing) {
     const present = [];
     for (let idx = 0; idx < d.blockIds.length && present.length < d.k; idx++) {
@@ -1044,29 +1050,24 @@ function healCoded(d, descEnv, holders, distinct, verified) {
       const data = rsDecode(d.k, d.m, d.blockSize, present);
       const all = [...data, ...rsEncode(d.k, d.m, d.blockSize, data)];
       for (let i = 0; i < all.length; i++) {
-        const h = toHex(d.blockIds[i]);
-        if (regenerated.has(h)) continue;
         // Re-certify against the already-signed id (§9): a mismatch means a bad
         // input/decode — drop it, never propagate (a poisoned descriptor can't mint).
-        if (bytesEqual(hash(all[i]), d.blockIds[i])) regenerated.set(h, all[i]);
+        if (bytesEqual(hash(all[i]), d.blockIds[i])) regenerated.set(toHex(d.blockIds[i]), all[i]);
       }
     }
   }
 
-  // Spread copies onto peers not already holding part of this chunk (§6, §10).
+  // Spread the restored copies onto peers not already holding part of this chunk (§6, §10).
   const occupied = new Set();
   for (const set of holders.values()) for (const p of set) occupied.add(p);
 
   let replaced = 0;
-  for (const [h, info] of distinct) {
-    const live = (holders.get(h) || new Set()).size;
-    const need = info.count - live;
-    if (need <= 0) continue;
-    // A live copy (already fetched by the audit) is the cheapest source; otherwise the
-    // reconstructed block.
-    const bytes = live > 0 ? verified.get(h) : regenerated.get(h);
-    if (!bytes) continue; // missing and not reconstructable this pass
-    const placed = placeBlock(info.id, bytes, descEnv, occupied, need);
+  for (const id of d.blockIds) {
+    const h = toHex(id);
+    if ((holders.get(h) || new Set()).size > 0) continue; // still has a live holder
+    const bytes = regenerated.get(h);
+    if (!bytes) continue;                                  // missing and not reconstructable this pass
+    const placed = placeBlock(id, bytes, descEnv, occupied, 1);
     for (const p of placed) occupied.add(p);
     replaced += placed.length;
   }
@@ -1077,15 +1078,20 @@ function repairChunk(descEnv) {
   const d = verifyDescriptor(descEnv);                     // forged/unsigned/malformed → null (§4.3)
   if (!d) return 0;
   const { live: holders, bytes: verified } = liveHolders(d.blockIds);
-  const distinct = distinctBlocks(d.blockIds);
-  // Effective redundancy: distinct live holders per block, each capped by how many
-  // slots that block fills. A degenerate code (RS(1,·), parity≡data) repeats one id
-  // across slots, so that id must live on as many distinct holders as it has slots
-  // (§6/§10); for ordinary RS every id is unique and this is the live-block count (§8).
-  let redundancy = 0;
-  for (const [h, info] of distinct) redundancy += Math.min((holders.get(h) || new Set()).size, info.count);
+  // Redundancy vs the low-water mark (§8, §9). Every id in a descriptor is unique —
+  // coding is k ≥ 2, and k=1 is replication (m=0) — so a coded chunk's redundancy is the
+  // count of its n blocks that still have a live holder (§8), while a replicated chunk's
+  // is the fewest copies any of its blocks has. Heal fires when either dips below lowWater.
+  let redundancy;
+  if (d.m === 0) {
+    redundancy = Infinity;
+    for (const id of d.blockIds) redundancy = Math.min(redundancy, (holders.get(toHex(id)) || new Set()).size);
+  } else {
+    redundancy = 0;
+    for (const id of d.blockIds) if ((holders.get(toHex(id)) || new Set()).size > 0) redundancy++;
+  }
   if (redundancy >= config().lowWater) return 0;           // healthy (§8, §9)
-  return d.m === 0 ? healReplicated(d, descEnv, holders, verified) : healCoded(d, descEnv, holders, distinct, verified);
+  return d.m === 0 ? healReplicated(d, descEnv, holders, verified) : healCoded(d, descEnv, holders, verified);
 }
 // Run the repair loop over every chunk this node holds a block of (§9).
 function doRepair() {

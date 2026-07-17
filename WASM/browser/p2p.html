@@ -136,9 +136,10 @@ import { createStorageNode, storageSignScope } from "./host/browser.js";
 import { RtcNetwork, relaySignaling } from "seedkernel-wasm/net-rtc";
 import { WsNetwork } from "seedkernel-wasm/net-ws";
 
-// RS(k=1, m=1): one data + one parity block per chunk, placed on two distinct
-// holders — so a file survives losing either holder, and the demo needs two
-// connected peers (three tabs). Bump m with more tabs for more redundancy.
+// k=1, m=1: replication r = m+1 = 2 — each block is copied to two distinct holders
+// (RS(1,·) is replication in disguise, so the guest takes the replication path, not
+// the codec). A file survives losing either holder, and the demo needs two connected
+// peers (three tabs). Bump m with more tabs for more redundancy.
 //
 // blockSize sets the chunk count. The network cost is batched PER HOLDER, not per
 // block (host/coordinator.ts), so each holder takes a handful of round trips total

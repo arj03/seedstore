@@ -152,12 +152,12 @@ export async function run(t) {
   }
 
   // Fewest distinct online holders across a set of block-ids — the redundancy that
-  // matters for a degenerate RS(1,1) block (one distinct id per chunk, replicated),
-  // where the distinct-*id* live count (liveCount) maxes out at 1 and hides the loss.
+  // matters for a k=1 (RS(1,1)) chunk: one id per chunk, replicated onto r peers, so
+  // the count of distinct *ids* maxes out at 1 and hides the loss of a copy.
   const minHolders = (nodes, net, ids) =>
     Math.min(...ids.map((id) => nodes.filter((n) => net.isOnline(n.peerId) && n.store.has(id)).length));
 
-  t.group("self-healing re-replicates a degenerate RS(1,1) file — chunks + manifest (§9)");
+  t.group("self-healing re-replicates a k=1 (RS(1,1)) file — chunks + manifest (§9)");
   {
     const net = new LoopbackNetwork();
     const cfg = { k: 1, m: 1, blockSize: 64 };            // the p2p.html demo config
@@ -171,8 +171,8 @@ export async function run(t) {
 
     const data = file(256, 11);                            // 4 blocks → 4 RS(1,1) chunks
     const put = await owner.put(data);
-    t.ok(!put.replicated, "a multi-block k=1 file takes the coded path (healCoded), not replication");
-    // put.blockIds = each chunk's (single, parity≡data) block + the manifest.
+    t.ok(!put.replicated, "a multi-block k=1 file windows (not the whole-file small path); each chunk is replicated (healReplicated)");
+    // put.blockIds = each chunk's single (replicated) block id + the manifest.
     t.eq(minHolders(nodes, net, put.blockIds), 2, "every block — chunks and manifest — is on 2 holders after PUT");
 
     const holder = nodes.find((n) => n !== owner && n.store.list().length > 0);
@@ -193,21 +193,21 @@ export async function run(t) {
     nodes.forEach((n) => n.close());
   }
 
-  t.group("repair settles on a high-redundancy degenerate config (RS(1,4)) (§9)");
+  t.group("repair settles on a high-redundancy k=1 config (RS(1,4)) (§9)");
   {
-    // RS(1,4): n=5, replicas=5, lowWater=3. The lone id (parity≡data) lives on 5
-    // distinct holders. Repair must read the *full* live-holder set, never a
-    // capped sample: a sample of, say, 2 reads redundancy 2 < lowWater 3 and would
-    // re-place on every pass, never settling. A freshly-PUT, fully-healthy file
+    // RS(1,4) is replication r=5: n=5, replicas=5, lowWater=3. Each chunk's lone id
+    // lives on 5 distinct holders. Repair must read the *full* live-holder set, never a
+    // capped sample: a sample of, say, 2 reads redundancy (min copies) 2 < lowWater 3 and
+    // would re-place on every pass, never settling. A freshly-PUT, fully-healthy file
     // must therefore be a strict no-op for repair.
     const net = new LoopbackNetwork();
     const cfg = { k: 1, m: 4, blockSize: 64 };
     const nodes = await createConnectedCohort({ count: 7, network: net, sodium, wasm, config: cfg, timeoutMs: TIMEOUT }); // owner + 6 holders >= n=5
     const owner = nodes[0];
     t.eq(owner.config.lowWater, 3, "lowWater re-derived for RS(1,4) (k + ceil(m/2))"); // replicas = m+1 = 5 is guest math now
-    const data = file(256, 41);                            // 4 blocks → coded path
+    const data = file(256, 41);                            // 4 blocks → windowed (per-chunk replication)
     const put = await owner.put(data);
-    t.ok(!put.replicated, "multi-block k=1 file takes the coded path");
+    t.ok(!put.replicated, "multi-block k=1 file windows; each chunk is replicated r=5 ways");
 
     let replaced = 0;
     for (const n of nodes.filter((x) => x !== owner)) replaced += await n.runRepair();
@@ -222,7 +222,7 @@ export async function run(t) {
     const cfg = { k: 1, m: 1, blockSize: 64 };
     const nodes = await createConnectedCohort({ count: 5, network: net, sodium, wasm, config: cfg, timeoutMs: TIMEOUT });
     const owner = nodes[0];
-    const put = await owner.put(file(256, 13));            // multi-block → coded path
+    const put = await owner.put(file(256, 13));            // multi-block → windowed replication
 
     const holder = nodes.find((n) => n !== owner && n.store.list().length > 0);
     net.setOnline(holder.peerId, false);
@@ -294,24 +294,25 @@ export async function run(t) {
     nodes.forEach((n) => n.close());
   }
 
-  // The browser demos run RS(1,·) on two or three holders — a shape the groups
+  // The browser demos run k=1 (RS(1,·)) on two or three holders — a shape the groups
   // above never used (they are all RS(2,2) on a full cohort). That blind spot is
-  // why two real bugs shipped: a k=1 parity block is byte-identical to the lone
-  // data block, so its id repeated in the returned set (the "13/13" holder probe),
-  // and a cohort smaller than n=k+m used to fail the whole PUT. Cover both.
-  t.group("degenerate k=1 on a 2-holder cohort (RS(1,9) on an undersized cohort)");
+  // why two real bugs shipped: the old degenerate coded k=1 repeated one id across its
+  // slots, so it leaked into the returned set (the "13/13" holder probe); and a cohort
+  // smaller than n=k+m used to fail the whole PUT. k=1 is now replication (one id per
+  // chunk, m=0 descriptor), so the dup-id leak is structurally impossible — cover both.
+  t.group("k=1 replication on a 2-holder cohort (RS(1,9) on an undersized cohort)");
   {
     const net = new LoopbackNetwork();
     const cfg = { k: 1, m: 9, blockSize: 64 };
     const nodes = await createConnectedCohort({ count: 3, network: net, sodium, wasm, config: cfg, timeoutMs: TIMEOUT }); // owner + 2 holders
     const owner = nodes[0];
-    const data = file(400, 23); // > 1 block → RS path, several chunks
+    const data = file(400, 23); // > 1 block → windowed, several chunks
 
     const put = await owner.put(data);
-    t.ok(!put.replicated, "k=1 multi-block file takes the RS path");
+    t.ok(!put.replicated, "k=1 multi-block file windows into per-chunk replication");
 
     // The returned set must name each placed id once: the 13/13 probe was a
-    // duplicate id leaking into blockIds (parity≡data), not the store lying.
+    // duplicate id leaking into blockIds (the old degenerate coded k=1), not the store lying.
     const hexes = put.blockIds.map(toHex);
     t.eq(new Set(hexes).size, hexes.length, "PUT reports each placed block id once (no dup-id leak)");
 
