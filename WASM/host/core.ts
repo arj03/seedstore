@@ -23,9 +23,9 @@ export interface StorageConfig {
    *  window binds hardest under a small cap (WebRTC's ~64 KB channel forces ~one
    *  block per STORE/FETCH): without it those messages would go one serial round
    *  trip per block. Under a large cap (WS) each holder has only a few big batches,
-   *  so it is a no-op. The synchronous guest can't overlap host calls itself, so it
-   *  expresses the same window through one batched CAP_NET_SEND_MANY round (W
-   *  per-peer requests fanned out host-side) — same peak in flight, one cap at a time. */
+   *  so it is a no-op. With the genuinely-async guest seam the guest overlaps the
+   *  round trips itself — one Promise.all over NET_SEND fires W per-peer requests at
+   *  once (the host driving them concurrently) — so W bounds the peak in flight. */
   putWindow: number;
   getWindow: number;
   /** Max bytes in one batched OFFER/STORE/FETCH message. Every per-holder batch is
@@ -46,7 +46,7 @@ export interface StorageConfig {
    *  realmMemoryBytes alongside it. Always set (defaultConfig homes the 4 MiB default);
    *  the confined guest reads it from the injected APP and never keeps its own copy. */
   windowTargetBytes: number;
-  /** Hard cap on the initiator realm's QuickJS heap (safe-js default 64 MiB). Raise
+  /** Hard cap on the guest realm's QuickJS heap (safe-js default 64 MiB). Raise
    *  it to run larger windowTargetBytes without the guest OOMing. Host-only (passed to
    *  createSafeRealm, not injected into the guest APP). Omit for the default. */
   realmMemoryBytes?: number;

@@ -45,8 +45,8 @@ structural sandbox guarantees they touch neither disk nor network even if buggy
 | --- | --- | --- | --- |
 | `codec` — GF(2⁸) + systematic Reed–Solomon RS(k,m) encode/decode, block-id | installed kernel handler | **WASM**, no caps (`assembly/codec`) | §4.1, §4.2, §9 |
 | `reputation` — decayed per-peer reciprocity counters | installed kernel handler | **WASM**, no caps (`assembly/reputation`) | §13 |
-| coordinator (PUT/GET, placement, manifest) + cohort (have/want, verification-fetch) + repair | confined **async** QuickJS realm | zero-authority JS (`host/tier2-guest.js`) | §5–§9 |
-| holder side — admission, sibling rule, content-addressing, quota, the store writes | confined **sync** QuickJS realm | zero-authority JS (`host/tier2-guest.js`) | §6, §10, §14 |
+| coordinator (PUT/GET, placement, manifest) + cohort (have/want, verification-fetch) + repair | confined QuickJS realm — **async** `call()` | zero-authority JS (`host/tier2-guest.js`) | §5–§9 |
+| holder side — admission, sibling rule, content-addressing, quota, the store writes | the **same** realm — **sync** `callSync()` | zero-authority JS (`host/tier2-guest.js`) | §6, §10, §14 |
 | the capability seam the guest reaches I/O through | seedkernel runtime | `cap-bridge` (generic primitives) | §16 |
 | `crypto.*`, `net.*`, `fs.*`, `clock` backends | seedkernel runtime | raw-byte capabilities | §12, §16 |
 
@@ -57,14 +57,17 @@ guest reaches them as generic `cap-bridge` primitives and builds its own
 descriptor envelope and nonce convention on top of the scoped `SIGN`
 (seedkernel §12.2) — how storage prefixes and checks it is below.
 
-**The two realms.** Storage uses both confinement realms seedkernel provides
-(§12.3): the initiator (PUT/GET/repair) is async — it fans out over `net` and
-awaits — so it runs in the Asyncify realm, while the holder side answers from
-local `fs` + crypto without yielding, so it runs in the sync realm and can serve
-a request *while this node's own initiator realm is parked mid-`await`*.
-`StorageNode` (`host/storage-node.ts`) keeps a host-side copy of both sides as
-the reference/parity path — the role the host-side classes play in the tests —
-but the **shipped** node runs the confined guest.
+**The one realm.** Storage runs its whole guest in a single confined realm
+seedkernel provides (§12.3), over its genuinely-async seam: the initiator
+(PUT/GET/repair) is async — it fans out over `net` and awaits *real* net promises
+(`await Promise.all(...)`) — through the realm's `call()`, while the holder side
+answers from local `fs` + crypto without yielding, through the same realm's
+synchronous `callSync()`, so it can serve a request *while this node's own
+initiator is parked mid-`await`* in that realm — a suspended async function is
+just heap state, and `callSync` never pumps the job queue, so it cannot advance
+the parked initiator. `StorageNode` (`host/storage-node.ts`) keeps a host-side
+copy of both sides as the reference/parity path — the role the host-side classes
+play in the tests — but the **shipped** node runs the confined guest.
 
 ## Signing scope, existence, and bundle versioning
 
@@ -303,8 +306,9 @@ path; same-machine tabs connect on host candidates without it.)
   signed bundle and runs the guest as the PUT/GET *initiator* against a cohort.
 - **holder-guest** — a cohort of generic shells runs storage end-to-end with the
   *holder* side confined too; a guest initiator and a host-side initiator place
-  concurrently (so a shell serves its sync holder realm while its async realm is
-  parked); and a host-side initiator → confined shell holders round-trips (parity).
+  concurrently (so a shell serves its holder side via `callSync` while its own
+  initiator is parked mid-await in that same realm); and a host-side initiator →
+  confined shell holders round-trips (parity).
 - **browser** — the same node booted through the `fetch`-based browser entry.
 
 ## Performance
@@ -429,7 +433,7 @@ hosts (`build/host-min`) into the demo.
 assembly/codec/        gf256.ts, rs.ts, index.ts   — Reed–Solomon WASM handler
 assembly/reputation/   index.ts                    — decayed reciprocity WASM handler
 host/  tier2-guest.js          the confined guest: the WHOLE protocol (PUT/GET/repair + holder)
-       storage-node.ts         the host that boots the kernel + drives the guest in two realms
+       storage-node.ts         the host that boots the kernel + drives the guest in one realm
        manifest (+core)/crypto/protocol/store-fs/store-local/names/util  — shared helpers
        node.ts / browser.ts    Node + browser entry points (each loads the guest text)
 scripts/  build-bundle.mjs     produce the signed bundle (npm run build:bundle)

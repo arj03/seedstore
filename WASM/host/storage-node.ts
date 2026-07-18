@@ -1,16 +1,17 @@
 // StorageNode — a single storage peer running *on* the seedkernel (README §19
 // bootstrap). It is now a THIN host: the entire storage protocol lives in the
-// confined guest (host/tier2-guest.js), run inside seedkernel's safe-js realms
+// confined guest (host/tier2-guest.js), run inside ONE seedkernel safe-js realm
 // over the generic capability bridge. StorageNode only:
 //
 //   - loads kernel.wasm + signature.wasm and wires signature + installer
 //   - registers the storage bridges (crypto.* no-cap; store/net/clock/rand
 //     cap-gated) and installs the pure codec + reputation handlers
-//   - runs the guest's *initiator* entrypoints (put / get / repair) in an async
-//     realm (it fans out over net and parks mid-await, §2.1)
+//   - runs the guest's *initiator* entrypoints (put / get / repair) via the
+//     realm's async `call()` (they fan out over net and park mid-await, §2.1)
 //   - serves the guest's *holder* entrypoint (handle: HAVE / OFFER / STORE /
-//     FETCH) from a SYNC realm, so it can answer a peer's request while its own
-//     initiator realm is parked mid-await — the runtime split (§2.1)
+//     FETCH) via the same realm's synchronous `callSync()`, so it can answer a
+//     peer's request while this node's own initiator is parked mid-await in that
+//     realm — the runtime split (a suspended async guest is just heap state, §2.1)
 //
 // There is no host-side copy of the protocol any more: placement, k-of-n,
 // admission, the wire format, repair triggers — all of it is the guest. The same
@@ -24,12 +25,14 @@
 // supplies it (`guestSource`): node.js reads it off disk, browser.js fetches it.
 import { KernelHost, referencePolicy, encodeInstallPayload } from "seedkernel-wasm/browser";
 import { createCapBridge, capPreamble } from "seedkernel-wasm/cap-bridge";
-// The generic zero-authority sandbox lives in the kernel as `safe-js`: an async
-// realm for the initiator (put/get/repair) and a sync realm for the holder
-// (handle), so the holder can serve while the initiator is parked mid-await.
+// The generic zero-authority sandbox lives in the kernel as `safe-js`: ONE realm
+// runs both roles over the genuinely-async seam — `call()` for the initiator
+// (put/get/repair, which awaits net) and `callSync()` for the holder (handle),
+// which answers synchronously from local fs + crypto and so can serve re-entrantly
+// while an initiator is parked mid-await in the same realm (§2.1).
 import {
-  createSafeRealm, createSyncSafeRealm,
-  type SafeRealm, type SyncSafeRealm, type SafeRealmBridge,
+  createSafeRealm,
+  type SafeRealm, type SafeRealmBridge,
 } from "seedkernel-wasm/safe-js";
 
 import type { Sodium } from "./sodium.js";
@@ -101,7 +104,7 @@ export interface StorageNodeOptions {
    *  over the same `fs` the node serves, or the two would diverge. Its put/delete are
    *  for callers that drive the store directly (e.g. tests): calling them on a live
    *  node bypasses the guest holder, whose cached quota budget then goes stale until
-   *  the holder realm is rebuilt — FsBlobStore itself reads used-bytes live for the
+   *  the guest realm is rebuilt — FsBlobStore itself reads used-bytes live for the
    *  mirror-image reason (it can't see the guest's `fs.*` writes). */
   store?: BlobStore;
   quota?: number;
@@ -136,22 +139,20 @@ export class StorageNode {
   private installSeq = 0;
   private repairLoopOn = false;
   private repairTimer: ReturnType<typeof setTimeout> | null = null;
-  // The tail of the initiator-realm call chain (put/get/repair). runInitiator chains
-  // every call onto it, so they run strictly one at a time (see there) and close() can
-  // await the whole chain — not just the most recent window call — before disposing the
-  // realm. `closed` short-circuits any call arriving after close() with a clean rejection
+  // The tail of the initiator call chain (put/get/repair). runInitiator chains every
+  // call onto it, so they run strictly one at a time (see there) and close() can await
+  // the whole chain — not just the most recent window call — before disposing the realm.
+  // `closed` short-circuits any call arriving after close() with a clean rejection
   // instead of a mid-flight "realm disposed" error.
   private inFlight: Promise<unknown> = Promise.resolve();
   private closed = false;
 
-  // Two realms run the one guest: an async initiator (put/get/repair) created
-  // lazily on first use, and a sync holder (handle) created eagerly at boot so a
-  // node serves the moment it is connected. Caching the initiator's creation
-  // *promise* (not the settled realm) means two concurrent first calls await one
-  // realm — a second async realm would leak and the two would overlap host calls,
-  // the §2.1 Asyncify module-global hard-abort.
-  private initiator: Promise<SafeRealm> | null = null;
-  private holder!: SyncSafeRealm;
+  // ONE realm runs the whole guest: the async initiator (put/get/repair, via call())
+  // and the synchronous holder (handle, via callSync()). Created eagerly at boot so a
+  // node serves the moment it is connected. callSync runs the holder re-entrantly —
+  // straight through to its bytes without pumping the job queue — so it answers a peer
+  // while this realm's own initiator is parked mid-await, without disturbing it (§2.1).
+  private realm!: SafeRealm;
 
   private constructor(opts: StorageNodeOptions, host: KernelHost, identity: Identity) {
     this.sodium = opts.sodium;
@@ -200,26 +201,29 @@ export class StorageNode {
     node.registerBridges();
     node.installHandlers(opts.codecBytes, opts.reputationBytes);
 
-    // The holder side, confined in a SYNC realm: every incoming request is routed
-    // to the guest's `handle`, which answers from local fs + crypto without
-    // yielding (no net round trip), so it can respond while this node's own async
-    // initiator realm is parked mid-await (the runtime split, §2.1).
-    node.holder = await createSyncSafeRealm({ source: node.guestFullSource(), bridge: node.buildBridge() });
+    // The one guest realm, created eagerly so the node serves the moment it is
+    // connected. The holder side routes every incoming request to the guest's `handle`
+    // via callSync — it answers from local fs + crypto without yielding (no net round
+    // trip) and without pumping the job queue, so it responds re-entrantly while this
+    // same realm's initiator is parked mid-await, without advancing it (§2.1).
+    node.realm = await createSafeRealm({
+      source: node.guestFullSource(), bridge: node.buildBridge(), memoryLimitBytes: node.config.realmMemoryBytes,
+    });
     node.transport.onRequest((_from, type, payload) => {
       const arg = new Uint8Array(1 + payload.length);
       arg[0] = type & 0xff;
       arg.set(payload, 1);
-      return node.holder.call("handle", arg);
+      return node.realm.callSync("handle", arg);
     });
     return node;
   }
 
-  // ── the guest runtime (initiator realm + bridge + injected config) ──────────
+  // ── the guest runtime (the one realm + bridge + injected config) ────────────
   /** The generic cap-bridge: kernel primitives only, no storage vocabulary.
    *  codec/reputation are reached as installed handlers via host.callHandler; net
-   *  via the Transport; fs over the node's raw backend. Both realms share one
-   *  bridge — the holder never calls net ops, so the DUAL bridge's sync arms
-   *  suffice for the sync realm. */
+   *  via the Transport; fs over the node's raw backend. One bridge serves the one
+   *  realm — the initiator awaits the net op (a real Promise); the holder path
+   *  touches only the synchronous ops. */
   private buildBridge(): SafeRealmBridge {
     return createCapBridge({
       sodium: this.sodium,
@@ -273,14 +277,6 @@ export class StorageNode {
     return capPreamble() + this.appPreamble() + this.guestSource;
   }
 
-  /** The async initiator realm (put/get/repair), created lazily on first use. */
-  private initiatorRealm(): Promise<SafeRealm> {
-    if (!this.initiator) {
-      this.initiator = createSafeRealm({ source: this.guestFullSource(), bridge: this.buildBridge(), memoryLimitBytes: this.config.realmMemoryBytes });
-    }
-    return this.initiator;
-  }
-
   // ── Node surface ───────────────────────────────────────────────────────
   now(): number { return this.clockFn(); }
   cohortPeers(): PeerId[] { return [...this.peers]; }
@@ -300,26 +296,26 @@ export class StorageNode {
   }
 
   // ── PUT / GET / repair / share (§6, §7, §9, §4.4) — all run in the guest ──
-  /** Run one initiator entrypoint in the async realm, recording it as in-flight so
-   *  close() can await it before disposing the realm (disposing while a call is parked
-   *  mid-await — a repair pass caught by close, waiting out an unreachable peer's timeout
-   *  — would resume into a freed realm: a QuickJS UseAfterFree abort). */
+  /** Run one initiator entrypoint via the realm's async call(), recording it as
+   *  in-flight so close() can await it before disposing the realm (disposing while a call
+   *  is parked mid-await — a repair pass caught by close, waiting out an unreachable
+   *  peer's timeout — would resume into a freed realm: a QuickJS UseAfterFree abort). */
   private async runInitiator(entry: string, payload: Uint8Array): Promise<Uint8Array> {
     if (this.closed) throw new Error("storage node closed");
-    const realm = await this.initiatorRealm();
-    // Chain onto the previous call so the initiator runs strictly one at a time. The
-    // Asyncify bridge is module-global (§2.1), so two overlapping initiator calls hard-
-    // abort the realm; serializing here makes that impossible even if application code
-    // overlaps two put()s (or a put() with a get()) — the streamed design issues many
-    // window calls per operation, so an interleave is far likelier than under the old
-    // single-call entrypoints. It also keeps `inFlight` a true tail: close() awaits the
-    // whole chain, so an earlier parked call can't still resume into a freed realm.
+    const realm = this.realm;
+    // Chain onto the previous call so the initiator runs strictly one at a time.
+    // Concurrent call()s on one realm are now safe (the async seam consumes the arg
+    // before the first await, so they never clobber), so this is no longer required for
+    // correctness — but it keeps a put and a repair pass from competing for the link, and
+    // it keeps `inFlight` a true tail: close() awaits the whole chain, so an earlier
+    // parked call can't resume into a freed realm (the streamed design issues many window
+    // calls per operation, so an interleave is easy to hit).
     const p = this.inFlight.then(() => realm.call(entry, payload));
     this.inFlight = p.then(() => {}, () => {});
     return p;
   }
 
-  /** PUT a file (§6), orchestrated inside the initiator realm, STREAMED so the
+  /** PUT a file (§6), orchestrated in the guest via the realm's async `call()`, STREAMED so the
    *  confined guest heap never holds the whole file (README §3): the plaintext is
    *  fed one chunk-aligned window at a time and each window's ciphertext is placed
    *  and dropped before the next is sent. putStart mints K and reports the window
@@ -363,7 +359,7 @@ export class StorageNode {
     return { manifestId, replicated, chunkCount: descriptors.length, key, blockIds, replicasLanded, replicasIntended };
   }
 
-  /** GET a file (§7), orchestrated inside the initiator realm, STREAMED so the guest
+  /** GET a file (§7), orchestrated in the guest via the realm's async `call()`, STREAMED so the guest
    *  reconstructs only one window of chunks at a time; the file is assembled here.
    *  getStart fetches + verifies the manifest and returns the file size, a window
    *  granularity, and every chunk descriptor; getChunk reconstructs each window. */
@@ -388,18 +384,18 @@ export class StorageNode {
     return out;
   }
 
-  /** Pre-warm the initiator realm's codec + crypto caps with a throwaway
-   *  encode/decode (no network, no store), so the first PUT/GET doesn't pay V8's
-   *  cold-JIT tax on the latency-sensitive path — a cold first PUT otherwise encodes
-   *  the whole file before the first byte hits the wire. Also boots the lazily-created
-   *  initiator realm now. Idempotent and optional: a client that will PUT/GET calls it
-   *  once after connecting; a pure holder (which serves from the sync realm) need not. */
+  /** Pre-warm the realm's codec + crypto caps with a throwaway encode/decode (no
+   *  network, no store), so the first PUT/GET doesn't pay V8's cold-JIT tax on the
+   *  latency-sensitive path — a cold first PUT otherwise encodes the whole file before
+   *  the first byte hits the wire. Idempotent and optional: a client that will PUT/GET
+   *  calls it once after connecting; a pure holder (which only ever serves via callSync)
+   *  need not. */
   async warm(): Promise<void> {
     await this.runInitiator("warm", new Uint8Array(0));
   }
 
   /** Run one repair pass over every chunk this node holds a block of (§9),
-   *  orchestrated inside the initiator realm. Returns the number of blocks
+   *  orchestrated in the guest via the realm's async `call()`. Returns the number of blocks
    *  (re-)placed. */
   async runRepair(): Promise<number> {
     return readU32BE(await this.runInitiator("repair", new Uint8Array(0)), 0);
@@ -459,7 +455,7 @@ export class StorageNode {
     if (this.repairTimer) { clearTimeout(this.repairTimer); this.repairTimer = null; }
   }
 
-  /** Tear down both guest realms + the transport, stopping the repair loop if
+  /** Tear down the guest realm + the transport, stopping the repair loop if
    *  running (test cleanup). */
   close(): void {
     this.closed = true; // reject any initiator call raised after this (e.g. the next window
@@ -467,16 +463,15 @@ export class StorageNode {
                         // the freed realm — a diagnosable "storage node closed", not a crash.
     this.stopRepairLoop();
     // Close the transport first so any parked initiator round trip settles (times out as
-    // unreachable) rather than hanging, and no new holder request arrives.
+    // unreachable) rather than hanging, and no new holder request arrives (so no callSync
+    // fires after this — the holder path never suspends, so nothing of it is in flight).
     this.transport.close();
-    // The sync holder realm never suspends (local fs + crypto only), so it is safe to
-    // free at once. The async initiator realm may be parked mid-await (a repair pass
-    // caught by close, waiting out a peer timeout); disposing it now would resume that
-    // computation into a freed realm (QuickJS UseAfterFree). Defer its disposal until the
-    // in-flight call settles.
-    this.holder?.dispose();
-    const disposeInitiator = () => { void this.initiator?.then((r) => r.dispose(), () => { /* creation failed — nothing to free */ }); };
-    this.inFlight.then(disposeInitiator, disposeInitiator);
+    // The realm may be parked mid-await on an initiator call (a repair pass caught by
+    // close, waiting out a peer timeout); disposing it now would resume that computation
+    // into a freed realm (QuickJS UseAfterFree). Defer disposal until the in-flight chain
+    // settles. The realm is created eagerly at boot, so it always exists here.
+    const disposeRealm = () => this.realm.dispose();
+    this.inFlight.then(disposeRealm, disposeRealm);
   }
 
   // ── bootstrap wiring (§19) ──────────────────────────────────────────────

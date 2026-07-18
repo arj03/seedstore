@@ -1,19 +1,21 @@
 // The Tier-2 guest — the WHOLE storage protocol (README §6/§7/§9) as zero-authority
 // JS that runs *inside* the QuickJS realm (§2.1). This is the single
 // implementation of placement, k-of-n, admission, the wire format, and repair: the
-// host (host/storage-node.ts) only boots the kernel and runs this guest in two
-// realms. Every capability is reached through the one `host.call(op, bytes)` seam,
-// and the code is de-async'd to straight-line synchronous form over the blocking
-// Asyncify bridge (the load-bearing finding — a host call from a deferred promise
-// job aborts the VM, so there is no async/await in here at all).
+// host (host/storage-node.ts) only boots the kernel and runs this guest in one
+// realm. Every capability is reached through the one `host.call(op, bytes)` seam.
+// The seam is genuinely async: a net op (`CAP_NET_SEND`) resolves to a real Promise
+// the initiator `await`s — so a fan-out is just `await Promise.all(peers.map(...))`,
+// with the host driving the concurrent round trips — while every other cap
+// (crypto/fs/clock/module) still resolves synchronously to its bytes.
 //
-// Two roles share this one program. The *initiator* entrypoints (`put`/`get`/
-// `repair`) are async — they fan out over net and run in the Asyncify realm. The
-// *holder* entrypoint (`handle`: HAVE/OFFER/STORE/FETCH, admission, content-
-// addressing, quota, fs writes) is purely synchronous (local fs + crypto, no net)
-// and runs in a SYNC realm, so a node can answer requests while its own initiator
-// realm is parked mid-await (the runtime split). Whichever entrypoint a realm
-// calls, the other role's code is simply dormant there.
+// Two roles share this one program and this one realm. The *initiator* entrypoints
+// (`put`/`get`/`repair`) are async — they fan out over net and park mid-`await`
+// while their round trips settle. The *holder* entrypoint (`handle`: HAVE/OFFER/
+// STORE/FETCH, admission, content-addressing, quota, fs writes) is purely
+// synchronous (local fs + crypto, no net) and is invoked re-entrantly (`callSync`),
+// so a node can answer a peer's request *while* its own initiator is parked mid-
+// await in the same realm — a suspended async function is just heap state (the
+// runtime split). Whichever entrypoint runs, the other role's code is dormant.
 //
 // This is a plain script, not a module: it has no imports/exports and no ambient
 // authority. It is loaded as source by the host (host/storage-node.ts, or the
@@ -67,8 +69,9 @@ function bytesToStr(b) { let s = ""; for (let i = 0; i < b.length; i++) s += Str
 // STORE wire format (host/protocol.ts), the codec & reputation module ABIs, and
 // the <hex>.blk/.dsc store layout (host/store-fs.ts). Config + the codec and
 // reputation kernel names arrive as the injected `APP` constant (prepended by
-// the driver), not as kernel ops. host.call blocks via Asyncify, so these read
-// as ordinary synchronous functions.
+// the driver), not as kernel ops. A sync op (crypto/fs/clock/module) resolves to
+// its bytes directly, so its wrapper reads as an ordinary synchronous function; the
+// net wrappers below are `async` and `await` the one round-trip op.
 
 // The op bytes of the codec handler (the guest owns its ABI). The reputation handler's
 // op bytes + request framing (REP_OBSERVE/REP_SCORE, encodeScoreReq/encodeObserveReq)
@@ -223,41 +226,31 @@ function makeRanker() {
 function rank(peers) { return makeRanker()(peers); }
 
 // ── net (request/response over the generic transport; wire format here) ──
-function netSend(peer, type, payload) {
+// The one genuinely-async cap: CAP_NET_SEND resolves to a Promise the initiator
+// awaits (the host round-trips it). An unreachable peer resolves to `[0]` (never a
+// reject), so this maps it to null within the request window.
+async function netSend(peer, type, payload) {
   const head = new Uint8Array(33); head.set(fromHex(peer), 0); head[32] = type;
-  const r = host.call(CAP_NET_SEND, concat([head, payload]));
+  const r = await host.call(CAP_NET_SEND, concat([head, payload]));
   return r[0] === 1 ? r.slice(1) : null; // null = peer unreachable within the window
 }
-// Per-peer fan-out (§6/§7): a DISTINCT request per peer, fanned out CONCURRENTLY by
-// the shared transport (CAP_NET_SEND_MANY). A broadcast of one shared payload to
-// many peers (disc.have/want) is just N identical entries — there is no separate
-// all-payloads-equal cap. This is the one concurrency a confined sync guest can
-// express — it issues one batched cap per round and blocks; the host fans out; the
-// guest never needs a Promise.all. `requests` = [{ peer, type, payload }]; results
-// align to input order, an unreachable peer coming back `ok:false`/`bytes:null`
-// (partial, never a throw).
+// Per-peer fan-out (§6/§7): a DISTINCT request per peer, all issued CONCURRENTLY.
+// With real net promises the guest fans out itself — `Promise.all` over netSend, the
+// host driving every round trip in parallel — so there is no host-side scatter-gather
+// cap. A broadcast of one shared payload to many peers (disc.have/want) is just N
+// identical entries. `requests` = [{ peer, type, payload }]; results align to input
+// order, an unreachable peer coming back `ok:false`/`bytes:null` (partial, never a
+// throw — netSend already swallowed the unreachable case).
 function netSendMany(requests) {
-  const head = new Uint8Array(4); wU32(head, 0, requests.length);
-  const parts = [head];
-  for (const rq of requests) {
-    const h = new Uint8Array(37); h.set(fromHex(rq.peer), 0); h[32] = rq.type; wU32(h, 33, rq.payload.length);
-    parts.push(h, rq.payload);
-  }
-  const r = host.call(CAP_NET_SEND_MANY, concat(parts));
-  const out = []; let o = 0; const n = rU32(r, o); o += 4;
-  for (let i = 0; i < n; i++) {
-    const peer = toHex(r.slice(o, o + 32)); o += 32;
-    const ok = r[o] === 1; o += 1;
-    const len = rU32(r, o); o += 4;
-    out.push({ peer, ok, bytes: ok ? r.slice(o, o + len) : null }); o += ok ? len : 0;
-  }
-  return out;
+  return Promise.all(requests.map(async (rq) => {
+    const bytes = await netSend(rq.peer, rq.type, rq.payload);
+    return { peer: rq.peer, ok: bytes !== null, bytes };
+  }));
 }
-// disc.have/want (§5.2): one round trip to the cohort; the host fans out in
-// parallel (net.sendMany — the same HAVE request broadcast to every holder as N
-// identical entries) so the guest never needs a Promise.all. A node is itself a
-// holder of whatever its own store keeps (repair runs on holders).
-function haveWant(ids) {
+// disc.have/want (§5.2): one round of fan-out to the cohort (Promise.all over the
+// same HAVE request to every holder) so the guest overlaps every peer. A node is
+// itself a holder of whatever its own store keeps (repair runs on holders).
+async function haveWant(ids) {
   const holders = new Map();
   for (const id of ids) holders.set(toHex(id), new Set());
   for (const id of ids) if (storeHas(id)) holders.get(toHex(id)).add(myPeer());
@@ -270,7 +263,7 @@ function haveWant(ids) {
   const maxIds = Math.max(1, Math.floor((maxMsgBytes() - 4) / HAVE_ID_LEN));
   for (const slice of sliceN(ids, maxIds)) {
     const haveReq = encodeHaveReq(slice); // one shared request, broadcast to every peer
-    for (const res of netSendMany(peers.map((p) => ({ peer: p, type: MSG_HAVE, payload: haveReq })))) {
+    for (const res of await netSendMany(peers.map((p) => ({ peer: p, type: MSG_HAVE, payload: haveReq })))) {
       if (!res.ok) continue;
       const held = res.bytes;
       for (let i = 0; i < slice.length && i < held.length; i++) {
@@ -293,9 +286,9 @@ function haveWant(ids) {
 // null for the whole batch if the peer was unreachable — so the caller can score a
 // reachable-but-didn't-serve as a §8 miss but never an unreachable peer. The
 // caller hash-verifies every block (§4.2).
-function fetchBatch(peer, ids) {
+async function fetchBatch(peer, ids) {
   if (peer === myPeer()) return ids.map((id) => { const sb = storeGet(id); return sb ? sb.bytes : null; });
-  const resp = netSend(peer, MSG_FETCH, encodeFetchBatchReq(ids));
+  const resp = await netSend(peer, MSG_FETCH, encodeFetchBatchReq(ids));
   if (resp === null) return null;
   const blocks = decodeFetchBatchRes(resp);
   return ids.map((_, i) => blocks[i] || null);
@@ -303,12 +296,12 @@ function fetchBatch(peer, ids) {
 // verification-fetch (§8): pull one block from a holder, confirm it hashes to its
 // id, and score the holder. The hash check + reputation are the guest's, not the
 // host's. Used for the manifest + repair; the GET path uses the batched fetchBatch.
-function verificationFetch(peer, id) {
+async function verificationFetch(peer, id) {
   if (peer === myPeer()) {
     const sb = storeGet(id);
     return sb && bytesEqual(hash(sb.bytes), id) ? sb.bytes : null;
   }
-  const resp = netSend(peer, MSG_FETCH, encodeFetchBatchReq([id]));
+  const resp = await netSend(peer, MSG_FETCH, encodeFetchBatchReq([id]));
   if (resp === null) return null;                       // unreachable — not a miss to score
   const data = decodeFetchBatchRes(resp)[0] || null;
   const t = clockNow();
@@ -320,19 +313,19 @@ function verificationFetch(peer, id) {
 // with the shared decodeMask (host/protocol.ts) over netSend, mapping an unreachable peer
 // (netSend → null) to all-declines. The per-peer fan-out (placeChunksBatched) drives
 // the same shared codecs directly through netSendMany.
-function offerBatch(peer, offers) {
-  const resp = netSend(peer, MSG_OFFER, encodeOfferBatch(offers));
+async function offerBatch(peer, offers) {
+  const resp = await netSend(peer, MSG_OFFER, encodeOfferBatch(offers));
   return resp === null ? offers.map(() => false) : decodeMask(resp);
 }
-function offer(peer, blockId, size, descriptor) {
-  return offerBatch(peer, [{ blockId, size, descriptor }])[0];
+async function offer(peer, blockId, size, descriptor) {
+  return (await offerBatch(peer, [{ blockId, size, descriptor }]))[0];
 }
-function storeBatch(peer, stores) {
-  const resp = netSend(peer, MSG_STORE, encodeStoreBatch(stores));
+async function storeBatch(peer, stores) {
+  const resp = await netSend(peer, MSG_STORE, encodeStoreBatch(stores));
   return resp === null ? stores.map(() => false) : decodeMask(resp);
 }
-function storePush(peer, blockId, descriptor, bytes) {
-  return storeBatch(peer, [{ blockId, descriptor, bytes }])[0];
+async function storePush(peer, blockId, descriptor, bytes) {
+  return (await storeBatch(peer, [{ blockId, descriptor, bytes }]))[0];
 }
 
 // ── descriptor + manifest ────────────────────────────────────────────────────
@@ -379,12 +372,12 @@ function maxMsgBytes() { const v = APP.maxMessageBytes; return (typeof v === "nu
 // audit both size their batches this way; the holder caps served bytes the same (§18).
 function fetchMaxIds() { return Math.max(1, Math.floor(maxMsgBytes() / (APP.blockSize + FETCH_FRAME))); }
 // The fan-out windows (transport/operator policy, like maxMessageBytes): how many
-// per-peer sub-batches a single CAP_NET_SEND_MANY round carries. putWindow bounds
+// per-peer sub-batches a single Promise.all round fires at once. putWindow bounds
 // STORE messages PER PEER (peers concurrent → peak W·peers); getWindow bounds FETCH
-// messages TOTAL across the cohort (peak W), so a confined sync guest pipelines a
-// holder's many ~1-block messages instead of paying one round trip apiece (the
-// tight-cap WebRTC case the lock-step fan-out was meant to keep windowed). Injected in
-// full by the driver (core.ts homes the default); the guest reads APP and never guesses.
+// messages TOTAL across the cohort (peak W), so the guest pipelines a holder's many
+// ~1-block messages instead of paying one round trip apiece (the tight-cap WebRTC
+// case the lock-step fan-out was meant to keep windowed). Injected in full by the
+// driver (core.ts homes the default); the guest reads APP and never guesses.
 function putWindow() { return APP.putWindow; }
 function getWindow() { return APP.getWindow; }
 function sliceN(arr, size) {
@@ -409,14 +402,14 @@ function batchBytes(items, sizeOf, maxBytes) {
 // Offer to candidates ranked by reciprocity (§13); on accept, push. Up to `count`
 // distinct peers not in `exclude`. Returns the peers that stored it. Used for the
 // small-file replicas + the manifest; the RS path uses placeChunksBatched.
-function placeBlock(blockId, bytes, descriptor, exclude, count) {
+async function placeBlock(blockId, bytes, descriptor, exclude, count) {
   const placed = [];
   const ranked = rank(cohortPeers().filter((p) => !exclude.has(p)));
   for (const peer of ranked) {
     if (placed.length >= count) break;
     if (placed.includes(peer)) continue;
-    if (!offer(peer, blockId, bytes.length, descriptor)) continue;
-    if (storePush(peer, blockId, descriptor, bytes)) placed.push(peer);
+    if (!(await offer(peer, blockId, bytes.length, descriptor))) continue;
+    if (await storePush(peer, blockId, descriptor, bytes)) placed.push(peer);
   }
   return placed;
 }
@@ -457,7 +450,7 @@ function encodeChunk(source, localCi, globalCi, K) {
 // block i of every chunk at once; the STOREs that follow window the peer's many
 // capped messages (peak W·peers). Returns nothing; fills each chunk's placedPeer[].
 // Throws if a chunk lands < k distinct ids.
-function placeChunksBatched(chunks) {
+async function placeChunksBatched(chunks) {
   const c = APP;
   const n = c.k + c.m;
   const ranked = rank(cohortPeers());
@@ -478,8 +471,8 @@ function placeChunksBatched(chunks) {
     }
     if (byPeer.size === 0) break;
 
-    // Lock-step fan-out: ALL of this round's OFFERs (one batched cap, peers
-    // concurrent) complete before its STOREs (no optimistic STORE — §6). The OFFER
+    // Lock-step fan-out: ALL of this round's OFFERs (one Promise.all over the peers)
+    // complete before its STOREs (no optimistic STORE — §6). The OFFER
     // phase carries ≤1 message per peer per fan-out (a peer's offers are small and
     // rarely exceed maxOffers, so the sub-batch index is round-robined one-per-peer).
     // The STORE phase windows up to putWindow() of a peer's byte-bounded sub-batches
@@ -503,7 +496,7 @@ function placeChunksBatched(chunks) {
         sliceOf.push(slice);
       }
       if (reqs.length === 0) break;
-      const results = netSendMany(reqs);
+      const results = await netSendMany(reqs);
       for (let ri = 0; ri < results.length; ri++) {
         const slice = sliceOf[ri];
         const mask = results[ri].ok ? decodeMask(results[ri].bytes) : [];
@@ -532,7 +525,7 @@ function placeChunksBatched(chunks) {
         }
       }
       if (reqs.length === 0) break;
-      const results = netSendMany(reqs);
+      const results = await netSendMany(reqs);
       for (let ri = 0; ri < results.length; ri++) {
         const group = groupOf[ri];
         const stored = results[ri].ok ? decodeMask(results[ri].bytes) : [];
@@ -549,10 +542,10 @@ function placeChunksBatched(chunks) {
   }
 }
 // Fetch a block from whichever cohort peer holds it, verifying by hash (manifest + repair).
-function fetchBlock(id) {
-  const holders = haveWant([id]).get(toHex(id)) || new Set();
+async function fetchBlock(id) {
+  const holders = (await haveWant([id])).get(toHex(id)) || new Set();
   for (const peer of rank([...holders])) {
-    const b = verificationFetch(peer, id);
+    const b = await verificationFetch(peer, id);
     if (b) return b;
   }
   return null;
@@ -563,7 +556,7 @@ function fetchBlock(id) {
 // flight, the getWindow window). `apply(peer, sliceHex, ids, blocks)` sees each
 // sub-batch's result — blocks aligned to ids (bytes|null), or null for the whole slice
 // if the peer was unreachable (partial, never a §8 miss). Shared by the GET gather and
-// the repair audit, so both express the same window through one CAP_NET_SEND_MANY round.
+// the repair audit, so both express the same window through one Promise.all round.
 //
 // Truncation vs miss is a wire bit: a holder bounds one FETCH response by ITS
 // maxMessageBytes (serveFetch), which can be smaller than ours (the caps are per-node
@@ -574,12 +567,12 @@ function fetchBlock(id) {
 // always serves the first present block, so each re-request round resolves ≥1 block, which
 // terminates. A genuine miss is ABSENT even past the cap, so it is ruled a miss in one
 // round trip.
-function runFetchTasks(byPeer, maxIds, apply) {
+async function runFetchTasks(byPeer, maxIds, apply) {
   const me = myPeer();
   if (byPeer.has(me)) {
     for (const slice of sliceN(byPeer.get(me), maxIds)) {
       const ids = slice.map(fromHex);
-      apply(me, slice, ids, fetchBatch(me, ids));
+      apply(me, slice, ids, await fetchBatch(me, ids));
     }
   }
   const tasks = []; // { peer, slice, ids } — re-requested unanswered blocks are appended and picked up by later windows
@@ -590,7 +583,7 @@ function runFetchTasks(byPeer, maxIds, apply) {
   const getW = getWindow();
   for (let base = 0; base < tasks.length; base += getW) {
     const window = tasks.slice(base, base + getW);
-    const results = netSendMany(window.map(({ peer, ids }) => ({ peer, type: MSG_FETCH, payload: encodeFetchBatchReq(ids) })));
+    const results = await netSendMany(window.map(({ peer, ids }) => ({ peer, type: MSG_FETCH, payload: encodeFetchBatchReq(ids) })));
     for (let ri = 0; ri < results.length; ri++) {
       const { peer, slice, ids } = window[ri];
       if (!results[ri].ok) { apply(results[ri].peer, slice, ids, null); continue; } // unreachable
@@ -614,7 +607,7 @@ function runFetchTasks(byPeer, maxIds, apply) {
 // (peak W in flight, the getWindow window); a coded chunk stops at k, preferring
 // data blocks. Every returned block is hash-verified (§4.2) and scores its holder
 // (§8). Returns a Map id-hex → bytes.
-function gatherBlocks(descriptors, holders) {
+async function gatherBlocks(descriptors, holders) {
   const c = APP;
   const got = new Map();
   const tried = new Map();
@@ -676,7 +669,7 @@ function gatherBlocks(descriptors, holders) {
     };
 
     // Self reads local; every other holder's sub-batches window by getWindow() (§8/§13).
-    runFetchTasks(byPeer, maxIds, applyFetch);
+    await runFetchTasks(byPeer, maxIds, applyFetch);
   }
   return got;
 }
@@ -737,7 +730,7 @@ function getWindowChunks(chunkData) { return Math.max(1, Math.floor(windowTarget
 // Replicate a small file r = m+1 times, not coded (§4.1) — a file too small to fill
 // a chunk. Returns its one signed descriptor + the ids that landed. The file is small
 // by definition, so it needs no windowing.
-function placeSmall(plaintext, K) {
+async function placeSmall(plaintext, K) {
   const c = APP;
   const d = Math.max(1, Math.ceil(plaintext.length / c.blockSize));
   const ct = encrypt(K, DOMAIN_BODY, 0, padTo(plaintext, d * c.blockSize));
@@ -748,7 +741,7 @@ function placeSmall(plaintext, K) {
   const perBlockTarget = Math.min(replicas(), cohortPeers().length);
   let placed = 0;
   for (let i = 0; i < d; i++) {
-    const peers = placeBlock(blockIds[i], dataBlocks[i], env, new Set(), replicas());
+    const peers = await placeBlock(blockIds[i], dataBlocks[i], env, new Set(), replicas());
     if (peers.length === 0) {
       throw new Error("put: no peer accepted a replica" + OUT_OF_STORAGE_HINT);
     }
@@ -764,14 +757,14 @@ function placeSmall(plaintext, K) {
 // fall out of scope on return. A k ≥ 2 window is RS-coded (n distinct blocks per chunk,
 // one per peer); a k = 1 window is replication (one block per chunk, r = m+1 copies on
 // r distinct peers) — encodeChunk decides, placeChunksBatched fans both out the same way.
-function placeWindow(slice, baseByteOffset, K) {
+async function placeWindow(slice, baseByteOffset, K) {
   const c = APP;
   const chunkData = c.k * c.blockSize;
   const baseCi = Math.floor(baseByteOffset / chunkData);
   const numChunks = Math.max(1, Math.ceil(slice.length / chunkData));
   const chunks = [];
   for (let lc = 0; lc < numChunks; lc++) chunks.push(encodeChunk(slice, lc, baseCi + lc, K));
-  placeChunksBatched(chunks);
+  await placeChunksBatched(chunks);
   const descriptors = [], placedIds = [];
   // Durability accounting: count REPLICA PLACEMENTS — one stored (block, peer), via
   // placedPeer — not distinct block ids. A k=1 chunk is one id replicated onto r peers,
@@ -791,12 +784,12 @@ function placeWindow(slice, baseByteOffset, K) {
 // Build, encrypt, and replicate the manifest (§4.3) over the collected chunk
 // descriptors. Carried as a one-block replicated chunk (k=1,m=0) with the manifest's
 // own block_id so repair can self-heal it (§9). Returns the manifest block id.
-function placeManifest(K, fileSize, descriptors) {
+async function placeManifest(K, fileSize, descriptors) {
   const manPlain = encodeManifest({ fileSize, encAlg: ENC_XCHACHA20, chunks: descriptors });
   const manCt = encrypt(K, DOMAIN_MANIFEST, 0, manPlain);
   const manifestId = hash(manCt);
   const manEnv = signChunk({ k: 1, m: 0, blockSize: manCt.length, blockIds: [manifestId] });
-  if (placeBlock(manifestId, manCt, manEnv, new Set(), replicas()).length === 0) {
+  if ((await placeBlock(manifestId, manCt, manEnv, new Set(), replicas())).length === 0) {
     throw new Error("put: no peer accepted the manifest" + OUT_OF_STORAGE_HINT);
   }
   return manifestId;
@@ -832,7 +825,7 @@ function encodeWindowResult(w) {
 
 // Whole-file PUT (shell / Go loader): windows over its own plaintext argument so the
 // ciphertext amplification is bounded even though the 1× plaintext is resident.
-function doPut(plaintext) {
+async function doPut(plaintext) {
   const c = APP;
   const fileSize = plaintext.length;
   const K = randomKey();
@@ -840,18 +833,18 @@ function doPut(plaintext) {
   const replicated = totalBlocks <= smallMaxBlocks();
   const descriptors = [], placedIds = [];
   if (replicated) {
-    const sm = placeSmall(plaintext, K);
+    const sm = await placeSmall(plaintext, K);
     for (const d of sm.descriptors) descriptors.push(d);
     for (const id of sm.placedIds) placedIds.push(id);
   } else {
     const wb = putWindowBytes();
     for (let off = 0; off < fileSize; off += wb) {
-      const w = placeWindow(plaintext.subarray(off, Math.min(off + wb, fileSize)), off, K);
+      const w = await placeWindow(plaintext.subarray(off, Math.min(off + wb, fileSize)), off, K);
       for (const d of w.descriptors) descriptors.push(d);
       for (const id of w.placedIds) placedIds.push(id);
     }
   }
-  const manifestId = placeManifest(K, fileSize, descriptors);
+  const manifestId = await placeManifest(K, fileSize, descriptors);
   placedIds.push(manifestId);
   return buildPutResult(manifestId, replicated, descriptors.length, K, placedIds);
 }
@@ -875,11 +868,11 @@ function doPutStart(arg) {
   return out;
 }
 // [K 32][plaintext]  → window result (the whole small file, replicated).
-function doPutSmall(arg) { return encodeWindowResult(placeSmall(arg.slice(32), arg.slice(0, 32))); }
+async function doPutSmall(arg) { return encodeWindowResult(await placeSmall(arg.slice(32), arg.slice(0, 32))); }
 // [K 32][baseByteOffset u64][slice]  → window result.
-function doPutWindow(arg) { return encodeWindowResult(placeWindow(arg.slice(40), rU64(arg, 32), arg.slice(0, 32))); }
+async function doPutWindow(arg) { return encodeWindowResult(await placeWindow(arg.slice(40), rU64(arg, 32), arg.slice(0, 32))); }
 // [K 32][fileSize u64][descCount u32]{[len u32][descriptor]}  → [manifestId 32].
-function doPutManifest(arg) {
+async function doPutManifest(arg) {
   const K = arg.slice(0, 32);
   const fileSize = rU64(arg, 32);
   let o = 40;
@@ -895,11 +888,11 @@ function doPutManifest(arg) {
 // `fileSize` bounds the tail so the last chunk's zero-padding is trimmed. One
 // have/want + batched FETCH per holder (gatherBlocks) over just these chunks' block
 // ids — shared by the whole-file `get` and the streamed getChunk window.
-function reconstructChunks(ds, K, chunkStart, fileSize) {
+async function reconstructChunks(ds, K, chunkStart, fileSize) {
   const allIds = [];
   for (const d of ds) for (const id of d.blockIds) allIds.push(id);
-  const holders = haveWant(allIds);
-  const got = gatherBlocks(ds, holders);
+  const holders = await haveWant(allIds);
+  const got = await gatherBlocks(ds, holders);
   // Geometry is the DESCRIPTOR's, never config's (§4.1/§4.3): descriptors are self-
   // describing, so a reader/repairer needs no config and — the point of the fix — a file
   // decodes (assembleChunk/rsDecode use d.k/d.blockSize) and offsets by the SAME numbers,
@@ -925,9 +918,9 @@ function reconstructChunks(ds, K, chunkStart, fileSize) {
 // Whole-file GET (shell / Go loader). The manifest is encrypted, not signed, so a
 // correct K with a tampered manifest is caught only by the per-chunk signature —
 // verify every descriptor before use (§4.3).
-function doGet(arg) {
+async function doGet(arg) {
   const manifestId = arg.slice(0, 32), K = arg.slice(32, 64);
-  const manCt = fetchBlock(manifestId);
+  const manCt = await fetchBlock(manifestId);
   if (!manCt) throw new Error("get: manifest not found in cohort");
   const man = decodeManifest(decrypt(K, DOMAIN_MANIFEST, 0, manCt));
   const ds = man.chunks.map((env) => {
@@ -943,9 +936,9 @@ function doGet(arg) {
 // getChunk per window and assembles the file itself, so the guest reconstructs only
 // one window's worth of plaintext at a time.
 // [manifestId 32][K 32] → [fileSize u64][windowChunks u32][chunkCount u32]{[len u32][descriptorEnv]}.
-function doGetStart(arg) {
+async function doGetStart(arg) {
   const manifestId = arg.slice(0, 32), K = arg.slice(32, 64);
-  const manCt = fetchBlock(manifestId);
+  const manCt = await fetchBlock(manifestId);
   if (!manCt) throw new Error("get: manifest not found in cohort");
   const man = decodeManifest(decrypt(K, DOMAIN_MANIFEST, 0, manCt));
   let first = null;
@@ -964,7 +957,7 @@ function doGetStart(arg) {
   return concat(parts);
 }
 // [K 32][chunkStart u32][fileSize u64][chunkCount u32]{[len u32][descriptorEnv]} → plaintext bytes for these chunks.
-function doGetChunk(arg) {
+async function doGetChunk(arg) {
   const K = arg.slice(0, 32);
   const chunkStart = rU32(arg, 32);
   const fileSize = rU64(arg, 36);
@@ -989,8 +982,8 @@ function doGetChunk(arg) {
 // per id, the pre-batch cost). The verification is unchanged per (peer, block): the
 // same hash-check (§4.2) + repObserve (§8), just batched one FETCH per holder (all the
 // ids it advertised) and windowed by getWindow(), not one round trip per (id, holder).
-function liveHolders(ids) {
-  const advertised = haveWant(ids);
+async function liveHolders(ids) {
+  const advertised = await haveWant(ids);
   const me = myPeer();
   const live = new Map();
   const bytes = new Map(); // hex → first hash-verifying copy seen this audit
@@ -1005,7 +998,7 @@ function liveHolders(ids) {
       list.push(h);
     }
   }
-  const applyAudit = (peer, slice, idBytes, blocks) => {
+  const applyAudit = (peer, slice, idBytes, blocks) => { // synchronous — hash + repObserve are sync ops
     const isSelf = peer === me;
     const t = clockNow();
     for (let i = 0; i < slice.length; i++) {
@@ -1020,12 +1013,12 @@ function liveHolders(ids) {
       }
     }
   };
-  runFetchTasks(byPeer, fetchMaxIds(), applyAudit);
+  await runFetchTasks(byPeer, fetchMaxIds(), applyAudit);
   return { live, bytes };
 }
 // Replicated chunk (§4.1): repair is a single block copy from any live holder — the
 // copy the audit already fetched and verified (`verified`), never a fresh have/want.
-function healReplicated(d, descEnv, holders, verified) {
+async function healReplicated(d, descEnv, holders, verified) {
   const r = replicas();
   let replaced = 0;
   for (const id of d.blockIds) {
@@ -1034,7 +1027,7 @@ function healReplicated(d, descEnv, holders, verified) {
     if (set.size >= r) continue;
     const data = verified.get(h);        // present iff a live holder served it (set.size > 0)
     if (!data) continue;                 // no live holder this pass — nothing to copy from
-    replaced += placeBlock(id, data, descEnv, set, r - set.size).length;
+    replaced += (await placeBlock(id, data, descEnv, set, r - set.size)).length;
   }
   return replaced;
 }
@@ -1043,7 +1036,7 @@ function healReplicated(d, descEnv, holders, verified) {
 // holder (§6/§10) — a block that still has one is left alone; a lost one is reconstructed
 // from any k present blocks, re-certified against its signed block_id, then placed on a
 // fresh peer.
-function healCoded(d, descEnv, holders, verified) {
+async function healCoded(d, descEnv, holders, verified) {
   // Reconstruct any entirely-missing block once, up front, from k present blocks —
   // reusing the copies the audit (liveHolders) already fetched and verified, so a block
   // that still has a live holder costs no extra round trip. (A missing block, held by no
@@ -1078,17 +1071,17 @@ function healCoded(d, descEnv, holders, verified) {
     if ((holders.get(h) || new Set()).size > 0) continue; // still has a live holder
     const bytes = regenerated.get(h);
     if (!bytes) continue;                                  // missing and not reconstructable this pass
-    const placed = placeBlock(id, bytes, descEnv, occupied, 1);
+    const placed = await placeBlock(id, bytes, descEnv, occupied, 1);
     for (const p of placed) occupied.add(p);
     replaced += placed.length;
   }
   return replaced;
 }
 // Audit and, if under-replicated, heal one chunk from its signed descriptor.
-function repairChunk(descEnv) {
+async function repairChunk(descEnv) {
   const d = verifyDescriptor(descEnv);                     // forged/unsigned/malformed → null (§4.3)
   if (!d) return 0;
-  const { live: holders, bytes: verified } = liveHolders(d.blockIds);
+  const { live: holders, bytes: verified } = await liveHolders(d.blockIds);
   // Redundancy vs the low-water mark (§8, §9). Every id in a descriptor is unique —
   // coding is k ≥ 2, and k=1 is replication (m=0) — so a coded chunk's redundancy is the
   // count of its n blocks that still have a live holder (§8), while a replicated chunk's
@@ -1104,8 +1097,10 @@ function repairChunk(descEnv) {
   if (redundancy >= APP.lowWater) return 0;           // healthy (§8, §9)
   return d.m === 0 ? healReplicated(d, descEnv, holders, verified) : healCoded(d, descEnv, holders, verified);
 }
+// NB repairChunk is async; healReplicated/healCoded each return a Promise, so the
+// ternary above resolves through the async function's own await on return.
 // Run the repair loop over every chunk this node holds a block of (§9).
-function doRepair() {
+async function doRepair() {
   const seen = new Set();
   let replaced = 0;
   for (const id of storeList()) {
@@ -1114,7 +1109,7 @@ function doRepair() {
     const key = toHex(hash(descriptor));
     if (seen.has(key)) continue;
     seen.add(key);
-    replaced += repairChunk(descriptor);
+    replaced += await repairChunk(descriptor);
   }
   const out = new Uint8Array(4);
   wU32(out, 0, replaced);
@@ -1126,10 +1121,13 @@ function doRepair() {
 // rule + §14 quota), content-addressing (§4.2), and the <hex>.blk/.dsc + quota
 // writes — the policy of host/storage-node.ts + host/store-fs.ts, now confined.
 // Reached only through the generic caps, and entirely *synchronous*: a holder
-// answers from local fs + crypto and never makes a net round trip, so it runs in
-// a SYNC safe-js realm and can respond while an async orchestration realm is
-// parked mid-await (the runtime split). bytesUsed mirrors
-// FsBlobStore's byte budget, rebuilt lazily from the fs the first time it matters.
+// answers from local fs + crypto and never makes a net round trip, so it is invoked
+// synchronously (`callSync`) and can respond while this realm's own initiator is
+// parked mid-await (the runtime split — a suspended async function is just heap
+// state). Because it reaches only sync ops, `doHandle` and every function it calls
+// must stay synchronous: an `await` here would return a guest promise that callSync
+// cannot settle. bytesUsed mirrors FsBlobStore's byte budget, rebuilt lazily from
+// the fs the first time it matters.
 let bytesUsed = -1;
 // The §14 byte budget is OPERATOR policy, not author content: the StorageNode injects
 // its store's quota, and a seedkernel shell merges the operator's config over the

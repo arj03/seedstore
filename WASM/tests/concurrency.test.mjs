@@ -157,12 +157,13 @@ export async function run(t) {
     nodes.forEach((nn) => nn.close());
   }
 
-  t.group("placement + gather fan out across holders (CAP_NET_SEND_MANY), not one round trip at a time");
+  t.group("placement + gather fan out across holders (Promise.all over NET_SEND), not one round trip at a time");
   {
     // The orchestration runs INSIDE the QuickJS realm and reaches net only through
-    // host.call, yet placement/gather must still overlap holders. The per-peer
-    // fan-out (cap-bridge op 19) lifts the peak in-flight per type from 1 (a serial
-    // awaited round trip) to the holder count — the confined twin of a Promise.all.
+    // host.call, yet placement/gather must still overlap holders. With the genuinely-
+    // async seam the guest fans out itself — Promise.all over NET_SEND, the host driving
+    // the round trips — lifting the peak in-flight per type from 1 (a serial awaited
+    // round trip) to the holder count.
     const net = new LatencyNetwork(DELAY);
     const nodes = await createConnectedCohort({ count: 6, network: net, sodium, wasm, config, timeoutMs: TIMEOUT });
     const owner = nodes[0];
@@ -188,7 +189,7 @@ export async function run(t) {
   {
     // The WebRTC tight-cap twin of the STORE-window group above: ~one block per FETCH
     // message turns a holder's blocks into many single-block messages, and the window
-    // packs getWindow() of them into one CAP_NET_SEND_MANY fan-out instead of one
+    // packs getWindow() of them into one Promise.all fan-out instead of one
     // round trip apiece. PUT then GET on ONE cohort (a fresh one would hold none of
     // the blocks); the setup PUT is excluded from the peak by resetting just before
     // the GET.

@@ -166,7 +166,7 @@ import { WsNetwork } from "seedkernel-wasm/net-ws";
 // WebRTC's ~64 KiB channel. blockSize lives in the manifest, so PUT-encode and
 // GET-decode of one file always agree.
 // Live A/B tuning knobs via URL query (all optional, browser-only):
-//   ?window=<MB> streamed PUT/GET window · ?heap=<MB> initiator realm heap ·
+//   ?window=<MB> streamed PUT/GET window · ?heap=<MB> guest realm heap ·
 //   ?conns=<N> parallel conns/holder (WS only) · ?block=<KiB> block size.
 const params = new URLSearchParams(location.search);
 const qNum = (k, d) => { const v = Number(params.get(k)); return Number.isFinite(v) && v > 0 ? v : d; };

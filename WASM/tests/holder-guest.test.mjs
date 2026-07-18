@@ -3,15 +3,17 @@
 // signed content, this proves the *request* side too: a shell serving HAVE / OFFER /
 // STORE / FETCH — admission control, the §6 sibling rule, content-addressing, the
 // §14 quota, and the <hex>.blk/.dsc fs writes — entirely from the confined guest,
-// in a SYNC safe-js realm, with zero storage-specific host code in the runtime.
+// via the realm's synchronous `callSync`, with zero storage-specific host code in the
+// runtime.
 //
-// The sync realm is the load-bearing piece: a holder answers from local fs + crypto
-// without yielding, so it responds while the node's own async orchestration realm is
-// parked mid-await (the Asyncify module-global caveat means two *async* realms can't
-// overlap host calls — a sync realm, a different WASM instance, can). The concurrency
-// group exercises exactly that: a guest (async) initiator and a host-side StorageNode
-// (plain JS) initiator place blocks at the same time, so STOREs land on a shell while
-// its async realm is busy and its sync holder realm has to serve them.
+// The synchronous holder path is the load-bearing piece: a holder answers from local
+// fs + crypto without yielding, so it responds *re-entrantly* while the node's own
+// initiator is parked mid-await in the same realm — a suspended async guest is just
+// heap state, and callSync never pumps the job queue, so it cannot advance the parked
+// initiator. The concurrency group exercises exactly that: a guest (async) initiator
+// and a host-side StorageNode (plain JS) initiator place blocks at the same time, so
+// STOREs land on a shell while its initiator is busy and its holder path has to serve
+// them.
 //
 //   node tests/holder-guest.test.mjs
 //   bun  tests/holder-guest.test.mjs
@@ -98,15 +100,16 @@ export async function run(t) {
       }
     }
 
-    t.group("holder: the confined sync holder serves while the node's own async realm is parked (§2.1)");
+    t.group("holder: the confined holder serves (callSync) while the node's own initiator is parked mid-await in the same realm (§2.1)");
     {
       const net = new LoopbackNetwork();
       const shells = [];
       for (let i = 0; i < 5; i++) shells.push(await bootShell(net));
       connectAll(shells);
       // A host-side StorageNode (plain JS — no QuickJS) is a second, concurrent
-      // initiator + holder in the same cohort, so two PUTs overlap without two
-      // async QuickJS realms ever overlapping host calls.
+      // initiator + holder in the same cohort, so two PUTs overlap and the shell's
+      // one realm must serve holder requests (callSync) while its own initiator is
+      // parked mid-await.
       const [sn] = await createConnectedCohort({
         count: 1, network: net, sodium, wasm, timeoutMs: TIMEOUT,
         // Same deployment as the shells: verify descriptors under the bundle author's scope.
@@ -115,9 +118,9 @@ export async function run(t) {
       for (const e of shells) { sn.addPeer(e.peerId); e.shell.addPeer(sn.peerId); }
       try {
         const dataA = file(800, 11), dataB = file(800, 12);
-        // Concurrent: the shell's guest PUT (async realm parks on net) runs while
-        // the StorageNode places STOREs on that same shell — its sync holder realm
-        // must answer mid-flight.
+        // Concurrent: the shell's guest PUT (its initiator parks on net) runs while
+        // the StorageNode places STOREs on that same shell — the shell's holder path
+        // (callSync) must answer re-entrantly mid-flight.
         const [rA, putB] = await Promise.all([
           shells[0].shell.runGuest("put", dataA),
           sn.put(dataB),
