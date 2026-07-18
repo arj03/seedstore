@@ -1,7 +1,8 @@
-// Node entry point — reads the four WASM modules from disk and boots a
+// Node entry point — reads the three WASM modules from disk and boots a
 // StorageNode against the sumo libsodium. Use this on Node / Bun / Deno; for
-// the browser see ./browser.ts. The kernel + signature modules come from the
-// sibling seedkernel build (copied in by scripts/copy-kernel.mjs); the codec +
+// the browser see ./browser.ts. The kernel module comes from the sibling
+// seedkernel build (copied in by scripts/copy-kernel.mjs) — the signature
+// wrapper is host code inside it now, not a separate module; the codec +
 // reputation are this project's own build output.
 
 import { readFile } from "node:fs/promises";
@@ -17,7 +18,6 @@ const buildDir = join(__dirname, "..");
 
 export interface WasmBytes {
   kernelBytes: Uint8Array;
-  signatureBytes: Uint8Array;
   codecBytes: Uint8Array;
   reputationBytes: Uint8Array;
   /** The stitched guest program text (build/host/tier2-guest.js). It carries the
@@ -26,18 +26,16 @@ export interface WasmBytes {
   guestSource: string;
 }
 
-/** Read the four WASM modules + the guest program from the build directory. */
+/** Read the three WASM modules + the guest program from the build directory. */
 export async function loadWasmBytes(dir = buildDir): Promise<WasmBytes> {
-  const [kernelBytes, signatureBytes, codecBytes, reputationBytes, guestSource] = await Promise.all([
+  const [kernelBytes, codecBytes, reputationBytes, guestSource] = await Promise.all([
     readFile(join(dir, "kernel.wasm")),
-    readFile(join(dir, "signature.wasm")),
     readFile(join(dir, "codec.wasm")),
     readFile(join(dir, "reputation.wasm")),
     readFile(join(dir, "host", "tier2-guest.js"), "utf8"),
   ]);
   return {
     kernelBytes: new Uint8Array(kernelBytes),
-    signatureBytes: new Uint8Array(signatureBytes),
     codecBytes: new Uint8Array(codecBytes),
     reputationBytes: new Uint8Array(reputationBytes),
     guestSource,

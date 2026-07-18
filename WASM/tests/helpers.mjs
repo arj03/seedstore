@@ -1,6 +1,7 @@
 // Shared test scaffolding: load a KernelHost (from the sibling seedkernel
 // build) with the signature wrapper + installer wired, plus install helpers.
-// Mirrors seedkernel's tests/run.mjs makeHost/buildInstall.
+// Mirrors seedkernel's tests/run.mjs makeHost/buildInstall. The signature
+// wrapper is host code inside the kernel now, so there is no separate module.
 
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -16,7 +17,6 @@ export const root = join(__dirname, "..");
 
 export const paths = {
   kernel: join(root, "build/kernel.wasm"),
-  signature: join(root, "build/signature.wasm"),
   codec: join(root, "build/codec.wasm"),
   reputation: join(root, "build/reputation.wasm"),
 };
@@ -37,10 +37,9 @@ export function newKey() {
 export async function loadHost() {
   await sodium.ready;
   const kernel = readFileSync(paths.kernel);
-  const signature = readFileSync(paths.signature);
   const host = await KernelHost.load(kernel, sodium);
   const signatureName = host.deriveBootstrapName("signature");
-  host.registerSignature(signatureName, signature);
+  host.registerSignature(signatureName);
   host.registerInstaller();
   host.setApproveInstall(referencePolicy(host, () => true));
   return { host };

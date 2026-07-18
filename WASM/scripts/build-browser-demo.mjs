@@ -102,7 +102,7 @@ async function copy(src, dst) {
 mkdirSync(out, { recursive: true });
 
 // WASM modules the pages fetch relative to themselves.
-for (const f of ["kernel.wasm", "signature.wasm", "codec.wasm", "reputation.wasm"]) {
+for (const f of ["kernel.wasm", "codec.wasm", "reputation.wasm"]) {
   await copy(join(build, f), join(out, f));
 }
 

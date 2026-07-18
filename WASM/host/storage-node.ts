@@ -3,7 +3,8 @@
 // confined guest (host/tier2-guest.js), run inside ONE seedkernel safe-js realm
 // over the generic capability bridge. StorageNode only:
 //
-//   - loads kernel.wasm + signature.wasm and wires signature + installer
+//   - loads kernel.wasm and wires signature + installer (the signature wrapper
+//     is host code inside the kernel now, not a separate WASM module)
 //   - registers the storage bridges (crypto.* no-cap; store/net/clock/rand
 //     cap-gated) and installs the pure codec + reputation handlers
 //   - runs the guest's *initiator* entrypoints (put / get / repair) via the
@@ -80,7 +81,6 @@ export interface StorageNodeOptions {
   network: Network;
   sodium: Sodium;
   kernelBytes: Uint8Array;
-  signatureBytes: Uint8Array;
   codecBytes: Uint8Array;
   reputationBytes: Uint8Array;
   /** The stitched guest program text (build/host/tier2-guest.js). The whole
@@ -183,7 +183,7 @@ export class StorageNode {
     const host = await KernelHost.load(
       opts.kernelBytes as BufferSource, opts.sodium as never,
     );
-    host.registerSignature(host.deriveBootstrapName("signature"), opts.signatureBytes as BufferSource);
+    host.registerSignature(host.deriveBootstrapName("signature"));
     host.registerInstaller();
     // Single-deployment reference posture: accept audited handler bytes from any
     // author. A real deployment narrows this to a content-hash allowlist + closed

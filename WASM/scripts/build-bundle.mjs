@@ -32,7 +32,7 @@ const out = join(root, "bundle");
 const { toHex, fromHex } = await import(new URL("../build/host/util.js", import.meta.url));
 
 const sodium = await loadSodium();
-const { host } = await loadKernelHost(join(build, "kernel.wasm"), join(build, "signature.wasm"));
+const host = await loadKernelHost(join(build, "kernel.wasm"));
 // This host is offline scaffolding — used only to derive the module kernel names and
 // hash the module bytes (genesisHash) the manifest commits to; it signs nothing.
 
