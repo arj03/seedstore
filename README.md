@@ -20,7 +20,7 @@ This design assumes a **closed, social network**: you store with and among peers
 - **The trusted base is small and separate from the logic.** Only the I/O backends of the four capability domains (`store`, `net`, `clock`, `rand`) and the crypto services are trusted host code; all storage *logic* — `codec`, `reputation`, and the `coordinator`/`cohort`/`repair` orchestration — is **confined** (WASM or a zero-authority sandboxed-JS realm), reaching I/O only through capability-gated bridges. Trusting a node means trusting the small, stable base, not the larger, upgradeable logic (§2.1).
 - **Browser nodes and long-running peers run the same protocol**, differing only in their `store` backend and default quota.
 
-The reference composition stacks: the storage bundle (pure `codec`/`reputation` handlers + the confined orchestration and holder logic) → the capability domains (`store`, `net`, `clock`, `rand`) → installer → signature → kernel.
+The reference composition stacks: the storage bundle (pure `codec`/`reputation` handlers + the confined orchestration and holder logic) → the capability domains (`store`, `net`, `clock`, `rand`) → the module registry → signature → kernel.
 
 ---
 
@@ -71,7 +71,7 @@ Nothing here changes the envelope, the dispatch rule, or `SetHandler`. Storage s
 
 Running a seed store node extends your trusted computing base (TCB) — but the design keeps the part you *must* trust small and separate from the part that changes. Three tiers, smallest-TCB-first:
 
-**Tier 0 — kernel base.** seedkernel itself: kernel, signature, installer. The root of trust; everything else composes on top.
+**Tier 0 — kernel base.** seedkernel itself: kernel, signature, and the module registry. The root of trust; everything else composes on top.
 
 **Tier 1 — I/O base (trusted).** The host backends behind the four capability domains — `store`, `net`, `clock`, `rand` (§16) — plus the no-cap crypto services over libsodium. These *must* be trusted: they are the only code that performs real I/O. They are deliberately small, each bound to exactly one capability, audited, and change rarely. This is the *whole* of what seed store adds to your TCB.
 
@@ -79,7 +79,7 @@ Running a seed store node extends your trusted computing base (TCB) — but the 
 
 Two implementation forms satisfy Tier 2, both confined identically:
 
-- **WASM** — the pure, hot compute (`codec`, `reputation`). The wasm sandbox is the boundary; installation and same-author upgrades come straight from the installer (seedkernel §7). These handlers hold no caps at all — pure computation with no I/O reach to govern.
+- **WASM** — the pure, hot compute (`codec`, `reputation`). The wasm sandbox is the boundary; installation and same-author upgrades are the module registry's job under its policy (seedkernel §7). These handlers hold no caps at all — pure computation with no I/O reach to govern.
 - **Sandboxed JS** — the orchestration (`coordinator`/`cohort`/`repair`) *and* the holder side (admission, the sibling rule, content-addressing, quota, the store writes), which are awkward to express as a *synchronous* wasm handler. They run in a **zero-authority JS realm**: a fresh context with *no* ambient authority, into which the host injects *only* the bridge surface the manifest's capability grant wires. The realm cannot even name `fs`/`net` — those bindings do not exist in it — and CPU/memory are bounded by the host. The async *initiator* side runs in an Asyncify realm; the *holder* side runs in a separate **synchronous** realm, so a node can answer an incoming request while its own initiator realm is parked mid-`await`.
 
 The line that matters: **"trusting seed store" means trusting Tier 1 (small, stable, audited) — not Tier 2 (large, churning, upgradeable).** A buggy or compromised Tier-2 unit, of either form, can do nothing but compute and call the bridges for the capabilities it was granted; it can never reach I/O outside that grant, and an upgrade cannot silently widen it — a wider grant is a visible change to the signed manifest.

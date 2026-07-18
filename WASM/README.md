@@ -20,7 +20,7 @@ seed store bundle  ──────────── signed by the app author
         │  reaches I/O only through ↓ the single capability seam                        │
   cap-bridge   crypto · net · fs · module-call · clock · identity  ── generic primitives ┘
         │
-  seedkernel runtime (the shell)     installer → signature → kernel  +  the raw-byte caps
+  seedkernel runtime (the shell)     module registry → signature → kernel  +  the raw-byte caps
 ```
 
 Everything with *structure* — content-addressing, the signed chunk descriptor,

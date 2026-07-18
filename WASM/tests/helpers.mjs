@@ -31,20 +31,19 @@ export function newKey() {
   return { publicKey: kp.publicKey, privateKey: kp.privateKey };
 }
 
-/** A KernelHost with signature + installer + an allow-all reference policy
- *  (any author may bind a name) — the trusted single-deployment posture of a
- *  reference node. */
+/** A KernelHost with signature + the module registry + an allow-all reference
+ *  policy (any author may bind a name) — the trusted single-deployment posture of
+ *  a reference node. */
 export async function loadHost() {
   await sodium.ready;
   const kernel = readFileSync(paths.kernel);
   const signature = readFileSync(paths.signature);
   const host = await KernelHost.load(kernel, sodium);
   const signatureName = host.deriveBootstrapName("signature");
-  const installName = host.deriveBootstrapName("install");
   host.registerSignature(signatureName, signature);
-  host.registerInstaller(installName);
+  host.registerInstaller();
   host.setApproveInstall(referencePolicy(host, () => true));
-  return { host, installName };
+  return { host };
 }
 
 /** Count block-ids with ≥1 *live* holder — an online cohort node whose store

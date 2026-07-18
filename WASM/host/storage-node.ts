@@ -23,7 +23,7 @@
 // so this module loads unchanged in both Node and the browser (§1, §20). For the
 // same reason StorageNode never reads the guest text from disk — the caller
 // supplies it (`guestSource`): node.js reads it off disk, browser.js fetches it.
-import { KernelHost, referencePolicy, encodeInstallPayload } from "seedkernel-wasm/browser";
+import { KernelHost, referencePolicy } from "seedkernel-wasm/browser";
 import { createCapBridge, capPreamble } from "seedkernel-wasm/cap-bridge";
 // The generic zero-authority sandbox lives in the kernel as `safe-js`: ONE realm
 // runs both roles over the genuinely-async seam — `call()` for the initiator
@@ -136,7 +136,6 @@ export class StorageNode {
   private readonly clockFn: () => number;
   private readonly guestSource: string;
   private readonly signScope: Uint8Array;
-  private installSeq = 0;
   private repairLoopOn = false;
   private repairTimer: ReturnType<typeof setTimeout> | null = null;
   // The tail of the initiator call chain (put/get/repair). runInitiator chains every
@@ -176,16 +175,16 @@ export class StorageNode {
     this.transport = new Transport(this.peerId, opts.network, opts.timeoutMs ?? 200);
   }
 
-  /** Boot a storage node: load the kernel, wire signature + installer, register
-   *  bridges, install the codec + reputation handlers, then build the sync holder
-   *  realm and route incoming requests to the guest's `handle` (§19, §2.1). */
+  /** Boot a storage node: load the kernel, wire signature + the module registry,
+   *  register bridges, install the codec + reputation handlers, then build the sync
+   *  holder realm and route incoming requests to the guest's `handle` (§19, §2.1). */
   static async create(opts: StorageNodeOptions): Promise<StorageNode> {
     await opts.sodium.ready;
     const host = await KernelHost.load(
       opts.kernelBytes as BufferSource, opts.sodium as never,
     );
     host.registerSignature(host.deriveBootstrapName("signature"), opts.signatureBytes as BufferSource);
-    host.registerInstaller(host.deriveBootstrapName("install"));
+    host.registerInstaller();
     // Single-deployment reference posture: accept audited handler bytes from any
     // author. A real deployment narrows this to a content-hash allowlist + closed
     // author set (§19). Capabilities are no longer install-declared — the JS
@@ -496,11 +495,11 @@ export class StorageNode {
   }
 
   private installOne(name: Uint8Array, wasm: Uint8Array): void {
-    const seq = ++this.installSeq;
-    const payload = encodeInstallPayload(seq, name, wasm);
-    this.host.dispatch(this.host.wrapAndEncode(
-      this.identity.privateKey, this.identity.publicKey, this.host.deriveBootstrapName("install"), payload,
-    ));
+    // The node authors its own handlers, so it admits the bytes directly under the
+    // same policy the bundle loader uses (§12.4) — installBundleModule → installDirect
+    // runs the accept-all policy wired in create(). This replaces the old ceremony of
+    // signing a §7.2 install envelope to itself; there is no wire install path.
+    this.host.installBundleModule(name, wasm, this.identity.publicKey);
   }
 
   /** True if both pure handlers are installed on the kernel (§19). */

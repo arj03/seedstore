@@ -30,9 +30,8 @@ const LN2: f64 = 0.6931471805599453;
 const PASS_WEIGHT: f64 = 1.0;
 const MISS_PENALTY: f64 = 2.0;
 
-// 128 KB — the kernel's installer requires at least DEFAULT_SCRATCH_SIZE of
-// scratch headroom for an installed handler, even though our ops use only a
-// few dozen bytes of it.
+// 128 KB — the host reserves at least DEFAULT_SCRATCH_SIZE of scratch headroom
+// for an installed handler, even though our ops use only a few dozen bytes of it.
 const SCRATCH_SIZE: i32 = 1 << 17;
 
 export let scratch: i32 = 0;
