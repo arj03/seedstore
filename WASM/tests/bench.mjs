@@ -9,15 +9,11 @@ import { readFileSync } from "node:fs";
 import { performance } from "node:perf_hooks";
 import { Crypto, DOMAIN_BODY } from "../build/host/crypto.js";
 import { CodecClient } from "./codec-client.mjs";
-import { storageNames } from "../build/host/names.js";
-import { loadHost } from "./helpers.mjs";
 import { loadSodium } from "seedkernel-wasm";
 
 const sodium = await loadSodium();
 const crypto = new Crypto(sodium);
-const { host } = await loadHost();
-const names = storageNames(host);
-const codec = await CodecClient.load(new Uint8Array(readFileSync("build/codec.wasm")), crypto, names.cryptoHash);
+const codec = await CodecClient.load(new Uint8Array(readFileSync("build/codec.wasm")));
 
 const MB = 1024 * 1024;
 const K = 10, M = 6, B = 64 * 1024;       // defaults RS(10,6), 64 KB blocks

@@ -1,7 +1,8 @@
 // Shared test scaffolding: load a KernelHost (from the sibling seedkernel
-// build) with the signature wrapper + installer wired, plus install helpers.
-// Mirrors seedkernel's tests/run.mjs makeHost/buildInstall. The signature
-// wrapper is host code inside the kernel now, so there is no separate module.
+// build) with the installer wired, plus install helpers. Mirrors seedkernel's
+// tests/run.mjs makeHost/buildInstall. There is no signature wrapper any more —
+// authenticity is the transport's job (the AKE channel), so the kernel carries
+// no per-message signing (seedkernel "Drop the whole envelope + signing").
 
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -31,15 +32,13 @@ export function newKey() {
   return { publicKey: kp.publicKey, privateKey: kp.privateKey };
 }
 
-/** A KernelHost with signature + the module registry + an allow-all reference
- *  policy (any author may bind a name) — the trusted single-deployment posture of
- *  a reference node. */
+/** A KernelHost with the module registry + an allow-all reference policy (any
+ *  author may bind a name) — the trusted single-deployment posture of a reference
+ *  node. No signature wrapper: authenticity is the transport's job now. */
 export async function loadHost() {
   await sodium.ready;
   const kernel = readFileSync(paths.kernel);
   const host = await KernelHost.load(kernel, sodium);
-  const signatureName = host.deriveBootstrapName("signature");
-  host.registerSignature(signatureName);
   host.registerInstaller();
   host.setApproveInstall(referencePolicy(host, () => true));
   return { host };

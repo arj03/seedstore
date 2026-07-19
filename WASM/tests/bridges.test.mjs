@@ -1,14 +1,14 @@
-// Storage host-service tests: the crypto primitives (§16), the crypto.hash bridge
-// registered on the kernel for the installed codec (§16), and the store.local
-// backend (§12).
+// Storage host-service tests: the crypto primitives (§16) and the store.local
+// backend (§12). There are no storage-specific kernel bridges any more — the
+// codec no longer hashes through a crypto.hash service (it is a pure transform),
+// and the confined guest reaches crypto/net/fs/clock/module through seedkernel's
+// generic cap-bridge, so nothing storage-named is wired onto the kernel.
 
 import { Crypto, DOMAIN_BODY, DOMAIN_MANIFEST } from "../build/host/crypto.js";
 import { MemoryBlobStore } from "../build/host/store-local.js";
-import { storageNames } from "../build/host/names.js";
-import { registerStorageBridges } from "../build/host/bridges.js";
 import { bytesEqual } from "../build/host/util.js";
 
-import { ensureSodium, newKey, loadHost } from "./helpers.mjs";
+import { ensureSodium, newKey } from "./helpers.mjs";
 
 export async function run(t) {
   const sodium = await ensureSodium();
@@ -68,20 +68,5 @@ export async function run(t) {
     let threw = false;
     try { store.put(id, new Uint8Array(2000), null); } catch { threw = true; }
     t.ok(threw, "put past quota throws");
-  }
-
-  t.group("crypto.hash bridge: registered on the kernel, returns the content hash (§16)");
-  {
-    // The one storage-named host service still wired onto the kernel: the no-cap
-    // content-hash the installed codec WASM calls for block-ids. (net/fs/clock/rand
-    // are reached by the confined guest through seedkernel's generic cap-bridge,
-    // not through storage bridges, so there is nothing storage-specific to gate.)
-    const { host } = await loadHost();
-    const names = storageNames(host);
-    registerStorageBridges(host, names, { crypto });
-    t.ok(host.isRegistered(names.cryptoHash), "crypto.hash is registered");
-    const data = new TextEncoder().encode("hash me through the bridge");
-    const viaBridge = host.callHandler(names.cryptoHash, data);
-    t.ok(viaBridge && bytesEqual(viaBridge, crypto.hash(data)), "bridge returns crypto.hash(payload)");
   }
 }

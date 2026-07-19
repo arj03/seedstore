@@ -3,10 +3,13 @@
 // confined guest (host/tier2-guest.js), run inside ONE seedkernel safe-js realm
 // over the generic capability bridge. StorageNode only:
 //
-//   - loads kernel.wasm and wires signature + installer (the signature wrapper
-//     is host code inside the kernel now, not a separate WASM module)
-//   - registers the storage bridges (crypto.* no-cap; store/net/clock/rand
-//     cap-gated) and installs the pure codec + reputation handlers
+//   - loads kernel.wasm and wires the module registry (installer). There is no
+//     signature wrapper any more — authenticity is the transport's job (the AKE
+//     channel attributes every frame), so the kernel carries no per-message
+//     signing (seedkernel "Drop the whole envelope + signing")
+//   - installs the pure codec + reputation handlers (RS coding + reciprocity
+//     scoring); everything else the guest reaches through the generic cap-bridge
+//     (crypto/net/fs/clock/module), so there are no storage-specific host bridges
 //   - runs the guest's *initiator* entrypoints (put / get / repair) via the
 //     realm's async `call()` (they fan out over net and park mid-await, §2.1)
 //   - serves the guest's *holder* entrypoint (handle: HAVE / OFFER / STORE /
@@ -44,7 +47,6 @@ import { DEFAULT_QUOTA_BYTES, type BlobStore } from "./store-local.js";
 import { FsBlobStore } from "./store-fs.js";
 import { Crypto } from "./crypto.js";
 import { storageNames, type StorageNames } from "./names.js";
-import { registerStorageBridges } from "./bridges.js";
 import { type Identity, type StorageConfig, defaultConfig } from "./core.js";
 import { STORAGE_SIGN_SCOPE, guestSignPrefix } from "./manifest.js";
 import { encodeScoreReq } from "./reputation-core.js";
@@ -175,15 +177,14 @@ export class StorageNode {
     this.transport = new Transport(this.peerId, opts.network, opts.timeoutMs ?? 200);
   }
 
-  /** Boot a storage node: load the kernel, wire signature + the module registry,
-   *  register bridges, install the codec + reputation handlers, then build the sync
-   *  holder realm and route incoming requests to the guest's `handle` (§19, §2.1). */
+  /** Boot a storage node: load the kernel, wire the module registry, install the
+   *  codec + reputation handlers, then build the sync holder realm and route
+   *  incoming requests to the guest's `handle` (§19, §2.1). */
   static async create(opts: StorageNodeOptions): Promise<StorageNode> {
     await opts.sodium.ready;
     const host = await KernelHost.load(
       opts.kernelBytes as BufferSource, opts.sodium as never,
     );
-    host.registerSignature(host.deriveBootstrapName("signature"));
     host.registerInstaller();
     // Single-deployment reference posture: accept audited handler bytes from any
     // author. A real deployment narrows this to a content-hash allowlist + closed
@@ -197,7 +198,6 @@ export class StorageNode {
     })();
 
     const node = new StorageNode(opts, host, identity);
-    node.registerBridges();
     node.installHandlers(opts.codecBytes, opts.reputationBytes);
 
     // The one guest realm, created eagerly so the node serves the moment it is
@@ -474,24 +474,15 @@ export class StorageNode {
   }
 
   // ── bootstrap wiring (§19) ──────────────────────────────────────────────
-  private registerBridges(): void {
-    // The only storage-named host service: the no-cap crypto.hash the installed
-    // codec WASM calls for block-ids (§16). The guest reaches net/fs/clock/rand
-    // through the generic cap-bridge (buildBridge), not through storage bridges.
-    registerStorageBridges(this.host, this.names, { crypto: this.crypto });
-  }
-
   private installHandlers(codecBytes: Uint8Array, reputationBytes: Uint8Array): void {
-    // The two pure handlers declare no capabilities, so the structural sandbox
-    // guarantees they reach neither disk nor network even if buggy (§17). The
-    // guest calls them as installed handlers via MODULE_CALL.
+    // The two pure handlers import nothing and cannot call back into the host
+    // (there is no kernel.call any more), so the structural sandbox guarantees
+    // they reach neither disk nor network even if buggy (§17). The guest calls
+    // them as installed handlers via MODULE_CALL, and computes block-ids itself
+    // via the cap-bridge hash (CAP_HASH) — the codec no longer hashes, so there
+    // is no crypto.hash service to plant on it any more.
     this.installOne(this.names.codec, codecBytes);
     this.installOne(this.names.reputation, reputationBytes);
-    // Plant the crypto.hash name on the installed codec so its block-id op can
-    // call the bridge (the same configure the host bakes in at install, §16).
-    const cfg = new Uint8Array(1 + this.names.cryptoHash.length);
-    cfg[0] = this.names.cryptoHash.length; cfg.set(this.names.cryptoHash, 1);
-    this.host.callDynamicExport(this.names.codec, "configure", cfg);
   }
 
   private installOne(name: Uint8Array, wasm: Uint8Array): void {

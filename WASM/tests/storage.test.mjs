@@ -40,7 +40,7 @@ export async function run(t) {
   const wasm = await loadWasmBytes();
   const config = { k: 2, m: 2, blockSize: 64 };
 
-  t.group("node boots on seedkernel: bridges + pure handlers installed (§19)");
+  t.group("node boots on seedkernel: pure codec + reputation handlers installed (§19)");
   {
     const net = new LoopbackNetwork();
     const [node] = await createConnectedCohort({ count: 1, network: net, sodium, wasm, config, timeoutMs: TIMEOUT });

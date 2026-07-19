@@ -4,7 +4,6 @@ import { readFileSync } from "node:fs";
 
 import { Crypto } from "../build/host/crypto.js";
 import { CodecClient } from "./codec-client.mjs";
-import { storageNames } from "../build/host/names.js";
 import {
   encodeDescriptorCore, decodeDescriptorCore,
   signDescriptor, verifyDescriptor, descriptorContains,
@@ -13,22 +12,17 @@ import {
 } from "../build/host/manifest.js";
 import { bytesEqual } from "../build/host/util.js";
 
-import { ensureSodium, newKey, paths, loadHost } from "./helpers.mjs";
+import { ensureSodium, newKey, paths } from "./helpers.mjs";
 
 export async function run(t) {
   const sodium = await ensureSodium();
   const crypto = new Crypto(sodium);
-  // Names need a deriver; reuse a host to derive the crypto.hash name.
-  const { host } = await loadHost();
-  const names = storageNames(host);
-  const codec = await CodecClient.load(new Uint8Array(readFileSync(paths.codec)), crypto, names.cryptoHash);
+  const codec = await CodecClient.load(new Uint8Array(readFileSync(paths.codec)));
 
-  t.group("CodecClient: info + RS round trip matches host crypto ids");
+  t.group("CodecClient: info + RS round trip");
   {
     const info = codec.info();
     t.eq(info.version, 1, "codec version 1");
-    t.ok(bytesEqual(codec.blockId(new TextEncoder().encode("x")), crypto.hash(new TextEncoder().encode("x"))),
-      "codec block-id == crypto.hash");
 
     const k = 4, m = 2, bs = 64;
     const data = [];
