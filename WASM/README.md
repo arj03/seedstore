@@ -13,9 +13,9 @@ installed-handler call, a clock — and knows nothing about storage. seed store
 ships as **signed content** that the shell loads and *becomes* a storage node:
 
 ```
-seed store bundle  ──────────── signed by the app author, verified at load ────────────┐
+seed store bundle (seedstore.skb — one signed blob, verified at load) ─────────────────┐
   codec.wasm  reputation.wasm        pure RS + reputation math, declare no capabilities │
-  tier2-guest.js                     PUT/GET/repair (initiator) + HAVE/OFFER/STORE/      │
+  guest.js                           PUT/GET/repair (initiator) + HAVE/OFFER/STORE/      │
                                      FETCH (holder): zero-authority JS, no ambient I/O   │
         │  reaches I/O only through ↓ the single capability seam                        │
   cap-bridge   crypto · net · fs · module-call · clock · identity  ── generic primitives ┘
@@ -91,11 +91,13 @@ mirror, and the bundle producer:
    before the raw `CAP_VERIFY`. The host mirror
    (`signDescriptor`/`verifyDescriptor` in `host/manifest.ts`) produces and
    checks byte-identical preimages, so the `tier2-port`/`holder-guest` parity
-   tests hold. The guest gets the scope bytes host-derived: `storage-node.ts`
-   injects `signPrefix` into the `const APP` block from
-   `guestSignPrefix(signScope)` — the shell derives the scope from the admitted
-   manifest, an in-process `StorageNode` from `STORAGE_SIGN_SCOPE` (zero author,
-   app).
+   tests hold. The guest gets the scope bytes host-derived, and never from
+   author-written config: both drivers inject them through seedkernel's shared
+   `bundlePreamble` as `BUNDLE.signPrefix` — the shell from the admitted
+   manifest's `(author, app)`, an in-process `StorageNode` from its `signAuthor`
+   (the zero author by default). One derivation, so the two cannot disagree; a
+   hand-baked copy in the signed config could, and would fail as signatures that
+   verify nowhere.
 2. **The descriptor's leading byte is the signed-format tag** (spec §16). The
    descriptor core leads with `TAG_DESCRIPTOR = 0x01` (`manifest-core.ts`), and
    the Part II signed formats reserve their own values before they exist
@@ -169,7 +171,7 @@ for browsers):
 SHELL=../../seedkernel/WASM/build/host/main.js     # the generic runtime
 
 # a holder: verifies + installs the bundle, then serves the confined holder side
-node "$SHELL" --policy allowed-keys.json --bundle ./bundle \
+node "$SHELL" --policy allowed-keys.json --bundle ./bundle/seedstore.skb \
      --dir ./data-A --key ./A.key --listen 127.0.0.1:7401
 #   seedkernel-shell <peer-pubkey>
 #     bundle seedstore v1 → installed codec, reputation
@@ -183,13 +185,13 @@ separated). The client orchestrates PUT inside the confined guest and places blo
 across the cohort:
 
 ```sh
-node "$SHELL" --policy allowed-keys.json --bundle ./bundle --dir ./client \
+node "$SHELL" --policy allowed-keys.json --bundle ./bundle/seedstore.skb --dir ./client \
      --peers "<pkA>@127.0.0.1:7401,<pkB>@127.0.0.1:7402,<pkC>@127.0.0.1:7403,<pkD>@127.0.0.1:7404" \
      --put ./notes.txt
 #   PUT ok: 8 chunk(s)                 ← a ~4 KB file at the default RS(2,2)/256 B blocks
 #     --get bdbc41…:74a32f…            ← manifest-id : content-key K
 
-node "$SHELL" --policy allowed-keys.json --bundle ./bundle --dir ./client \
+node "$SHELL" --policy allowed-keys.json --bundle ./bundle/seedstore.skb --dir ./client \
      --peers "<pkA>@…,<pkB>@…,<pkC>@…,<pkD>@…" \
      --get bdbc41…:74a32f… --out ./restored.txt
 #   GET ok: 4000 B → ./restored.txt
@@ -400,7 +402,7 @@ cores and the guest — it never loads a line of the host-side TypeScript:
 |---|---:|---:|
 | `codec.wasm` (incl. SIMD RS + GF tables) | 8.5 KB | — |
 | `reputation.wasm` | 6.7 KB | — |
-| `tier2-guest.js` — the confined guest, shipped minified in the bundle | 29 KB | **7.6 KB** |
+| `guest.js` — the confined guest, shipped minified in the bundle | 29 KB | **7.6 KB** |
 
 riding on the seedkernel shell it shares with any app — the `KernelHost` JS
 (28 KB / **5 KB gz**, handler table included: the kernel is host code, not a

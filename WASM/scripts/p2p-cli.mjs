@@ -26,7 +26,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { WsNetwork } from "seedkernel-wasm/net-ws";
-import { createStorageNode, loadSodium, storageSignScope, defaultConfig, PRODUCTION_BLOCK_SIZE, toHex, fromHex } from "../build/host/node.js";
+import { createStorageNode, loadSodium, defaultConfig, PRODUCTION_BLOCK_SIZE, toHex, fromHex } from "../build/host/node.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -171,8 +171,8 @@ if (!authorHex) {
     if (b.length >= 32) authorHex = hex(b.slice(0, 32));
   } catch { /* no bundle staged */ }
 }
-const signScope = authorHex && authorHex !== "none" ? storageSignScope(fromHex(authorHex)) : undefined;
-console.log(signScope ? `signing scope: bundle author ${authorHex.slice(0, 8)}…` : "signing scope: zero-author default");
+const signAuthor = authorHex && authorHex !== "none" ? fromHex(authorHex) : undefined;
+console.log(signAuthor ? `signing scope: bundle author ${authorHex.slice(0, 8)}…` : "signing scope: zero-author default");
 
 const peerUp = new Set();
 let onQuorum = null;
@@ -191,7 +191,7 @@ const net = new WsNetwork({
 const config = { ...defaultConfig(kParam, mParam, blockSize), maxMessageBytes, putWindow: windowN, getWindow: windowN,
   ...(wtargetMB > 0 ? { windowTargetBytes: Math.round(wtargetMB * 1024 * 1024) } : {}),
   ...(heapMB > 0 ? { realmMemoryBytes: Math.round(heapMB * 1024 * 1024) } : {}) };
-let node = await createStorageNode({ network: net, identity, config, timeoutMs, signScope });
+let node = await createStorageNode({ network: net, identity, config, timeoutMs, signAuthor });
 for (const pid of peerUp) node.addPeer(pid);
 console.log(`node ready: RS(${kParam},${mParam}), ${blockSize / 1024} KiB blocks, batch ${Math.round(maxMessageBytes / 1024)} KiB, window ${windowN}, conns/peer ${connsN}, wtarget ${wtargetMB > 0 ? wtargetMB + " MB" : "4 MiB (default)"}, heap ${heapMB > 0 ? heapMB + " MB" : "64 MiB (default)"}, timeout ${timeoutMs} ms`);
 

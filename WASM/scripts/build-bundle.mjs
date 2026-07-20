@@ -8,9 +8,9 @@
 //
 //   node scripts/build-bundle.mjs            (writes ./bundle, signs with ./seedstore-author.key)
 //
-// Output (a directory the shell loads with --bundle):
-//   bundle/manifest.bundle   signed manifest envelope
-//   bundle/codec.wasm  bundle/reputation.wasm  bundle/tier2-guest.js
+// Output — ONE file the shell loads with --bundle:
+//   bundle/seedstore.skb   the signed manifest envelope + codec.wasm + reputation.wasm
+//                          + guest.js, packed into a single blob (seedkernel §12.4)
 // The signed manifest commits to each module's hash; the shell verifies the bytes
 // against it and installs them directly (seedkernel §12.4).
 //
@@ -21,13 +21,14 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { createKernelHost, loadSodium } from "seedkernel-wasm";
-import { verifyManifest } from "seedkernel-wasm/bundle";
+import { verifyBundle } from "seedkernel-wasm/bundle";
 import { writeStorageBundle } from "./storage-bundle.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = join(__dirname, "..");
 const build = join(root, "build");
 const out = join(root, "bundle");
+const bundlePath = join(out, "seedstore.skb");
 
 const { toHex, fromHex } = await import(new URL("../build/host/util.js", import.meta.url));
 
@@ -60,16 +61,15 @@ if (existsSync(keyPath)) {
 // restarts at 1 after a `git clean`, a fresh checkout, or a build on a second machine — and
 // every deployed shell then correctly rejects the next publish as a downgrade. The key +
 // version file travel together (both out of git); copy one to another machine, copy both.
-const prevManifest = join(out, "manifest.bundle");
 let prevVersion = 0;
 if (existsSync(versionPath)) {
   const v = Number(readFileSync(versionPath, "utf8").trim());
   if (Number.isInteger(v) && v > 0) prevVersion = v;
-} else if (existsSync(prevManifest)) {
+} else if (existsSync(bundlePath)) {
   // Older tree with no version file yet: seed the mark from the last built bundle.
   try {
-    const prev = verifyManifest(sodium, new Uint8Array(readFileSync(prevManifest)));
-    if (prev && Number.isInteger(prev.manifest.version)) prevVersion = prev.manifest.version;
+    const prev = verifyBundle(sodium, new Uint8Array(readFileSync(bundlePath)));
+    if (Number.isInteger(prev.manifest.version)) prevVersion = prev.manifest.version;
   } catch { /* unreadable / pre-integer version → treat as none */ }
 } else if (!mintedKey) {
   // The dangerous case: a persisted key (an established namespace) but no record of how far
@@ -82,12 +82,12 @@ if (existsSync(versionPath)) {
 }
 const version = prevVersion + 1;
 
-const manifest = writeStorageBundle({ dir: out, host, sodium, sk, pk, build, version, log: console.log });
+const manifest = writeStorageBundle({ path: bundlePath, host, sodium, sk, pk, build, version, log: console.log });
 
 // Record the new high-water mark beside the key, so the next publish counts on from here
 // even if bundle/ is wiped.
 writeFileSync(versionPath, `${manifest.version}\n`);
 
 console.log(`  author ${toHex(pk)}`);
-console.log(`  wrote ${out} (app ${manifest.app} v${manifest.version}, ${manifest.modules.length} modules, `
-  + `caps ${manifest.caps.join("+")})`);
+console.log(`  wrote ${bundlePath} (app ${manifest.app} v${manifest.version}, ${manifest.modules.length} modules, `
+  + `caps ${manifest.guest.caps.join("+")})`);

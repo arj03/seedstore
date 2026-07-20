@@ -18,7 +18,6 @@ import { fileURLToPath } from "node:url";
 import { boot } from "seedkernel-wasm/shell";
 import {
   loadSodium, loadWasmBytes, generateKeyPair, LoopbackNetwork, createConnectedCohort,
-  storageSignScope,
 } from "../build/host/node.js";
 import { toHex, bytesEqual, concatBytes } from "../build/host/util.js";
 import { buildBundle } from "./bundle-fixture.mjs";
@@ -41,19 +40,20 @@ export async function run(t) {
   {
     // The bundle author fixes the deployment's signing scope (README §16). The shell
     // running the bundle signs descriptors under it, so the host-side StorageNode holders
-    // must verify under the SAME scope — build them with storageSignScope(bundle author).
+    // must verify under the SAME scope — build them with that bundle author.
     const author = generateKeyPair(sodium);
     const net = new LoopbackNetwork();
     const holders = await createConnectedCohort({
       count: 6, network: net, sodium, wasm, timeoutMs: 40,
-      signScope: storageSignScope(author.publicKey),
+      signAuthor: author.publicKey,
     });
 
     const bundleDir = mkdtempSync(join(tmpdir(), "seedstore-bundle-"));
+    const bundlePath = join(bundleDir, "seedstore.skb");
     const shellDir = mkdtempSync(join(tmpdir(), "seedstore-shell-"));
     let shell;
     try {
-      await buildBundle(bundleDir, author, sodium, build);
+      await buildBundle(bundlePath, author, sodium, build);
 
       // The shell knows only its policy + the kernel; storage arrives as content.
       shell = await boot({
@@ -66,7 +66,7 @@ export async function run(t) {
         // this tiny test file single-block/replicated instead of RS across the cohort).
         config: { blockSize: 64 },
       });
-      const loaded = shell.loadBundle(bundleDir);
+      const loaded = shell.loadBundle(bundlePath);
       t.eq(loaded.installed.join(","), "codec,reputation", "the shell installed the bundle's signed modules");
 
       // PUT, orchestrated by the confined guest the shell loaded.
@@ -89,7 +89,7 @@ export async function run(t) {
         dir: shell2Dir, identity: generateKeyPair(sodium), network: net,
       });
       let refused = false;
-      try { shell2.loadBundle(bundleDir); } catch { refused = true; }
+      try { shell2.loadBundle(bundlePath); } catch { refused = true; }
       t.ok(refused, "a shell whose policy omits the author refuses the bundle");
       shell2.close();
       rmSync(shell2Dir, { recursive: true, force: true });
@@ -108,8 +108,8 @@ export async function run(t) {
   t.group("shell: bundle version freshness — a downgrade is refused (§12.4)");
   {
     // The manifest `version` is a monotonic integer high-water mark per (author, app).
-    // Once a shell loads version 5 it refuses a same-author version-3 directory as a
-    // downgrade — the guest is loaded wholesale from the directory, so this is the only
+    // Once a shell loads version 5 it refuses a same-author version-3 bundle as a
+    // downgrade — the guest is loaded wholesale from the bundle, so this is the only
     // guard against silently swapping in an older signed bundle.
     const author = generateKeyPair(sodium);
     const net = new LoopbackNetwork();
@@ -118,15 +118,16 @@ export async function run(t) {
     const shellDir = mkdtempSync(join(tmpdir(), "seedstore-shell-fresh-"));
     let shell;
     try {
-      await buildBundle(hiDir, author, sodium, build, 5);
-      await buildBundle(loDir, author, sodium, build, 3);
+      const hiPath = join(hiDir, "seedstore.skb"), loPath = join(loDir, "seedstore.skb");
+      await buildBundle(hiPath, author, sodium, build, 5);
+      await buildBundle(loPath, author, sodium, build, 3);
       shell = await boot({
         policyJson: JSON.stringify({ authors: [toHex(author.publicKey)] }),
         dir: shellDir, identity: generateKeyPair(sodium), network: net, timeoutMs: 40,
       });
-      shell.loadBundle(hiDir); // advances the (author, app) high-water mark to 5
+      shell.loadBundle(hiPath); // advances the (author, app) high-water mark to 5
       let refused = false;
-      try { shell.loadBundle(loDir); } catch { refused = true; }
+      try { shell.loadBundle(loPath); } catch { refused = true; }
       t.ok(refused, "a version-3 bundle is refused after a version-5 bundle loaded (no downgrade)");
     } finally {
       if (shell) shell.close();

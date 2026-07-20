@@ -132,7 +132,7 @@
 
 <script type="module">
 import sodium from "libsodium-wrappers-sumo";
-import { createStorageNode, storageSignScope } from "./host/browser.js";
+import { createStorageNode } from "./host/browser.js";
 import { RtcNetwork, relaySignaling } from "seedkernel-wasm/net-rtc";
 import { WsNetwork } from "seedkernel-wasm/net-ws";
 
@@ -294,15 +294,15 @@ async function boot() {
 
     log("loading wasm + booting the storage node on the seedkernel…");
     // Descriptor signatures are scoped to the cohort's bundle author (README §16). A
-    // holder running a signed bundle (a seedloader) verifies under storageSignScope(author),
-    // so this node must sign under the SAME scope or every block it offers is declined.
-    // The field is auto-read from ./manifest.bundle (detectCohortAuthor); a manual value
-    // overrides it, and a blank field + no bundle → the zero-author default.
+    // holder running a signed bundle (a seedloader) verifies under that author's scope,
+    // so this node must sign under the SAME author or every block it offers is declined.
+    // The field is auto-read from the cohort's bundle (detectCohortAuthor); a manual
+    // value overrides it, and a blank field + no bundle → the zero-author default.
     let authorHex = $("author").value.trim() || (await detectCohortAuthor()) || "";
-    let signScope;
+    let signAuthor;
     if (authorHex) {
       if (!/^[0-9a-f]{64}$/i.test(authorHex)) throw new Error("cohort bundle author must be a 64-hex (32-byte) public key");
-      signScope = storageSignScope(fromHex(authorHex));
+      signAuthor = fromHex(authorHex);
       $("author").value = authorHex; // reflect the auto-detected scope in the UI
     }
     // The WS/TCP path carries far larger frames than WebRTC, so it gets bigger
@@ -318,14 +318,14 @@ async function boot() {
     // tiny, so it stays snappy at 5 s.
     const timeoutMs = mode === "ws" ? 20000 : 5000;
     node = await createStorageNode({
-      network: net, sodium, identity, baseUrl: "./", config, timeoutMs, signScope,
+      network: net, sodium, identity, baseUrl: "./", config, timeoutMs, signAuthor,
     });
     // Log the LIVE config the coordinator actually uses (after defaultConfig
     // merge), so a stale/cached build that lost maxMessageBytes is visible here.
     const winMiB = Math.round((node.config.windowTargetBytes ?? 4 * 1024 * 1024) / (1024 * 1024));
     const heapMiB = Math.round((node.config.realmMemoryBytes ?? 64 * 1024 * 1024) / (1024 * 1024));
     log(`node ready (${node.peerId.slice(0, 8)}…), RS(${node.config.k},${node.config.m}), ${node.config.blockSize / 1024} KiB blocks, batch cap ${Math.round(node.config.maxMessageBytes / 1024)} KiB, window ${winMiB} MiB, heap ${heapMiB} MiB${mode === "ws" ? `, conns/peer ${connsPerPeerFor(mode)}` : ""}. handlers installed: ${node.handlersInstalled()}`);
-    log(signScope ? `signing scope: bundle author ${authorHex.slice(0, 8)}… (matches a seedloader cohort)`
+    log(signAuthor ? `signing scope: bundle author ${authorHex.slice(0, 8)}… (matches a seedloader cohort)`
                   : `signing scope: zero-author default — holders running a signed bundle will DECLINE; set the cohort bundle author above if so.`);
 
     // Pay the codec + crypto cold-JIT tax now (a throwaway encode/decode, no network,

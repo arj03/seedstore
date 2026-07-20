@@ -52,11 +52,14 @@ export function storageSignScope(authorPk: Uint8Array): Uint8Array {
   return guestSignScope(authorPk, STORAGE_APP);
 }
 
-/** The default in-process signing scope: a host-side StorageNode has no bundle, so it
- *  scopes to `(zero author, app)` — every in-process node derives the same bytes, so a
- *  descriptor one signs verifies on another. A cohort that shares a bundle author (the
- *  shell-run / holder-guest cross-path tests) overrides this with `storageSignScope`. */
-export const STORAGE_SIGN_SCOPE = storageSignScope(new Uint8Array(32));
+/** The default author for a node with no bundle behind it: a host-side StorageNode
+ *  scopes to `(zero author, app)`, so every in-process node derives the same bytes and a
+ *  descriptor one signs verifies on another. A cohort joining shell-run holders (the
+ *  cross-path tests, p2p.html) passes that bundle's author instead. */
+export const ZERO_AUTHOR = new Uint8Array(32);
+
+/** The default in-process signing scope — `storageSignScope(ZERO_AUTHOR)`. */
+export const STORAGE_SIGN_SCOPE = storageSignScope(ZERO_AUTHOR);
 
 /** The scoped preimage the author signs / a verifier checks: `DOMAIN_guest ‖ scope ‖ core`.
  *  `guestSignPrefix(scope)` is `DOMAIN_guest ‖ scope`, from the kernel, so this reconstructs

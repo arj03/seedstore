@@ -29,7 +29,7 @@
 // same reason StorageNode never reads the guest text from disk — the caller
 // supplies it (`guestSource`): node.js reads it off disk, browser.js fetches it.
 import { KernelHost } from "seedkernel-wasm/browser";
-import { createCapBridge, capPreamble } from "seedkernel-wasm/cap-bridge";
+import { createCapBridge, capPreamble, bundlePreamble } from "seedkernel-wasm/cap-bridge";
 // The generic zero-authority sandbox lives in the kernel as `safe-js`: ONE realm
 // runs both roles over the genuinely-async seam — `call()` for the initiator
 // (put/get/repair, which awaits net) and `callSync()` for the holder (handle),
@@ -49,7 +49,7 @@ import { FsBlobStore } from "./store-fs.js";
 import { Crypto } from "./crypto.js";
 import { storageNames, type StorageNames } from "./names.js";
 import { type Identity, type StorageConfig, defaultConfig } from "./core.js";
-import { STORAGE_SIGN_SCOPE, guestSignPrefix } from "./manifest.js";
+import { STORAGE_APP, ZERO_AUTHOR, storageSignScope } from "./manifest.js";
 import { encodeScoreReq } from "./reputation-core.js";
 import { toHex, readU32BE, writeU32BE, writeU64BE, readU64BE, concatBytes } from "./util.js";
 
@@ -113,13 +113,18 @@ export interface StorageNodeOptions {
   clock?: () => number;
   /** net.send timeout — how long before a peer is treated as unreachable (§8). */
   timeoutMs?: number;
-  /** The guest signing scope (README §16). Descriptors are signed/verified over
-   *  `DOMAIN_guest ‖ scope ‖ core`, so every node in one cohort must share it (a
-   *  descriptor one signs verifies on another). Defaults to the in-process
-   *  `STORAGE_SIGN_SCOPE` (zero author); a cohort that shares a bundle author — the
-   *  shell-run / holder-guest cross-path tests — passes `storageSignScope(author)` so
-   *  its StorageNodes verify what a shell running that bundle signs. */
-  signScope?: Uint8Array;
+  /** The bundle author this node signs and verifies descriptors under (README §16).
+   *  The scope is `guestSignScope(signAuthor, "seedstore")` and descriptors are
+   *  signed/verified over `DOMAIN_guest ‖ scope ‖ core`, so every node in one cohort
+   *  must agree on it (a descriptor one signs verifies on another). Defaults to the
+   *  zero key — the in-process posture for a host-side node with no bundle behind it;
+   *  a cohort joining shell-run holders (the cross-path tests, p2p.html) passes that
+   *  bundle's author so its StorageNodes verify what the shell signs.
+   *
+   *  Deliberately the AUTHOR and not a pre-derived scope: the scope and the guest's
+   *  injected signing prefix are then derived from it in one place, exactly as the
+   *  seedkernel shell derives them from an admitted manifest (§12.4). */
+  signAuthor?: Uint8Array;
 }
 
 export class StorageNode {
@@ -137,6 +142,8 @@ export class StorageNode {
   private readonly peers = new Set<PeerId>();
   private readonly clockFn: () => number;
   private readonly guestSource: string;
+  /** The bundle author this node's signing scope is derived from (§16). */
+  private readonly signAuthor: Uint8Array;
   private readonly signScope: Uint8Array;
   private repairLoopOn = false;
   private repairTimer: ReturnType<typeof setTimeout> | null = null;
@@ -161,7 +168,10 @@ export class StorageNode {
     this.identity = identity;
     this.peerId = toHex(identity.publicKey);
     this.guestSource = opts.guestSource;
-    this.signScope = opts.signScope ?? STORAGE_SIGN_SCOPE;
+    // One derivation from the author: the bridge's SIGN scope and the guest's injected
+    // verify prefix both come from it, so the two can never disagree (§16).
+    this.signAuthor = opts.signAuthor ?? ZERO_AUTHOR;
+    this.signScope = storageSignScope(this.signAuthor);
     // Derive lowWater from the *caller's* k & m, then let any explicit field in
     // opts.config override — otherwise overriding k/m alone would leave lowWater
     // derived from the (2,2) default (e.g. an unreachable lowWater > n on the demo's
@@ -237,10 +247,14 @@ export class StorageNode {
     });
   }
 
-  /** The `const APP = {…};` block the guest reads its config + module names from —
-   *  storage's app-specific constants, injected the same way the CAP op preamble
-   *  is. The seedkernel shell builds the byte-identical block from a bundle
-   *  manifest's `config` field. */
+  /** The `const APP = {…};` block the guest reads its config from — storage's
+   *  app-specific constants, injected the same way the CAP op preamble is. The
+   *  seedkernel shell builds the byte-identical block from a bundle manifest's
+   *  `guest.config` (with operator config merged over it).
+   *
+   *  What is NOT here: the module kernel names and the signing prefix. Those are facts
+   *  a runtime derives, and they arrive as `BUNDLE` (below) — where operator config,
+   *  which merges over APP, cannot reach them. */
   private appPreamble(): string {
     const c = this.config;
     // The APP injection is TOTAL: every value the guest reads is here and concrete —
@@ -259,20 +273,28 @@ export class StorageNode {
       // Streamed PUT/GET window (§3), always concrete (core.ts homes the 4 MiB default).
       // Bigger windows amortise the per-window OFFER→STORE→ack barrier on a fat/low-loss link.
       windowTargetBytes: c.windowTargetBytes,
-      codecName: this.names.codec, repName: this.names.reputation,
-      // The scoped-signature prefix `DOMAIN_guest ‖ scope` the guest prepends before
-      // CAP_VERIFY (README §16) — the same bytes the bridge's SIGN op prepends, so the
-      // two paths agree. The seedkernel shell injects the byte-identical value from the
-      // admitted bundle's (author, app); here it comes from this node's scope.
-      signPrefix: toHex(guestSignPrefix(this.signScope)),
     };
     return `const APP = ${JSON.stringify(app)};\n`;
   }
 
-  /** The full guest source: the generic CAP op catalog + the injected APP config +
-   *  the orchestration program. */
+  /** The `const BUNDLE = {…};` block (seedkernel §12.4): the facts a runtime derives
+   *  about the app it is running — here from this node's own author + names rather than
+   *  from an admitted manifest, since a host-side StorageNode has no bundle behind it.
+   *  Built by the SHARED `bundlePreamble`, so the signing prefix it injects is the same
+   *  bytes, from the same derivation, that a shell running the seedstore bundle injects
+   *  — which is what makes a descriptor signed on one verify on the other. */
+  private bundleFacts(): string {
+    return bundlePreamble({
+      app: STORAGE_APP,
+      author: this.signAuthor,
+      modules: { codec: this.names.codec, reputation: this.names.reputation },
+    });
+  }
+
+  /** The full guest source: the generic CAP op catalog + the bundle facts + the
+   *  injected APP config + the orchestration program. */
   private guestFullSource(): string {
-    return capPreamble() + this.appPreamble() + this.guestSource;
+    return capPreamble() + this.bundleFacts() + this.appPreamble() + this.guestSource;
   }
 
   // ── Node surface ───────────────────────────────────────────────────────
