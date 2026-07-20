@@ -324,8 +324,8 @@ async function offerBatch(peer, offers) {
   const resp = await netSend(peer, MSG_OFFER, encodeOfferBatch(offers));
   return resp === null ? offers.map(() => false) : decodeMask(resp);
 }
-async function offer(peer, blockId, size, descriptor) {
-  return (await offerBatch(peer, [{ blockId, size, descriptor }]))[0];
+async function offer(peer, blockId, descriptor) {
+  return (await offerBatch(peer, [{ blockId, descriptor }]))[0];
 }
 async function storeBatch(peer, stores) {
   const resp = await netSend(peer, MSG_STORE, encodeStoreBatch(stores));
@@ -347,6 +347,10 @@ async function storePush(peer, blockId, descriptor, bytes) {
 // n ≠ k+m) is rejected — not parsed into garbage block-ids that sidestep the §10
 // sibling rule — because parseSignedDescriptor throws on a bad core.
 function verifyDescriptor(env) {
+  // Length-gate before the CAP_VERIFY seam: the envelope is [pk 32][sig 64][core ≥8]
+  // (parseSignedDescriptor's own bound), so anything shorter — an absent descriptor
+  // included — is rejected here rather than handed to verify as a short buffer.
+  if (!env || env.length < 32 + 64 + 8) return null;
   if (!verifyEnv(env)) return null;
   try { return parseSignedDescriptor(env).descriptor; } catch (_e) { return null; }
 }
@@ -415,7 +419,7 @@ async function placeBlock(blockId, bytes, descriptor, exclude, count) {
   for (const peer of ranked) {
     if (placed.length >= count) break;
     if (placed.includes(peer)) continue;
-    if (!(await offer(peer, blockId, bytes.length, descriptor))) continue;
+    if (!(await offer(peer, blockId, descriptor))) continue;
     if (await storePush(peer, blockId, descriptor, bytes)) placed.push(peer);
   }
   return placed;
@@ -462,7 +466,7 @@ async function placeChunksBatched(chunks) {
   const n = c.k + c.m;
   const ranked = rank(cohortPeers());
   const maxBytes = maxMsgBytes();
-  const entryBytes = 40 + (chunks.length ? chunks[0].descriptor.length : 0);
+  const entryBytes = 36 + (chunks.length ? chunks[0].descriptor.length : 0); // one OFFER entry: [blockId 32][dlen u32][descriptor]
   const maxOffers = Math.max(1, Math.floor(maxBytes / entryBytes));
 
   for (let r = 0; ; r++) {
@@ -498,7 +502,7 @@ async function placeChunksBatched(chunks) {
       for (const [peer, slices] of offerSlices) {
         if (s >= slices.length) continue;
         const slice = slices[s];
-        const offers = slice.map(({ ch, i }) => ({ blockId: ch.blockIds[i], size: ch.blocks[i].length, descriptor: ch.descriptor }));
+        const offers = slice.map(({ ch, i }) => ({ blockId: ch.blockIds[i], descriptor: ch.descriptor }));
         reqs.push({ peer, type: MSG_OFFER, payload: encodeOfferBatch(offers) });
         sliceOf.push(slice);
       }
@@ -1173,45 +1177,61 @@ function storeWrite(id, bytes, descriptor) {
   // Charge the ciphertext AND the descriptor sidecar, crediting whatever was already
   // stored under this id — byte-for-byte as FsBlobStore.put (store-fs.ts) and
   // MemoryBlobStore, so a holder's §14 budget matches the host store's stat() at the
-  // boundary instead of writing the .dsc for free.
+  // boundary instead of writing the .dsc for free. Admission (admitBatch) has already
+  // verified the descriptor, so every committed block has one: the .dsc write is
+  // unconditional, with no described-block-overwritten-by-a-bare-one case to unwind.
   const prevBlk = storeHas(id) ? fsSize(hex + STORE_BLK) : 0;
   const prevDsc = fsSize(hex + STORE_DSC);
-  const dscLen = descriptor && descriptor.length ? descriptor.length : 0;
-  const next = bytesUsed - prevBlk - prevDsc + bytes.length + dscLen;
+  const next = bytesUsed - prevBlk - prevDsc + bytes.length + descriptor.length;
   if (next > quota()) throw new Error("store: quota exceeded");
   fsPut(hex + STORE_BLK, bytes);
-  if (dscLen) fsPut(hex + STORE_DSC, descriptor);
-  else if (prevDsc) host.call(CAP_FS_DELETE, strBytes(hex + STORE_DSC)); // described → bare
+  fsPut(hex + STORE_DSC, descriptor);
   bytesUsed = next;
 }
-// Admission (§6 sibling rule, §14 quota): a holder enforces no-two-blocks-of-a-
-// chunk itself, so the §10 invariant survives a careless or malicious placer (a
-// repairer included), not just an honest coordinator. A single block is just the
-// one-element case of admitBatch — same quota, verify, and sibling checks (the
-// batch's provisional set is empty for one block), so there is one implementation.
+// Admission (§4.3 descriptor check, §6 sibling rule, §14 quota): a holder verifies
+// the chunk's signed descriptor and enforces no-two-blocks-of-a-chunk itself, so the
+// §10 invariant survives a careless or malicious placer (a repairer included), not
+// just an honest coordinator. A single block is just the one-element case of
+// admitBatch — same verify, sibling, and quota checks (the batch's provisional set is
+// empty for one block), so there is one implementation.
+//
+// `size` is the length of the block ACTUALLY in hand, which only STORE has; an OFFER
+// carries no size on the wire (the geometry is the descriptor's) and passes null.
 function admit(descriptor, blockId, size) {
-  return admitBatch([{ blockId, size, descriptor }])[0];
+  return admitBatch([{ blockId, descriptor, size }])[0];
 }
-// Batched admission (mirror StorageNode.admitBatch): one OFFER's worth of blocks
-// checked cumulatively — the §14 quota budget shrinks as blocks are provisionally
-// accepted, and a block whose sibling (§6) is already held OR provisionally
-// accepted in this same batch is declined, so two blocks of one chunk never both
-// pass. STORE re-checks each block (acceptStore/admit), so this is the advisory
-// pre-check, never the enforcement.
+// Batched admission: one OFFER's worth of blocks checked cumulatively — the §14 quota
+// budget shrinks as blocks are provisionally accepted, and a block whose sibling (§6)
+// is already held OR provisionally accepted in this same batch is declined, so two
+// blocks of one chunk never both pass. STORE re-checks each block (acceptStore/admit),
+// so this is the advisory pre-check, never the enforcement.
+//
+// The signed descriptor is REQUIRED on every path (§4.3: "every peer that accepts a
+// block first verifies its descriptor"). There is deliberately no descriptor-less
+// branch: one would be an admission gated by quota alone, letting any cohort peer push
+// arbitrary bytes past the sibling rule — the wire decoders reject a descriptor-less
+// entry outright, and a forged, malformed, or not-of-this-chunk one is declined here.
 function admitBatch(offers) {
   let free = quotaFree();
   const provisional = new Set();
   return offers.map((o) => {
-    if (o.size > free) return false;
-    if (o.descriptor && o.descriptor.length) {
-      const d = verifyDescriptor(o.descriptor);
-      if (!d || !d.blockIds.some((id) => bytesEqual(id, o.blockId))) return false; // forged/unsigned/not-of-chunk
-      for (const sib of d.blockIds) {
-        if (bytesEqual(sib, o.blockId)) continue;
-        if (storeHas(sib) || provisional.has(toHex(sib))) return false;
-      }
+    const d = verifyDescriptor(o.descriptor);
+    if (!d) return false;                                  // absent, forged, unsigned, or malformed
+    if (!descriptorContains(d, o.blockId)) return false;    // not a block of this chunk
+    // Geometry is the SIGNED descriptor's, never a field the sender picks: every block
+    // is exactly blockSize bytes, so bytes in hand that disagree are not the block that
+    // was offered, whatever they hash to.
+    if (o.size != null && o.size !== d.blockSize) return false;
+    // Charge what storeWrite will actually commit — the ciphertext AND its .dsc
+    // sidecar — so this pre-check answers the same question the binding write does
+    // instead of over-admitting by the descriptor's own size.
+    const cost = d.blockSize + o.descriptor.length;
+    if (cost > free) return false;
+    for (const sib of d.blockIds) {
+      if (bytesEqual(sib, o.blockId)) continue;
+      if (storeHas(sib) || provisional.has(toHex(sib))) return false;
     }
-    free -= o.size;
+    free -= cost;
     provisional.add(toHex(o.blockId));
     return true;
   });

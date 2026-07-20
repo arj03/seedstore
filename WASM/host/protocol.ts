@@ -57,22 +57,30 @@ export function decodeHaveReq(buf: Uint8Array): Uint8Array[] {
 // encodeMask / decodeMask above.
 
 // ── OFFER (block.offer, §6) ────────────────────────────────────────────────
-// Each entry carries block_id, size, and the signed chunk descriptor so the
-// holder can verify it and enforce the no-two-blocks-of-a-chunk-same-holder rule
-// (§6). A batch is a count followed by the self-delimiting entries; the response
-// is one accept byte per entry.
+// Each entry carries block_id and the signed chunk descriptor so the holder can
+// verify it and enforce the no-two-blocks-of-a-chunk-same-holder rule (§6). A batch
+// is a count followed by the self-delimiting entries; the response is one accept
+// byte per entry.
+//
+// The descriptor is MANDATORY — §4.3's "every peer that accepts a block first
+// verifies its descriptor" is only true if there is no way to offer a block without
+// one. A descriptor-less entry is a malformed message, rejected by the decoder, not
+// a block admitted on quota alone.
+//
+// There is no size field: a block is exactly `descriptor.blockSize` bytes (padding
+// guarantees it, and the replicated manifest chunk signs blockSize = its ciphertext
+// length), so a size on the wire would be an unauthenticated restatement of signed
+// geometry — free to disagree with it. The holder charges its §14 quota from the
+// descriptor instead.
 export interface Offer {
   blockId: Uint8Array;
-  size: number;
-  descriptor: Uint8Array | null; // signed descriptor env; null for a bare replica (manifest)
+  descriptor: Uint8Array; // signed chunk-descriptor envelope (§4.3) — never absent
 }
 function encodeOfferEntry(o: Offer): Uint8Array {
-  const head = new Uint8Array(32 + 4 + 4);
+  const head = new Uint8Array(32 + 4);
   head.set(o.blockId, 0);
-  writeU32BE(head, 32, o.size);
-  const desc = o.descriptor ?? new Uint8Array(0);
-  writeU32BE(head, 36, desc.length);
-  return concatBytes([head, desc]);
+  writeU32BE(head, 32, o.descriptor.length);
+  return concatBytes([head, o.descriptor]);
 }
 export function encodeOfferBatch(offers: Offer[]): Uint8Array {
   const head = new Uint8Array(4);
@@ -85,14 +93,13 @@ export function decodeOfferBatch(buf: Uint8Array): Offer[] {
   const out: Offer[] = [];
   let o = 4;
   for (let i = 0; i < count; i++) {
-    if (o + 40 > buf.length) throw new Error("protocol: decodeOfferBatch truncated entry");
+    if (o + 36 > buf.length) throw new Error("protocol: decodeOfferBatch truncated entry");
     const blockId = buf.slice(o, o + 32);
-    const size = readU32BE(buf, o + 32);
-    const dlen = readU32BE(buf, o + 36);
-    if (o + 40 + dlen > buf.length) throw new Error("protocol: decodeOfferBatch truncated descriptor");
-    const descriptor = dlen > 0 ? buf.slice(o + 40, o + 40 + dlen) : null;
-    out.push({ blockId, size, descriptor });
-    o += 40 + dlen;
+    const dlen = readU32BE(buf, o + 32);
+    if (dlen === 0) throw new Error("protocol: decodeOfferBatch missing descriptor");
+    if (o + 36 + dlen > buf.length) throw new Error("protocol: decodeOfferBatch truncated descriptor");
+    out.push({ blockId, descriptor: buf.slice(o + 36, o + 36 + dlen) });
+    o += 36 + dlen;
   }
   return out;
 }
@@ -106,9 +113,11 @@ export function decodeOfferBatch(buf: Uint8Array): Offer[] {
 // ack instead of a request/response per block. STORE is still the BINDING
 // admission point: the holder hash-verifies (§4.2) and admits (§6/§14) EVERY block
 // in the batch (acceptStore), so batching changes only the framing, not the gate.
+// The byte length here is framing (the entry is self-delimiting); the holder still
+// checks it against the descriptor's signed blockSize before admitting.
 export interface StoreReq {
   blockId: Uint8Array;
-  descriptor: Uint8Array | null;
+  descriptor: Uint8Array; // signed chunk-descriptor envelope (§4.3) — never absent, as for OFFER
   bytes: Uint8Array;
 }
 export function encodeStoreBatch(stores: StoreReq[]): Uint8Array {
@@ -116,12 +125,11 @@ export function encodeStoreBatch(stores: StoreReq[]): Uint8Array {
   writeU32BE(head, 0, stores.length);
   const parts: Uint8Array[] = [head];
   for (const s of stores) {
-    const desc = s.descriptor ?? new Uint8Array(0);
     const h = new Uint8Array(32 + 4 + 4);
     h.set(s.blockId, 0);
-    writeU32BE(h, 32, desc.length);
+    writeU32BE(h, 32, s.descriptor.length);
     writeU32BE(h, 36, s.bytes.length);
-    parts.push(h, desc, s.bytes);
+    parts.push(h, s.descriptor, s.bytes);
   }
   return concatBytes(parts);
 }
@@ -135,8 +143,9 @@ export function decodeStoreBatch(buf: Uint8Array): StoreReq[] {
     const blockId = buf.slice(o, o + 32);
     const dlen = readU32BE(buf, o + 32);
     const blen = readU32BE(buf, o + 36);
+    if (dlen === 0) throw new Error("protocol: decodeStoreBatch missing descriptor");
     if (o + 40 + dlen + blen > buf.length) throw new Error("protocol: decodeStoreBatch truncated data");
-    const descriptor = dlen > 0 ? buf.slice(o + 40, o + 40 + dlen) : null;
+    const descriptor = buf.slice(o + 40, o + 40 + dlen);
     const bytes = buf.slice(o + 40 + dlen, o + 40 + dlen + blen);
     out.push({ blockId, descriptor, bytes });
     o += 40 + dlen + blen;

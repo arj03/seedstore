@@ -22,8 +22,10 @@ export const DEFAULT_QUOTA_BYTES = 64 * 1024 * 1024;
  *  so a repairer that lacks the manifest still has the chunk's shape. */
 export interface StoredBlock {
   bytes: Uint8Array;
-  /** The author-signed chunk-descriptor envelope (wire bytes), or null if the
-   *  caller stored a bare block (e.g. a replicated manifest block). */
+  /** The author-signed chunk-descriptor envelope (wire bytes). Anything a holder
+   *  admits over the wire has one — the §18 placement messages make it mandatory,
+   *  the replicated manifest block included — so null here means only that this
+   *  block was planted through the store API directly (tests, tooling). */
   descriptor: Uint8Array | null;
 }
 

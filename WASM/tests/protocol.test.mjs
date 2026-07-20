@@ -1,5 +1,5 @@
 // The batched OFFER / FETCH wire (host/protocol.ts) and the holder's batched
-// admission (StorageNode.admitBatch). Two halves:
+// admission (the confined guest's admitBatch). Two halves:
 //   - pure encode/decode round trips, including the self-delimiting offer entries,
 //     the per-block accept mask, and FETCH responses with present/absent blocks;
 //   - the holder evaluating a whole OFFER batch at once: the §6 sibling rule
@@ -7,6 +7,10 @@
 //     declines the tail once the cumulative budget is spent. STORE re-checks each
 //     block, so this batched pre-check never has to be the only gate — but it must
 //     still be correct.
+//
+// Every offered or stored block carries its author-signed chunk descriptor (§4.3) —
+// there is no descriptor-less entry to admit, on the wire or in the holder, and the
+// tests below cover both refusals.
 
 import {
   encodeOfferBatch, decodeOfferBatch, encodeMask, decodeMask,
@@ -37,18 +41,17 @@ export async function run(t) {
   t.group("OFFER batch + accept-mask round-trip the wire");
   {
     const offers = [
-      { blockId: id(1), size: 1000, descriptor: bytes(168, 9) },
-      { blockId: id(2), size: 0, descriptor: null },              // bare replica (manifest)
-      { blockId: id(3), size: 0xfffff, descriptor: bytes(40, 3) },
+      { blockId: id(1), descriptor: bytes(168, 9) },
+      { blockId: id(2), descriptor: bytes(136, 5) },
+      { blockId: id(3), descriptor: bytes(40, 3) },
     ];
     const back = decodeOfferBatch(encodeOfferBatch(offers));
     t.eq(back.length, offers.length, "every offer survives the batch");
     let same = true;
     for (let i = 0; i < offers.length; i++) {
-      same &&= bytesEqual(back[i].blockId, offers[i].blockId) && back[i].size === offers[i].size
-        && (offers[i].descriptor === null ? back[i].descriptor === null : bytesEqual(back[i].descriptor, offers[i].descriptor));
+      same &&= bytesEqual(back[i].blockId, offers[i].blockId) && bytesEqual(back[i].descriptor, offers[i].descriptor);
     }
-    t.ok(same, "blockId, size, and (variable-length, possibly null) descriptor all round-trip");
+    t.ok(same, "blockId and the variable-length descriptor round-trip — an entry carries no size, the descriptor's signed blockSize is the geometry");
 
     const mask = [true, false, true];
     t.ok(decodeMask(encodeMask(mask)).every((v, i) => v === mask[i]), "accept-mask round-trips");
@@ -58,7 +61,7 @@ export async function run(t) {
   {
     const stores = [
       { blockId: id(40), descriptor: bytes(168, 2), bytes: bytes(1000, 1) },
-      { blockId: id(41), descriptor: null, bytes: bytes(7, 5) },          // bare replica, tiny
+      { blockId: id(41), descriptor: bytes(136, 5), bytes: bytes(7, 5) },
       { blockId: id(42), descriptor: bytes(40, 4), bytes: bytes(50000, 3) },
     ];
     const back = decodeStoreBatch(encodeStoreBatch(stores));
@@ -66,11 +69,32 @@ export async function run(t) {
     let same = true;
     for (let i = 0; i < stores.length; i++) {
       same &&= bytesEqual(back[i].blockId, stores[i].blockId) && bytesEqual(back[i].bytes, stores[i].bytes)
-        && (stores[i].descriptor === null ? back[i].descriptor === null : bytesEqual(back[i].descriptor, stores[i].descriptor));
+        && bytesEqual(back[i].descriptor, stores[i].descriptor);
     }
-    t.ok(same, "blockId, (possibly null) descriptor, and variable-length bytes all round-trip");
+    t.ok(same, "blockId, descriptor, and variable-length bytes all round-trip");
     const mask = [true, true, false];
     t.ok(decodeMask(encodeMask(mask)).every((v, i) => v === mask[i]), "stored-mask round-trips");
+  }
+
+  // The descriptor is mandatory on the wire, not merely expected: §4.3 says every peer
+  // that accepts a block first verifies its descriptor, which only holds if a
+  // descriptor-less entry cannot be expressed. Both decoders reject one as malformed —
+  // hand-framed here, since the encoders can no longer produce it.
+  t.group("the wire refuses a descriptor-less entry outright (§4.3)");
+  {
+    const offerEntry = new Uint8Array(4 + 32 + 4); // [count 1][blockId][dlen 0]
+    offerEntry[3] = 1;
+    offerEntry.set(id(7), 4);
+    let threw = false;
+    try { decodeOfferBatch(offerEntry); } catch { threw = true; }
+    t.ok(threw, "an OFFER entry with a zero-length descriptor is a decode error");
+
+    const storeEntry = new Uint8Array(4 + 32 + 4 + 4); // [count 1][blockId][dlen 0][blen 0]
+    storeEntry[3] = 1;
+    storeEntry.set(id(7), 4);
+    threw = false;
+    try { decodeStoreBatch(storeEntry); } catch { threw = true; }
+    t.ok(threw, "a STORE entry with a zero-length descriptor is a decode error");
   }
 
   t.group("FETCH batch req + res round-trip, present / absent / unanswered blocks");
@@ -102,8 +126,8 @@ export async function run(t) {
       const sib0 = id(20), sib1 = id(21);
       const env = signDescriptor(sodium, { k: 1, m: 1, blockSize: 100, blockIds: [sib0, sib1] }, a.identity.publicKey, a.identity.privateKey);
       const offers = [
-        { blockId: sib0, size: 100, descriptor: env },
-        { blockId: sib1, size: 100, descriptor: env }, // sibling of sib0 — must not both pass
+        { blockId: sib0, descriptor: env },
+        { blockId: sib1, descriptor: env }, // sibling of sib0 — must not both pass
       ];
       const mask = decodeMask(await a.transport.request(b.peerId, MsgType.OFFER, encodeOfferBatch(offers)));
       t.eq(mask[0], true, "the holder accepts the first block of the chunk");
@@ -114,18 +138,20 @@ export async function run(t) {
   t.group("a holder spends its quota cumulatively across the batch");
   {
     const net = new LoopbackNetwork();
-    // Room for two 100-byte blocks, not three (the manifest path: no descriptor,
-    // so this is a pure §14 quota decision).
-    const [a, b] = await createConnectedCohort({ count: 2, network: net, sodium, wasm, quota: 250, timeoutMs: TIMEOUT });
+    // Three unrelated one-block chunks (k=1, m=0), so the sibling rule never fires and
+    // this is a pure §14 quota decision. The holder charges what it will commit — the
+    // 100-byte block plus its 136-byte descriptor sidecar = 236 each — reading the size
+    // from the signed geometry, never from the offer. Room for two, not three.
+    const [a, b] = await createConnectedCohort({ count: 2, network: net, sodium, wasm, quota: 500, timeoutMs: TIMEOUT });
     try {
-      const offers = [
-        { blockId: id(30), size: 100, descriptor: null },
-        { blockId: id(31), size: 100, descriptor: null },
-        { blockId: id(32), size: 100, descriptor: null }, // would overrun the 250-byte budget
-      ];
+      const solo = (blockId) => signDescriptor(
+        sodium, { k: 1, m: 0, blockSize: 100, blockIds: [blockId] }, a.identity.publicKey, a.identity.privateKey,
+      );
+      const offers = [id(30), id(31), id(32)].map((blockId) => ({ blockId, descriptor: solo(blockId) }));
+      t.eq(offers[0].descriptor.length, 136, "a one-block descriptor envelope is [pk 32][sig 64][core 40]");
       const mask = decodeMask(await a.transport.request(b.peerId, MsgType.OFFER, encodeOfferBatch(offers)));
-      t.eq(mask[0], true, "first block fits the quota");
-      t.eq(mask[1], true, "second still fits (cumulative 200 ≤ 250)");
+      t.eq(mask[0], true, "first block fits the quota (236 ≤ 500)");
+      t.eq(mask[1], true, "second still fits (cumulative 472 ≤ 500)");
       t.eq(mask[2], false, "third declined — the running budget is spent (§14)");
     } finally { a.close(); b.close(); }
   }
@@ -133,18 +159,63 @@ export async function run(t) {
   t.group("a holder commits a batched STORE block-by-block (quota + sibling)");
   {
     const net = new LoopbackNetwork();
-    // Room for one 1000-byte block, not two.
+    // Room for one 1000-byte block + its 136-byte descriptor, not two.
     const [a, b] = await createConnectedCohort({ count: 2, network: net, sodium, wasm, quota: 1500, timeoutMs: TIMEOUT });
     try {
       const b0 = bytes(1000, 1), b1 = bytes(1000, 2);
       const i0 = b.crypto.hash(b0), i1 = b.crypto.hash(b1); // content-addressed (acceptStore hashes)
+      const solo = (blockId) => signDescriptor(
+        sodium, { k: 1, m: 0, blockSize: 1000, blockIds: [blockId] }, a.identity.publicKey, a.identity.privateKey,
+      );
       const stored = decodeMask(await a.transport.request(b.peerId, MsgType.STORE, encodeStoreBatch([
-        { blockId: i0, descriptor: null, bytes: b0 },
-        { blockId: i1, descriptor: null, bytes: b1 }, // would overrun the 1500-byte budget
+        { blockId: i0, descriptor: solo(i0), bytes: b0 },
+        { blockId: i1, descriptor: solo(i1), bytes: b1 }, // would overrun the 1500-byte budget
       ])));
       t.eq(stored[0], true, "first block stored");
       t.eq(stored[1], false, "second rejected — its predecessor in the batch already spent the quota (§14)");
       t.ok(b.store.has(i0) && !b.store.has(i1), "only the first block actually committed to the store");
+    } finally { a.close(); b.close(); }
+  }
+
+  // The regression this whole invariant exists for: the descriptor is what binds a
+  // block to an author-signed chunk, so without a real one a cohort peer could push
+  // arbitrary bytes into a holder's store with only the §14 quota in the way — past
+  // the §6 sibling rule and past §4.3 entirely.
+  t.group("a holder refuses bytes whose descriptor doesn't verify (§4.3 admission)");
+  {
+    const net = new LoopbackNetwork();
+    const [a, b] = await createConnectedCohort({ count: 2, network: net, sodium, wasm, timeoutMs: TIMEOUT });
+    try {
+      const junk = bytes(100, 8);
+      const jid = b.crypto.hash(junk); // correctly content-addressed — only the descriptor is bad
+      const stored = decodeMask(await a.transport.request(b.peerId, MsgType.STORE, encodeStoreBatch([
+        { blockId: jid, descriptor: bytes(136, 1), bytes: junk }, // unsigned garbage of descriptor shape
+      ])));
+      t.eq(stored[0], false, "STORE declined — the descriptor carries no valid author signature");
+      t.ok(!b.store.has(jid), "nothing committed to the store");
+
+      // Signed, but for a DIFFERENT chunk: the signature verifies and yet this block is
+      // not one of its block_ids (§4.3's block_id ∈ block_ids check).
+      const other = signDescriptor(
+        sodium, { k: 1, m: 0, blockSize: 100, blockIds: [id(77)] }, a.identity.publicKey, a.identity.privateKey,
+      );
+      const stored2 = decodeMask(await a.transport.request(b.peerId, MsgType.STORE, encodeStoreBatch([
+        { blockId: jid, descriptor: other, bytes: junk },
+      ])));
+      t.eq(stored2[0], false, "STORE declined — validly signed, but the block is not of that chunk");
+      t.ok(!b.store.has(jid), "still nothing committed");
+
+      // Signed, of this chunk, but the bytes disagree with the signed blockSize: the
+      // geometry is the descriptor's, so bytes that aren't blockSize long are not the
+      // block that was admitted (this is what makes OFFER's old size field redundant).
+      const wrongSize = signDescriptor(
+        sodium, { k: 1, m: 0, blockSize: 99, blockIds: [jid] }, a.identity.publicKey, a.identity.privateKey,
+      );
+      const stored3 = decodeMask(await a.transport.request(b.peerId, MsgType.STORE, encodeStoreBatch([
+        { blockId: jid, descriptor: wrongSize, bytes: junk }, // 100 bytes vs a signed blockSize of 99
+      ])));
+      t.eq(stored3[0], false, "STORE declined — the bytes in hand aren't the descriptor's blockSize");
+      t.ok(!b.store.has(jid), "still nothing committed");
     } finally { a.close(); b.close(); }
   }
 

@@ -288,6 +288,9 @@ path; same-machine tabs connect on host candidates without it.)
   offer entries, the per-block accept mask, FETCH present/absent blocks, and a
   holder admitting a whole OFFER batch at once — the §6 sibling rule declines a
   sibling offered alongside, the §14 quota declines the tail once the budget is spent.
+  The signed chunk descriptor is mandatory on both OFFER and STORE (§4.3): a
+  descriptor-less entry fails to decode, and one that is forged, of another chunk, or
+  disagrees with the bytes in hand is declined by the holder.
 - **reputation** — passes raise / misses penalize / scores decay with a half-life.
 - **storage** (multi-node loopback) — PUT→GET, small-file replication, offline
   tolerance (any *k* of *n*), repair restoring redundancy after loss, sharing a
