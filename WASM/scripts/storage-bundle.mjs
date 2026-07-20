@@ -42,7 +42,7 @@ const STORAGE_CAPS = ["crypto", "net", "fs", "module", "clock"];
  * @param {any}    o.sodium   loaded libsodium
  * @param {Uint8Array} o.sk   author secret key (signs the manifest)
  * @param {Uint8Array} o.pk   author public key
- * @param {string} o.build    seedstore build/ dir (holds kernel/codec wasm + staged guest)
+ * @param {string} o.build    seedstore build/ dir (holds the codec wasm + staged guest)
  * @param {number} [o.version] monotonic-per-(author,app) freshness mark (README §12.4);
  *                             the shell refuses a load below its high-water mark. Integer.
  * @param {(s:string)=>void} [o.log]  optional progress logger
@@ -68,7 +68,7 @@ export function writeStorageBundle({ dir, host, sodium, sk, pk, build, version =
     // (seedkernel §7.1) and the manifest module `hash` the loader checks the file against.
     const hash = toHex(host.genesisHash(wasm));
     log(`  ${m.name}: bytesHash ${hash}`);
-    return { name: m.name, file: m.file, hash, kernelName: toHex(m.kernelName) };
+    return { name: m.name, file: m.file, hash, kernelName: m.kernelName };
   });
 
   // The zero-authority orchestration guest, shipped *minified* (the shell injects
@@ -112,7 +112,7 @@ export function writeStorageBundle({ dir, host, sodium, sk, pk, build, version =
       maxMessageBytes: cfg.maxMessageBytes,
       putWindow: cfg.putWindow, getWindow: cfg.getWindow,
       windowTargetBytes: cfg.windowTargetBytes,
-      codecName: toHex(names.codec), repName: toHex(names.reputation),
+      codecName: names.codec, repName: names.reputation,
       // The scoped-signature prefix `DOMAIN_guest ‖ scope` the guest prepends before
       // CAP_VERIFY (README §16). The shell's SIGN op scopes to (this author, this app),
       // so build the byte-identical prefix here from the same (pk, APP_NAME).

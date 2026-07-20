@@ -30,7 +30,6 @@ export async function createConnectedCohort(opts: CohortOptions): Promise<Storag
     nodes.push(await StorageNode.create({
       network: opts.network,
       sodium: opts.sodium,
-      kernelBytes: opts.wasm.kernelBytes,
       codecBytes: opts.wasm.codecBytes,
       reputationBytes: opts.wasm.reputationBytes,
       guestSource: opts.wasm.guestSource,

@@ -3,10 +3,11 @@
 // confined guest (host/tier2-guest.js), run inside ONE seedkernel safe-js realm
 // over the generic capability bridge. StorageNode only:
 //
-//   - loads kernel.wasm and wires the module registry (installer). There is no
-//     signature wrapper any more — authenticity is the transport's job (the AKE
-//     channel attributes every frame), so the kernel carries no per-message
-//     signing (seedkernel "Drop the whole envelope + signing")
+//   - stands up the handler table and wires the loader's admission policy (§12.5). There is
+//     no module registry and no signature wrapper any more — authenticity is the
+//     transport's job (the AKE channel attributes every frame), so the kernel
+//     carries no per-message signing (seedkernel "Drop the whole envelope +
+//     signing", "Move admission policy to bundle loading")
 //   - installs the pure codec + reputation handlers (RS coding + reciprocity
 //     scoring); everything else the guest reaches through the generic cap-bridge
 //     (crypto/net/fs/clock/module), so there are no storage-specific host bridges
@@ -27,7 +28,7 @@
 // so this module loads unchanged in both Node and the browser (§1, §20). For the
 // same reason StorageNode never reads the guest text from disk — the caller
 // supplies it (`guestSource`): node.js reads it off disk, browser.js fetches it.
-import { KernelHost, referencePolicy } from "seedkernel-wasm/browser";
+import { KernelHost } from "seedkernel-wasm/browser";
 import { createCapBridge, capPreamble } from "seedkernel-wasm/cap-bridge";
 // The generic zero-authority sandbox lives in the kernel as `safe-js`: ONE realm
 // runs both roles over the genuinely-async seam — `call()` for the initiator
@@ -82,7 +83,6 @@ export interface PutResult {
 export interface StorageNodeOptions {
   network: Network;
   sodium: Sodium;
-  kernelBytes: Uint8Array;
   codecBytes: Uint8Array;
   reputationBytes: Uint8Array;
   /** The stitched guest program text (build/host/tier2-guest.js). The whole
@@ -177,20 +177,19 @@ export class StorageNode {
     this.transport = new Transport(this.peerId, opts.network, opts.timeoutMs ?? 200);
   }
 
-  /** Boot a storage node: load the kernel, wire the module registry, install the
+  /** Boot a storage node: stand up the handler table, wire the admission policy, install the
    *  codec + reputation handlers, then build the sync holder realm and route
    *  incoming requests to the guest's `handle` (§19, §2.1). */
   static async create(opts: StorageNodeOptions): Promise<StorageNode> {
     await opts.sodium.ready;
-    const host = await KernelHost.load(
-      opts.kernelBytes as BufferSource, opts.sodium as never,
-    );
-    host.registerInstaller();
-    // Single-deployment reference posture: accept audited handler bytes from any
+    const host = new KernelHost(opts.sodium as never);
+    // Single-deployment reference posture: admit audited handler bytes from any
     // author. A real deployment narrows this to a content-hash allowlist + closed
-    // author set (§19). Capabilities are no longer install-declared — the JS
-    // sandbox is the confinement, so the policy governs WHO may bind a name only.
-    host.setApproveInstall(referencePolicy(host, () => true));
+    // author set — that is exactly `buildAdmit(policy)` on the shell's boot path
+    // (§12.5, §19). Capabilities are no longer install-declared — the JS sandbox is
+    // the confinement, so the policy governs WHO may bind a name only. Admission is
+    // deny-all until this runs, so it is what lets installHandlers land anything.
+    host.setAdmitPolicy(() => true);
 
     const identity = opts.identity ?? (() => {
       const kp = opts.sodium.crypto_sign_keypair();
@@ -260,7 +259,7 @@ export class StorageNode {
       // Streamed PUT/GET window (§3), always concrete (core.ts homes the 4 MiB default).
       // Bigger windows amortise the per-window OFFER→STORE→ack barrier on a fat/low-loss link.
       windowTargetBytes: c.windowTargetBytes,
-      codecName: toHex(this.names.codec), repName: toHex(this.names.reputation),
+      codecName: this.names.codec, repName: this.names.reputation,
       // The scoped-signature prefix `DOMAIN_guest ‖ scope` the guest prepends before
       // CAP_VERIFY (README §16) — the same bytes the bridge's SIGN op prepends, so the
       // two paths agree. The seedkernel shell injects the byte-identical value from the
@@ -485,11 +484,11 @@ export class StorageNode {
     this.installOne(this.names.reputation, reputationBytes);
   }
 
-  private installOne(name: Uint8Array, wasm: Uint8Array): void {
+  private installOne(name: string, wasm: Uint8Array): void {
     // The node authors its own handlers, so it admits the bytes directly under the
-    // same policy the bundle loader uses (§12.4) — installBundleModule → installDirect
+    // same policy the bundle loader uses (§12.4) — installBundleModule → records.admit
     // runs the accept-all policy wired in create(). This replaces the old ceremony of
-    // signing a §7.2 install envelope to itself; there is no wire install path.
+    // signing an install envelope to itself; there is no wire install path.
     this.host.installBundleModule(name, wasm, this.identity.publicKey);
   }
 

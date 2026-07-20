@@ -20,7 +20,7 @@ import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { loadKernelHost, loadSodium } from "seedkernel-wasm";
+import { createKernelHost, loadSodium } from "seedkernel-wasm";
 import { verifyManifest } from "seedkernel-wasm/bundle";
 import { writeStorageBundle } from "./storage-bundle.mjs";
 
@@ -32,7 +32,7 @@ const out = join(root, "bundle");
 const { toHex, fromHex } = await import(new URL("../build/host/util.js", import.meta.url));
 
 const sodium = await loadSodium();
-const host = await loadKernelHost(join(build, "kernel.wasm"));
+const host = await createKernelHost();
 // This host is offline scaffolding — used only to derive the module kernel names and
 // hash the module bytes (genesisHash) the manifest commits to; it signs nothing.
 

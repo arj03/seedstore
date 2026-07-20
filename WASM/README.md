@@ -20,7 +20,7 @@ seed store bundle  ──────────── signed by the app author
         │  reaches I/O only through ↓ the single capability seam                        │
   cap-bridge   crypto · net · fs · module-call · clock · identity  ── generic primitives ┘
         │
-  seedkernel runtime (the shell)     module registry → signature → kernel  +  the raw-byte caps
+  seedkernel runtime (the shell)     bundle loader → admission policy → kernel  +  the raw-byte caps
 ```
 
 Everything with *structure* — content-addressing, the signed chunk descriptor,
@@ -135,13 +135,12 @@ Then, here:
 
 ```sh
 npm install        # one dependency: the sibling seedkernel-wasm (sumo libsodium + QuickJS live there)
-npm run build      # copy kernel.wasm/signature.wasm, compile codec+reputation WASM, stage the guest, compile host TS
+npm run build      # compile codec+reputation WASM, stage the guest, compile host TS
 npm test           # build + run the full test suite (Node); `bun tests/run.mjs` runs it on Bun
 ```
 
-`npm run build` produces `build/codec.wasm`, `build/reputation.wasm`, the copied
-`build/kernel.wasm` + `build/signature.wasm`, the staged `build/host/tier2-guest.js`,
-and the compiled host in `build/host/`.
+`npm run build` produces `build/codec.wasm`, `build/reputation.wasm`, the staged
+`build/host/tier2-guest.js`, and the compiled host in `build/host/`.
 
 ## Run a node from the command line
 
@@ -364,8 +363,10 @@ that would let a BLAKE3 `hash_many` vectorize the block-id hashing next.
 
 **Block-id hash choice (BLAKE2b, and the BLAKE3 next step).** Block-ids are
 content addressing *internal* to storage — they never cross into the kernel — so
-they need not be the kernel's SHA-3 genesis hash, and storage hashes them with
-**BLAKE2b** (`crypto_generichash`) — fast and already in libsodium. The next step up is **BLAKE3**: its tree of
+they are storage's own choice, not something the kernel imposes, and storage hashes
+them with **BLAKE2b** (`crypto_generichash`) — fast and already in libsodium.
+(seedkernel has since standardized on BLAKE2b-256 as its own genesis hash too, so
+the two now coincide — but independently, not because one constrains the other.) The next step up is **BLAKE3**: its tree of
 equal-size leaves lines up with the layer's own uniform *B*-byte block splitting,
 so a vectorized `hash_many` produces all *n* block-ids of a chunk across parallel
 SIMD lanes, and the independent per-block hashes thread trivially — projected
@@ -401,9 +402,9 @@ cores and the guest — it never loads a line of the host-side TypeScript:
 | `reputation.wasm` | 6.7 KB | — |
 | `tier2-guest.js` — the confined guest, shipped minified in the bundle | 29 KB | **7.6 KB** |
 
-riding on the seedkernel shell it shares with any app — `kernel.wasm` +
-`signature.wasm` (11.6 KB), the `KernelHost` JS (28 KB / **5 KB gz**), and the
-sumo libsodium (278 KB, reused not bundled). So **seedstore's own runtime
+riding on the seedkernel shell it shares with any app — the `KernelHost` JS
+(28 KB / **5 KB gz**, handler table included: the kernel is host code, not a
+module) and the sumo libsodium (278 KB, reused not bundled). So **seedstore's own runtime
 footprint is ~15 KB of WASM + ~8 KB of gzipped JS (the guest)** (§2, §16: "logic +
 RS, tens of KB, no second copy of a crypto library").
 
@@ -433,11 +434,11 @@ hosts (`build/host-min`) into the demo.
 assembly/codec/        gf256.ts, rs.ts, index.ts   — Reed–Solomon WASM handler
 assembly/reputation/   index.ts                    — decayed reciprocity WASM handler
 host/  tier2-guest.js          the confined guest: the WHOLE protocol (PUT/GET/repair + holder)
-       storage-node.ts         the host that boots the kernel + drives the guest in one realm
+       storage-node.ts         the host that holds the handler table + drives the guest in one realm
        manifest (+core)/crypto/protocol/store-fs/store-local/names/util  — shared helpers
        node.ts / browser.ts    Node + browser entry points (each loads the guest text)
 scripts/  build-bundle.mjs     produce the signed bundle (npm run build:bundle)
-          copy-kernel, build-browser-demo  — stage all browser pages → build/browser-demo
+          build-browser-demo               — stage all browser pages → build/browser-demo
           serve-rtc-holder + smoke-rtc        — relay-signaled P2P over RtcNetwork + STUN
 tests/    codec / bridges / manifest / protocol / reputation / storage
           concurrency / net / browser / shell-run / holder-guest / bundle-fixture

@@ -83,8 +83,10 @@ const MSG_HAVE = 1, MSG_OFFER = 2, MSG_FETCH = 3, MSG_STORE = 4;
 const HAVE_ID_LEN = 32;      // a HAVE/FETCH request names 32-byte block_ids (§18)
 const FETCH_FRAME = 5;       // a present block costs [found u8][len u32] in a FETCH response (§18)
 const STORE_BLK = ".blk", STORE_DSC = ".dsc";
-const CODEC_NAME = fromHex(APP.codecName);
-const REP_NAME = fromHex(APP.repName);
+// Kernel names are strings (seedkernel §5.1) and cross the MODULE_CALL seam as their
+// UTF-8 bytes; both are ASCII, so strBytes is the encoder.
+const CODEC_NAME = strBytes(APP.codecName);
+const REP_NAME = strBytes(APP.repName);
 // The scoped-signature prefix `DOMAIN_guest ‖ scope` (README §16): the CAP_SIGN op signs
 // `prefix ‖ msg`, never the raw msg, so a descriptor signature verifies only in this app's
 // scope. CAP_VERIFY stays raw, so verifyEnv rebuilds `prefix ‖ core` before checking. The

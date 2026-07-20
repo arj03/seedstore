@@ -17,7 +17,6 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const buildDir = join(__dirname, "..");
 
 export interface WasmBytes {
-  kernelBytes: Uint8Array;
   codecBytes: Uint8Array;
   reputationBytes: Uint8Array;
   /** The stitched guest program text (build/host/tier2-guest.js). It carries the
@@ -26,16 +25,14 @@ export interface WasmBytes {
   guestSource: string;
 }
 
-/** Read the three WASM modules + the guest program from the build directory. */
+/** Read the two WASM modules + the guest program from the build directory. */
 export async function loadWasmBytes(dir = buildDir): Promise<WasmBytes> {
-  const [kernelBytes, codecBytes, reputationBytes, guestSource] = await Promise.all([
-    readFile(join(dir, "kernel.wasm")),
+  const [codecBytes, reputationBytes, guestSource] = await Promise.all([
     readFile(join(dir, "codec.wasm")),
     readFile(join(dir, "reputation.wasm")),
     readFile(join(dir, "host", "tier2-guest.js"), "utf8"),
   ]);
   return {
-    kernelBytes: new Uint8Array(kernelBytes),
     codecBytes: new Uint8Array(codecBytes),
     reputationBytes: new Uint8Array(reputationBytes),
     guestSource,
