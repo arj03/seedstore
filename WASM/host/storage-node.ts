@@ -365,41 +365,46 @@ export class StorageNode {
     return this.runExclusive(async () => {
       const meta = await this.realm.call("putStart", u64be(plaintext.length));
       const windowBytes = readU32BE(meta, 0);
-      // ── THE THROUGHPUT CEILING, if you are here to make PUT faster ──────────────
-      // This `await` is a full BARRIER: a window's every OFFER → STORE → ack must settle
-      // before the next window's first byte is encoded. Nothing is in flight across the
-      // seam, so the wire goes IDLE for the encode+place of window n+1 — and idles again
-      // per window, for as many windows as the file has.
+      // ── THE WINDOW BARRIER IS REAL, AND REMOVING IT DOES NOT MAKE PUT FASTER ────
+      // This `await` is a full BARRIER: a window's every OFFER → STORE → ack settles before
+      // the next window's first byte is encoded, so the wire goes idle for the encode+place
+      // of window n+1, once per window. That much is measurable (50 MB to two WS holders
+      // over a ~100 Mbit up link, RS(1,1), 24 MiB window, conns 2) in p2p-cli's four
+      // CUMULATIVE timestamps: `drain` ~7–8.3 s lands BEFORE `queue` ~12–13.5 s — buffers
+      // ran dry ~60% through the send — with `peak buffered` pinned at exactly 42.0 MB,
+      // ~one window's ciphertext, i.e. in-flight bytes bounded by the WINDOW, not the link.
       //
-      // Measured live (2× 50 MB to two WS holders over a ~100 Mbit up link, RS(1,1),
-      // 24 MiB window, conns 2). p2p-cli prints four CUMULATIVE TIMESTAMPS; the signature
-      // is `drain` landing well BEFORE `queue`:
+      // It is still not the ceiling. TRIED AND REVERTED 2026-07-21: a pipelined guest, in
+      // which putFeed started its window's encode+placement and awaited the PREVIOUS one,
+      // so two windows were open and one was always queued behind the one draining. It
+      // demonstrably worked — `drain` moved after `queue` (13.3 s vs 12.4 s) and `peak
+      // buffered` went 42.0 → 67.5 MB, so the wire really did stop idling — and PUT came
+      // out at 7.2 MB/s wire, dead centre of the 6.8–7.6 MB/s the barrier version gives.
+      // Deeper queue, same drain rate: the bytes moved from "not yet encoded" into kernel
+      // socket buffers, not onto the link. So the idle wire is a SYMPTOM of the receiver
+      // not draining rather than a cause of lost throughput, and the iperf3 headroom
+      // (106 Mbit on 4 flows) is not ours to claim by keeping the sender busy. The cost
+      // was guest pipeline/ordering/latch complexity and ~2× window in guest heap, for a
+      // measured zero. Don't re-implement it.
       //
-      //     encode  ~300 ms   first bulk frame handed to a socket
-      //     queue  ~12–13.5 s LAST bulk frame handed to a socket
-      //     drain   ~7–8.3 s  socket buffers last seen non-empty  ← BEFORE queue ends
-      //     settle ~13–14.6 s last STORE response
+      // Nor is the holder, as far as we can measure. `tests/bench-holder.mjs` prices the
+      // ingest path (hash + descriptor verify + sibling check + 2 fs writes per block) with
+      // the network taken out: at the live geometry on real disk it runs ~96 MB/s per
+      // holder, ~48 MB/s for two co-resident holders on one cpu — about 7× the 7.2 MB/s the
+      // live PUT actually demanded of that box. So the ~6 s settle tail seen on some runs is
+      // not the holder chewing; a holder box would have to be ~7× slower than a dev machine
+      // for ingest to bind. Untimed there: the WS receive path (unmasking, reassembly) on
+      // the holder, the honest remaining unknown — run that bench ON a holder to close it.
       //
-      // Buffers ran dry ~60% of the way through the send, i.e. the back half of the PUT
-      // was WIRE-STARVED — the link was waiting on us. The clincher is `peak buffered`
-      // pinning at exactly 42.0 MB on both runs: that is ~one window's ciphertext, so
-      // in-flight bytes are bounded by the WINDOW, not by the link or the receiver.
-      // Result ≈ 6.8–7.6 MB/s wire against a path iperf3 shows carrying 106 Mbit
-      // (≈13 MB/s) on 4 flows — roughly half the link, left on the floor.
-      //
-      // Widening the window (`windowTargetBytes`) only makes the idle gaps fewer, not
-      // shorter, and costs guest heap (peak ≈ 3× window at RS(1,1)). The actual fix is to
-      // stop making them barriers — overlap window n+1's encode/place with window n's
-      // acks, so a second window is always queued behind the one draining. That needs the
-      // guest's putStream to tolerate two open windows (today one implicit session is what
-      // makes runExclusive's whole-operation chaining safe — see runExclusive above), so
-      // it is a guest-side change, NOT a host-side one, and NOT more sockets: `conns`
-      // already helps only once the window stops idling the wire.
+      // Which leaves the path/transport itself as the live suspect, and the sender-side
+      // levers spent. Widening the window (`windowTargetBytes`) is the wrong lever twice
+      // over: it only makes the idle gaps fewer, not shorter, and costs guest heap (peak
+      // ≈ 3× window at RS(1,1)).
       //
       // Do NOT read p2p-cli's printed "MB/s upload" as evidence the link is saturated: it
       // divides ALL bulk bytes by (drain − encode), a span that by definition did not
       // carry them all whenever drain < queue, so it over-reports (15.1 MB/s printed vs
-      // ≈7.8 actual on run 1).
+      // ≈7.8 actual).
       // ───────────────────────────────────────────────────────────────────────────
       // At least one window always goes in, so a zero-length file is still a PUT.
       for (let off = 0; ; off += windowBytes) {
