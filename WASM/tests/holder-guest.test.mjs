@@ -60,8 +60,13 @@ export async function run(t) {
     const identity = generateKeyPair(sodium);
     const shell = await boot({
       policyJson, dir, identity, network: net, timeoutMs: TIMEOUT,
-      // Quota is operator policy now (not signed into the bundle): the operator
-      // supplies it at boot, merged over the bundle's guest config into the guest's APP.
+      // Quota is operator policy (not signed into the bundle): the operator supplies it
+      // at boot, merged over the bundle's guest config into the guest's APP. NB this is
+      // the SHELL's config — opaque operator input the shell merges wholesale. A
+      // StorageNode's `config` is the typed StorageConfig instead, and takes quota as a
+      // sibling option (`StorageNode.create({ quota })`); the same spelling used there is
+      // rejected rather than ignored. Both drivers run in this file, so the two are easy
+      // to confuse.
       // blockSize is overridden back to test scale — the signed bundle carries the
       // PRODUCTION 256 KiB (storage-bundle.mjs), which would make these tiny test
       // files single-block/replicated instead of exercising the RS path.

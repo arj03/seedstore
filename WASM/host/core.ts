@@ -60,6 +60,15 @@ export const DEFAULT_FANOUT_WINDOW = 16;
  *  (not in the guest) for the same reason as DEFAULT_FANOUT_WINDOW. */
 export const DEFAULT_WINDOW_TARGET_BYTES = 4 * 1024 * 1024;
 
+/** Default committed-tier byte budget (§14) when the operator sets none: 64 MiB.
+ *  Quota is OPERATOR policy, not author content, so it is not part of StorageConfig
+ *  and is never signed into a bundle: a driver supplies it at boot (StorageNode's
+ *  `quota` option, a shell's boot config) and it is injected into the guest's APP.
+ *  The confined holder is the only thing that ENFORCES it — this is just the number
+ *  a host-side node injects when its operator named none. A driver that injects
+ *  nothing leaves the guest to fail closed at 0 rather than guess a generous default. */
+export const DEFAULT_QUOTA_BYTES = 64 * 1024 * 1024;
+
 /** The block size a real DEPLOYMENT uses — the single value the signed bundle and the
  *  CLI derive their geometry from, so "production geometry" is one named constant, not a
  *  magic number copied per site. 256 KiB keeps a k=2 codec request at the 512 KiB the
@@ -92,6 +101,43 @@ export function defaultConfig(k = 2, m = 2, blockSize = 256): StorageConfig {
     maxMessageBytes: 1 << 20,
     windowTargetBytes: DEFAULT_WINDOW_TARGET_BYTES,
   };
+}
+
+/** Every key a StorageConfig may carry, at runtime. Derived from defaultConfig() so
+ *  the required set cannot drift from the interface as fields are added; only the
+ *  OPTIONAL ones (which a default cannot show) are named here. */
+const CONFIG_KEYS: ReadonlySet<string> = new Set([...Object.keys(defaultConfig()), "realmMemoryBytes"]);
+
+/** Reject unknown keys in a caller-supplied config (StorageConfig is a closed set).
+ *
+ *  Worth a runtime check because every driver that passes one is plain JS — the tests,
+ *  the CLI scripts, the browser demo — so TypeScript's excess-property check never runs
+ *  and a misspelled knob is silently ignored: the node runs on the default and the caller
+ *  is never told their setting did nothing. That failure is invisible in exactly the way
+ *  a tuning knob must not be (a wrong windowTargetBytes reads as a perf result, not a bug).
+ *
+ *  `quota` is called out by name because it is not a typo but a genuine collision: it IS
+ *  operator policy, spelled inside the opaque boot `config` a seedkernel shell takes — but
+ *  here it is a SIBLING option (StorageNodeOptions.quota), deliberately outside
+ *  StorageConfig so it can never be spread into an author-signed bundle config
+ *  (scripts/storage-bundle.mjs). Drivers that stand up shells and StorageNodes side by
+ *  side (tests/holder-guest.test.mjs) do have both spellings in view at once. */
+export function assertStorageConfig(config?: Partial<StorageConfig>): void {
+  if (!config) return;
+  for (const key of Object.keys(config)) {
+    if (CONFIG_KEYS.has(key)) continue;
+    if (key === "quota") {
+      throw new Error(
+        "StorageConfig has no `quota`: it is operator policy, passed as the sibling option " +
+        "`quota` on StorageNode.create({ quota }) — only a seedkernel shell's boot config " +
+        "carries it inline (boot({ config: { quota } })). Passing it here would be ignored.",
+      );
+    }
+    throw new Error(
+      `StorageConfig has no \`${key}\` — a misspelled knob would be silently ignored. ` +
+      `Known keys: ${[...CONFIG_KEYS].sort().join(", ")}.`,
+    );
+  }
 }
 
 /** peer_id is the hex of a peer's kernel public key (§2). */

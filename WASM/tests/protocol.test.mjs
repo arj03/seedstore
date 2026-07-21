@@ -23,6 +23,7 @@ import {
   loadSodium, loadWasmBytes, LoopbackNetwork, createConnectedCohort,
 } from "../build/host/node.js";
 import { bytesEqual, toHex } from "../build/host/util.js";
+import { plantBlock } from "./helpers.mjs";
 
 const TIMEOUT = 200;
 
@@ -135,6 +136,27 @@ export async function run(t) {
     } finally { a.close(); b.close(); }
   }
 
+  // Quota reaches the holder as a sibling option, not through the typed StorageConfig —
+  // but a seedkernel shell spells the same operator knob INSIDE its boot config, and
+  // both drivers appear in one file (holder-guest.test.mjs). Getting it wrong here used
+  // to be silent: the node would run on the 64 MiB default while the caller believed it
+  // had set a budget, so a quota test could "pass" without testing a quota at all.
+  t.group("a StorageConfig rejects unknown keys instead of ignoring them");
+  {
+    const net = new LoopbackNetwork();
+    let quotaErr = null, typoErr = null;
+    try {
+      await createConnectedCohort({ count: 1, network: net, sodium, wasm, config: { quota: 500 }, timeoutMs: TIMEOUT });
+    } catch (e) { quotaErr = e; }
+    t.ok(quotaErr !== null, "config: { quota } is refused — quota is the sibling option (or a shell's boot config)");
+    t.ok(quotaErr && /sibling option/.test(quotaErr.message), "the error says where quota actually goes");
+    try {
+      await createConnectedCohort({ count: 1, network: net, sodium, wasm, config: { windowTarget: 1 }, timeoutMs: TIMEOUT });
+    } catch (e) { typoErr = e; }
+    t.ok(typoErr !== null, "a misspelled knob (windowTarget) is refused, not silently defaulted");
+    t.ok(typoErr && /windowTargetBytes/.test(typoErr.message), "the error lists the real key names");
+  }
+
   t.group("a holder spends its quota cumulatively across the batch");
   {
     const net = new LoopbackNetwork();
@@ -226,7 +248,7 @@ export async function run(t) {
     try {
       const held = bytes(777, 4);
       const heldId = b.crypto.hash(held);
-      b.store.put(heldId, held, null); // plant a block directly on the holder
+      plantBlock(b.fs, toHex(heldId), held); // seed the holder directly, bypassing the protocol
       const absentId = id(99);
 
       const res = decodeFetchBatchRes(await a.transport.request(b.peerId, MsgType.FETCH, encodeFetchBatchReq([heldId, absentId])));

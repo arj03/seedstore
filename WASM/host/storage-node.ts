@@ -20,8 +20,8 @@
 //
 // There is no host-side copy of the protocol any more: placement, k-of-n,
 // admission, the wire format, repair triggers — all of it is the guest. The same
-// class runs in Node and the browser; only the BlobStore backend and the Network
-// implementation differ (§1, §12).
+// class runs in Node and the browser; only the `fs` backend the holder stores into
+// and the Network implementation differ (§1, §12).
 
 // Import the kernel host from seedkernel's *browser* subpath: it is the same
 // platform-neutral KernelHost, but without the node:fs shims node.js pulls in,
@@ -44,11 +44,12 @@ import type { Sodium } from "./sodium.js";
 import type { Network, PeerId } from "seedkernel-wasm/net";
 import { Transport } from "seedkernel-wasm/net";
 import { MemoryFs, type Fs } from "seedkernel-wasm/fs";
-import { DEFAULT_QUOTA_BYTES, type BlobStore } from "./store-local.js";
-import { FsBlobStore } from "./store-fs.js";
+import { FsBlobView, type BlobView } from "./store-view.js";
 import { Crypto } from "./crypto.js";
 import { storageNames, type StorageNames } from "./names.js";
-import { type Identity, type StorageConfig, defaultConfig } from "./core.js";
+import {
+  type Identity, type StorageConfig, defaultConfig, assertStorageConfig, DEFAULT_QUOTA_BYTES,
+} from "./core.js";
 import { STORAGE_APP, ZERO_AUTHOR, storageSignScope } from "./manifest.js";
 import { encodeScoreReq } from "./reputation-core.js";
 import { toHex, readU32BE, writeU64BE, readU64BE, concatBytes } from "./util.js";
@@ -110,24 +111,28 @@ export interface StorageNodeOptions {
   guestSource: string;
   identity?: Identity;
   config?: Partial<StorageConfig>;
-  /** Raw-byte `fs.*` backend (§12; seedkernel's Fs). Defaults to an in-RAM
-   *  MemoryFs; a server node passes a NodeFs, the browser an OPFS-backed one. The
-   *  default store is an FsBlobStore over this, and BOTH guest realms serve `fs.*`
-   *  from it — so the holder's writes and the host-side store view share a backend.
-   *  Do NOT write blocks into this `fs` out-of-band on a live node: the guest holder
-   *  caches its committed-tier byte total (bytesUsed) and only rebuilds it lazily, so
-   *  writes it didn't make leave its §14 quota accounting stale until the realm is
-   *  rebuilt (over/under-admitting in the meantime). */
+  /** Raw-byte `fs.*` backend (§12; seedkernel's Fs). Defaults to an in-RAM MemoryFs;
+   *  a server node passes a NodeFs, the browser an OPFS-backed one. This is the
+   *  holder's store.local: the guest writes its `<hex>.blk`/`.dsc` layout here, and
+   *  `store` reads it back. Planting blocks here directly is how a test seeds a
+   *  holder — but on a LIVE node it leaves the guest's lazily-rebuilt byte total
+   *  stale (it only counts what it wrote), so seed before the holder is exercised. */
   fs?: Fs;
-  /** Donated blob store (§12) — a *read view* over `fs` for inspection (the guest
-   *  holder writes the `<hex>.blk`/`.dsc` layout itself, via `fs.*`). Defaults to
-   *  an FsBlobStore over `fs` with a `quota`-byte budget; a custom store must layer
-   *  over the same `fs` the node serves, or the two would diverge. Its put/delete are
-   *  for callers that drive the store directly (e.g. tests): calling them on a live
-   *  node bypasses the guest holder, whose cached quota budget then goes stale until
-   *  the guest realm is rebuilt — FsBlobStore itself reads used-bytes live for the
-   *  mirror-image reason (it can't see the guest's `fs.*` writes). */
-  store?: BlobStore;
+  /** Read view of what the holder has stored (§12), for inspection only — there is
+   *  no host-side write path, since the guest holder owns admission and the writes.
+   *  Defaults to an `FsBlobView` over `fs`; an override must read the same `fs` the
+   *  node serves, or it is looking at a different node's blocks. */
+  store?: BlobView;
+  /** The holder's committed-tier byte budget (§14), operator policy injected into the
+   *  guest's APP — where the confined holder is the only thing that enforces it.
+   *  Defaults to DEFAULT_QUOTA_BYTES.
+   *
+   *  Deliberately a sibling of `config` rather than a StorageConfig field: quota is
+   *  per-node operator policy, and keeping it out of the config object means it cannot
+   *  be spread into an author-signed bundle config (scripts/storage-bundle.mjs). NB a
+   *  seedkernel shell spells the same knob INSIDE its boot config — `boot({ config: {
+   *  quota } })` — because that config is opaque operator input, not this typed one;
+   *  `config: { quota }` here is rejected outright rather than silently ignored. */
   quota?: number;
   clock?: () => number;
   /** net.send timeout — how long before a peer is treated as unreachable (§8). */
@@ -151,7 +156,10 @@ export class StorageNode {
   readonly identity: Identity;
   readonly transport: Transport;
   readonly fs: Fs;
-  readonly store: BlobStore;
+  readonly store: BlobView;
+  /** The §14 byte budget this node injects into its guest holder (operator policy).
+   *  Kept here because the guest is the only enforcer — nothing host-side checks it. */
+  readonly quota: number;
   readonly crypto: Crypto;
   readonly sodium: Sodium;
   readonly config: StorageConfig;
@@ -197,11 +205,15 @@ export class StorageNode {
     // signed descriptor, or from k/m in the guest), so overriding the geometry cannot
     // leave a stale durability knob behind for them to disagree with.
     const c = opts.config;
+    // A JS driver gets no type checking, so an unknown key here would silently run on
+    // the default instead of the setting the caller asked for (see assertStorageConfig).
+    assertStorageConfig(c);
     this.config = { ...defaultConfig(c?.k, c?.m, c?.blockSize), ...c };
     this.clockFn = opts.clock ?? (() => Date.now());
     this.crypto = new Crypto(opts.sodium);
     this.fs = opts.fs ?? new MemoryFs();
-    this.store = opts.store ?? new FsBlobStore(this.fs, opts.quota ?? DEFAULT_QUOTA_BYTES);
+    this.quota = opts.quota ?? DEFAULT_QUOTA_BYTES;
+    this.store = opts.store ?? new FsBlobView(this.fs);
     this.names = storageNames(host);
     this.transport = new Transport(this.peerId, opts.network, opts.timeoutMs ?? 200);
   }
@@ -282,9 +294,10 @@ export class StorageNode {
     // guest, and the replica count + low-water mark from each chunk's signed descriptor.
     const app = {
       k: c.k, m: c.m, blockSize: c.blockSize,
-      // The holder side's byte budget (§14) — the same quota FsBlobStore enforces,
-      // surfaced so the confined `handle` path admits exactly as the host store does.
-      quota: this.store.stat().quota,
+      // The holder side's byte budget (§14). Operator policy, injected like the
+      // transport knobs below — and enforced ONLY here, inside the confined `handle`
+      // path; the host keeps no second copy of the rule to drift out of step with.
+      quota: this.quota,
       // Transport/operator policy (like quota, not author-signed): the per-message
       // batch cap and the fan-out windows the guest splits/pipelines OFFER/STORE/
       // FETCH under, so it batches byte-for-byte as the spec intends.

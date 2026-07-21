@@ -67,7 +67,8 @@ function bytesToStr(b) { let s = ""; for (let i = 0; i < b.length; i++) s += Str
 // seedkernel). All *structure* lives here in the guest, never in the kernel:
 // the nonce convention, the signed-descriptor envelope, the HAVE/OFFER/FETCH/
 // STORE wire format (host/protocol.ts), the codec & reputation module ABIs, and
-// the <hex>.blk/.dsc store layout (host/store-fs.ts). Config + the codec and
+// the <hex>.blk/.dsc store layout (read back host-side by host/store-view.ts, which
+// implements none of the policy — see there). Config + the codec and
 // reputation kernel names arrive as the injected `APP` constant (prepended by
 // the driver), not as kernel ops. A sync op (crypto/fs/clock/module) resolves to
 // its bytes directly, so its wrapper reads as an ordinary synchronous function; the
@@ -185,7 +186,7 @@ function repObserve(peerPk, t, pass) {
   moduleCall(REP_NAME, encodeObserveReq(peerPk, t, pass)); // returns the new score; the guest doesn't need it
 }
 
-// ── local store over fs.* (the <hex>.blk / <hex>.dsc layout of FsBlobStore) ──
+// ── local store over fs.* (the <hex>.blk / <hex>.dsc layout) ─────────────────
 // Existence is `size ≥ 0` (there is no CAP_FS_HAS): the raw CAP_FS_SIZE is 0xFFFFFFFF
 // (fs.size → -1) only for an absent key, so a present-but-empty value still reads as held.
 function storeHas(id) { return fsSizeRaw(toHex(id) + STORE_BLK) !== 0xffffffff; }
@@ -1114,15 +1115,17 @@ async function doRepair() {
 // ── holder side (§5/§6/§7) ───────────────────────────────────────────────────
 // The request side a node serves to its cohort: admission control (the §6 sibling
 // rule + §14 quota), content-addressing (§4.2), and the <hex>.blk/.dsc + quota
-// writes — the policy of host/storage-node.ts + host/store-fs.ts, now confined.
+// writes — all of it confined here, and nowhere else: the host has a read view of
+// the same fs (host/store-view.ts) and no write path at all.
 // Reached only through the generic caps, and entirely *synchronous*: a holder
 // answers from local fs + crypto and never makes a net round trip, so it is invoked
 // synchronously (`callSync`) and can respond while this realm's own initiator is
 // parked mid-await (the runtime split — a suspended async function is just heap
 // state). Because it reaches only sync ops, `doHandle` and every function it calls
 // must stay synchronous: an `await` here would return a guest promise that callSync
-// cannot settle. bytesUsed mirrors FsBlobStore's byte budget, rebuilt lazily from
-// the fs the first time it matters.
+// cannot settle. This is the ONLY implementation of the quota rule — the host keeps a
+// read view of the fs (host/store-view.ts) and no write path — so bytesUsed is the
+// budget, rebuilt lazily from the fs the first time it matters.
 let bytesUsed = -1;
 // The §14 byte budget is OPERATOR policy, not author content: the StorageNode injects
 // its store's quota, and a seedkernel shell merges the operator's config over the
@@ -1141,9 +1144,10 @@ function fsSize(keyStr) { const v = fsSizeRaw(keyStr); return v === 0xffffffff ?
 function ensureUsed() {
   if (bytesUsed >= 0) return;
   bytesUsed = 0;
-  // Mirror FsBlobStore.usedBytes (store-fs.ts): the committed tier is the <hex>.blk
-  // ciphertext AND its <hex>.dsc descriptor sidecar — the descriptor is real bytes,
-  // so charging only .blk would over-admit relative to the host store's view (§14).
+  // The committed tier is the <hex>.blk ciphertext AND its <hex>.dsc descriptor
+  // sidecar — the descriptor is real bytes a holder keeps per block, so charging only
+  // .blk would over-admit by the whole descriptor tier (§14). Rebuilt from the fs, so
+  // a restarted holder re-derives its budget from what is actually on the backend.
   for (const id of storeList()) { const hex = toHex(id); bytesUsed += fsSize(hex + STORE_BLK) + fsSize(hex + STORE_DSC); }
 }
 function quotaFree() { ensureUsed(); return Math.max(0, quota() - bytesUsed); }
@@ -1152,18 +1156,17 @@ function fsPut(keyStr, bytes) {
   const head = new Uint8Array(4); wU32(head, 0, kb.length);
   host.call(CAP_FS_PUT, concat([head, kb, bytes]));
 }
-// Mirror FsBlobStore.put (store-fs.ts): the <hex>.blk ciphertext + its sibling
+// The one write path into store.local: the <hex>.blk ciphertext + its sibling
 // <hex>.dsc descriptor, under the quota budget. Throws past quota so admission
 // refuses rather than over-commits.
 function storeWrite(id, bytes, descriptor) {
   ensureUsed();
   const hex = toHex(id);
   // Charge the ciphertext AND the descriptor sidecar, crediting whatever was already
-  // stored under this id — byte-for-byte as FsBlobStore.put (store-fs.ts) and
-  // MemoryBlobStore, so a holder's §14 budget matches the host store's stat() at the
-  // boundary instead of writing the .dsc for free. Admission (admitBatch) has already
-  // verified the descriptor, so every committed block has one: the .dsc write is
-  // unconditional, with no described-block-overwritten-by-a-bare-one case to unwind.
+  // stored under this id, instead of writing the .dsc for free. Admission (admitBatch)
+  // has already verified the descriptor, so every committed block has one: the .dsc
+  // write is unconditional, with no described-block-overwritten-by-a-bare-one case to
+  // unwind.
   const prevBlk = storeHas(id) ? fsSize(hex + STORE_BLK) : 0;
   const prevDsc = fsSize(hex + STORE_DSC);
   const next = bytesUsed - prevBlk - prevDsc + bytes.length + descriptor.length;

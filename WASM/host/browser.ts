@@ -1,7 +1,7 @@
 // Browser entry point — fetches the two WASM modules and boots a StorageNode
 // against a caller-provided sumo libsodium. The page readies libsodium and
-// passes it in; the BlobStore backend would be OPFS/IndexedDB in a real browser
-// node (here the default in-memory store is used, which is also a valid
+// passes it in; the `fs` backend the holder stores into would be OPFS/IndexedDB in a
+// real browser node (here the default in-memory one is used, which is also a valid
 // eviction-aware cache, §12). Browser nodes run the same protocol as
 // long-running peers, differing only in backend and default quota (§1, §8).
 

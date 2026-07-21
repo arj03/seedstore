@@ -1,6 +1,6 @@
 // Networking + filesystem integration (README §16, §12). Exercises the real
-// fabric that replaces LoopbackNetwork/MemoryBlobStore:
-//   - FsBlobStore round-trips and persists across reopen
+// fabric that replaces the loopback:
+//   - FsBlobView reads the durable store.local layout back, across reopen
 //   - a full cohort over real TCP sockets, blocks landing on holders' disks
 //   - a browser-like node reaching a server node over a real WebSocket
 //
@@ -15,7 +15,7 @@ import { join } from "node:path";
 import { loadSodium, loadWasmBytes } from "../build/host/node.js";
 import { StorageNode } from "../build/host/storage-node.js";
 import { NodeNetwork } from "seedkernel-wasm/net-node";
-import { FsBlobStore } from "../build/host/store-fs.js";
+import { FsBlobView } from "../build/host/store-view.js";
 import { NodeFs } from "seedkernel-wasm/fs-node";
 // `bytesCompare` is a transport helper from the seedkernel `./net` barrel, used
 // by the cohort below to canonicalise dial direction (lower pubkey dials higher).
@@ -25,6 +25,7 @@ import {
 } from "../build/host/protocol.js";
 import { signDescriptor } from "../build/host/manifest.js";
 import { toHex, fromHex, bytesEqual } from "../build/host/util.js";
+import { plantBlock } from "./helpers.mjs";
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -40,7 +41,7 @@ function newKey(sodium) {
 }
 
 // Stand up `count` storage nodes on real TCP loopback sockets, each with its own
-// on-disk FsBlobStore, fully connected. Dial direction is canonical (lower pubkey
+// on-disk store.local directory, fully connected. Dial direction is canonical (lower pubkey
 // dials higher) so no pair double-connects.
 async function tcpCohort({ count, sodium, wasm, config, baseDir }) {
   const ids = Array.from({ length: count }, () => newKey(sodium));
@@ -61,9 +62,9 @@ async function tcpCohort({ count, sodium, wasm, config, baseDir }) {
   for (let i = 0; i < count; i++) {
     const dir = join(baseDir, `n${i}`);
     dirs.push(dir);
-    // Give the node a disk-backed fs; its default store is an FsBlobStore over that
-    // same fs, so what the confined guest holder writes via fs.* lands on disk and
-    // node.store reflects it (the store must share the fs the guest serves).
+    // Give the node a disk-backed fs; its default store view reads that same fs, so
+    // what the confined guest holder writes via fs.* lands on disk and node.store
+    // reflects it (the view must read the fs the guest serves).
     nodes.push(await StorageNode.create({
       network: nets[i], sodium, ...wasm, identity: ids[i], fs: new NodeFs(dir), config, timeoutMs: 3000,
     }));
@@ -79,40 +80,46 @@ export async function run(t) {
   const sodium = await loadSodium();
   const wasm = await loadWasmBytes();
 
-  // ── FsBlobStore ────────────────────────────────────────────────────────────
-  t.group("FsBlobStore: durable store.local backend (§12)");
+  // ── FsBlobView ─────────────────────────────────────────────────────────────
+  // A pure READ view of the durable store.local layout (§12): the write half —
+  // admission, the §14 quota, the <hex>.blk/.dsc writes — belongs to the confined
+  // guest holder alone (protocol.test.mjs drives it over the real wire). So this
+  // writes the layout the way the guest does, through `fs.*`, and checks the view
+  // reads it back.
+  t.group("FsBlobView: reading back the durable store.local layout (§12)");
   {
     const dir = mkdtempSync(join(tmpdir(), "seedstore-fs-"));
     try {
-      const store = new FsBlobStore(new NodeFs(dir), 1024);
-      const id = sodium.crypto_generichash(32, file(64, 2));
+      const fs = new NodeFs(dir);
+      const view = new FsBlobView(fs);
       const bytes = file(64, 2);
+      const id = sodium.crypto_generichash(32, bytes);
       const desc = new Uint8Array([9, 8, 7, 6]);
 
-      t.ok(!store.has(id), "absent before put");
-      store.put(id, bytes, desc);
-      t.ok(store.has(id), "present after put");
-      const got = store.get(id);
+      t.ok(!view.has(id), "absent before anything is written");
+      t.eq(view.usedBytes(), 0, "used starts at zero");
+
+      plantBlock(fs, toHex(id), bytes, desc);
+      t.ok(view.has(id), "present once the block is on the backend");
+      const got = view.get(id);
       t.ok(got && bytesEqual(got.bytes, bytes), "get returns the bytes");
-      t.ok(got && got.descriptor && bytesEqual(got.descriptor, desc), "descriptor persisted alongside");
-      t.eq(store.stat().used, bytes.length + desc.length, "used reflects ciphertext + descriptor size");
-      t.eq(store.list().length, 1, "list sees the one block");
+      t.ok(got && got.descriptor && bytesEqual(got.descriptor, desc), "descriptor read from the sibling .dsc");
+      t.eq(view.usedBytes(), bytes.length + desc.length, "used counts ciphertext + descriptor — what the holder charges (§14)");
+      t.eq(view.list().length, 1, "list sees the one block");
 
-      // Persistence: a fresh store over the same dir rebuilds its index.
-      const reopened = new FsBlobStore(new NodeFs(dir), 1024);
-      t.ok(reopened.has(id), "reopened store still has the block");
-      t.eq(reopened.stat().used, bytes.length + desc.length, "reopened used is correct (blks + dscs)");
-      const got2 = reopened.get(id);
-      t.ok(got2 && bytesEqual(got2.bytes, bytes), "reopened get returns the bytes");
+      // The view holds no index of its own, so it sees writes it did not make —
+      // which is the point: on a live node the guest is the one writing.
+      const bytes2 = file(32, 5);
+      const id2 = sodium.crypto_generichash(32, bytes2);
+      plantBlock(fs, toHex(id2), bytes2, null);
+      t.eq(view.list().length, 2, "a write made behind the view's back still shows up");
+      t.eq(view.get(id2).descriptor, null, "a bare block reads back with a null descriptor");
 
-      t.ok(store.delete(id), "delete reports removal");
-      t.ok(!store.has(id), "absent after delete");
-      t.eq(store.stat().used, 0, "used returns to zero");
-
-      // Quota is enforced exactly like MemoryBlobStore.
-      let threw = false;
-      try { store.put(id, file(2048), null); } catch { threw = true; }
-      t.ok(threw, "put past quota throws");
+      // Durability: a fresh view over the same directory sees the same blocks.
+      const reopened = new FsBlobView(new NodeFs(dir));
+      t.ok(reopened.has(id), "reopened view still has the block");
+      t.eq(reopened.usedBytes(), bytes.length + desc.length + bytes2.length, "reopened used is correct (blks + dscs)");
+      t.ok(bytesEqual(reopened.get(id).bytes, bytes), "reopened get returns the bytes");
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -165,7 +172,7 @@ export async function run(t) {
       for (let i = 1; i < nodes.length; i++) if (nodes[i].store.list().length > 0) { holderIdx = i; break; }
       t.ok(holderIdx > 0, "located a holder with blocks");
       const idsBefore = nodes[holderIdx].store.list().map(toHex).sort();
-      const cold = new FsBlobStore(new NodeFs(dirs[holderIdx]));
+      const cold = new FsBlobView(new NodeFs(dirs[holderIdx]));
       const idsAfter = cold.list().map(toHex).sort();
       t.eq(idsAfter.join(","), idsBefore.join(","), "cold reopen sees exactly the same block ids");
       const onDisk = readdirSync(dirs[holderIdx]).filter((f) => f.endsWith(".blk"));
@@ -186,7 +193,7 @@ export async function run(t) {
     const netB = new NodeNetwork({ identity: idB, sodium }); // browser-like: dials out only
     netB.addPeerAddr(toHex(idS.publicKey), { host: "127.0.0.1", port: netS.wsPort, transport: "ws" });
 
-    // Default store = FsBlobStore over each node's (in-RAM) fs, so S.store reflects
+    // Default store = FsBlobView over each node's (in-RAM) fs, so S.store reflects
     // what the confined guest holder writes via fs.* when B stores to it.
     const S = await StorageNode.create({ network: netS, sodium, ...wasm, identity: idS, timeoutMs: 3000 });
     const B = await StorageNode.create({ network: netB, sodium, ...wasm, identity: idB, timeoutMs: 3000 });

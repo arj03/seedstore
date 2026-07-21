@@ -54,7 +54,7 @@ const net = new RtcNetwork({
 });
 
 // A real StorageNode serving HAVE / OFFER / STORE / FETCH over the P2P links. Default
-// store is an in-RAM FsBlobStore.
+// store.local is an in-RAM fs, read back through the node's FsBlobView.
 node = await StorageNode.create({ network: net, sodium, ...wasm, identity, config, timeoutMs: 6000 });
 net.join(); // announce into the room → present peers begin the WebRTC handshake
 
@@ -85,8 +85,8 @@ const timer = setInterval(() => {
   for (const id of node.store.list().map(toHex)) {
     if (!known.has(id)) {
       known.add(id);
-      const { used } = node.store.stat();
-      console.log(`  ✓ stored block ${short(id)}  (${known.size} held, ${(used / 1024).toFixed(1)} KB)`);
+      const used = node.store.usedBytes();
+      console.log(`  ✓ stored block ${short(id)}  (${known.size} held, ${(used / 1024).toFixed(1)} KB of ${(node.quota / 1024 / 1024).toFixed(0)} MB)`);
     }
   }
 }, 300);

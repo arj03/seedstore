@@ -1,11 +1,15 @@
-// Storage host-service tests: the crypto primitives (§16) and the store.local
-// backend (§12). There are no storage-specific kernel bridges any more — the
-// codec no longer hashes through a crypto.hash service (it is a pure transform),
-// and the confined guest reaches crypto/net/fs/clock/module through seedkernel's
-// generic cap-bridge, so nothing storage-named is wired onto the kernel.
+// Storage host-service tests: the crypto primitives (§16). There are no
+// storage-specific kernel bridges any more — the codec no longer hashes through a
+// crypto.hash service (it is a pure transform), and the confined guest reaches
+// crypto/net/fs/clock/module through seedkernel's generic cap-bridge, so nothing
+// storage-named is wired onto the kernel.
+//
+// store.local is not tested here: the host holds only a read view of it now
+// (host/store-view.ts, covered in net.test.mjs), and the policy that fills it —
+// admission and the §14 quota — is the confined holder's, covered end-to-end over
+// the real wire in protocol.test.mjs.
 
 import { Crypto, DOMAIN_BODY, DOMAIN_MANIFEST } from "../build/host/crypto.js";
-import { MemoryBlobStore } from "../build/host/store-local.js";
 import { bytesEqual } from "../build/host/util.js";
 
 import { ensureSodium, newKey } from "./helpers.mjs";
@@ -49,24 +53,4 @@ export async function run(t) {
     void owner;
   }
 
-  t.group("store.local backend: put/get/has/delete/stat (§12)");
-  {
-    const store = new MemoryBlobStore(1024);
-    const id = crypto.hash(new TextEncoder().encode("a"));
-    const bytes = new Uint8Array([1, 2, 3, 4]);
-    const desc = new Uint8Array([9, 9]);
-    store.put(id, bytes, desc);
-    t.ok(store.has(id), "has after put");
-    const got = store.get(id);
-    t.ok(got && bytesEqual(got.bytes, bytes), "get returns bytes");
-    t.ok(got && got.descriptor && bytesEqual(got.descriptor, desc), "get returns descriptor");
-    t.eq(store.stat().used, bytes.length + desc.length, "used reflects ciphertext + descriptor bytes");
-    t.eq(store.list().length, 1, "list has one id");
-    t.ok(store.delete(id), "delete returns true");
-    t.ok(!store.has(id), "gone after delete");
-    // Quota refusal feeds admission control (§14).
-    let threw = false;
-    try { store.put(id, new Uint8Array(2000), null); } catch { threw = true; }
-    t.ok(threw, "put past quota throws");
-  }
 }
