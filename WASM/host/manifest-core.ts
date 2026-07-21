@@ -27,18 +27,29 @@ export const TAG_HEAD = 0x03;      // reserved: the §27.3 mutable file head (no
 
 // ── chunk descriptor ───────────────────────────────────────────────────────
 
+// `m` means the same thing for both kinds of chunk: **this chunk survives m losses**
+// (§4.1). How it buys that survival is the id count, and nothing else:
+//
+//   coded       blockIds.length === k + m   the k data + m parity blocks, one per peer
+//   replicated  blockIds.length === k       the k data blocks, each on r = m + 1 peers
+//
+// So a descriptor stays self-describing all the way to the durability target: a
+// repairer reads k, m, and the id count off the signed bytes and needs no deployment
+// config to know the shape, the replica count, or the low-water mark (§9).
 export interface Descriptor {
   k: number;            // data blocks (0..k are data rows)
-  m: number;            // parity blocks (k..n are parity rows); 0 for a replicated chunk
+  m: number;            // losses this chunk survives: m parity blocks, or m extra replicas
   blockSize: number;
-  blockIds: Uint8Array[]; // n = k + m ids, by generator-row index
+  blockIds: Uint8Array[]; // k + m ids by generator-row index (coded), or k ids (replicated)
 }
 
 /** The descriptor's signed core — the bytes the author signs over (§4.3). Leads with
  *  the descriptor format tag (§16). */
 export function encodeDescriptorCore(d: Descriptor): Uint8Array {
   const n = d.blockIds.length;
-  if (n !== d.k + d.m) throw new Error("descriptor: blockIds.length must equal k+m");
+  if (n !== d.k && n !== d.k + d.m) {
+    throw new Error("descriptor: blockIds.length must be k (replicated) or k+m (coded)");
+  }
   const head = new Uint8Array(1 + 1 + 1 + 4 + 1);
   head[0] = TAG_DESCRIPTOR; // leading format tag (§16)
   head[1] = d.k;
@@ -55,7 +66,7 @@ export function decodeDescriptorCore(core: Uint8Array): Descriptor {
   if (k < 1) throw new Error("descriptor: k must be >= 1");
   if (blockSize < 1) throw new Error("descriptor: blockSize must be >= 1");
   const n = core[7];
-  if (n !== k + m) throw new Error("descriptor: n != k+m");
+  if (n !== k && n !== k + m) throw new Error("descriptor: n must be k (replicated) or k+m (coded)");
   if (core.length !== 8 + n * BLOCK_ID_LEN) throw new Error("descriptor: truncated");
   const blockIds: Uint8Array[] = [];
   for (let i = 0; i < n; i++) blockIds.push(core.slice(8 + i * BLOCK_ID_LEN, 8 + (i + 1) * BLOCK_ID_LEN));
@@ -81,6 +92,61 @@ export function parseSignedDescriptor(env: Uint8Array): SignedDescriptor {
  *  accepts a block checks block_id ∈ block_ids (§4.3). */
 export function descriptorContains(d: Descriptor, blockId: Uint8Array): boolean {
   return d.blockIds.some((id) => bytesEqual(id, blockId));
+}
+
+// ── descriptor-derived geometry (§4.1, §8, §9) ───────────────────────────────
+// Everything a reader or a repairer needs beyond the ids themselves is computed from
+// the signed (k, m, id-count) here, so it can never be a deployment knob that drifts
+// out of step with the chunk it describes. A cohort running mixed geometry (§4.1) is
+// therefore repaired correctly chunk by chunk, from each chunk's own bytes.
+
+/** Replicated ⇔ the descriptor lists only its k data blocks, each destined for
+ *  r = m + 1 peers; coded ⇔ it lists all k + m blocks, one per peer (§4.1). (At m = 0
+ *  the two coincide — no parity and no second copy is the same zero-redundancy chunk.) */
+export function isReplicated(d: Descriptor): boolean {
+  return d.blockIds.length === d.k;
+}
+
+/** Copies of each *listed* block a healthy chunk wants on distinct peers: r = m + 1
+ *  replicas, or the single copy of each of a coded chunk's k + m blocks, whose
+ *  redundancy is the parity instead (§4.1, §10). */
+export function replicaTarget(d: Descriptor): number {
+  return isReplicated(d) ? d.m + 1 : 1;
+}
+
+/** The placement slots a chunk wants — one (block, distinct peer) target apiece, as
+ *  indices into blockIds (§6, §10). Coded: one slot per block. Replicated: r slots per
+ *  block, replica-major, so the first k slots are one whole copy and a thin cohort
+ *  fills a complete copy before starting a second. */
+export function slotIndices(d: Descriptor): number[] {
+  const out: number[] = [];
+  const r = replicaTarget(d);
+  for (let c = 0; c < r; c++) for (let i = 0; i < d.blockIds.length; i++) out.push(i);
+  return out;
+}
+
+/** The chunk's **loss margin**: how many further losses it survives right now, given
+ *  the live-holder count of each listed block (in blockIds order). Coded: any k of the
+ *  k + m blocks reconstruct, so the spare is live-blocks − k. Replicated: every listed
+ *  block is needed and each carries copies, so the spare is the fewest copies − 1.
+ *  Both are m on a fully-healthy chunk and 0 one loss from death — one health number
+ *  for both kinds of chunk (§8). */
+export function lossMargin(d: Descriptor, copies: number[]): number {
+  if (isReplicated(d)) {
+    let min = copies.length > 0 ? copies[0] : 0;
+    for (let i = 1; i < copies.length; i++) if (copies[i] < min) min = copies[i];
+    return min - 1;
+  }
+  let live = 0;
+  for (let i = 0; i < copies.length; i++) if (copies[i] > 0) live++;
+  return live - d.k;
+}
+
+/** The low-water mark, in loss margin: repair fires while the margin is below ⌈m/2⌉ —
+ *  half the redundancy spent — never waiting until the chunk is one loss from death
+ *  (§8, §9). For a coded chunk that is the familiar `live_blocks < k + ⌈m/2⌉`. */
+export function lowWaterMargin(d: Descriptor): number {
+  return Math.ceil(d.m / 2);
 }
 
 // ── manifest ─────────────────────────────────────────────────────────────

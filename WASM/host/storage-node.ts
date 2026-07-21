@@ -172,11 +172,11 @@ export class StorageNode {
     // verify prefix both come from it, so the two can never disagree (§16).
     this.signAuthor = opts.signAuthor ?? ZERO_AUTHOR;
     this.signScope = storageSignScope(this.signAuthor);
-    // Derive lowWater from the *caller's* k & m, then let any explicit field in
-    // opts.config override — otherwise overriding k/m alone would leave lowWater
-    // derived from the (2,2) default (e.g. an unreachable lowWater > n on the demo's
-    // RS(1,1)). replicas (m+1) and smallMaxBlocks are §4.1 math the guest computes
-    // from k/m, not config fields, so there is nothing to keep in sync here.
+    // Defaults under the caller's own (k, m, blockSize), with any explicit field
+    // overriding. Nothing here is *derived* from k/m: the replica count, the low-water
+    // mark, and smallMaxBlocks are all §4.1 math computed where they are used (from the
+    // signed descriptor, or from k/m in the guest), so overriding the geometry cannot
+    // leave a stale durability knob behind for them to disagree with.
     const c = opts.config;
     this.config = { ...defaultConfig(c?.k, c?.m, c?.blockSize), ...c };
     this.clockFn = opts.clock ?? (() => Date.now());
@@ -258,10 +258,11 @@ export class StorageNode {
   private appPreamble(): string {
     const c = this.config;
     // The APP injection is TOTAL: every value the guest reads is here and concrete —
-    // the guest reads APP and never falls back to a guessed default. replicas and
-    // smallMaxBlocks are absent because they are §4.1 math the guest derives from k/m.
+    // the guest reads APP and never falls back to a guessed default. The §4.1 durability
+    // math is absent because it is derived, not injected: smallMaxBlocks from k/m in the
+    // guest, and the replica count + low-water mark from each chunk's signed descriptor.
     const app = {
-      k: c.k, m: c.m, blockSize: c.blockSize, lowWater: c.lowWater,
+      k: c.k, m: c.m, blockSize: c.blockSize,
       // The holder side's byte budget (§14) — the same quota FsBlobStore enforces,
       // surfaced so the confined `handle` path admits exactly as the host store does.
       quota: this.store.stat().quota,

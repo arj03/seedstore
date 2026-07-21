@@ -283,7 +283,9 @@ path; same-machine tabs connect on host candidates without it.)
 - **bridges** — crypto host services, the `store.local` backend, and the
   capability gate end-to-end via seedkernel's forwarder fixture (§8.2).
 - **manifest** — descriptor/manifest round trips, author signature is
-  tamper-evident, manifest encrypt + `manifest_id` stability.
+  tamper-evident, manifest encrypt + `manifest_id` stability, and the one-model
+  descriptor math: coded vs. replicated by id count, `r` = *m*+1, the placement
+  slots, and the loss margin agreeing for both kinds at production geometry.
 - **protocol** — the batched OFFER/FETCH wire (`host/protocol.ts`): self-delimiting
   offer entries, the per-block accept mask, FETCH present/absent blocks, and a
   holder admitting a whole OFFER batch at once — the §6 sibling rule declines a
@@ -293,9 +295,10 @@ path; same-machine tabs connect on host candidates without it.)
   disagrees with the bytes in hand is declined by the holder.
 - **reputation** — passes raise / misses penalize / scores decay with a half-life.
 - **storage** (multi-node loopback) — PUT→GET, small-file replication, offline
-  tolerance (any *k* of *n*), repair restoring redundancy after loss, sharing a
-  sealed key, crypto-shredding, reciprocity from served fetches (the host-side
-  reference path).
+  tolerance (any *k* of *n*), repair restoring redundancy after loss (including a
+  mixed-geometry cohort, where a holder configured RS(1,1) still heals an RS(1,4)
+  chunk back to the *r* = 5 its descriptor signs), sharing a sealed key,
+  crypto-shredding, reciprocity from served fetches.
 - **concurrency** — PUT/GET round-trip economy over a *latency-bearing* link:
   OFFER/STORE/FETCH are batched and windowed *per holder* rather than issued per
   block, so wall-clock tracks round-trip-count × RTT — the cost the zero-latency
@@ -472,15 +475,26 @@ has no separate bulk frame kind, so block bytes ride ordinary req/res bodies
 (inside the encrypted record layer) and content-addressing stays the app-level
 admission check.
 
-PUT also places **best-effort**: it spreads a chunk's *n = k+m* blocks across as
+PUT also places **best-effort**: it spreads a chunk's placement slots across as
 many distinct holders as the cohort offers (one block per holder, the §6/§10
-sibling rule) and succeeds once at least *k* land, rather than requiring all *n*
-reachable up front. Redundancy then falls below RS(*k*,*m*) on a thin cohort and
-repair (§9) restores it as holders appear — which is what lets the browser demos
-store across just one or two holders. A deployment that must *guarantee* the full
-durability at write time would instead fail the PUT; the reference favours
-liveness. (A *k*=1 code is degenerate — an RS parity block comes out byte-
-identical to the lone data block — so it behaves as plain replication: the
-repeated block is placed on a second holder, and the returned block set counts
-each distinct id once. The browser demos use *k*=1 deliberately, since surviving
-the loss of a holder in a two- or three-node cohort means replication, not coding.)
+sibling rule) and succeeds once at least *k* distinct blocks land, rather than
+requiring every slot filled up front. Redundancy then falls below the chunk's
+target on a thin cohort and repair (§9) restores it as holders appear — which is
+what lets the browser demos store across just one or two holders. A deployment
+that must *guarantee* the full durability at write time would instead fail the
+PUT; the reference favours liveness.
+
+**Coded and replicated chunks are one model.** A chunk is *k* + *m* ids (coded,
+one block per holder) or *k* ids (replicated, each on *r* = *m*+1 holders), and
+both record the same *m* — "survives *m* losses" (§4.1). Placement expands either
+into the same list of slots, so `placeChunksBatched` fans both out identically;
+reads take any *k* listed blocks; and repair is one audit against one health
+number, the **loss margin**, healed back to whatever the chunk's own signed
+descriptor asks for. Nothing about durability is injected config: *r* and the
+low-water mark ⌈*m*/2⌉ are read off the descriptor (`replicaTarget` /
+`lowWaterMargin` in `manifest-core.ts`), so a repairer needs no deployment config
+and a mixed-geometry cohort heals each chunk to the count its author signed. The
+browser demos run *k*=1 deliberately — surviving the loss of a holder in a two- or
+three-node cohort means replication, not coding — and a *k*=1 chunk is simply the
+replicated shape, never an RS code whose parity would come out byte-identical to
+its lone data block.

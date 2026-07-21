@@ -13,8 +13,6 @@ export interface StorageConfig {
   k: number;
   m: number;
   blockSize: number;
-  /** Repair fires when live_blocks < lowWater; default k + ceil(m/2) (§8, §9). */
-  lowWater: number;
   /** How many per-holder STORE sub-batches a PUT pushes concurrently
    *  (putWindow) and per-holder FETCH sub-batches a GET pulls
    *  (getWindow). OFFER/STORE/FETCH are batched per holder, so the round-trip
@@ -76,13 +74,16 @@ export const PRODUCTION_BLOCK_SIZE = 256 * 1024;
  *  bundle producer, a demo page) must pass a real block size (PRODUCTION_BLOCK_SIZE);
  *  baking this default into a deployment chunks a 10 MB file into ~41k blocks. */
 export function defaultConfig(k = 2, m = 2, blockSize = 256): StorageConfig {
-  // replicas (r = m + 1) and smallMaxBlocks are NOT config fields — they are math
-  // derived from (k, m) per §4.1, computed in the guest, so they can't drift from k/m.
+  // (k, m, blockSize) is the whole of the durability dial. Everything derivable from it
+  // is derived where it is used and never carried here, so it cannot drift out of step:
+  // smallMaxBlocks in the guest (a write-side choice, §4.1), and the replica count
+  // r = m + 1 plus the low-water mark ⌈m/2⌉ from each chunk's own SIGNED descriptor
+  // (manifest-core's replicaTarget / lowWaterMargin), so a repairer needs no config
+  // at all and a mixed-geometry cohort repairs each chunk to what its author signed.
   return {
     k,
     m,
     blockSize,
-    lowWater: k + Math.ceil(m / 2),
     putWindow: DEFAULT_FANOUT_WINDOW,
     getWindow: DEFAULT_FANOUT_WINDOW,
     // ~1 MiB: a batch transfers well inside a typical request timeout and keeps a

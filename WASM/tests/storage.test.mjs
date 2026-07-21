@@ -163,12 +163,10 @@ export async function run(t) {
     const cfg = { k: 1, m: 1, blockSize: 64 };            // the p2p.html demo config
     const nodes = await createConnectedCohort({ count: 5, network: net, sodium, wasm, config: cfg, timeoutMs: TIMEOUT });
     const owner = nodes[0];
-    // Overriding k/m must re-derive lowWater, not keep the (2,2) default — an
-    // unreachable lowWater > n would make repair never settle. (replicas = m+1 is no
-    // longer a config field; the guest derives it — the "2 holders" checks below
-    // exercise that end-to-end.)
-    t.eq(owner.config.lowWater, 2, "lowWater re-derived for RS(1,1) (k + ceil(m/2))");
-
+    // Nothing about durability is a config field any more: r = m+1 and the low-water
+    // mark come off each chunk's signed descriptor, so overriding k/m cannot leave a
+    // stale knob behind (an unreachable low-water would make repair never settle). The
+    // "2 holders" + idempotence checks below exercise both end-to-end.
     const data = file(256, 11);                            // 4 blocks → 4 RS(1,1) chunks
     const put = await owner.put(data);
     t.ok(!put.replicated, "a multi-block k=1 file windows (not the whole-file small path); each chunk is replicated (healReplicated)");
@@ -195,16 +193,15 @@ export async function run(t) {
 
   t.group("repair settles on a high-redundancy k=1 config (RS(1,4)) (§9)");
   {
-    // RS(1,4) is replication r=5: n=5, replicas=5, lowWater=3. Each chunk's lone id
-    // lives on 5 distinct holders. Repair must read the *full* live-holder set, never a
-    // capped sample: a sample of, say, 2 reads redundancy (min copies) 2 < lowWater 3 and
-    // would re-place on every pass, never settling. A freshly-PUT, fully-healthy file
-    // must therefore be a strict no-op for repair.
+    // RS(1,4) is replication r = m+1 = 5: each chunk's lone id lives on 5 distinct
+    // holders, giving a loss margin of 4 against a low-water margin of ceil(m/2) = 2.
+    // Repair must read the *full* live-holder set, never a capped sample: a sample of,
+    // say, 2 reads a margin of 1 < 2 and would re-place on every pass, never settling.
+    // A freshly-PUT, fully-healthy file must therefore be a strict no-op for repair.
     const net = new LoopbackNetwork();
     const cfg = { k: 1, m: 4, blockSize: 64 };
-    const nodes = await createConnectedCohort({ count: 7, network: net, sodium, wasm, config: cfg, timeoutMs: TIMEOUT }); // owner + 6 holders >= n=5
+    const nodes = await createConnectedCohort({ count: 7, network: net, sodium, wasm, config: cfg, timeoutMs: TIMEOUT }); // owner + 6 holders >= r=5
     const owner = nodes[0];
-    t.eq(owner.config.lowWater, 3, "lowWater re-derived for RS(1,4) (k + ceil(m/2))"); // replicas = m+1 = 5 is guest math now
     const data = file(256, 41);                            // 4 blocks → windowed (per-chunk replication)
     const put = await owner.put(data);
     t.ok(!put.replicated, "multi-block k=1 file windows; each chunk is replicated r=5 ways");
@@ -214,6 +211,44 @@ export async function run(t) {
     t.eq(replaced, 0, "repair places nothing on an already-healthy file (reads the full holder set, §9)");
     t.ok(bytesEqual(await owner.get(put.manifestId, put.key), data), "file still reads after the repair pass");
     nodes.forEach((n) => n.close());
+  }
+
+  t.group("mixed geometry: a replicated chunk is repaired to ITS OWN r, not the repairer's config (§4.1, §9)");
+  {
+    // §4.1 permits a cohort to run mixed geometry, because every chunk descriptor is
+    // self-describing. That promise only holds if the *replica target* is descriptor-math
+    // too: here the owner writes at RS(1,4) — r = m+1 = 5 copies, low-water margin
+    // ceil(4/2) = 2 — while every holder is configured RS(1,1), which for its own writes
+    // would be r = 2. A repairer reading r (and the low-water mark) off its own config
+    // sees 2 live copies of a 5-copy chunk, calls it healthy, and repairs nothing.
+    const net = new LoopbackNetwork();
+    const wasmOpts = { network: net, sodium, wasm, timeoutMs: TIMEOUT };
+    const owner = await StorageNode.create({ ...wasmOpts, codecBytes: wasm.codecBytes, reputationBytes: wasm.reputationBytes, guestSource: wasm.guestSource, config: { k: 1, m: 4, blockSize: 64 } });
+    const holders = [];
+    for (let i = 0; i < 7; i++) {
+      holders.push(await StorageNode.create({ ...wasmOpts, codecBytes: wasm.codecBytes, reputationBytes: wasm.reputationBytes, guestSource: wasm.guestSource, config: { k: 1, m: 1, blockSize: 64 } }));
+    }
+    const all = [owner, ...holders];
+    for (let i = 0; i < all.length; i++) for (let j = i + 1; j < all.length; j++) StorageNode.connect(all[i], all[j]);
+
+    const data = file(64, 47);                             // 1 block → the small replicated path
+    const put = await owner.put(data);
+    t.ok(put.replicated, "the owner wrote one replicated chunk at its own RS(1,4)");
+    t.eq(minHolders(all, net, put.blockIds), 5, "r = m+1 = 5 copies of every block, per the WRITER's geometry");
+
+    // Lose three copies of the chunk's block: margin 5−1 = 4 drops to 1, under the
+    // descriptor's low-water margin of 2.
+    const chunkId = put.blockIds[0];
+    const held = holders.filter((n) => n.store.has(chunkId));
+    for (const n of held.slice(0, 3)) net.setOnline(n.peerId, false);
+    t.eq(minHolders(all, net, [chunkId]), 2, "two copies live — healthy under the repairer's own RS(1,1), not under the chunk's");
+
+    let replaced = 0;
+    for (const n of holders) if (net.isOnline(n.peerId)) replaced += await n.runRepair();
+    t.ok(replaced > 0, `a differently-configured holder still healed the chunk (placed=${replaced})`);
+    t.ok(minHolders(all, net, [chunkId]) > 2, `copies restored toward the descriptor's r=5 (now ${minHolders(all, net, [chunkId])})`);
+    t.ok(bytesEqual(await owner.get(put.manifestId, put.key), data), "the file still reads after the mixed-geometry repair");
+    all.forEach((n) => n.close());
   }
 
   t.group("startRepairLoop runs repair on a jittered interval, then settles (§9)");

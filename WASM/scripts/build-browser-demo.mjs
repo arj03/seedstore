@@ -180,9 +180,15 @@ for (const [pkg, sub, dest, files, allMjs] of VENDOR) {
 // on the holders: the browser needs the author, not megabytes of bundle contents.
 const bundleBlob = [join(root, "bundle", "seedstore.skb"), join(build, "bundle", "seedstore.skb")]
   .find((p) => existsSync(p));
+let bundleManifest = false;
 if (bundleBlob) {
   const files = unpackBundle(new Uint8Array(readFileSync(bundleBlob)));
-  if (files[MANIFEST_FILE]) writeFileSync(join(out, MANIFEST_FILE), files[MANIFEST_FILE]);
+  if (files[MANIFEST_FILE]) {
+    const dst = join(out, MANIFEST_FILE);
+    writeFileSync(dst, files[MANIFEST_FILE]);
+    staged.add(resolve(dst)); // it is unpacked, not copy()'d, so register it or prune eats it
+    bundleManifest = true;
+  }
 }
 
 // Every browser page, into the one dir.

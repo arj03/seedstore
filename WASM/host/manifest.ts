@@ -30,6 +30,7 @@ export {
   BLOCK_ID_LEN, ENC_XCHACHA20,
   encodeDescriptorCore, decodeDescriptorCore, parseSignedDescriptor,
   descriptorContains, encodeManifest, decodeManifest,
+  isReplicated, replicaTarget, slotIndices, lossMargin, lowWaterMargin,
 } from "./manifest-core.js";
 export type { Descriptor, SignedDescriptor, Manifest } from "./manifest-core.js";
 

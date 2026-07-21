@@ -185,9 +185,10 @@ const net = new WsNetwork({
   onPeerDown: (pid) => { node?.removePeer(pid); peerUp.delete(pid); console.log(`link DOWN: ${pid.slice(0, 8)}…`); },
 });
 
-// Base on defaultConfig so lowWater and the fan-out/window defaults are set for the
-// chosen k/m (replicas = m+1 and smallMaxBlocks are §4.1 math the guest derives). The
-// injection is total — a partial config would feed the strict guest an undefined knob.
+// Base on defaultConfig so the fan-out/window defaults are all set (the §4.1 durability
+// math — smallMaxBlocks, r = m+1, the low-water mark — is derived from k/m and from each
+// chunk's signed descriptor, never config). The injection is total — a partial config
+// would feed the strict guest an undefined knob.
 const config = { ...defaultConfig(kParam, mParam, blockSize), maxMessageBytes, putWindow: windowN, getWindow: windowN,
   ...(wtargetMB > 0 ? { windowTargetBytes: Math.round(wtargetMB * 1024 * 1024) } : {}),
   ...(heapMB > 0 ? { realmMemoryBytes: Math.round(heapMB * 1024 * 1024) } : {}) };
