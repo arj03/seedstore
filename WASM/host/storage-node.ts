@@ -51,13 +51,32 @@ import { storageNames, type StorageNames } from "./names.js";
 import { type Identity, type StorageConfig, defaultConfig } from "./core.js";
 import { STORAGE_APP, ZERO_AUTHOR, storageSignScope } from "./manifest.js";
 import { encodeScoreReq } from "./reputation-core.js";
-import { toHex, readU32BE, writeU32BE, writeU64BE, readU64BE, concatBytes } from "./util.js";
+import { toHex, readU32BE, writeU64BE, readU64BE, concatBytes } from "./util.js";
 
-// Fresh-array constructors for the windowed PUT/GET host seam: they frame the length-
-// prefixed arguments the streaming entries read. The u32/u64 read+write primitives live
-// in util.ts (readU64BE is imported above); these just allocate one field's worth.
-function u32be(n: number): Uint8Array { const b = new Uint8Array(4); writeU32BE(b, 0, n); return b; }
+const NO_ARG = new Uint8Array(0);
+/** The one scalar the host frames for the guest: the file size that opens a PUT stream.
+ *  Everything else about a stream lives in the guest's own realm state, so there is no
+ *  other length-prefixed argument to build here. */
 function u64be(n: number): Uint8Array { const b = new Uint8Array(8); writeU64BE(b, 0, n); return b; }
+
+/** Decode the guest's PUT result — the single result format every driver reads
+ *  (`encodePutResult` in tier2-guest.orchestration.js):
+ *  [manifestId 32][replicated u8][chunkCount u32][K 32][placed u32][intended u32]
+ *  [idCount u32]{id 32}. */
+function decodePutResult(r: Uint8Array): PutResult {
+  const blockIds: Uint8Array[] = [];
+  const idCount = readU32BE(r, 77);
+  for (let i = 0; i < idCount; i++) blockIds.push(r.slice(81 + i * 32, 81 + (i + 1) * 32));
+  return {
+    manifestId: r.slice(0, 32),
+    replicated: r[32] === 1,
+    chunkCount: readU32BE(r, 33),
+    key: r.slice(37, 69),
+    replicasLanded: readU32BE(r, 69),
+    replicasIntended: readU32BE(r, 73),
+    blockIds,
+  };
+}
 
 /** PUT result: the manifest root, the per-file content key K, and where the
  *  file landed (every distinct block id placed + the manifest, in placement
@@ -147,11 +166,11 @@ export class StorageNode {
   private readonly signScope: Uint8Array;
   private repairLoopOn = false;
   private repairTimer: ReturnType<typeof setTimeout> | null = null;
-  // The tail of the initiator call chain (put/get/repair). runInitiator chains every
-  // call onto it, so they run strictly one at a time (see there) and close() can await
-  // the whole chain — not just the most recent window call — before disposing the realm.
-  // `closed` short-circuits any call arriving after close() with a clean rejection
-  // instead of a mid-flight "realm disposed" error.
+  // The tail of the initiator operation chain (put/get/repair/warm). runExclusive chains
+  // each whole operation onto it, so they run strictly one at a time (see there) and
+  // close() can await the chain — not just the most recent window call — before disposing
+  // the realm. `closed` short-circuits any operation raised after close() with a clean
+  // rejection instead of a mid-flight "realm disposed" error.
   private inFlight: Promise<unknown> = Promise.resolve();
   private closed = false;
 
@@ -317,92 +336,96 @@ export class StorageNode {
   }
 
   // ── PUT / GET / repair / share (§6, §7, §9, §4.4) — all run in the guest ──
-  /** Run one initiator entrypoint via the realm's async call(), recording it as
-   *  in-flight so close() can await it before disposing the realm (disposing while a call
-   *  is parked mid-await — a repair pass caught by close, waiting out an unreachable
-   *  peer's timeout — would resume into a freed realm: a QuickJS UseAfterFree abort). */
-  private async runInitiator(entry: string, payload: Uint8Array): Promise<Uint8Array> {
-    if (this.closed) throw new Error("storage node closed");
-    const realm = this.realm;
-    // Chain onto the previous call so the initiator runs strictly one at a time.
-    // Concurrent call()s on one realm are now safe (the async seam consumes the arg
-    // before the first await, so they never clobber), so this is no longer required for
-    // correctness — but it keeps a put and a repair pass from competing for the link, and
-    // it keeps `inFlight` a true tail: close() awaits the whole chain, so an earlier
-    // parked call can't resume into a freed realm (the streamed design issues many window
-    // calls per operation, so an interleave is easy to hit).
-    const p = this.inFlight.then(() => realm.call(entry, payload));
+  /** Run one initiator OPERATION — a whole streamed PUT or GET, not a single realm call —
+   *  with exclusive use of the realm, recording it as in-flight so close() can await it
+   *  before disposing (disposing while a call is parked mid-await — a repair pass caught
+   *  by close, waiting out an unreachable peer's timeout — would resume into a freed
+   *  realm: a QuickJS UseAfterFree abort).
+   *
+   *  Exclusive for the whole operation, not per call, because the guest keeps a stream's
+   *  protocol state (K, the running offset, the descriptors placed so far) in realm state
+   *  rather than round-tripping it through the host: two overlapping streams in one realm
+   *  would clobber each other. Chaining whole operations is what makes that single
+   *  implicit session safe by construction — and, as before, it keeps a PUT and a repair
+   *  pass from competing for the link. */
+  private runExclusive<T>(body: () => Promise<T>): Promise<T> {
+    if (this.closed) return Promise.reject(new Error("storage node closed"));
+    const p = this.inFlight.then(body);
     this.inFlight = p.then(() => {}, () => {});
     return p;
   }
 
-  /** PUT a file (§6), orchestrated in the guest via the realm's async `call()`, STREAMED so the
-   *  confined guest heap never holds the whole file (README §3): the plaintext is
-   *  fed one chunk-aligned window at a time and each window's ciphertext is placed
-   *  and dropped before the next is sent. putStart mints K and reports the window
-   *  size; putWindow/putSmall place each window and return its chunk descriptors;
-   *  putManifest seals the manifest over them. The result is assembled here. */
+  /** PUT a file (§6), orchestrated in the guest, STREAMED so the confined guest heap never
+   *  holds the whole file (README §3): putStart opens the stream and reports the plaintext
+   *  window size, putWindow feeds each slice in file order — its ciphertext placed and
+   *  dropped before the next crosses — and putFinish seals the manifest and reports the
+   *  result. K, the chunk descriptors and the replica accounting stay in the guest, so the
+   *  host ships plaintext in and reads one result out, and re-encodes no protocol format. */
   async put(plaintext: Uint8Array): Promise<PutResult> {
-    const fileSize = plaintext.length;
-    const meta = await this.runInitiator("putStart", u64be(fileSize));
-    const key = meta.slice(0, 32);
-    const replicated = meta[32] === 1;
-    const windowBytes = readU32BE(meta, 33);
-
-    const descriptors: Uint8Array[] = [];
-    const blockIds: Uint8Array[] = [];
-    let replicasLanded = 0, replicasIntended = 0;
-    // Decode one window's result:
-    //   [descCount u32]{[len u32][descriptor]}[idCount u32]{id 32}[placed u32][intended u32]
-    const collect = (w: Uint8Array) => {
-      let o = 0;
-      const dc = readU32BE(w, o); o += 4;
-      for (let i = 0; i < dc; i++) { const l = readU32BE(w, o); o += 4; descriptors.push(w.slice(o, o + l)); o += l; }
-      const ic = readU32BE(w, o); o += 4;
-      for (let i = 0; i < ic; i++) { blockIds.push(w.slice(o, o + 32)); o += 32; }
-      replicasLanded += readU32BE(w, o); o += 4;
-      replicasIntended += readU32BE(w, o); o += 4;
-    };
-
-    if (replicated) {
-      collect(await this.runInitiator("putSmall", concatBytes([key, plaintext])));
-    } else {
-      for (let off = 0; off < fileSize; off += windowBytes) {
-        const slice = plaintext.subarray(off, Math.min(off + windowBytes, fileSize));
-        collect(await this.runInitiator("putWindow", concatBytes([key, u64be(off), slice])));
+    return this.runExclusive(async () => {
+      const meta = await this.realm.call("putStart", u64be(plaintext.length));
+      const windowBytes = readU32BE(meta, 0);
+      // ── THE THROUGHPUT CEILING, if you are here to make PUT faster ──────────────
+      // This `await` is a full BARRIER: a window's every OFFER → STORE → ack must settle
+      // before the next window's first byte is encoded. Nothing is in flight across the
+      // seam, so the wire goes IDLE for the encode+place of window n+1 — and idles again
+      // per window, for as many windows as the file has.
+      //
+      // Measured live (2× 50 MB to two WS holders over a ~100 Mbit up link, RS(1,1),
+      // 24 MiB window, conns 2). p2p-cli prints four CUMULATIVE TIMESTAMPS; the signature
+      // is `drain` landing well BEFORE `queue`:
+      //
+      //     encode  ~300 ms   first bulk frame handed to a socket
+      //     queue  ~12–13.5 s LAST bulk frame handed to a socket
+      //     drain   ~7–8.3 s  socket buffers last seen non-empty  ← BEFORE queue ends
+      //     settle ~13–14.6 s last STORE response
+      //
+      // Buffers ran dry ~60% of the way through the send, i.e. the back half of the PUT
+      // was WIRE-STARVED — the link was waiting on us. The clincher is `peak buffered`
+      // pinning at exactly 42.0 MB on both runs: that is ~one window's ciphertext, so
+      // in-flight bytes are bounded by the WINDOW, not by the link or the receiver.
+      // Result ≈ 6.8–7.6 MB/s wire against a path iperf3 shows carrying 106 Mbit
+      // (≈13 MB/s) on 4 flows — roughly half the link, left on the floor.
+      //
+      // Widening the window (`windowTargetBytes`) only makes the idle gaps fewer, not
+      // shorter, and costs guest heap (peak ≈ 3× window at RS(1,1)). The actual fix is to
+      // stop making them barriers — overlap window n+1's encode/place with window n's
+      // acks, so a second window is always queued behind the one draining. That needs the
+      // guest's putStream to tolerate two open windows (today one implicit session is what
+      // makes runExclusive's whole-operation chaining safe — see runExclusive above), so
+      // it is a guest-side change, NOT a host-side one, and NOT more sockets: `conns`
+      // already helps only once the window stops idling the wire.
+      //
+      // Do NOT read p2p-cli's printed "MB/s upload" as evidence the link is saturated: it
+      // divides ALL bulk bytes by (drain − encode), a span that by definition did not
+      // carry them all whenever drain < queue, so it over-reports (15.1 MB/s printed vs
+      // ≈7.8 actual on run 1).
+      // ───────────────────────────────────────────────────────────────────────────
+      // At least one window always goes in, so a zero-length file is still a PUT.
+      for (let off = 0; ; off += windowBytes) {
+        await this.realm.call("putWindow", plaintext.subarray(off, Math.min(off + windowBytes, plaintext.length)));
+        if (off + windowBytes >= plaintext.length) break;
       }
-    }
-
-    const manParts: Uint8Array[] = [key, u64be(fileSize), u32be(descriptors.length)];
-    for (const d of descriptors) manParts.push(u32be(d.length), d);
-    const manifestId = await this.runInitiator("putManifest", concatBytes(manParts));
-    blockIds.push(manifestId);
-    return { manifestId, replicated, chunkCount: descriptors.length, key, blockIds, replicasLanded, replicasIntended };
+      return decodePutResult(await this.realm.call("putFinish", NO_ARG));
+    });
   }
 
-  /** GET a file (§7), orchestrated in the guest via the realm's async `call()`, STREAMED so the guest
-   *  reconstructs only one window of chunks at a time; the file is assembled here.
-   *  getStart fetches + verifies the manifest and returns the file size, a window
-   *  granularity, and every chunk descriptor; getChunk reconstructs each window. */
+  /** GET a file (§7), orchestrated in the guest, STREAMED so the guest reconstructs only
+   *  one window of chunks at a time; the file is assembled here. getStart fetches the
+   *  manifest and verifies every chunk descriptor once, keeping them in realm state;
+   *  getNext then drains the file one window of plaintext at a time. */
   async get(manifestId: Uint8Array, key: Uint8Array): Promise<Uint8Array> {
-    const start = await this.runInitiator("getStart", concatBytes([manifestId, key]));
-    const fileSize = readU64BE(start, 0);
-    const windowChunks = readU32BE(start, 8);
-    const chunkCount = readU32BE(start, 12);
-    let o = 16;
-    const envs: Uint8Array[] = [];
-    for (let i = 0; i < chunkCount; i++) { const l = readU32BE(start, o); o += 4; envs.push(start.slice(o, o + l)); o += l; }
-
-    const out = new Uint8Array(fileSize);
-    let written = 0;
-    for (let cs = 0; cs < chunkCount; cs += windowChunks) {
-      const windowEnvs = envs.slice(cs, cs + windowChunks);
-      const parts: Uint8Array[] = [key, u32be(cs), u64be(fileSize), u32be(windowEnvs.length)];
-      for (const e of windowEnvs) parts.push(u32be(e.length), e);
-      const chunk = await this.runInitiator("getChunk", concatBytes(parts));
-      out.set(chunk, written); written += chunk.length;
-    }
-    return out;
+    return this.runExclusive(async () => {
+      const fileSize = readU64BE(await this.realm.call("getStart", concatBytes([manifestId, key])), 0);
+      const out = new Uint8Array(fileSize);
+      let written = 0;
+      while (written < fileSize) {
+        const part = await this.realm.call("getNext", NO_ARG);
+        if (part.length === 0) throw new Error(`get: stream ended ${written}/${fileSize} bytes in`);
+        out.set(part, written); written += part.length;
+      }
+      return out;
+    });
   }
 
   /** Pre-warm the realm's codec + crypto caps with a throwaway encode/decode (no
@@ -412,14 +435,14 @@ export class StorageNode {
    *  calls it once after connecting; a pure holder (which only ever serves via callSync)
    *  need not. */
   async warm(): Promise<void> {
-    await this.runInitiator("warm", new Uint8Array(0));
+    await this.runExclusive(() => this.realm.call("warm", NO_ARG));
   }
 
   /** Run one repair pass over every chunk this node holds a block of (§9),
    *  orchestrated in the guest via the realm's async `call()`. Returns the number of blocks
    *  (re-)placed. */
   async runRepair(): Promise<number> {
-    return readU32BE(await this.runInitiator("repair", new Uint8Array(0)), 0);
+    return readU32BE(await this.runExclusive(() => this.realm.call("repair", NO_ARG)), 0);
   }
 
   /** Decayed reciprocity score this node holds for a peer (§13), read from the
@@ -479,9 +502,10 @@ export class StorageNode {
   /** Tear down the guest realm + the transport, stopping the repair loop if
    *  running (test cleanup). */
   close(): void {
-    this.closed = true; // reject any initiator call raised after this (e.g. the next window
-                        // of a mid-flight streamed put) cleanly, rather than letting it hit
-                        // the freed realm — a diagnosable "storage node closed", not a crash.
+    this.closed = true; // reject any initiator operation raised after this cleanly, rather
+                        // than letting it hit the freed realm — a diagnosable "storage node
+                        // closed", not a crash. An operation already under way keeps its
+                        // window calls (its stream is mid-flight); disposal waits for it.
     this.stopRepairLoop();
     // Close the transport first so any parked initiator round trip settles (times out as
     // unreachable) rather than hanging, and no new holder request arrives (so no callSync
