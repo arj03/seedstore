@@ -4,7 +4,8 @@
 // Given a kernel host + author key + the build dir, it writes the bundle: one signed
 // blob holding each module's wasm, the guest, and the signed manifest envelope. The
 // manifest commits to every module's genesisHash, so the shell installs the verified
-// bytes directly under the declared kernel name (seedkernel §12.4).
+// bytes at the kernel name it derives from the signed `(app, name)` pair — the manifest
+// declares no bind name (seedkernel §12.4, §5.1).
 //
 // Three deliberate choices live here, once:
 //   • `caps` declares capability *domains* (cap-bridge CAP_DOMAINS keys), not op
@@ -24,9 +25,8 @@
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 
-import { signManifest, packBundle, MANIFEST_FILE, GUEST_FILE, moduleFile }
+import { signManifest, packBundle, genesisHash, MANIFEST_FILE, GUEST_FILE, moduleFile }
   from "seedkernel-wasm/bundle";
-import { storageNames } from "../build/host/names.js";
 import { defaultConfig, PRODUCTION_BLOCK_SIZE } from "../build/host/core.js";
 import { toHex } from "../build/host/util.js";
 
@@ -43,8 +43,7 @@ const STORAGE_CAPS = ["crypto", "net", "fs", "module", "clock"];
  * Write a complete signed seedstore bundle to `path` (one blob, seedkernel §12.4).
  * @param {object} o
  * @param {string} o.path     output bundle file (e.g. ./bundle/seedstore.skb)
- * @param {any}    o.host     a loaded KernelHost with the signature handler registered
- * @param {any}    o.sodium   loaded libsodium
+ * @param {any}    o.sodium   loaded libsodium (hashes the module bytes; signs the manifest)
  * @param {Uint8Array} o.sk   author secret key (signs the manifest)
  * @param {Uint8Array} o.pk   author public key
  * @param {string} o.build    seedstore build/ dir (holds the codec wasm + staged guest)
@@ -53,31 +52,32 @@ const STORAGE_CAPS = ["crypto", "net", "fs", "module", "clock"];
  * @param {(s:string)=>void} [o.log]  optional progress logger
  * @returns the manifest object that was signed (for logging/inspection).
  */
-export function writeStorageBundle({ path, host, sodium, sk, pk, build, version = 1, log = () => {} }) {
+export function writeStorageBundle({ path, sodium, sk, pk, build, version = 1, log = () => {} }) {
   if (!Number.isInteger(version)) throw new Error("writeStorageBundle: version must be an integer");
-  const names = storageNames(host);
-  const modSpecs = [
-    { name: "codec", kernelName: names.codec },
-    { name: "reputation", kernelName: names.reputation },
-  ];
+  // The two modules by logical name. That name is all the manifest carries: the loader
+  // derives the kernel name each binds at from `(app, name)` (seedkernel §5.1), so there
+  // is no bind name to state here and none to drift from what the runtime does.
+  const modSpecs = ["codec", "reputation"];
   // Files inside the bundle blob, keyed by the names §12.4 derives — a module lives in
   // `<name>.wasm` and the guest in `guest.js`, so the manifest names no filenames.
   const files = {};
 
   // The two pure handlers (§17). The manifest commits to each module's genesisHash;
-  // the shell verifies the bytes against it and installs them directly under
-  // `kernelName`, re-checking author + module hash under the same policy gate
-  // (seedkernel §12.4).
-  const modules = modSpecs.map((m) => {
+  // the shell verifies the bytes against it and installs them at the name it derives
+  // from the signed `(app, name)` pair, re-checking author + module hash under the same
+  // policy gate (seedkernel §12.4).
+  const modules = modSpecs.map((name) => {
     // The build dir still stages each module as <name>.wasm, which is also its name
     // inside the bundle.
-    const wasm = new Uint8Array(readFileSync(join(build, moduleFile(m.name))));
-    files[moduleFile(m.name)] = wasm;
+    const wasm = new Uint8Array(readFileSync(join(build, moduleFile(name))));
+    files[moduleFile(name)] = wasm;
     // hash = genesisHash(wasm): the `bytes_hash` a policy.modules allowlist matches
     // (seedkernel §7.1) and the manifest module `hash` the loader checks the bytes against.
-    const hash = toHex(host.genesisHash(wasm));
-    log(`  ${m.name}: bytesHash ${hash}`);
-    return { name: m.name, hash, kernelName: m.kernelName };
+    // Hashing lives in the bundle module now (a free `genesisHash(sodium, …)`), not on the
+    // host — the kernel table touches no crypto.
+    const hash = toHex(genesisHash(sodium, wasm));
+    log(`  ${name}: bytesHash ${hash}`);
+    return { name, hash };
   });
 
   // The zero-authority orchestration guest, shipped *minified* (the shell injects
@@ -104,7 +104,7 @@ export function writeStorageBundle({ path, host, sodium, sk, pk, build, version 
     // one place (seedkernel §12.4). A bundle with no `guest` is a bundle with no
     // authority; storage has one, so it declares both.
     guest: {
-      hash: toHex(host.genesisHash(files[GUEST_FILE])),
+      hash: toHex(genesisHash(sodium, files[GUEST_FILE])),
       // The enforced capability grant (domains, not op numbers). The guest's op ABI
       // is the CAP_* preamble the shell injects at load, not a signed catalog.
       caps: [...STORAGE_CAPS],

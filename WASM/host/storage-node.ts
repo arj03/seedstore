@@ -46,11 +46,10 @@ import { Transport } from "seedkernel-wasm/net";
 import { MemoryFs, type Fs } from "seedkernel-wasm/fs";
 import { FsBlobView, type BlobView } from "./store-view.js";
 import { Crypto } from "./crypto.js";
-import { storageNames, type StorageNames } from "./names.js";
 import {
   type Identity, type StorageConfig, defaultConfig, assertStorageConfig, DEFAULT_QUOTA_BYTES,
 } from "./core.js";
-import { STORAGE_APP, ZERO_AUTHOR, storageSignScope } from "./manifest.js";
+import { STORAGE_APP, storageModules, ZERO_AUTHOR, storageSignScope } from "./manifest.js";
 import { encodeScoreReq } from "./reputation-core.js";
 import { toHex, readU32BE, writeU64BE, readU64BE, concatBytes } from "./util.js";
 
@@ -164,7 +163,6 @@ export class StorageNode {
   readonly sodium: Sodium;
   readonly config: StorageConfig;
   readonly host: KernelHost;
-  readonly names: StorageNames;
 
   private readonly peers = new Set<PeerId>();
   private readonly clockFn: () => number;
@@ -172,6 +170,9 @@ export class StorageNode {
   /** The bundle author this node's signing scope is derived from (§16). */
   private readonly signAuthor: Uint8Array;
   private readonly signScope: Uint8Array;
+  /** The kernel names this node's two handlers bind at — derived from `signAuthor`
+   *  (§5.1), so they match a bundle-loaded node running under the same author. */
+  private readonly modules: { codec: string; reputation: string };
   private repairLoopOn = false;
   private repairTimer: ReturnType<typeof setTimeout> | null = null;
   // The tail of the initiator operation chain (put/get/repair/warm). runExclusive chains
@@ -199,6 +200,9 @@ export class StorageNode {
     // verify prefix both come from it, so the two can never disagree (§16).
     this.signAuthor = opts.signAuthor ?? ZERO_AUTHOR;
     this.signScope = storageSignScope(this.signAuthor);
+    // The handlers' kernel names fold in that same author (§5.1), so this node and a
+    // bundle-loaded node under the same author reach codec/reputation by the same name.
+    this.modules = storageModules(this.signAuthor);
     // Defaults under the caller's own (k, m, blockSize), with any explicit field
     // overriding. Nothing here is *derived* from k/m: the replica count, the low-water
     // mark, and smallMaxBlocks are all §4.1 math computed where they are used (from the
@@ -214,7 +218,6 @@ export class StorageNode {
     this.fs = opts.fs ?? new MemoryFs();
     this.quota = opts.quota ?? DEFAULT_QUOTA_BYTES;
     this.store = opts.store ?? new FsBlobView(this.fs);
-    this.names = storageNames(host);
     this.transport = new Transport(this.peerId, opts.network, opts.timeoutMs ?? 200);
   }
 
@@ -223,14 +226,13 @@ export class StorageNode {
    *  incoming requests to the guest's `handle` (§19, §2.1). */
   static async create(opts: StorageNodeOptions): Promise<StorageNode> {
     await opts.sodium.ready;
-    const host = new KernelHost(opts.sodium as never);
-    // Single-deployment reference posture: admit audited handler bytes from any
-    // author. A real deployment narrows this to a content-hash allowlist + closed
-    // author set — that is exactly `buildAdmit(policy)` on the shell's boot path
-    // (§12.5, §19). Capabilities are no longer install-declared — the JS sandbox is
-    // the confinement, so the policy governs WHO may bind a name only. Admission is
-    // deny-all until this runs, so it is what lets installHandlers land anything.
-    host.setAdmitPolicy(() => true);
+    // The kernel is just the handler table now — it touches no crypto and holds no
+    // admission policy. A host-side StorageNode authors its own handlers and binds them
+    // directly (installWasmHandler); admission is the bundle loader's concern (§12.4,
+    // §12.5), which a real shell deployment narrows to a content-hash allowlist + closed
+    // author set via `buildAdmit(policy)`. Confinement is the JS sandbox, not an
+    // install-time capability declaration.
+    const host = new KernelHost();
 
     const identity = opts.identity ?? (() => {
       const kp = opts.sodium.crypto_sign_keypair();
@@ -311,8 +313,11 @@ export class StorageNode {
   }
 
   /** The `const BUNDLE = {…};` block (seedkernel §12.4): the facts a runtime derives
-   *  about the app it is running — here from this node's own author + names rather than
-   *  from an admitted manifest, since a host-side StorageNode has no bundle behind it.
+   *  about the app it is running — here from this node's own author (both the preamble
+   *  `author` and, folded into the module names, `this.modules`) rather than from an
+   *  admitted manifest, since a host-side StorageNode has no bundle behind it. Those names
+   *  come from seedkernel's own `kernelNameFor`, so the guest sees the same `BUNDLE.modules`
+   *  either way.
    *  Built by the SHARED `bundlePreamble`, so the signing prefix it injects is the same
    *  bytes, from the same derivation, that a shell running the seedstore bundle injects
    *  — which is what makes a descriptor signed on one verify on the other. */
@@ -320,7 +325,7 @@ export class StorageNode {
     return bundlePreamble({
       app: STORAGE_APP,
       author: this.signAuthor,
-      modules: { codec: this.names.codec, reputation: this.names.reputation },
+      modules: { ...this.modules },
     });
   }
 
@@ -467,7 +472,7 @@ export class StorageNode {
    *  installed reputation handler — the same state the guest's verification-fetch
    *  observations write (the guest reaches it the same way, via MODULE_CALL). */
   score(peerPk: Uint8Array): number {
-    const res = this.host.callHandler(this.names.reputation, encodeScoreReq(peerPk, this.now()));
+    const res = this.host.callHandler(this.modules.reputation, encodeScoreReq(peerPk, this.now()));
     if (!res || res.length < 8) return 0;
     return new DataView(res.buffer, res.byteOffset, 8).getFloat64(0, true);
   }
@@ -545,20 +550,21 @@ export class StorageNode {
     // them as installed handlers via MODULE_CALL, and computes block-ids itself
     // via the cap-bridge hash (CAP_HASH) — the codec no longer hashes, so there
     // is no crypto.hash service to plant on it any more.
-    this.installOne(this.names.codec, codecBytes);
-    this.installOne(this.names.reputation, reputationBytes);
+    this.installOne(this.modules.codec, codecBytes);
+    this.installOne(this.modules.reputation, reputationBytes);
   }
 
   private installOne(name: string, wasm: Uint8Array): void {
-    // The node authors its own handlers, so it admits the bytes directly under the
-    // same policy the bundle loader uses (§12.4) — installBundleModule → records.admit
-    // runs the accept-all policy wired in create(). This replaces the old ceremony of
+    // The node authors its own handlers, so it binds the bytes straight onto the kernel
+    // table (§3.1, §4). `installWasmHandler` is the raw bind — admission is the bundle
+    // loader's job (§12.4), and a host-side StorageNode has no bundle to admit, so there
+    // is no policy gate and no author argument here. This replaces the old ceremony of
     // signing an install envelope to itself; there is no wire install path.
-    this.host.installBundleModule(name, wasm, this.identity.publicKey);
+    this.host.installWasmHandler(name, wasm);
   }
 
   /** True if both pure handlers are installed on the kernel (§19). */
   handlersInstalled(): boolean {
-    return this.host.isRegistered(this.names.codec) && this.host.isRegistered(this.names.reputation);
+    return this.host.isBound(this.modules.codec) && this.host.isBound(this.modules.reputation);
   }
 }

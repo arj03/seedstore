@@ -351,12 +351,19 @@ function signChunk(d) { return signCore(encodeDescriptorCore(d)); }
 
 // ── placement + fetch (coordinator §6/§7) ────────────────────────────────────
 // Appended to a placement-failure throw. A holder declines an OFFER/STORE for one of
-// two reasons, indistinguishable to the initiator: (1) §14 quota full, or (2) the
+// two reasons, indistinguishable to the initiator: (1) no §14 quota left, or (2) the
 // descriptor fails its verify — most often a SIGNING-SCOPE mismatch (§16): the holder
 // verifies under storageSignScope(bundleAuthor) but this node signed under a different
 // scope (e.g. the zero-author default vs. a seedloader running a signed bundle). GET
 // still works either way (serving a FETCH checks neither quota nor the author scope).
-const OUT_OF_STORAGE_HINT = " — holders answered but declined. Two causes look identical here: (a) the holders are OUT OF STORAGE (quota/disk full) — clear their data dirs or raise the quota; or (b) a SIGNING-SCOPE mismatch (§16) — the cohort's holders run a signed bundle and verify under its author scope, but this node signs under a different one (set the cohort's bundle author). Or simply connect more holders";
+//
+// Cause (a) leads with the UNCONFIGURED case, not the exhausted one: quota is operator
+// policy that is deliberately absent from the signed bundle, and `quota()` fails closed
+// at 0 — so a shell holder booted with no --app-config declines every STORE while looking
+// perfectly healthy (it connects, serves FETCH, and logs nothing). That is far and away
+// the likeliest way to land here, and "OUT OF STORAGE" used to send readers hunting a
+// full disk instead.
+const OUT_OF_STORAGE_HINT = " — holders answered but declined. Two causes look identical here: (a) the holders have NO QUOTA to admit into — most often none was configured at all (quota is operator policy, absent from the signed bundle and failing closed at 0: pass it in the shell's --app-config), otherwise they are genuinely full (clear their data dirs or raise the quota); or (b) a SIGNING-SCOPE mismatch (§16) — the cohort's holders run a signed bundle and verify under its author scope, but this node signs under a different one (set the cohort's bundle author). Or simply connect more holders";
 // A batched OFFER / STORE / FETCH is split to stay under APP.maxMessageBytes —
 // the per-transport cap that keeps one message inside the frame cap AND the request
 // timeout. Transport/operator policy injected via the APP preamble (like quota);

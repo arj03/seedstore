@@ -20,7 +20,7 @@ import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { createKernelHost, loadSodium } from "seedkernel-wasm";
+import { loadSodium } from "seedkernel-wasm";
 import { verifyBundle } from "seedkernel-wasm/bundle";
 import { writeStorageBundle } from "./storage-bundle.mjs";
 
@@ -33,9 +33,10 @@ const bundlePath = join(out, "seedstore.skb");
 const { toHex, fromHex } = await import(new URL("../build/host/util.js", import.meta.url));
 
 const sodium = await loadSodium();
-const host = await createKernelHost();
-// This host is offline scaffolding — used only to derive the module kernel names and
-// hash the module bytes (genesisHash) the manifest commits to; it signs nothing.
+// Bundle *content* is assembled below from sodium alone: it hashes the module bytes
+// (genesisHash) the manifest commits to and signs the manifest. No kernel host is needed —
+// hashing is a free `genesisHash(sodium, …)` in the bundle module now, and a module's kernel
+// name is derived from the signed `(app, name)` pair at load time (seedkernel §5.1).
 
 // Author identity: the key the bundle is signed with (and that installs are
 // signed with). A deployment's policy lists this public key as an allowed author.
@@ -82,7 +83,7 @@ if (existsSync(versionPath)) {
 }
 const version = prevVersion + 1;
 
-const manifest = writeStorageBundle({ path: bundlePath, host, sodium, sk, pk, build, version, log: console.log });
+const manifest = writeStorageBundle({ path: bundlePath, sodium, sk, pk, build, version, log: console.log });
 
 // Record the new high-water mark beside the key, so the next publish counts on from here
 // even if bundle/ is wiped.

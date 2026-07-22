@@ -30,14 +30,13 @@ export function newKey() {
   return { publicKey: kp.publicKey, privateKey: kp.privateKey };
 }
 
-/** A KernelHost with an allow-all admission policy (any author may bind a name) —
- *  the trusted single-deployment posture of a reference node. Admission is deny-all
- *  until setAdmitPolicy runs (§12.5). No signature wrapper: authenticity is the
- *  transport's job now. */
+/** A bare KernelHost — just the handler table (§3). It touches no crypto and holds no
+ *  admission policy any more (admission is the bundle loader's job, §12.4); a reference
+ *  node authors its own handlers and binds them directly. No signature wrapper either:
+ *  authenticity is the transport's job now. */
 export async function loadHost() {
   await sodium.ready;
-  const host = new KernelHost(sodium);
-  host.setAdmitPolicy(() => true);
+  const host = new KernelHost();
   return { host };
 }
 
