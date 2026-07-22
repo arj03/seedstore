@@ -67,7 +67,8 @@ function bytesToStr(b) { let s = ""; for (let i = 0; i < b.length; i++) s += Str
 // seedkernel). All *structure* lives here in the guest, never in the kernel:
 // the nonce convention, the signed-descriptor envelope, the HAVE/OFFER/FETCH/
 // STORE wire format (host/protocol.ts), the codec & reputation module ABIs, and
-// the <hex>.blk/.dsc store layout (host/store-fs.ts). Config + the codec and
+// the <hex>.blk/.dsc store layout (read back host-side by host/store-view.ts, which
+// implements none of the policy — see there). Config + the codec and
 // reputation kernel names arrive as the injected `APP` constant (prepended by
 // the driver), not as kernel ops. A sync op (crypto/fs/clock/module) resolves to
 // its bytes directly, so its wrapper reads as an ordinary synchronous function; the
@@ -83,25 +84,35 @@ const MSG_HAVE = 1, MSG_OFFER = 2, MSG_FETCH = 3, MSG_STORE = 4;
 const HAVE_ID_LEN = 32;      // a HAVE/FETCH request names 32-byte block_ids (§18)
 const FETCH_FRAME = 5;       // a present block costs [found u8][len u32] in a FETCH response (§18)
 const STORE_BLK = ".blk", STORE_DSC = ".dsc";
-const CODEC_NAME = fromHex(APP.codecName);
-const REP_NAME = fromHex(APP.repName);
+// The kernel names this app's own modules landed at, from BUNDLE.modules — keyed by the
+// logical name the manifest declares (seedkernel §12.4), so the guest never re-derives a
+// name or reads one an author retyped into config. Kernel names are strings (§5.1) and
+// cross the MODULE_CALL seam as their UTF-8 bytes; both are ASCII, so strBytes encodes.
+const CODEC_NAME = strBytes(BUNDLE.modules.codec);
+const REP_NAME = strBytes(BUNDLE.modules.reputation);
 // The scoped-signature prefix `DOMAIN_guest ‖ scope` (README §16): the CAP_SIGN op signs
 // `prefix ‖ msg`, never the raw msg, so a descriptor signature verifies only in this app's
 // scope. CAP_VERIFY stays raw, so verifyEnv rebuilds `prefix ‖ core` before checking. The
-// driver derives the bytes host-side (storage-node.ts from its scope, the shell from the
-// admitted bundle's (author, app)) and injects them alongside APP — the guest treats them
-// as an opaque prefix, never reconstructing the kernel's domain string itself.
-const SIGN_PREFIX = fromHex(APP.signPrefix);
+// runtime derives these bytes from the admitted manifest's (author, app) and injects them
+// as BUNDLE — the guest treats them as an opaque prefix, never reconstructing the kernel's
+// domain string itself, and no build step ever restates them.
+const SIGN_PREFIX = fromHex(BUNDLE.signPrefix);
 
-// The injected APP constant IS the config the guest reads (storage-node.ts appPreamble
-// builds it, the shell merges operator policy over the signed bundle). It is read
-// directly as `APP.*` — there is no second name for it.
-// replicas (r = m + 1) and smallMaxBlocks are §4.1 MATH, not injected knobs: they are
-// fixed by (k, m), so the guest derives them here rather than reading an APP field that
-// could disagree with k/m. replicas is the copy count for a file too small to fill a
-// chunk; smallMaxBlocks is the largest such file (in blocks) — replication beats padding
-// while d < (k+m)/(m+1), so the largest replicated d is ceil((k+m)/(m+1)) − 1.
-function replicas() { return APP.m + 1; }
+// Two injected constants, with a hard split (seedkernel §12.4):
+//   BUNDLE  facts the RUNTIME derived from the admitted manifest — author, app, the
+//           signing prefix, this app's module kernel names. Not operator-writable.
+//   APP     the author's signed config, with operator policy merged over it
+//           (storage-node.ts appPreamble builds it host-side; the shell merges
+//           --app-config over the bundle's). Read directly as `APP.*`.
+// smallMaxBlocks is §4.1 MATH, not an injected knob: it is fixed by (k, m), so the guest
+// derives it here rather than reading an APP field that could disagree with k/m. It is the
+// largest file (in blocks) still worth replicating whole instead of padding out to a chunk
+// — replication beats padding while d < (k+m)/(m+1), so the largest replicated d is
+// ceil((k+m)/(m+1)) − 1. The other two derived quantities, the replica count r = m + 1 and
+// the low-water mark, are the same kind of math one step further out: they come off the
+// SIGNED DESCRIPTOR (replicaTarget / lowWaterMargin in the shared manifest-core), so repair
+// reads them from the chunk in hand and consults no config at all (§4.1, §9). This one is a
+// WRITE-side choice — which shape to cut a new file into — so config is its only source.
 function smallMaxBlocks() { const c = APP; return Math.max(1, Math.ceil((c.k + c.m) / (c.m + 1)) - 1); }
 
 // ── crypto primitives + storage framing ──
@@ -147,7 +158,8 @@ function rsEncode(k, m, blockSize, dataBlocks) {
   const parity = splitBlocks(moduleCallParts(CODEC_NAME, [head, ...dataBlocks]), blockSize);
   // A codec that returns no/short parity (its handler scratch too small for a
   // k·blockSize request, or the module missing) would otherwise surface far away as
-  // the descriptor's "blockIds.length must equal k+m". Fail here, where the cause is.
+  // the descriptor's "blockIds.length must be k (replicated) or k+m (coded)" — or, worse,
+  // as a chunk silently signed with the wrong shape. Fail here, where the cause is.
   if (parity.length !== m) {
     throw new Error("rsEncode: codec returned " + parity.length + " parity blocks, expected " + m +
       " — chunk (k=" + k + " × blockSize=" + blockSize + ") likely exceeds the codec handler's scratch");
@@ -174,7 +186,7 @@ function repObserve(peerPk, t, pass) {
   moduleCall(REP_NAME, encodeObserveReq(peerPk, t, pass)); // returns the new score; the guest doesn't need it
 }
 
-// ── local store over fs.* (the <hex>.blk / <hex>.dsc layout of FsBlobStore) ──
+// ── local store over fs.* (the <hex>.blk / <hex>.dsc layout) ─────────────────
 // Existence is `size ≥ 0` (there is no CAP_FS_HAS): the raw CAP_FS_SIZE is 0xFFFFFFFF
 // (fs.size → -1) only for an absent key, so a present-but-empty value still reads as held.
 function storeHas(id) { return fsSizeRaw(toHex(id) + STORE_BLK) !== 0xffffffff; }
@@ -277,9 +289,9 @@ async function haveWant(ids) {
 // encode/decodeStoreBatch, encode/decodeFetchBatchReq, encode/decodeFetchBatchRes, and
 // the shared encode/decodeMask that all three of the HAVE/OFFER/STORE responses use)
 // come from the SHARED host/protocol.ts, stitched in ahead of this body — one
-// definition of the §18 control-plane format, not a hand-copied mirror. The
-// transport-policy wrappers below (offerBatch/storeBatch/fetchBatch) compose those
-// codecs with netSend and handle the unreachable-peer (null) case.
+// definition of the §18 control-plane format, not a hand-copied mirror. Composing them
+// with netSend — and with the unreachable-peer (null) case — is transport policy, and
+// there are exactly two places that do it: fetchBatch below, and the placement engine.
 
 // Batched fetch from one peer (the GET hot path): one round trip for many blocks.
 // Self reads the local store. Returns an array aligned to `ids` (bytes|null), or
@@ -309,24 +321,12 @@ async function verificationFetch(peer, id) {
   repObserve(fromHex(peer), t, false);
   return null;
 }
-// OFFER/STORE transport-policy wrappers: the shared encodeOfferBatch / encodeStoreBatch
-// with the shared decodeMask (host/protocol.ts) over netSend, mapping an unreachable peer
-// (netSend → null) to all-declines. The per-peer fan-out (placeChunksBatched) drives
-// the same shared codecs directly through netSendMany.
-async function offerBatch(peer, offers) {
-  const resp = await netSend(peer, MSG_OFFER, encodeOfferBatch(offers));
-  return resp === null ? offers.map(() => false) : decodeMask(resp);
-}
-async function offer(peer, blockId, size, descriptor) {
-  return (await offerBatch(peer, [{ blockId, size, descriptor }]))[0];
-}
-async function storeBatch(peer, stores) {
-  const resp = await netSend(peer, MSG_STORE, encodeStoreBatch(stores));
-  return resp === null ? stores.map(() => false) : decodeMask(resp);
-}
-async function storePush(peer, blockId, descriptor, bytes) {
-  return (await storeBatch(peer, [{ blockId, descriptor, bytes }]))[0];
-}
+// There is ONE placement engine (placeChunksBatched, below) and it drives the shared
+// §18 codecs — encodeOfferBatch / encodeStoreBatch with the shared decodeMask
+// (host/protocol.ts) — directly through netSendMany, mapping an unreachable peer
+// (netSend → null) to all-declines. Nothing places a block any other way: a small
+// file, a window of coded chunks, the manifest, and a repair pass all express
+// themselves as (block, slot) targets and hand them to that one function.
 
 // ── descriptor + manifest ────────────────────────────────────────────────────
 // The pure §4.3 codecs — encode/decodeDescriptorCore, parseSignedDescriptor,
@@ -336,32 +336,34 @@ async function storePush(peer, blockId, descriptor, bytes) {
 // CAP_VERIFY / CAP_SIGN seam, composed with the shared parser/encoder.
 //
 // verifyDescriptor checks the author signature AND structurally validates the core
-// (the parity the host holder has): a *signed* but malformed descriptor (junk core,
-// n ≠ k+m) is rejected — not parsed into garbage block-ids that sidestep the §10
-// sibling rule — because parseSignedDescriptor throws on a bad core.
+// (the parity the host holder has): a *signed* but malformed descriptor (junk core, an id
+// count that is neither k nor k+m) is rejected — not parsed into garbage block-ids that
+// sidestep the §10 sibling rule — because parseSignedDescriptor throws on a bad core.
 function verifyDescriptor(env) {
+  // Length-gate before the CAP_VERIFY seam: the envelope is [pk 32][sig 64][core ≥8]
+  // (parseSignedDescriptor's own bound), so anything shorter — an absent descriptor
+  // included — is rejected here rather than handed to verify as a short buffer.
+  if (!env || env.length < 32 + 64 + 8) return null;
   if (!verifyEnv(env)) return null;
-  try { return parseSignedDescriptor(env).descriptor; } catch (_e) { return null; }
-}
-// Parse-validate a descriptor WITHOUT re-checking its author signature: the structural
-// half of verifyDescriptor only (parseSignedDescriptor still throws on a malformed core →
-// null, so a junk core never parses into garbage block-ids). The streamed GET uses this on
-// the per-window descriptors getStart ALREADY signature-verified — the host that round-
-// trips them one window at a time is the Tier-1-trusted realm bridge (a hostile host owns
-// the whole seam regardless), so re-verifying Ed25519 per window is pure redundant work.
-function parseDescriptor(env) {
   try { return parseSignedDescriptor(env).descriptor; } catch (_e) { return null; }
 }
 function signChunk(d) { return signCore(encodeDescriptorCore(d)); }
 
 // ── placement + fetch (coordinator §6/§7) ────────────────────────────────────
 // Appended to a placement-failure throw. A holder declines an OFFER/STORE for one of
-// two reasons, indistinguishable to the initiator: (1) §14 quota full, or (2) the
+// two reasons, indistinguishable to the initiator: (1) no §14 quota left, or (2) the
 // descriptor fails its verify — most often a SIGNING-SCOPE mismatch (§16): the holder
 // verifies under storageSignScope(bundleAuthor) but this node signed under a different
 // scope (e.g. the zero-author default vs. a seedloader running a signed bundle). GET
 // still works either way (serving a FETCH checks neither quota nor the author scope).
-const OUT_OF_STORAGE_HINT = " — holders answered but declined. Two causes look identical here: (a) the holders are OUT OF STORAGE (quota/disk full) — clear their data dirs or raise the quota; or (b) a SIGNING-SCOPE mismatch (§16) — the cohort's holders run a signed bundle and verify under its author scope, but this node signs under a different one (set the cohort's bundle author). Or simply connect more holders";
+//
+// Cause (a) leads with the UNCONFIGURED case, not the exhausted one: quota is operator
+// policy that is deliberately absent from the signed bundle, and `quota()` fails closed
+// at 0 — so a shell holder booted with no --app-config declines every STORE while looking
+// perfectly healthy (it connects, serves FETCH, and logs nothing). That is far and away
+// the likeliest way to land here, and "OUT OF STORAGE" used to send readers hunting a
+// full disk instead.
+const OUT_OF_STORAGE_HINT = " — holders answered but declined. Two causes look identical here: (a) the holders have NO QUOTA to admit into — most often none was configured at all (quota is operator policy, absent from the signed bundle and failing closed at 0: pass it in the shell's --app-config), otherwise they are genuinely full (clear their data dirs or raise the quota); or (b) a SIGNING-SCOPE mismatch (§16) — the cohort's holders run a signed bundle and verify under its author scope, but this node signs under a different one (set the cohort's bundle author). Or simply connect more holders";
 // A batched OFFER / STORE / FETCH is split to stay under APP.maxMessageBytes —
 // the per-transport cap that keeps one message inside the frame cap AND the request
 // timeout. Transport/operator policy injected via the APP preamble (like quota);
@@ -399,71 +401,92 @@ function batchBytes(items, sizeOf, maxBytes) {
   if (group.length > 0) out.push(group);
   return out;
 }
-// Offer to candidates ranked by reciprocity (§13); on accept, push. Up to `count`
-// distinct peers not in `exclude`. Returns the peers that stored it. Used for the
-// small-file replicas + the manifest; the RS path uses placeChunksBatched.
-async function placeBlock(blockId, bytes, descriptor, exclude, count) {
-  const placed = [];
-  const ranked = rank(cohortPeers().filter((p) => !exclude.has(p)));
-  for (const peer of ranked) {
-    if (placed.length >= count) break;
-    if (placed.includes(peer)) continue;
-    if (!(await offer(peer, blockId, bytes.length, descriptor))) continue;
-    if (await storePush(peer, blockId, descriptor, bytes)) placed.push(peer);
-  }
-  return placed;
+// A placement JOB: the unit the one engine below consumes. It is a flat list of SLOTS —
+// (block bytes, id) targets to land on distinct peers — plus the signed descriptor that
+// admits them, a `floor` of distinct ids that must land, and the peers the job may not
+// use. Everything that places blocks builds one of these:
+//
+//   a chunk (makeChunk)  slotIndices(d) — a coded chunk's k+m blocks once each, a
+//                        replicated chunk's k blocks r = m+1 times each; floor = its own k
+//   the manifest         the k=1 replicated case of exactly that
+//   a repair pass (heal) only the copies still owed, floor 0 (best-effort), excluding the
+//                        peers already holding part of the chunk
+//
+// So placement has one sentence of semantics: a set of (block, slot) targets negotiated
+// in batched rounds.
+function makeJob(slotIds, slotBlocks, descriptor, floor, exclude) {
+  return {
+    floor, slotIds, slotBlocks, descriptor, exclude,
+    placedPeer: new Array(slotIds.length).fill(null),
+    placedIds: [],
+  };
 }
-// Encode + sign one chunk: encrypt k data blocks, then either add m parity (k ≥ 2, a
-// coded chunk) or replicate the lone block r = m+1 ways (k = 1, see below), hash, sign.
-// `source` is the plaintext this chunk is cut from — the whole file (localCi ==
-// globalCi) or just a window slice (localCi indexes within the slice). The AEAD
-// counter is the GLOBAL chunk index (§4.4), so a windowed encode is byte-identical
-// to a whole-file one regardless of how the plaintext was sliced.
+// A signed chunk ready to place, expanded into its placement slots (§6/§10). Placement
+// then treats both kinds identically: it only ever sees a list of slots to land on
+// distinct peers. The floor is the chunk's OWN k, not config's — a small file's chunk has
+// k = d — and a fresh chunk excludes nothing.
+function makeChunk(d, blocks, descriptor) {
+  const slots = slotIndices(d);
+  return makeJob(slots.map((i) => d.blockIds[i]), slots.map((i) => blocks[i]), descriptor, d.k, new Set());
+}
+// Encode + sign one chunk: encrypt k data blocks, then add m parity (k ≥ 2, a coded
+// chunk) or, at k = 1, replicate the lone block r = m+1 ways (see below). `source` is
+// the plaintext this chunk is cut from — the whole file (localCi == globalCi) or just a
+// window slice (localCi indexes within the slice). The AEAD counter is the GLOBAL chunk
+// index (§4.4), so a windowed encode is byte-identical to a whole-file one regardless of
+// how the plaintext was sliced.
 function encodeChunk(source, localCi, globalCi, K) {
   const c = APP;
   const start = localCi * c.k * c.blockSize;
   const chunkPlain = source.slice(start, start + c.k * c.blockSize);
   const ct = encrypt(K, DOMAIN_BODY, globalCi, padTo(chunkPlain, c.k * c.blockSize));
   const dataBlocks = splitBlocks(ct, c.blockSize);
-  if (c.k === 1) {
-    // RS(1,m) is replication in disguise: its m parity blocks are byte-identical to the
-    // lone data block (parity ≡ data), so the chunk is ONE block placed on r = m+1
-    // distinct peers. Sign it as a replicated descriptor (m=0, the single id) and skip
-    // the codec entirely — coding is k ≥ 2 only, so every id in a descriptor is unique
-    // and the repair path never reasons about a repeated id. The r identical placement
-    // slots below fan the one block onto r peers through placeChunksBatched.
-    const block = dataBlocks[0];
-    const id = hash(block);
-    const r = c.m + 1;
-    const descriptor = signChunk({ k: 1, m: 0, blockSize: c.blockSize, blockIds: [id] });
-    return { blockIds: new Array(r).fill(id), blocks: new Array(r).fill(block), descriptor, placedPeer: new Array(r).fill(null), placedIds: [] };
-  }
-  const blocks = [...dataBlocks, ...rsEncode(c.k, c.m, c.blockSize, dataBlocks)];
-  const blockIds = blocks.map(hash);
-  const descriptor = signChunk({ k: c.k, m: c.m, blockSize: c.blockSize, blockIds });
-  return { blockIds, blocks, descriptor, placedPeer: new Array(blocks.length).fill(null), placedIds: [] };
+  // RS(1,m) is replication in disguise: its m parity blocks come out byte-identical to
+  // the lone data block (parity ≡ data), so the chunk is ONE block on r = m+1 distinct
+  // peers and the codec is skipped entirely — coding is k ≥ 2 only. The descriptor is a
+  // replicated one (its k ids listed once) and still records the SAME m: "survives m
+  // losses", bought with copies rather than parity. Nothing downstream branches on which
+  // it got — makeChunk expands either into slots, and repair reads m off the signature.
+  const blocks = c.k === 1 ? dataBlocks : [...dataBlocks, ...rsEncode(c.k, c.m, c.blockSize, dataBlocks)];
+  const d = { k: c.k, m: c.m, blockSize: c.blockSize, blockIds: blocks.map(hash) };
+  return makeChunk(d, blocks, signChunk(d));
 }
-// Place every chunk's n blocks with one batched OFFER per peer per round, then the
-// accepted blocks STORE'd in putWindow()-deep fan-outs per peer. Block index i
-// targets ranked[i], ranked[i+n], … (a disjoint residue class per i, so a chunk's n
-// blocks land on distinct peers, §6/§10). Per peer the OFFER is one round trip for
-// block i of every chunk at once; the STOREs that follow window the peer's many
-// capped messages (peak W·peers). Returns nothing; fills each chunk's placedPeer[].
-// Throws if a chunk lands < k distinct ids.
-async function placeChunksBatched(chunks) {
-  const c = APP;
-  const n = c.k + c.m;
+// THE placement engine (§6/§10). Place every job's slots with one batched OFFER per peer
+// per round, then the accepted blocks STORE'd in putWindow()-deep fan-outs per peer.
+// Slot i targets cands[i], cands[i+slots], … (a disjoint residue class per i, so one
+// job's slots land on distinct peers — which is the sibling rule for a coded chunk, the
+// r distinct replica holders for a replicated one, and "somewhere new" for a repaired
+// copy: one rule). Per peer the OFFER is one round trip for slot i of every job at once;
+// the STOREs that follow window the peer's many capped messages (peak W·peers). Returns
+// nothing; fills each job's placedPeer[] and placedIds[].
+//
+// Throws if a job lands fewer than its `floor` distinct ids — for a chunk, the readable
+// floor either way: any k of a coded chunk's blocks reconstruct it, and a replicated
+// chunk lists exactly the k blocks it needs. `what` names the job in that error, so a
+// failure says which placement gave up; a floor of 0 is best-effort (repair places what
+// the cohort will take and the next pass retries the rest), which cannot raise it and so
+// passes no name.
+async function placeChunksBatched(jobs, what) {
   const ranked = rank(cohortPeers());
+  // Each job draws from the ranked cohort minus the peers it must avoid. PUT excludes
+  // nothing (a fresh chunk is nowhere yet); repair excludes the peers already holding
+  // part of the chunk, so a restored copy lands somewhere new instead of being pushed at
+  // a holder that would either decline it as a sibling (§6) or silently overwrite the
+  // copy it already has.
+  const candsOf = new Map();
+  for (const job of jobs) candsOf.set(job, job.exclude.size === 0 ? ranked : ranked.filter((p) => !job.exclude.has(p)));
   const maxBytes = maxMsgBytes();
-  const entryBytes = 40 + (chunks.length ? chunks[0].descriptor.length : 0);
+  const entryBytes = 36 + (jobs.length ? jobs[0].descriptor.length : 0); // one OFFER entry: [blockId 32][dlen u32][descriptor]
   const maxOffers = Math.max(1, Math.floor(maxBytes / entryBytes));
 
   for (let r = 0; ; r++) {
     const byPeer = new Map(); // peer → [{ch, i}]
-    for (const ch of chunks) {
-      for (let i = 0; i < n; i++) {
+    for (const ch of jobs) {
+      const cands = candsOf.get(ch);
+      const slots = ch.slotIds.length;
+      for (let i = 0; i < slots; i++) {
         if (ch.placedPeer[i]) continue;
-        const peer = ranked[i + r * n];
+        const peer = cands[i + r * slots];
         if (!peer) continue;
         let list = byPeer.get(peer); if (!list) byPeer.set(peer, (list = []));
         list.push({ ch, i });
@@ -491,7 +514,7 @@ async function placeChunksBatched(chunks) {
       for (const [peer, slices] of offerSlices) {
         if (s >= slices.length) continue;
         const slice = slices[s];
-        const offers = slice.map(({ ch, i }) => ({ blockId: ch.blockIds[i], size: ch.blocks[i].length, descriptor: ch.descriptor }));
+        const offers = slice.map(({ ch, i }) => ({ blockId: ch.slotIds[i], descriptor: ch.descriptor }));
         reqs.push({ peer, type: MSG_OFFER, payload: encodeOfferBatch(offers) });
         sliceOf.push(slice);
       }
@@ -512,7 +535,7 @@ async function placeChunksBatched(chunks) {
     // sub-batches into one netSendMany (all peers concurrent → peak W·peers).
     const storeGroups = new Map(); // peer → [group]
     for (const [peer, accepted] of acceptedByPeer) {
-      storeGroups.set(peer, batchBytes(accepted, ({ ch, i }) => 40 + ch.descriptor.length + ch.blocks[i].length, maxBytes));
+      storeGroups.set(peer, batchBytes(accepted, ({ ch, i }) => 40 + ch.descriptor.length + ch.slotBlocks[i].length, maxBytes));
     }
     const putW = putWindow();
     for (let base = 0; ; base += putW) {
@@ -520,7 +543,7 @@ async function placeChunksBatched(chunks) {
       for (const [peer, groups] of storeGroups) {
         for (let s = base; s < base + putW && s < groups.length; s++) {
           const group = groups[s];
-          reqs.push({ peer, type: MSG_STORE, payload: encodeStoreBatch(group.map(({ ch, i }) => ({ blockId: ch.blockIds[i], descriptor: ch.descriptor, bytes: ch.blocks[i] }))) });
+          reqs.push({ peer, type: MSG_STORE, payload: encodeStoreBatch(group.map(({ ch, i }) => ({ blockId: ch.slotIds[i], descriptor: ch.descriptor, bytes: ch.slotBlocks[i] }))) });
           groupOf.push(group);
         }
       }
@@ -534,10 +557,10 @@ async function placeChunksBatched(chunks) {
     }
   }
 
-  for (const ch of chunks) {
+  for (const ch of jobs) {
     const distinct = new Set();
-    for (let i = 0; i < ch.blockIds.length; i++) if (ch.placedPeer[i]) distinct.add(toHex(ch.blockIds[i]));
-    if (distinct.size < c.k) throw new Error("put: chunk landed " + distinct.size + "/" + c.k + " distinct blocks" + OUT_OF_STORAGE_HINT);
+    for (let i = 0; i < ch.slotIds.length; i++) if (ch.placedPeer[i]) distinct.add(toHex(ch.slotIds[i]));
+    if (distinct.size < ch.floor) throw new Error("put: " + what + " landed " + distinct.size + "/" + ch.floor + " distinct blocks" + OUT_OF_STORAGE_HINT);
     ch.placedIds = [...distinct].map(fromHex);  // the distinct ids that landed, for the PUT result
   }
 }
@@ -617,11 +640,12 @@ async function gatherBlocks(descriptors, holders) {
   // slip just past the cap (the request side, 32 B/id, is smaller and never binds).
   const maxIds = fetchMaxIds();
 
+  // k distinct ids read a chunk, whichever kind it is (§4.1): any k of a coded chunk's
+  // k+m blocks reconstruct it, and a replicated chunk lists exactly the k blocks it needs.
   const stillNeeds = (d) => {
     const distinct = new Set();
     for (const id of d.blockIds) if (got.has(toHex(id))) distinct.add(toHex(id));
-    const need = d.m === 0 ? d.blockIds.length : d.k;
-    return Math.max(0, need - distinct.size);
+    return Math.max(0, d.k - distinct.size);
   };
 
   for (;;) {
@@ -673,17 +697,11 @@ async function gatherBlocks(descriptors, holders) {
   }
   return got;
 }
-// Assemble one chunk's ciphertext from the gathered blocks (§4.1/§7).
+// Assemble one chunk's ciphertext from the gathered blocks (§4.1/§7). One path for both
+// kinds of chunk: take the first k listed blocks that arrived, and if they are the k data
+// blocks in order just concatenate them (systematic RS — the common case, and the ONLY
+// case for a replicated chunk, whose k listed blocks are all data). Anything else decodes.
 function assembleChunk(d, got) {
-  if (d.m === 0) {
-    const blocks = [];
-    for (const id of d.blockIds) {
-      const b = got.get(toHex(id));
-      if (!b) throw new Error("get: a replica is unavailable");
-      blocks.push(b);
-    }
-    return concat(blocks);
-  }
   const k = d.k;
   const present = [];
   for (let i = 0; i < d.blockIds.length && present.length < k; i++) {
@@ -702,11 +720,11 @@ function assembleChunk(d, got) {
 // ── PUT (§6) ─────────────────────────────────────────────────────────────────
 // A large file is never wholly resident in the confined guest heap: it is encoded
 // and placed in chunk-aligned WINDOWS, and each window's ciphertext blocks are
-// dropped once placed (README §3). The whole-file `put` entry (used by the shell /
-// Go loader) windows over its own in-memory plaintext, which bounds the ≈ n/k×
-// ciphertext amplification; the StorageNode host-driver goes one better and streams
-// the plaintext IN a window at a time (putStart → putWindow/putSmall → putManifest),
-// so not even the 1× plaintext ever fully crosses into the guest.
+// dropped once placed (README §3). The driver streams the plaintext IN a window at a
+// time (putStart → putWindow* → putFinish), so not even the 1× plaintext ever fully
+// crosses into the guest. The whole-file `put` entry (used by the seedkernel shell and
+// the Go loader, which hand over bytes and read bytes back) drives that very same loop
+// over its own in-memory argument — one windowed loop, not two.
 
 // Target footprint for one window's plaintext slice; the ciphertext it expands to
 // (≈ n/k×) plus the slice stays a small fraction of the realm heap at any file size.
@@ -727,36 +745,30 @@ function putWindowBytes() { const chunkData = APP.k * APP.blockSize; return Math
 // is the DESCRIPTOR's geometry (§4.3), passed in by the reader, never config's.
 function getWindowChunks(chunkData) { return Math.max(1, Math.floor(windowTarget() / chunkData)); }
 
-// Replicate a small file r = m+1 times, not coded (§4.1) — a file too small to fill
-// a chunk. Returns its one signed descriptor + the ids that landed. The file is small
-// by definition, so it needs no windowing.
+// Replicate a small file r = m+1 times, not coded (§4.1) — a file too small to fill a
+// chunk. It is ONE replicated chunk of d ≤ smallMaxBlocks() blocks: its descriptor lists
+// those d ids (so k = d, the file's own geometry, not config's) and records the same m the
+// deployment codes with, since r = m+1 copies survive the same m losses a coded chunk does.
+// From there it is an ordinary chunk — the same slot expansion and the same batched
+// placement a window uses. The file is small by definition, so it needs no windowing.
 async function placeSmall(plaintext, K) {
   const c = APP;
   const d = Math.max(1, Math.ceil(plaintext.length / c.blockSize));
   const ct = encrypt(K, DOMAIN_BODY, 0, padTo(plaintext, d * c.blockSize));
-  const dataBlocks = splitBlocks(ct, c.blockSize);
-  const blockIds = dataBlocks.map(hash);
-  const env = signChunk({ k: d, m: 0, blockSize: c.blockSize, blockIds });
-  const placedIds = [];
-  const perBlockTarget = Math.min(replicas(), cohortPeers().length);
-  let placed = 0;
-  for (let i = 0; i < d; i++) {
-    const peers = await placeBlock(blockIds[i], dataBlocks[i], env, new Set(), replicas());
-    if (peers.length === 0) {
-      throw new Error("put: no peer accepted a replica" + OUT_OF_STORAGE_HINT);
-    }
-    placed += peers.length;
-    placedIds.push(blockIds[i]);
-  }
-  return { descriptors: [env], placedIds, placed, intended: d * perBlockTarget };
+  const blocks = splitBlocks(ct, c.blockSize);
+  const desc = { k: d, m: c.m, blockSize: c.blockSize, blockIds: blocks.map(hash) };
+  const chunks = [makeChunk(desc, blocks, signChunk(desc))];
+  await placeChunksBatched(chunks, "chunk");
+  return chunks;
 }
 
 // Encode + place the chunks wholly contained in `slice` — a chunk-aligned slice of the
-// file starting at byte offset `baseByteOffset` (a multiple of k·blockSize). Returns
-// this window's signed descriptors + the block ids that landed; the ciphertext blocks
-// fall out of scope on return. A k ≥ 2 window is RS-coded (n distinct blocks per chunk,
-// one per peer); a k = 1 window is replication (one block per chunk, r = m+1 copies on
-// r distinct peers) — encodeChunk decides, placeChunksBatched fans both out the same way.
+// file starting at byte offset `baseByteOffset` (a multiple of k·blockSize). Returns the
+// placed chunks; their ciphertext blocks fall out of scope once the caller has folded
+// the descriptors into the stream. A k ≥ 2 window is RS-coded (n distinct blocks per
+// chunk, one per peer); a k = 1 window is replication (one block per chunk, r = m+1
+// copies on r distinct peers) — encodeChunk decides, placeChunksBatched fans both out
+// the same way.
 async function placeWindow(slice, baseByteOffset, K) {
   const c = APP;
   const chunkData = c.k * c.blockSize;
@@ -764,122 +776,125 @@ async function placeWindow(slice, baseByteOffset, K) {
   const numChunks = Math.max(1, Math.ceil(slice.length / chunkData));
   const chunks = [];
   for (let lc = 0; lc < numChunks; lc++) chunks.push(encodeChunk(slice, lc, baseCi + lc, K));
-  await placeChunksBatched(chunks);
-  const descriptors = [], placedIds = [];
-  // Durability accounting: count REPLICA PLACEMENTS — one stored (block, peer), via
-  // placedPeer — not distinct block ids. A k=1 chunk is one id replicated onto r peers,
-  // so counting ids would report 1/chunk even when r peers hold it; placedPeer counts
-  // all r. intended is capped at the reachable cohort so a genuinely small cohort is not
-  // flagged; a reachable-but-declining (full) holder makes placed < intended.
-  const perChunkTarget = Math.min(c.k + c.m, cohortPeers().length);
-  let placed = 0;
-  for (const ch of chunks) {
-    descriptors.push(ch.descriptor);
-    for (const id of ch.placedIds) placedIds.push(id);
-    for (const p of ch.placedPeer) if (p) placed++;
-  }
-  return { descriptors, placedIds, placed, intended: chunks.length * perChunkTarget };
+  await placeChunksBatched(chunks, "chunk");
+  return chunks;
 }
 
 // Build, encrypt, and replicate the manifest (§4.3) over the collected chunk
-// descriptors. Carried as a one-block replicated chunk (k=1,m=0) with the manifest's
-// own block_id so repair can self-heal it (§9). Returns the manifest block id.
+// descriptors. Carried as a one-block replicated chunk (k=1, the manifest's own
+// block_id, m = the deployment's), so it goes through the SAME placement engine as
+// everything else — r = m+1 copies on distinct peers — and repair audits and
+// re-replicates it exactly as it does any other replicated chunk (§9). Returns the
+// manifest block id; a floor of k = 1 means placement throws if no peer took a copy.
 async function placeManifest(K, fileSize, descriptors) {
   const manPlain = encodeManifest({ fileSize, encAlg: ENC_XCHACHA20, chunks: descriptors });
   const manCt = encrypt(K, DOMAIN_MANIFEST, 0, manPlain);
   const manifestId = hash(manCt);
-  const manEnv = signChunk({ k: 1, m: 0, blockSize: manCt.length, blockIds: [manifestId] });
-  if ((await placeBlock(manifestId, manCt, manEnv, new Set(), replicas())).length === 0) {
-    throw new Error("put: no peer accepted the manifest" + OUT_OF_STORAGE_HINT);
-  }
+  const man = { k: 1, m: APP.m, blockSize: manCt.length, blockIds: [manifestId] };
+  await placeChunksBatched([makeChunk(man, [manCt], signChunk(man))], "manifest");
   return manifestId;
 }
 
-// result: [manifestId 32][replicated u8][chunkCount u32][K 32][idCount u32][ids 32·n].
-// The blockIds tail is appended AFTER K so offsets 0–68 stay fixed (the shell + Go
-// loader read only the length/hex of the response).
-function buildPutResult(manifestId, replicated, chunkCount, K, placedIds) {
-  const out = new Uint8Array(73 + placedIds.length * 32);
-  out.set(manifestId, 0);
-  out[32] = replicated ? 1 : 0;
-  wU32(out, 33, chunkCount);
-  out.set(K, 37);
-  wU32(out, 69, placedIds.length);
-  for (let i = 0; i < placedIds.length; i++) out.set(placedIds[i], 73 + i * 32);
-  return out;
+// ── the streamed PUT session ─────────────────────────────────────────────────
+// The protocol state a PUT carries between windows — the file's content key K, how far
+// into the file we are, the signed descriptors placed so far, the replica accounting —
+// lives HERE, in realm state, instead of being round-tripped through the driver. One
+// implicit session is safe by construction: every driver runs an initiator operation to
+// completion before starting the next (StorageNode's runExclusive; the whole-file
+// wrappers below are a single call), so two streams never overlap in this realm.
+let putStream = null;
+function requirePut() {
+  if (!putStream) throw new Error("put: no stream open — call putStart first");
+  return putStream;
 }
-// A window's result over the host seam:
-//   [descCount u32]{[len u32][descriptor]}[idCount u32]{id 32}[placed u32][intended u32]
-// The trailing (placed, intended) is the window's replica accounting (§8): how many
-// replicas actually landed vs how many were reachable-and-intended, so the host can
-// warn on a silently under-replicated PUT (a full/declining holder).
-function encodeWindowResult(w) {
-  const parts = [];
-  const dc = new Uint8Array(4); wU32(dc, 0, w.descriptors.length); parts.push(dc);
-  for (const d of w.descriptors) { const l = new Uint8Array(4); wU32(l, 0, d.length); parts.push(l, d); }
-  const ic = new Uint8Array(4); wU32(ic, 0, w.placedIds.length); parts.push(ic);
-  for (const id of w.placedIds) parts.push(id);
-  const tail = new Uint8Array(8); wU32(tail, 0, w.placed || 0); wU32(tail, 4, w.intended || 0); parts.push(tail);
-  return concat(parts);
-}
-
-// Whole-file PUT (shell / Go loader): windows over its own plaintext argument so the
-// ciphertext amplification is bounded even though the 1× plaintext is resident.
-async function doPut(plaintext) {
+// Open a stream: mint K, decide the file's shape (§4.1 — a file too small to fill a chunk
+// is replicated whole rather than coded), and answer with the plaintext window the driver
+// should feed. A replicated file is ONE window, since it is smaller than a chunk by
+// definition; the `max(1, …)` keeps a driver's feed loop finite for an empty file.
+function putStart(fileSize) {
   const c = APP;
-  const fileSize = plaintext.length;
-  const K = randomKey();
-  const totalBlocks = Math.max(1, Math.ceil(fileSize / c.blockSize));
-  const replicated = totalBlocks <= smallMaxBlocks();
-  const descriptors = [], placedIds = [];
-  if (replicated) {
-    const sm = await placeSmall(plaintext, K);
-    for (const d of sm.descriptors) descriptors.push(d);
-    for (const id of sm.placedIds) placedIds.push(id);
-  } else {
-    const wb = putWindowBytes();
-    for (let off = 0; off < fileSize; off += wb) {
-      const w = await placeWindow(plaintext.subarray(off, Math.min(off + wb, fileSize)), off, K);
-      for (const d of w.descriptors) descriptors.push(d);
-      for (const id of w.placedIds) placedIds.push(id);
-    }
+  const replicated = Math.max(1, Math.ceil(fileSize / c.blockSize)) <= smallMaxBlocks();
+  putStream = {
+    K: randomKey(), fileSize, replicated, offset: 0,
+    descriptors: [], placedIds: [], placed: 0, intended: 0,
+  };
+  return replicated ? Math.max(1, fileSize) : putWindowBytes();
+}
+// Fold one placed window's chunks into the stream (§8). Durability accounting counts
+// REPLICA PLACEMENTS — one stored (block, peer), i.e. one filled slot — not distinct ids:
+// a replicated chunk is k ids on r peers each, so counting ids would report k even when
+// every copy landed. `intended` is capped at the reachable cohort because the §6/§10
+// sibling rule puts at most one of a chunk's blocks on any one peer — so a genuinely
+// small cohort is not flagged, while a reachable-but-declining (full) holder makes
+// placed < intended.
+function recordWindow(chunks) {
+  const s = putStream;
+  const peerCount = cohortPeers().length;
+  for (const ch of chunks) {
+    s.descriptors.push(ch.descriptor);
+    for (const id of ch.placedIds) s.placedIds.push(id);
+    for (const p of ch.placedPeer) if (p) s.placed++;
+    s.intended += Math.min(ch.slotIds.length, peerCount);
   }
-  const manifestId = await placeManifest(K, fileSize, descriptors);
-  placedIds.push(manifestId);
-  return buildPutResult(manifestId, replicated, descriptors.length, K, placedIds);
 }
-
-// ── streamed PUT (StorageNode host-driver) ───────────────────────────────────
-// The host feeds the plaintext one window at a time, so the guest never holds more
-// than a single window. putStart mints K and reports the chunk-aligned window size
-// (and whether the file is small enough to replicate whole); the host then drives
-// putWindow per slice (or putSmall once), collecting the returned descriptors, and
-// finally putManifest. The PUT result is assembled host-side from those pieces.
-function doPutStart(arg) {
-  const c = APP;
-  const fileSize = rU64(arg, 0);
-  const K = randomKey();
-  const totalBlocks = Math.max(1, Math.ceil(fileSize / c.blockSize));
-  const replicated = totalBlocks <= smallMaxBlocks();
-  const out = new Uint8Array(37);
-  out.set(K, 0);
-  out[32] = replicated ? 1 : 0;
-  wU32(out, 33, replicated ? 0 : putWindowBytes());
+// Feed the next plaintext window, in file order — the whole file for a replicated one,
+// a chunk-aligned slice otherwise. Its ciphertext is placed and dropped before this
+// returns; the driver never learns the window's byte offset, because the stream knows it.
+async function putFeed(slice) {
+  const s = requirePut();
+  recordWindow(s.replicated ? await placeSmall(slice, s.K) : await placeWindow(slice, s.offset, s.K));
+  s.offset += slice.length;
+}
+// Seal the stream: replicate the manifest over every descriptor placed, then report the
+// whole PUT. The stream closes first, so a failed or abandoned PUT leaves nothing behind
+// for the next one to inherit.
+async function putFinish() {
+  const s = requirePut();
+  putStream = null;
+  const manifestId = await placeManifest(s.K, s.fileSize, s.descriptors);
+  s.placedIds.push(manifestId);
+  return encodePutResult(manifestId, s);
+}
+// The ONE PUT result format, read by every driver:
+//   [manifestId 32][replicated u8][chunkCount u32][K 32][placed u32][intended u32]
+//   [idCount u32]{id 32}
+// Offsets 0–68 are fixed and the id tail comes last, so the byte-in/byte-out drivers (the
+// seedkernel shell, the Go loader) can read the root and K without knowing the rest.
+// (placed, intended) is the replica accounting (§8) — how many replicas landed vs how many
+// were reachable-and-intended — so a driver can warn on a PUT that met the ≥ k floor but
+// is silently under-replicated (a full/declining holder, or a short cohort).
+function encodePutResult(manifestId, s) {
+  const out = new Uint8Array(81 + s.placedIds.length * 32);
+  out.set(manifestId, 0);
+  out[32] = s.replicated ? 1 : 0;
+  wU32(out, 33, s.descriptors.length);
+  out.set(s.K, 37);
+  wU32(out, 69, s.placed);
+  wU32(out, 73, s.intended);
+  wU32(out, 77, s.placedIds.length);
+  for (let i = 0; i < s.placedIds.length; i++) out.set(s.placedIds[i], 81 + i * 32);
   return out;
 }
-// [K 32][plaintext]  → window result (the whole small file, replicated).
-async function doPutSmall(arg) { return encodeWindowResult(await placeSmall(arg.slice(32), arg.slice(0, 32))); }
-// [K 32][baseByteOffset u64][slice]  → window result.
-async function doPutWindow(arg) { return encodeWindowResult(await placeWindow(arg.slice(40), rU64(arg, 32), arg.slice(0, 32))); }
-// [K 32][fileSize u64][descCount u32]{[len u32][descriptor]}  → [manifestId 32].
-async function doPutManifest(arg) {
-  const K = arg.slice(0, 32);
-  const fileSize = rU64(arg, 32);
-  let o = 40;
-  const n = rU32(arg, o); o += 4;
-  const descriptors = [];
-  for (let i = 0; i < n; i++) { const l = rU32(arg, o); o += 4; descriptors.push(arg.slice(o, o + l)); o += l; }
-  return placeManifest(K, fileSize, descriptors);
+
+// [fileSize u64] → [windowBytes u32]: open the stream, report the feed size.
+function doPutStart(arg) { const out = new Uint8Array(4); wU32(out, 0, putStart(rU64(arg, 0))); return out; }
+// The window's plaintext, raw — no framing, since the stream holds everything else.
+async function doPutWindow(arg) { await putFeed(arg); return EMPTY; }
+// No argument — the stream is the argument.
+function doPutFinish() { return putFinish(); }
+
+// Whole-file PUT: one call, bytes in, result out — what the seedkernel shell and the Go
+// loader drive, since they pass raw bytes and read raw bytes and hold no protocol
+// structure of their own. It runs the very same session as the streamed path, so there
+// is one windowed loop and one result format; only the 1× plaintext is resident, which
+// still bounds the ≈ n/k× ciphertext amplification.
+async function doPut(plaintext) {
+  const wb = putStart(plaintext.length);
+  for (let off = 0; ; off += wb) {
+    await putFeed(plaintext.subarray(off, Math.min(off + wb, plaintext.length)));
+    if (off + wb >= plaintext.length) break;
+  }
+  return putFinish();
 }
 
 // ── GET (§7) ─────────────────────────────────────────────────────────────────
@@ -906,8 +921,8 @@ async function reconstructChunks(ds, K, chunkStart, fileSize) {
     const d = ds[i];
     const chunkCipher = assembleChunk(d, got);
     // AEAD counter = the GLOBAL chunk index (§4.4), matching encodeChunk. A replicated
-    // chunk (m=0) is no special case: placeSmall's whole-file chunk is index 0, and a
-    // windowed k=1 chunk carries its own index, so both decrypt at chunkStart + i.
+    // chunk is no special case: placeSmall's whole-file chunk is index 0, and a windowed
+    // k=1 chunk carries its own index, so both decrypt at chunkStart + i.
     const chunkPlain = decrypt(K, DOMAIN_BODY, chunkStart + i, chunkCipher);
     const take = Math.min(chunkPlain.length, fileSize - written);
     parts.push(take === chunkPlain.length ? chunkPlain : chunkPlain.subarray(0, take));
@@ -915,11 +930,18 @@ async function reconstructChunks(ds, K, chunkStart, fileSize) {
   }
   return concat(parts);
 }
-// Whole-file GET (shell / Go loader). The manifest is encrypted, not signed, so a
-// correct K with a tampered manifest is caught only by the per-chunk signature —
-// verify every descriptor before use (§4.3).
-async function doGet(arg) {
-  const manifestId = arg.slice(0, 32), K = arg.slice(32, 64);
+// ── the streamed GET session ─────────────────────────────────────────────────
+// The mirror of the PUT stream: getStart fetches the manifest, verifies EVERY chunk
+// descriptor once, and keeps them — parsed, verified, in file order — in realm state.
+// The driver then calls getNext until it has the file, each call reconstructing one
+// window's chunks, so only one window's plaintext is ever resident. Because the
+// descriptors never leave the realm there is nothing to re-parse or re-verify per
+// window: a descriptor is checked exactly once, where the signature actually matters.
+let getStream = null;
+// Open a stream. The manifest is encrypted, not signed, so a correct K over a tampered
+// manifest is caught only by the per-chunk signature — verify every descriptor here,
+// before a single block is fetched against it (§4.3).
+async function getStart(manifestId, K) {
   const manCt = await fetchBlock(manifestId);
   if (!manCt) throw new Error("get: manifest not found in cohort");
   const man = decodeManifest(decrypt(K, DOMAIN_MANIFEST, 0, manCt));
@@ -928,49 +950,40 @@ async function doGet(arg) {
     if (!d) throw new Error("get: chunk descriptor signature invalid");
     return d;
   });
-  return reconstructChunks(ds, K, 0, man.fileSize);
-}
-// ── streamed GET (StorageNode host-driver) ───────────────────────────────────
-// getStart fetches + verifies the manifest and hands the host the file size, a
-// chunk-window granularity, and every verified chunk descriptor; the host then drives
-// getChunk per window and assembles the file itself, so the guest reconstructs only
-// one window's worth of plaintext at a time.
-// [manifestId 32][K 32] → [fileSize u64][windowChunks u32][chunkCount u32]{[len u32][descriptorEnv]}.
-async function doGetStart(arg) {
-  const manifestId = arg.slice(0, 32), K = arg.slice(32, 64);
-  const manCt = await fetchBlock(manifestId);
-  if (!manCt) throw new Error("get: manifest not found in cohort");
-  const man = decodeManifest(decrypt(K, DOMAIN_MANIFEST, 0, manCt));
-  let first = null;
-  for (const env of man.chunks) {
-    const d = verifyDescriptor(env);
-    if (!d) throw new Error("get: chunk descriptor signature invalid");
-    if (!first) first = d;
-  }
   // Window granularity from the chunk's OWN geometry (§4.3), not config: a full chunk is
   // k·blockSize plaintext, and the reader holds windowTarget()-worth at a time.
-  const chunkData = first ? first.k * first.blockSize : 1;
-  const head = new Uint8Array(16);
-  wU64(head, 0, man.fileSize); wU32(head, 8, getWindowChunks(chunkData)); wU32(head, 12, man.chunks.length);
-  const parts = [head];
-  for (const env of man.chunks) { const l = new Uint8Array(4); wU32(l, 0, env.length); parts.push(l, env); }
-  return concat(parts);
+  const chunkData = ds.length ? ds[0].k * ds[0].blockSize : 1;
+  getStream = { K, ds, fileSize: man.fileSize, next: 0, windowChunks: getWindowChunks(chunkData) };
+  return man.fileSize;
 }
-// [K 32][chunkStart u32][fileSize u64][chunkCount u32]{[len u32][descriptorEnv]} → plaintext bytes for these chunks.
-async function doGetChunk(arg) {
-  const K = arg.slice(0, 32);
-  const chunkStart = rU32(arg, 32);
-  const fileSize = rU64(arg, 36);
-  let o = 44;
-  const n = rU32(arg, o); o += 4;
-  const ds = [];
-  for (let i = 0; i < n; i++) {
-    const l = rU32(arg, o); o += 4;
-    const d = parseDescriptor(arg.slice(o, o + l)); o += l; // getStart already verified the signature
-    if (!d) throw new Error("get: chunk descriptor malformed");
-    ds.push(d);
-  }
-  return reconstructChunks(ds, K, chunkStart, fileSize);
+// The next window's plaintext, in file order. Empty once the file is exhausted, which
+// also closes the stream — so a driver reading to the end leaves nothing behind.
+async function getNext() {
+  const s = getStream;
+  if (!s) throw new Error("get: no stream open — call getStart first");
+  if (s.next >= s.ds.length) { getStream = null; return EMPTY; }
+  const start = s.next;
+  const ds = s.ds.slice(start, start + s.windowChunks);
+  s.next = start + ds.length;
+  return reconstructChunks(ds, s.K, start, s.fileSize);
+}
+
+// [manifestId 32][K 32] → [fileSize u64]: open the stream, report how much to drain.
+async function doGetStart(arg) {
+  const out = new Uint8Array(8);
+  wU64(out, 0, await getStart(arg.slice(0, 32), arg.slice(32, 64)));
+  return out;
+}
+// No argument — the stream is the argument.
+function doGetNext() { return getNext(); }
+
+// Whole-file GET: the counterpart of the whole-file `put`, draining the same stream in
+// one call for the byte-in/byte-out drivers.
+async function doGet(arg) {
+  await getStart(arg.slice(0, 32), arg.slice(32, 64));
+  const parts = [];
+  while (getStream) parts.push(await getNext());
+  return concat(parts);
 }
 
 // ── repair (§9) ────────────────────────────────────────────────────────────--
@@ -1016,35 +1029,23 @@ async function liveHolders(ids) {
   await runFetchTasks(byPeer, fetchMaxIds(), applyAudit);
   return { live, bytes };
 }
-// Replicated chunk (§4.1): repair is a single block copy from any live holder — the
-// copy the audit already fetched and verified (`verified`), never a fresh have/want.
-async function healReplicated(d, descEnv, holders, verified) {
-  const r = replicas();
-  let replaced = 0;
-  for (const id of d.blockIds) {
-    const h = toHex(id);
-    const set = holders.get(h) || new Set();
-    if (set.size >= r) continue;
-    const data = verified.get(h);        // present iff a live holder served it (set.size > 0)
-    if (!data) continue;                 // no live holder this pass — nothing to copy from
-    replaced += (await placeBlock(id, data, descEnv, set, r - set.size)).length;
-  }
-  return replaced;
-}
-// Coded chunk (§9): restore any block no live holder serves. Coding is k ≥ 2, so every
-// id in the descriptor is distinct and each of the n blocks wants exactly one live
-// holder (§6/§10) — a block that still has one is left alone; a lost one is reconstructed
-// from any k present blocks, re-certified against its signed block_id, then placed on a
-// fresh peer.
-async function healCoded(d, descEnv, holders, verified) {
-  // Reconstruct any entirely-missing block once, up front, from k present blocks —
-  // reusing the copies the audit (liveHolders) already fetched and verified, so a block
-  // that still has a live holder costs no extra round trip. (A missing block, held by no
-  // live holder, isn't in `verified`; it's decoded here and copied below.)
+// Heal one chunk back toward full redundancy (§9), from its signed descriptor alone.
+// ONE slot model covers both kinds, because the descriptor says which it is: every
+// listed block wants r copies on distinct peers — r = m+1 for a replicated chunk, r = 1
+// for a coded one, whose redundancy is its m parity blocks instead. A block short of r
+// is topped up from the copy the audit (liveHolders) already fetched and verified, so a
+// block that still has a live holder costs no extra round trip. A CODED block no live
+// holder serves at all has no copy to lean on, so it is first reconstructed from any k
+// present blocks and re-certified against its signed block_id; a lost replica has no
+// parity to rebuild from — its other copies were the redundancy — so it can only be
+// copied while one survives. The copies it ends up owing are then just placement slots,
+// handed to the same engine PUT uses.
+async function heal(d, descEnv, holders, verified) {
+  const r = replicaTarget(d);
+  const copiesOf = (h) => (holders.get(h) || new Set()).size;
+
   const regenerated = new Map();
-  let anyMissing = false;
-  for (const id of d.blockIds) if ((holders.get(toHex(id)) || new Set()).size === 0) { anyMissing = true; break; }
-  if (anyMissing) {
+  if (!isReplicated(d) && d.blockIds.some((id) => copiesOf(toHex(id)) === 0)) {
     const present = [];
     for (let idx = 0; idx < d.blockIds.length && present.length < d.k; idx++) {
       const b = verified.get(toHex(d.blockIds[idx])); // present iff that id has a live holder
@@ -1061,20 +1062,30 @@ async function healCoded(d, descEnv, holders, verified) {
     }
   }
 
-  // Spread the restored copies onto peers not already holding part of this chunk (§6, §10).
+  // Every peer already holding part of this chunk. Restored copies go somewhere else
+  // (§6, §10 — the sibling rule, which is also what keeps r replicas distinct).
   const occupied = new Set();
   for (const set of holders.values()) for (const p of set) occupied.add(p);
 
-  let replaced = 0;
+  // The copies still owed, expressed as PLACEMENT SLOTS — exactly what a PUT window hands
+  // the engine, so "place the regenerated blocks" is the same call as placing a window.
+  // A block already at full redundancy contributes no slots, and neither does one with no
+  // live copy that this pass couldn't reconstruct.
+  const slotIds = [], slotBlocks = [];
   for (const id of d.blockIds) {
     const h = toHex(id);
-    if ((holders.get(h) || new Set()).size > 0) continue; // still has a live holder
-    const bytes = regenerated.get(h);
-    if (!bytes) continue;                                  // missing and not reconstructable this pass
-    const placed = await placeBlock(id, bytes, descEnv, occupied, 1);
-    for (const p of placed) occupied.add(p);
-    replaced += placed.length;
+    const bytes = verified.get(h) || regenerated.get(h);
+    if (!bytes) continue;
+    for (let have = copiesOf(h); have < r; have++) { slotIds.push(id); slotBlocks.push(bytes); }
   }
+  if (slotIds.length === 0) return 0;
+
+  // Floor 0 — repair is best-effort: a pass places what the cohort will take and the next
+  // pass retries the rest, where a PUT would rather fail than under-place a new file.
+  const job = makeJob(slotIds, slotBlocks, descEnv, 0, occupied);
+  await placeChunksBatched([job]);
+  let replaced = 0;
+  for (const p of job.placedPeer) if (p) replaced++;
   return replaced;
 }
 // Audit and, if under-replicated, heal one chunk from its signed descriptor.
@@ -1082,23 +1093,15 @@ async function repairChunk(descEnv) {
   const d = verifyDescriptor(descEnv);                     // forged/unsigned/malformed → null (§4.3)
   if (!d) return 0;
   const { live: holders, bytes: verified } = await liveHolders(d.blockIds);
-  // Redundancy vs the low-water mark (§8, §9). Every id in a descriptor is unique —
-  // coding is k ≥ 2, and k=1 is replication (m=0) — so a coded chunk's redundancy is the
-  // count of its n blocks that still have a live holder (§8), while a replicated chunk's
-  // is the fewest copies any of its blocks has. Heal fires when either dips below lowWater.
-  let redundancy;
-  if (d.m === 0) {
-    redundancy = Infinity;
-    for (const id of d.blockIds) redundancy = Math.min(redundancy, (holders.get(toHex(id)) || new Set()).size);
-  } else {
-    redundancy = 0;
-    for (const id of d.blockIds) if ((holders.get(toHex(id)) || new Set()).size > 0) redundancy++;
-  }
-  if (redundancy >= APP.lowWater) return 0;           // healthy (§8, §9)
-  return d.m === 0 ? healReplicated(d, descEnv, holders, verified) : healCoded(d, descEnv, holders, verified);
+  // Chunk health is ONE number for both kinds of chunk (§8, §9): the loss margin — how
+  // many further losses this chunk survives — against the low-water mark ⌈m/2⌉. Both
+  // come out of the shared manifest-core from the SIGNED descriptor, so a repairer needs
+  // no deployment config here either: a cohort running mixed geometry (§4.1) repairs
+  // each chunk to the count its own author signed.
+  const copies = d.blockIds.map((id) => (holders.get(toHex(id)) || new Set()).size);
+  if (lossMargin(d, copies) >= lowWaterMargin(d)) return 0;          // healthy
+  return heal(d, descEnv, holders, verified);
 }
-// NB repairChunk is async; healReplicated/healCoded each return a Promise, so the
-// ternary above resolves through the async function's own await on return.
 // Run the repair loop over every chunk this node holds a block of (§9).
 async function doRepair() {
   const seen = new Set();
@@ -1119,15 +1122,17 @@ async function doRepair() {
 // ── holder side (§5/§6/§7) ───────────────────────────────────────────────────
 // The request side a node serves to its cohort: admission control (the §6 sibling
 // rule + §14 quota), content-addressing (§4.2), and the <hex>.blk/.dsc + quota
-// writes — the policy of host/storage-node.ts + host/store-fs.ts, now confined.
+// writes — all of it confined here, and nowhere else: the host has a read view of
+// the same fs (host/store-view.ts) and no write path at all.
 // Reached only through the generic caps, and entirely *synchronous*: a holder
 // answers from local fs + crypto and never makes a net round trip, so it is invoked
 // synchronously (`callSync`) and can respond while this realm's own initiator is
 // parked mid-await (the runtime split — a suspended async function is just heap
 // state). Because it reaches only sync ops, `doHandle` and every function it calls
 // must stay synchronous: an `await` here would return a guest promise that callSync
-// cannot settle. bytesUsed mirrors FsBlobStore's byte budget, rebuilt lazily from
-// the fs the first time it matters.
+// cannot settle. This is the ONLY implementation of the quota rule — the host keeps a
+// read view of the fs (host/store-view.ts) and no write path — so bytesUsed is the
+// budget, rebuilt lazily from the fs the first time it matters.
 let bytesUsed = -1;
 // The §14 byte budget is OPERATOR policy, not author content: the StorageNode injects
 // its store's quota, and a seedkernel shell merges the operator's config over the
@@ -1146,9 +1151,10 @@ function fsSize(keyStr) { const v = fsSizeRaw(keyStr); return v === 0xffffffff ?
 function ensureUsed() {
   if (bytesUsed >= 0) return;
   bytesUsed = 0;
-  // Mirror FsBlobStore.usedBytes (store-fs.ts): the committed tier is the <hex>.blk
-  // ciphertext AND its <hex>.dsc descriptor sidecar — the descriptor is real bytes,
-  // so charging only .blk would over-admit relative to the host store's view (§14).
+  // The committed tier is the <hex>.blk ciphertext AND its <hex>.dsc descriptor
+  // sidecar — the descriptor is real bytes a holder keeps per block, so charging only
+  // .blk would over-admit by the whole descriptor tier (§14). Rebuilt from the fs, so
+  // a restarted holder re-derives its budget from what is actually on the backend.
   for (const id of storeList()) { const hex = toHex(id); bytesUsed += fsSize(hex + STORE_BLK) + fsSize(hex + STORE_DSC); }
 }
 function quotaFree() { ensureUsed(); return Math.max(0, quota() - bytesUsed); }
@@ -1157,54 +1163,69 @@ function fsPut(keyStr, bytes) {
   const head = new Uint8Array(4); wU32(head, 0, kb.length);
   host.call(CAP_FS_PUT, concat([head, kb, bytes]));
 }
-// Mirror FsBlobStore.put (store-fs.ts): the <hex>.blk ciphertext + its sibling
+// The one write path into store.local: the <hex>.blk ciphertext + its sibling
 // <hex>.dsc descriptor, under the quota budget. Throws past quota so admission
 // refuses rather than over-commits.
 function storeWrite(id, bytes, descriptor) {
   ensureUsed();
   const hex = toHex(id);
   // Charge the ciphertext AND the descriptor sidecar, crediting whatever was already
-  // stored under this id — byte-for-byte as FsBlobStore.put (store-fs.ts) and
-  // MemoryBlobStore, so a holder's §14 budget matches the host store's stat() at the
-  // boundary instead of writing the .dsc for free.
+  // stored under this id, instead of writing the .dsc for free. Admission (admitBatch)
+  // has already verified the descriptor, so every committed block has one: the .dsc
+  // write is unconditional, with no described-block-overwritten-by-a-bare-one case to
+  // unwind.
   const prevBlk = storeHas(id) ? fsSize(hex + STORE_BLK) : 0;
   const prevDsc = fsSize(hex + STORE_DSC);
-  const dscLen = descriptor && descriptor.length ? descriptor.length : 0;
-  const next = bytesUsed - prevBlk - prevDsc + bytes.length + dscLen;
+  const next = bytesUsed - prevBlk - prevDsc + bytes.length + descriptor.length;
   if (next > quota()) throw new Error("store: quota exceeded");
   fsPut(hex + STORE_BLK, bytes);
-  if (dscLen) fsPut(hex + STORE_DSC, descriptor);
-  else if (prevDsc) host.call(CAP_FS_DELETE, strBytes(hex + STORE_DSC)); // described → bare
+  fsPut(hex + STORE_DSC, descriptor);
   bytesUsed = next;
 }
-// Admission (§6 sibling rule, §14 quota): a holder enforces no-two-blocks-of-a-
-// chunk itself, so the §10 invariant survives a careless or malicious placer (a
-// repairer included), not just an honest coordinator. A single block is just the
-// one-element case of admitBatch — same quota, verify, and sibling checks (the
-// batch's provisional set is empty for one block), so there is one implementation.
+// Admission (§4.3 descriptor check, §6 sibling rule, §14 quota): a holder verifies
+// the chunk's signed descriptor and enforces no-two-blocks-of-a-chunk itself, so the
+// §10 invariant survives a careless or malicious placer (a repairer included), not
+// just an honest coordinator. A single block is just the one-element case of
+// admitBatch — same verify, sibling, and quota checks (the batch's provisional set is
+// empty for one block), so there is one implementation.
+//
+// `size` is the length of the block ACTUALLY in hand, which only STORE has; an OFFER
+// carries no size on the wire (the geometry is the descriptor's) and passes null.
 function admit(descriptor, blockId, size) {
-  return admitBatch([{ blockId, size, descriptor }])[0];
+  return admitBatch([{ blockId, descriptor, size }])[0];
 }
-// Batched admission (mirror StorageNode.admitBatch): one OFFER's worth of blocks
-// checked cumulatively — the §14 quota budget shrinks as blocks are provisionally
-// accepted, and a block whose sibling (§6) is already held OR provisionally
-// accepted in this same batch is declined, so two blocks of one chunk never both
-// pass. STORE re-checks each block (acceptStore/admit), so this is the advisory
-// pre-check, never the enforcement.
+// Batched admission: one OFFER's worth of blocks checked cumulatively — the §14 quota
+// budget shrinks as blocks are provisionally accepted, and a block whose sibling (§6)
+// is already held OR provisionally accepted in this same batch is declined, so two
+// blocks of one chunk never both pass. STORE re-checks each block (acceptStore/admit),
+// so this is the advisory pre-check, never the enforcement.
+//
+// The signed descriptor is REQUIRED on every path (§4.3: "every peer that accepts a
+// block first verifies its descriptor"). There is deliberately no descriptor-less
+// branch: one would be an admission gated by quota alone, letting any cohort peer push
+// arbitrary bytes past the sibling rule — the wire decoders reject a descriptor-less
+// entry outright, and a forged, malformed, or not-of-this-chunk one is declined here.
 function admitBatch(offers) {
   let free = quotaFree();
   const provisional = new Set();
   return offers.map((o) => {
-    if (o.size > free) return false;
-    if (o.descriptor && o.descriptor.length) {
-      const d = verifyDescriptor(o.descriptor);
-      if (!d || !d.blockIds.some((id) => bytesEqual(id, o.blockId))) return false; // forged/unsigned/not-of-chunk
-      for (const sib of d.blockIds) {
-        if (bytesEqual(sib, o.blockId)) continue;
-        if (storeHas(sib) || provisional.has(toHex(sib))) return false;
-      }
+    const d = verifyDescriptor(o.descriptor);
+    if (!d) return false;                                  // absent, forged, unsigned, or malformed
+    if (!descriptorContains(d, o.blockId)) return false;    // not a block of this chunk
+    // Geometry is the SIGNED descriptor's, never a field the sender picks: every block
+    // is exactly blockSize bytes, so bytes in hand that disagree are not the block that
+    // was offered, whatever they hash to.
+    if (o.size != null && o.size !== d.blockSize) return false;
+    // Charge what storeWrite will actually commit — the ciphertext AND its .dsc
+    // sidecar — so this pre-check answers the same question the binding write does
+    // instead of over-admitting by the descriptor's own size.
+    const cost = d.blockSize + o.descriptor.length;
+    if (cost > free) return false;
+    for (const sib of d.blockIds) {
+      if (bytesEqual(sib, o.blockId)) continue;
+      if (storeHas(sib) || provisional.has(toHex(sib))) return false;
     }
-    free -= o.size;
+    free -= cost;
     provisional.add(toHex(o.blockId));
     return true;
   });
@@ -1284,21 +1305,25 @@ function doWarm() {
   const rounds = Math.min(64, Math.max(1, Math.ceil((4 * 1024 * 1024) / perRound)));
   for (let r = 0; r < rounds; r++) {
     const chunk = encodeChunk(buf, 0, 0, K);                                    // encrypt + RS-encode + hash + sign
-    verifyDescriptor(chunk.descriptor);                                          // Ed25519 verify (+ §16 scope preimage)
-    // Reconstruct from the k data blocks to warm the GET-side decode seam too.
-    rsDecode(c.k, c.m, c.blockSize, chunk.blocks.slice(0, c.k).map((bytes, index) => ({ index, bytes })));
+    const d = verifyDescriptor(chunk.descriptor);                                // Ed25519 verify (+ §16 scope preimage)
+    // Reconstruct from the k data blocks to warm the GET-side decode seam too — for a
+    // CODED chunk only, on the same descriptor-kind test the real path uses: a replicated
+    // deployment (k = 1) never reaches the codec on PUT, GET, or repair, so there is no
+    // cold-JIT tax there to pay down.
+    if (d && !isReplicated(d)) {
+      rsDecode(c.k, c.m, c.blockSize, chunk.slotBlocks.slice(0, c.k).map((bytes, index) => ({ index, bytes })));
+    }
   }
   return EMPTY;
 }
 
 register("put", doPut);
 register("putStart", doPutStart);
-register("putSmall", doPutSmall);
 register("putWindow", doPutWindow);
-register("putManifest", doPutManifest);
+register("putFinish", doPutFinish);
 register("get", doGet);
 register("getStart", doGetStart);
-register("getChunk", doGetChunk);
+register("getNext", doGetNext);
 register("repair", doRepair);
 register("handle", doHandle);
 register("warm", doWarm);

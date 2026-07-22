@@ -8,9 +8,9 @@
 //
 //   node scripts/build-bundle.mjs            (writes ./bundle, signs with ./seedstore-author.key)
 //
-// Output (a directory the shell loads with --bundle):
-//   bundle/manifest.bundle   signed manifest envelope
-//   bundle/codec.wasm  bundle/reputation.wasm  bundle/tier2-guest.js
+// Output — ONE file the shell loads with --bundle:
+//   bundle/seedstore.skb   the signed manifest envelope + codec.wasm + reputation.wasm
+//                          + guest.js, packed into a single blob (seedkernel §12.4)
 // The signed manifest commits to each module's hash; the shell verifies the bytes
 // against it and installs them directly (seedkernel §12.4).
 //
@@ -20,21 +20,23 @@ import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { loadKernelHost, loadSodium } from "seedkernel-wasm";
-import { verifyManifest } from "seedkernel-wasm/bundle";
+import { loadSodium } from "seedkernel-wasm";
+import { verifyBundle } from "seedkernel-wasm/bundle";
 import { writeStorageBundle } from "./storage-bundle.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = join(__dirname, "..");
 const build = join(root, "build");
 const out = join(root, "bundle");
+const bundlePath = join(out, "seedstore.skb");
 
 const { toHex, fromHex } = await import(new URL("../build/host/util.js", import.meta.url));
 
 const sodium = await loadSodium();
-const host = await loadKernelHost(join(build, "kernel.wasm"));
-// This host is offline scaffolding — used only to derive the module kernel names and
-// hash the module bytes (genesisHash) the manifest commits to; it signs nothing.
+// Bundle *content* is assembled below from sodium alone: it hashes the module bytes
+// (genesisHash) the manifest commits to and signs the manifest. No kernel host is needed —
+// hashing is a free `genesisHash(sodium, …)` in the bundle module now, and a module's kernel
+// name is derived from the signed `(app, name)` pair at load time (seedkernel §5.1).
 
 // Author identity: the key the bundle is signed with (and that installs are
 // signed with). A deployment's policy lists this public key as an allowed author.
@@ -60,16 +62,15 @@ if (existsSync(keyPath)) {
 // restarts at 1 after a `git clean`, a fresh checkout, or a build on a second machine — and
 // every deployed shell then correctly rejects the next publish as a downgrade. The key +
 // version file travel together (both out of git); copy one to another machine, copy both.
-const prevManifest = join(out, "manifest.bundle");
 let prevVersion = 0;
 if (existsSync(versionPath)) {
   const v = Number(readFileSync(versionPath, "utf8").trim());
   if (Number.isInteger(v) && v > 0) prevVersion = v;
-} else if (existsSync(prevManifest)) {
+} else if (existsSync(bundlePath)) {
   // Older tree with no version file yet: seed the mark from the last built bundle.
   try {
-    const prev = verifyManifest(sodium, new Uint8Array(readFileSync(prevManifest)));
-    if (prev && Number.isInteger(prev.manifest.version)) prevVersion = prev.manifest.version;
+    const prev = verifyBundle(sodium, new Uint8Array(readFileSync(bundlePath)));
+    if (Number.isInteger(prev.manifest.version)) prevVersion = prev.manifest.version;
   } catch { /* unreadable / pre-integer version → treat as none */ }
 } else if (!mintedKey) {
   // The dangerous case: a persisted key (an established namespace) but no record of how far
@@ -82,12 +83,12 @@ if (existsSync(versionPath)) {
 }
 const version = prevVersion + 1;
 
-const manifest = writeStorageBundle({ dir: out, host, sodium, sk, pk, build, version, log: console.log });
+const manifest = writeStorageBundle({ path: bundlePath, sodium, sk, pk, build, version, log: console.log });
 
 // Record the new high-water mark beside the key, so the next publish counts on from here
 // even if bundle/ is wiped.
 writeFileSync(versionPath, `${manifest.version}\n`);
 
 console.log(`  author ${toHex(pk)}`);
-console.log(`  wrote ${out} (app ${manifest.app} v${manifest.version}, ${manifest.modules.length} modules, `
-  + `caps ${manifest.caps.join("+")})`);
+console.log(`  wrote ${bundlePath} (app ${manifest.app} v${manifest.version}, ${manifest.modules.length} modules, `
+  + `caps ${manifest.guest.caps.join("+")})`);

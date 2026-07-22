@@ -1,15 +1,28 @@
 // p2p-cli — a headless "p2p.html light": boots the SAME WsNetwork + StorageNode the
 // browser demo uses (WS mode: 256 KiB blocks, 1 MiB batches, window 64) and drives
 // PUT/GET against real `seedloader --ws-listen` nodes from the terminal, printing a
-// wire-level timeline so a slow transfer can be attributed to a phase:
+// wire-level timeline so a slow transfer can be attributed to a phase. All four are
+// CUMULATIVE TIMESTAMPS — ms since the operation started, NOT durations — so read them
+// as points on one clock and subtract to get a phase:
 //
-//   encode  = put() start → first STORE frame handed to the socket (guest CPU:
+//   encode  = first STORE frame handed to a socket (guest CPU up to that point:
 //             XChaCha20 + RS + BLAKE2b + Ed25519, plus the OFFER round trip)
-//   queue   = first STORE send → last STORE send (guest → socket handoff, incl.
+//   queue   = LAST STORE frame handed to a socket (guest → socket handoff, incl.
 //             the per-frame AEAD seal, whose cost is also totalled separately)
-//   drain   = last STORE send → socket buffers empty (REAL upload bandwidth —
-//             TCP + the far end's read rate; sampled from ws.bufferedAmount)
-//   settle  = buffers empty → last STORE response (holder verify/store + RTT)
+//   drain   = socket buffers last sampled non-empty (from ws.bufferedAmount)
+//   settle  = last STORE response (holder verify/store + RTT)
+//
+// They are NOT ordered: `drain` BEFORE `queue` is the diagnostic that matters. It means
+// the buffers ran dry while frames were still being handed over — the wire was STARVED
+// and the link was waiting on us, not the reverse. That is the streamed PUT's per-window
+// OFFER→STORE→ack barrier idling the wire between windows; `peak buffered` pinning at
+// ~one window's ciphertext across runs confirms in-flight bytes are window-bounded rather
+// than link-bounded. The full analysis, with numbers, is on put() in host/storage-node.ts.
+//
+// CAVEAT on the "MB/s upload" printed with drain: it divides ALL bulk bytes by
+// (drain − encode). Whenever drain < queue that span did not carry all of them, so the
+// figure OVER-REPORTS and must not be read as "the link is saturated". Sustained rate is
+// the "N MB/s wire" on the headline PUT line, which uses the true total.
 //
 // Usage (Node ≥20 needs the WebSocket global):
 //   node --experimental-websocket scripts/p2p-cli.mjs \
@@ -26,7 +39,8 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { WsNetwork } from "seedkernel-wasm/net-ws";
-import { createStorageNode, loadSodium, storageSignScope, defaultConfig, PRODUCTION_BLOCK_SIZE, toHex, fromHex } from "../build/host/node.js";
+import { unpackBundle, MANIFEST_FILE } from "seedkernel-wasm/bundle";
+import { createStorageNode, loadSodium, defaultConfig, PRODUCTION_BLOCK_SIZE, toHex, fromHex } from "../build/host/node.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -164,15 +178,29 @@ const sodium = await loadSodium();
 const identity = sodium.crypto_sign_keypair();
 console.log(`me: ${hex(identity.publicKey).slice(0, 16)}…`);
 
+// The cohort's holders verify under their bundle's author scope (§16), so sign under the
+// same one: read it from the staged bundle's manifest envelope ([authorPk 32][sig 64][json],
+// the MANIFEST_FILE entry of the seedstore.skb archive). A missing bundle is fine — that's
+// a cohort with no signed deployment — but a bundle we can't read the author out of is
+// NOT: it silently degrades to the zero-author scope and every OFFER comes back declined,
+// which reads exactly like a full holder. So fail loud on anything but "no bundle".
 let authorHex = args.get("author") ?? "";
 if (!authorHex) {
+  const path = join(__dirname, "..", "bundle", "seedstore.skb");
+  let blob = null;
   try {
-    const b = new Uint8Array(await readFile(join(__dirname, "..", "bundle", "manifest.bundle")));
-    if (b.length >= 32) authorHex = hex(b.slice(0, 32));
-  } catch { /* no bundle staged */ }
+    blob = new Uint8Array(await readFile(path));
+  } catch (e) {
+    if (e.code !== "ENOENT") throw e; // unreadable ≠ absent
+  }
+  if (blob) {
+    const env = unpackBundle(blob)[MANIFEST_FILE];
+    if (!env || env.length < 32) throw new Error(`bundle at ${path} has no readable manifest author — pass --author explicitly, or --author none`);
+    authorHex = hex(env.slice(0, 32));
+  }
 }
-const signScope = authorHex && authorHex !== "none" ? storageSignScope(fromHex(authorHex)) : undefined;
-console.log(signScope ? `signing scope: bundle author ${authorHex.slice(0, 8)}…` : "signing scope: zero-author default");
+const signAuthor = authorHex && authorHex !== "none" ? fromHex(authorHex) : undefined;
+console.log(signAuthor ? `signing scope: bundle author ${authorHex.slice(0, 8)}…` : "signing scope: zero-author default");
 
 const peerUp = new Set();
 let onQuorum = null;
@@ -185,13 +213,14 @@ const net = new WsNetwork({
   onPeerDown: (pid) => { node?.removePeer(pid); peerUp.delete(pid); console.log(`link DOWN: ${pid.slice(0, 8)}…`); },
 });
 
-// Base on defaultConfig so lowWater and the fan-out/window defaults are set for the
-// chosen k/m (replicas = m+1 and smallMaxBlocks are §4.1 math the guest derives). The
-// injection is total — a partial config would feed the strict guest an undefined knob.
+// Base on defaultConfig so the fan-out/window defaults are all set (the §4.1 durability
+// math — smallMaxBlocks, r = m+1, the low-water mark — is derived from k/m and from each
+// chunk's signed descriptor, never config). The injection is total — a partial config
+// would feed the strict guest an undefined knob.
 const config = { ...defaultConfig(kParam, mParam, blockSize), maxMessageBytes, putWindow: windowN, getWindow: windowN,
   ...(wtargetMB > 0 ? { windowTargetBytes: Math.round(wtargetMB * 1024 * 1024) } : {}),
   ...(heapMB > 0 ? { realmMemoryBytes: Math.round(heapMB * 1024 * 1024) } : {}) };
-let node = await createStorageNode({ network: net, identity, config, timeoutMs, signScope });
+let node = await createStorageNode({ network: net, identity, config, timeoutMs, signAuthor });
 for (const pid of peerUp) node.addPeer(pid);
 console.log(`node ready: RS(${kParam},${mParam}), ${blockSize / 1024} KiB blocks, batch ${Math.round(maxMessageBytes / 1024)} KiB, window ${windowN}, conns/peer ${connsN}, wtarget ${wtargetMB > 0 ? wtargetMB + " MB" : "4 MiB (default)"}, heap ${heapMB > 0 ? heapMB + " MB" : "64 MiB (default)"}, timeout ${timeoutMs} ms`);
 

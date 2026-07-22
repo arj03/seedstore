@@ -1,38 +1,24 @@
 // Test-only host-owned instance of the codec WASM (README §17). Lets a test drive
-// the Reed–Solomon codec directly — instantiating the same codec.wasm and serving
-// the one host call it makes (kernel.call("crypto.hash", …) for the block-id op) by
-// routing it to the crypto service. The runtime never uses this: a node reaches the
-// codec as an installed kernel handler over MODULE_CALL (host/storage-node.ts), so
-// this client lives with the tests that exercise the wasm in isolation. The ABI
+// the Reed–Solomon codec directly — instantiating the same codec.wasm the way the
+// kernel host does: a PURE transform that imports only the AssemblyScript runtime
+// shims (env.*) and makes no host calls. The runtime never uses this: a node reaches
+// the codec as an installed kernel handler over MODULE_CALL (host/storage-node.ts),
+// so this client lives with the tests that exercise the wasm in isolation. The ABI
 // (op-tag layout) is owned by assembly/codec/index.ts.
 
 import { writeU32BE } from "../build/host/util.js";
 
-const OP_INFO = 0, OP_ENCODE = 1, OP_DECODE = 2, OP_BLOCKID = 3;
+const OP_INFO = 0, OP_ENCODE = 1, OP_DECODE = 2;
 
 export class CodecClient {
-  #crypto;
   exports;
   scratch = 0;
 
-  constructor(crypto) { this.#crypto = crypto; }
-
-  /** Instantiate the codec and plant the crypto.hash name it calls for ids. */
-  static async load(codecBytes, crypto, cryptoHashName) {
-    const c = new CodecClient(crypto);
+  /** Instantiate the codec (a pure transform — env.* shims only, no host calls). */
+  static async load(codecBytes) {
+    const c = new CodecClient();
     const mod = new WebAssembly.Module(codecBytes);
     const imports = {
-      kernel: {
-        // The codec's only host call: genesis hashing. Write the digest back to
-        // the codec's scratch, mirroring how KernelHost delivers a kernel.call
-        // response to the caller's scratch region.
-        call: (_sPtr, _sLen, payloadPtr, payloadLen) => {
-          const data = new Uint8Array(c.exports.memory.buffer, payloadPtr, payloadLen).slice();
-          const digest = crypto.hash(data);
-          new Uint8Array(c.exports.memory.buffer, c.scratch, digest.length).set(digest);
-          return digest.length;
-        },
-      },
       env: {
         abort: (_m, _f, l, col) => { throw new Error(`codec abort ${l}:${col}`); },
         seed: () => Date.now(),
@@ -42,12 +28,6 @@ export class CodecClient {
     const inst = new WebAssembly.Instance(mod, imports);
     c.exports = inst.exports;
     c.scratch = c.exports.scratch.value;
-    // Plant the hash bridge name (the value is irrelevant to this host-owned
-    // instance, but the codec guards on a non-empty name).
-    const cfg = new Uint8Array(1 + cryptoHashName.length);
-    cfg[0] = cryptoHashName.length; cfg.set(cryptoHashName, 1);
-    c.write(cfg);
-    c.exports.configure(cfg.length);
     return c;
   }
 
@@ -79,16 +59,6 @@ export class CodecClient {
     this.write(new Uint8Array([OP_INFO]));
     const r = this.read(this.exports.handle(1));
     return { version: r[0], polyLo: r[1], polyHi: r[2], maxK: r[3], maxM: r[4] };
-  }
-
-  /** block_id via the codec's host-crypto path (§4.2). Equivalent to
-   *  crypto.hash; used where the WASM path is what we want to exercise. */
-  blockId(bytes) {
-    const req = new Uint8Array(1 + bytes.length);
-    req[0] = OP_BLOCKID; req.set(bytes, 1);
-    const len = this.exports.handle(this.write(req));
-    if (len !== 32) throw new Error("codec block-id failed");
-    return this.read(32);
   }
 
   /** Systematic RS encode: k data blocks → m parity blocks (§4.1). Stages the

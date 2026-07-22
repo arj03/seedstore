@@ -1,7 +1,7 @@
-// Browser entry point — fetches the three WASM modules and boots a StorageNode
+// Browser entry point — fetches the two WASM modules and boots a StorageNode
 // against a caller-provided sumo libsodium. The page readies libsodium and
-// passes it in; the BlobStore backend would be OPFS/IndexedDB in a real browser
-// node (here the default in-memory store is used, which is also a valid
+// passes it in; the `fs` backend the holder stores into would be OPFS/IndexedDB in a
+// real browser node (here the default in-memory one is used, which is also a valid
 // eviction-aware cache, §12). Browser nodes run the same protocol as
 // long-running peers, differing only in backend and default quota (§1, §8).
 
@@ -9,7 +9,7 @@ import type { Sodium } from "./sodium.js";
 import { StorageNode, type StorageNodeOptions } from "./storage-node.js";
 import type { WasmBytes } from "./node.js";
 
-/** Fetch the three WASM modules + the guest program relative to the page. */
+/** Fetch the two WASM modules + the guest program relative to the page. */
 export async function loadWasmBytes(baseUrl: string | URL = "./"): Promise<WasmBytes> {
   const base = typeof baseUrl === "string" ? baseUrl : baseUrl.href;
   // no-store: the wasm modules and guest are versioned together with the host JS, so a
@@ -17,11 +17,11 @@ export async function loadWasmBytes(baseUrl: string | URL = "./"): Promise<WasmB
   // a fresh host — a "no entrypoint 'x'" mismatch that a normal reload won't clear.
   const get = async (name: string) => new Uint8Array(await (await fetch(base + name, { cache: "no-store" })).arrayBuffer());
   const text = async (name: string) => (await fetch(base + name, { cache: "no-store" })).text();
-  const [kernelBytes, codecBytes, reputationBytes, guestSource] = await Promise.all([
-    get("kernel.wasm"), get("codec.wasm"), get("reputation.wasm"),
+  const [codecBytes, reputationBytes, guestSource] = await Promise.all([
+    get("codec.wasm"), get("reputation.wasm"),
     text("tier2-guest.js"),
   ]);
-  return { kernelBytes, codecBytes, reputationBytes, guestSource };
+  return { codecBytes, reputationBytes, guestSource };
 }
 
 /** Boot one storage node in the browser. Pass a readied sumo libsodium. */

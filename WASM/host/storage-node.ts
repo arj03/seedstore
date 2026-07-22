@@ -3,10 +3,14 @@
 // confined guest (host/tier2-guest.js), run inside ONE seedkernel safe-js realm
 // over the generic capability bridge. StorageNode only:
 //
-//   - loads kernel.wasm and wires signature + installer (the signature wrapper
-//     is host code inside the kernel now, not a separate WASM module)
-//   - registers the storage bridges (crypto.* no-cap; store/net/clock/rand
-//     cap-gated) and installs the pure codec + reputation handlers
+//   - stands up the handler table and wires the loader's admission policy (§12.5). There is
+//     no module registry and no signature wrapper any more — authenticity is the
+//     transport's job (the AKE channel attributes every frame), so the kernel
+//     carries no per-message signing (seedkernel "Drop the whole envelope +
+//     signing", "Move admission policy to bundle loading")
+//   - installs the pure codec + reputation handlers (RS coding + reciprocity
+//     scoring); everything else the guest reaches through the generic cap-bridge
+//     (crypto/net/fs/clock/module), so there are no storage-specific host bridges
 //   - runs the guest's *initiator* entrypoints (put / get / repair) via the
 //     realm's async `call()` (they fan out over net and park mid-await, §2.1)
 //   - serves the guest's *holder* entrypoint (handle: HAVE / OFFER / STORE /
@@ -16,16 +20,16 @@
 //
 // There is no host-side copy of the protocol any more: placement, k-of-n,
 // admission, the wire format, repair triggers — all of it is the guest. The same
-// class runs in Node and the browser; only the BlobStore backend and the Network
-// implementation differ (§1, §12).
+// class runs in Node and the browser; only the `fs` backend the holder stores into
+// and the Network implementation differ (§1, §12).
 
 // Import the kernel host from seedkernel's *browser* subpath: it is the same
 // platform-neutral KernelHost, but without the node:fs shims node.js pulls in,
 // so this module loads unchanged in both Node and the browser (§1, §20). For the
 // same reason StorageNode never reads the guest text from disk — the caller
 // supplies it (`guestSource`): node.js reads it off disk, browser.js fetches it.
-import { KernelHost, referencePolicy } from "seedkernel-wasm/browser";
-import { createCapBridge, capPreamble } from "seedkernel-wasm/cap-bridge";
+import { KernelHost } from "seedkernel-wasm/browser";
+import { createCapBridge, capPreamble, bundlePreamble } from "seedkernel-wasm/cap-bridge";
 // The generic zero-authority sandbox lives in the kernel as `safe-js`: ONE realm
 // runs both roles over the genuinely-async seam — `call()` for the initiator
 // (put/get/repair, which awaits net) and `callSync()` for the holder (handle),
@@ -40,21 +44,39 @@ import type { Sodium } from "./sodium.js";
 import type { Network, PeerId } from "seedkernel-wasm/net";
 import { Transport } from "seedkernel-wasm/net";
 import { MemoryFs, type Fs } from "seedkernel-wasm/fs";
-import { DEFAULT_QUOTA_BYTES, type BlobStore } from "./store-local.js";
-import { FsBlobStore } from "./store-fs.js";
+import { FsBlobView, type BlobView } from "./store-view.js";
 import { Crypto } from "./crypto.js";
-import { storageNames, type StorageNames } from "./names.js";
-import { registerStorageBridges } from "./bridges.js";
-import { type Identity, type StorageConfig, defaultConfig } from "./core.js";
-import { STORAGE_SIGN_SCOPE, guestSignPrefix } from "./manifest.js";
+import {
+  type Identity, type StorageConfig, defaultConfig, assertStorageConfig, DEFAULT_QUOTA_BYTES,
+} from "./core.js";
+import { STORAGE_APP, storageModules, ZERO_AUTHOR, storageSignScope } from "./manifest.js";
 import { encodeScoreReq } from "./reputation-core.js";
-import { toHex, readU32BE, writeU32BE, writeU64BE, readU64BE, concatBytes } from "./util.js";
+import { toHex, readU32BE, writeU64BE, readU64BE, concatBytes } from "./util.js";
 
-// Fresh-array constructors for the windowed PUT/GET host seam: they frame the length-
-// prefixed arguments the streaming entries read. The u32/u64 read+write primitives live
-// in util.ts (readU64BE is imported above); these just allocate one field's worth.
-function u32be(n: number): Uint8Array { const b = new Uint8Array(4); writeU32BE(b, 0, n); return b; }
+const NO_ARG = new Uint8Array(0);
+/** The one scalar the host frames for the guest: the file size that opens a PUT stream.
+ *  Everything else about a stream lives in the guest's own realm state, so there is no
+ *  other length-prefixed argument to build here. */
 function u64be(n: number): Uint8Array { const b = new Uint8Array(8); writeU64BE(b, 0, n); return b; }
+
+/** Decode the guest's PUT result — the single result format every driver reads
+ *  (`encodePutResult` in tier2-guest.orchestration.js):
+ *  [manifestId 32][replicated u8][chunkCount u32][K 32][placed u32][intended u32]
+ *  [idCount u32]{id 32}. */
+function decodePutResult(r: Uint8Array): PutResult {
+  const blockIds: Uint8Array[] = [];
+  const idCount = readU32BE(r, 77);
+  for (let i = 0; i < idCount; i++) blockIds.push(r.slice(81 + i * 32, 81 + (i + 1) * 32));
+  return {
+    manifestId: r.slice(0, 32),
+    replicated: r[32] === 1,
+    chunkCount: readU32BE(r, 33),
+    key: r.slice(37, 69),
+    replicasLanded: readU32BE(r, 69),
+    replicasIntended: readU32BE(r, 73),
+    blockIds,
+  };
+}
 
 /** PUT result: the manifest root, the per-file content key K, and where the
  *  file landed (every distinct block id placed + the manifest, in placement
@@ -80,7 +102,6 @@ export interface PutResult {
 export interface StorageNodeOptions {
   network: Network;
   sodium: Sodium;
-  kernelBytes: Uint8Array;
   codecBytes: Uint8Array;
   reputationBytes: Uint8Array;
   /** The stitched guest program text (build/host/tier2-guest.js). The whole
@@ -89,35 +110,44 @@ export interface StorageNodeOptions {
   guestSource: string;
   identity?: Identity;
   config?: Partial<StorageConfig>;
-  /** Raw-byte `fs.*` backend (§12; seedkernel's Fs). Defaults to an in-RAM
-   *  MemoryFs; a server node passes a NodeFs, the browser an OPFS-backed one. The
-   *  default store is an FsBlobStore over this, and BOTH guest realms serve `fs.*`
-   *  from it — so the holder's writes and the host-side store view share a backend.
-   *  Do NOT write blocks into this `fs` out-of-band on a live node: the guest holder
-   *  caches its committed-tier byte total (bytesUsed) and only rebuilds it lazily, so
-   *  writes it didn't make leave its §14 quota accounting stale until the realm is
-   *  rebuilt (over/under-admitting in the meantime). */
+  /** Raw-byte `fs.*` backend (§12; seedkernel's Fs). Defaults to an in-RAM MemoryFs;
+   *  a server node passes a NodeFs, the browser an OPFS-backed one. This is the
+   *  holder's store.local: the guest writes its `<hex>.blk`/`.dsc` layout here, and
+   *  `store` reads it back. Planting blocks here directly is how a test seeds a
+   *  holder — but on a LIVE node it leaves the guest's lazily-rebuilt byte total
+   *  stale (it only counts what it wrote), so seed before the holder is exercised. */
   fs?: Fs;
-  /** Donated blob store (§12) — a *read view* over `fs` for inspection (the guest
-   *  holder writes the `<hex>.blk`/`.dsc` layout itself, via `fs.*`). Defaults to
-   *  an FsBlobStore over `fs` with a `quota`-byte budget; a custom store must layer
-   *  over the same `fs` the node serves, or the two would diverge. Its put/delete are
-   *  for callers that drive the store directly (e.g. tests): calling them on a live
-   *  node bypasses the guest holder, whose cached quota budget then goes stale until
-   *  the guest realm is rebuilt — FsBlobStore itself reads used-bytes live for the
-   *  mirror-image reason (it can't see the guest's `fs.*` writes). */
-  store?: BlobStore;
+  /** Read view of what the holder has stored (§12), for inspection only — there is
+   *  no host-side write path, since the guest holder owns admission and the writes.
+   *  Defaults to an `FsBlobView` over `fs`; an override must read the same `fs` the
+   *  node serves, or it is looking at a different node's blocks. */
+  store?: BlobView;
+  /** The holder's committed-tier byte budget (§14), operator policy injected into the
+   *  guest's APP — where the confined holder is the only thing that enforces it.
+   *  Defaults to DEFAULT_QUOTA_BYTES.
+   *
+   *  Deliberately a sibling of `config` rather than a StorageConfig field: quota is
+   *  per-node operator policy, and keeping it out of the config object means it cannot
+   *  be spread into an author-signed bundle config (scripts/storage-bundle.mjs). NB a
+   *  seedkernel shell spells the same knob INSIDE its boot config — `boot({ config: {
+   *  quota } })` — because that config is opaque operator input, not this typed one;
+   *  `config: { quota }` here is rejected outright rather than silently ignored. */
   quota?: number;
   clock?: () => number;
   /** net.send timeout — how long before a peer is treated as unreachable (§8). */
   timeoutMs?: number;
-  /** The guest signing scope (README §16). Descriptors are signed/verified over
-   *  `DOMAIN_guest ‖ scope ‖ core`, so every node in one cohort must share it (a
-   *  descriptor one signs verifies on another). Defaults to the in-process
-   *  `STORAGE_SIGN_SCOPE` (zero author); a cohort that shares a bundle author — the
-   *  shell-run / holder-guest cross-path tests — passes `storageSignScope(author)` so
-   *  its StorageNodes verify what a shell running that bundle signs. */
-  signScope?: Uint8Array;
+  /** The bundle author this node signs and verifies descriptors under (README §16).
+   *  The scope is `guestSignScope(signAuthor, "seedstore")` and descriptors are
+   *  signed/verified over `DOMAIN_guest ‖ scope ‖ core`, so every node in one cohort
+   *  must agree on it (a descriptor one signs verifies on another). Defaults to the
+   *  zero key — the in-process posture for a host-side node with no bundle behind it;
+   *  a cohort joining shell-run holders (the cross-path tests, p2p.html) passes that
+   *  bundle's author so its StorageNodes verify what the shell signs.
+   *
+   *  Deliberately the AUTHOR and not a pre-derived scope: the scope and the guest's
+   *  injected signing prefix are then derived from it in one place, exactly as the
+   *  seedkernel shell derives them from an admitted manifest (§12.4). */
+  signAuthor?: Uint8Array;
 }
 
 export class StorageNode {
@@ -125,24 +155,31 @@ export class StorageNode {
   readonly identity: Identity;
   readonly transport: Transport;
   readonly fs: Fs;
-  readonly store: BlobStore;
+  readonly store: BlobView;
+  /** The §14 byte budget this node injects into its guest holder (operator policy).
+   *  Kept here because the guest is the only enforcer — nothing host-side checks it. */
+  readonly quota: number;
   readonly crypto: Crypto;
   readonly sodium: Sodium;
   readonly config: StorageConfig;
   readonly host: KernelHost;
-  readonly names: StorageNames;
 
   private readonly peers = new Set<PeerId>();
   private readonly clockFn: () => number;
   private readonly guestSource: string;
+  /** The bundle author this node's signing scope is derived from (§16). */
+  private readonly signAuthor: Uint8Array;
   private readonly signScope: Uint8Array;
+  /** The kernel names this node's two handlers bind at — derived from `signAuthor`
+   *  (§5.1), so they match a bundle-loaded node running under the same author. */
+  private readonly modules: { codec: string; reputation: string };
   private repairLoopOn = false;
   private repairTimer: ReturnType<typeof setTimeout> | null = null;
-  // The tail of the initiator call chain (put/get/repair). runInitiator chains every
-  // call onto it, so they run strictly one at a time (see there) and close() can await
-  // the whole chain — not just the most recent window call — before disposing the realm.
-  // `closed` short-circuits any call arriving after close() with a clean rejection
-  // instead of a mid-flight "realm disposed" error.
+  // The tail of the initiator operation chain (put/get/repair/warm). runExclusive chains
+  // each whole operation onto it, so they run strictly one at a time (see there) and
+  // close() can await the chain — not just the most recent window call — before disposing
+  // the realm. `closed` short-circuits any operation raised after close() with a clean
+  // rejection instead of a mid-flight "realm disposed" error.
   private inFlight: Promise<unknown> = Promise.resolve();
   private closed = false;
 
@@ -159,37 +196,43 @@ export class StorageNode {
     this.identity = identity;
     this.peerId = toHex(identity.publicKey);
     this.guestSource = opts.guestSource;
-    this.signScope = opts.signScope ?? STORAGE_SIGN_SCOPE;
-    // Derive lowWater from the *caller's* k & m, then let any explicit field in
-    // opts.config override — otherwise overriding k/m alone would leave lowWater
-    // derived from the (2,2) default (e.g. an unreachable lowWater > n on the demo's
-    // RS(1,1)). replicas (m+1) and smallMaxBlocks are §4.1 math the guest computes
-    // from k/m, not config fields, so there is nothing to keep in sync here.
+    // One derivation from the author: the bridge's SIGN scope and the guest's injected
+    // verify prefix both come from it, so the two can never disagree (§16).
+    this.signAuthor = opts.signAuthor ?? ZERO_AUTHOR;
+    this.signScope = storageSignScope(this.signAuthor);
+    // The handlers' kernel names fold in that same author (§5.1), so this node and a
+    // bundle-loaded node under the same author reach codec/reputation by the same name.
+    this.modules = storageModules(this.signAuthor);
+    // Defaults under the caller's own (k, m, blockSize), with any explicit field
+    // overriding. Nothing here is *derived* from k/m: the replica count, the low-water
+    // mark, and smallMaxBlocks are all §4.1 math computed where they are used (from the
+    // signed descriptor, or from k/m in the guest), so overriding the geometry cannot
+    // leave a stale durability knob behind for them to disagree with.
     const c = opts.config;
+    // A JS driver gets no type checking, so an unknown key here would silently run on
+    // the default instead of the setting the caller asked for (see assertStorageConfig).
+    assertStorageConfig(c);
     this.config = { ...defaultConfig(c?.k, c?.m, c?.blockSize), ...c };
     this.clockFn = opts.clock ?? (() => Date.now());
     this.crypto = new Crypto(opts.sodium);
     this.fs = opts.fs ?? new MemoryFs();
-    this.store = opts.store ?? new FsBlobStore(this.fs, opts.quota ?? DEFAULT_QUOTA_BYTES);
-    this.names = storageNames(host);
+    this.quota = opts.quota ?? DEFAULT_QUOTA_BYTES;
+    this.store = opts.store ?? new FsBlobView(this.fs);
     this.transport = new Transport(this.peerId, opts.network, opts.timeoutMs ?? 200);
   }
 
-  /** Boot a storage node: load the kernel, wire signature + the module registry,
-   *  register bridges, install the codec + reputation handlers, then build the sync
-   *  holder realm and route incoming requests to the guest's `handle` (§19, §2.1). */
+  /** Boot a storage node: stand up the handler table, wire the admission policy, install the
+   *  codec + reputation handlers, then build the sync holder realm and route
+   *  incoming requests to the guest's `handle` (§19, §2.1). */
   static async create(opts: StorageNodeOptions): Promise<StorageNode> {
     await opts.sodium.ready;
-    const host = await KernelHost.load(
-      opts.kernelBytes as BufferSource, opts.sodium as never,
-    );
-    host.registerSignature(host.deriveBootstrapName("signature"));
-    host.registerInstaller();
-    // Single-deployment reference posture: accept audited handler bytes from any
-    // author. A real deployment narrows this to a content-hash allowlist + closed
-    // author set (§19). Capabilities are no longer install-declared — the JS
-    // sandbox is the confinement, so the policy governs WHO may bind a name only.
-    host.setApproveInstall(referencePolicy(host, () => true));
+    // The kernel is just the handler table now — it touches no crypto and holds no
+    // admission policy. A host-side StorageNode authors its own handlers and binds them
+    // directly (installWasmHandler); admission is the bundle loader's concern (§12.4,
+    // §12.5), which a real shell deployment narrows to a content-hash allowlist + closed
+    // author set via `buildAdmit(policy)`. Confinement is the JS sandbox, not an
+    // install-time capability declaration.
+    const host = new KernelHost();
 
     const identity = opts.identity ?? (() => {
       const kp = opts.sodium.crypto_sign_keypair();
@@ -197,7 +240,6 @@ export class StorageNode {
     })();
 
     const node = new StorageNode(opts, host, identity);
-    node.registerBridges();
     node.installHandlers(opts.codecBytes, opts.reputationBytes);
 
     // The one guest realm, created eagerly so the node serves the moment it is
@@ -238,20 +280,26 @@ export class StorageNode {
     });
   }
 
-  /** The `const APP = {…};` block the guest reads its config + module names from —
-   *  storage's app-specific constants, injected the same way the CAP op preamble
-   *  is. The seedkernel shell builds the byte-identical block from a bundle
-   *  manifest's `config` field. */
+  /** The `const APP = {…};` block the guest reads its config from — storage's
+   *  app-specific constants, injected the same way the CAP op preamble is. The
+   *  seedkernel shell builds the byte-identical block from a bundle manifest's
+   *  `guest.config` (with operator config merged over it).
+   *
+   *  What is NOT here: the module kernel names and the signing prefix. Those are facts
+   *  a runtime derives, and they arrive as `BUNDLE` (below) — where operator config,
+   *  which merges over APP, cannot reach them. */
   private appPreamble(): string {
     const c = this.config;
     // The APP injection is TOTAL: every value the guest reads is here and concrete —
-    // the guest reads APP and never falls back to a guessed default. replicas and
-    // smallMaxBlocks are absent because they are §4.1 math the guest derives from k/m.
+    // the guest reads APP and never falls back to a guessed default. The §4.1 durability
+    // math is absent because it is derived, not injected: smallMaxBlocks from k/m in the
+    // guest, and the replica count + low-water mark from each chunk's signed descriptor.
     const app = {
-      k: c.k, m: c.m, blockSize: c.blockSize, lowWater: c.lowWater,
-      // The holder side's byte budget (§14) — the same quota FsBlobStore enforces,
-      // surfaced so the confined `handle` path admits exactly as the host store does.
-      quota: this.store.stat().quota,
+      k: c.k, m: c.m, blockSize: c.blockSize,
+      // The holder side's byte budget (§14). Operator policy, injected like the
+      // transport knobs below — and enforced ONLY here, inside the confined `handle`
+      // path; the host keeps no second copy of the rule to drift out of step with.
+      quota: this.quota,
       // Transport/operator policy (like quota, not author-signed): the per-message
       // batch cap and the fan-out windows the guest splits/pipelines OFFER/STORE/
       // FETCH under, so it batches byte-for-byte as the spec intends.
@@ -260,20 +308,31 @@ export class StorageNode {
       // Streamed PUT/GET window (§3), always concrete (core.ts homes the 4 MiB default).
       // Bigger windows amortise the per-window OFFER→STORE→ack barrier on a fat/low-loss link.
       windowTargetBytes: c.windowTargetBytes,
-      codecName: toHex(this.names.codec), repName: toHex(this.names.reputation),
-      // The scoped-signature prefix `DOMAIN_guest ‖ scope` the guest prepends before
-      // CAP_VERIFY (README §16) — the same bytes the bridge's SIGN op prepends, so the
-      // two paths agree. The seedkernel shell injects the byte-identical value from the
-      // admitted bundle's (author, app); here it comes from this node's scope.
-      signPrefix: toHex(guestSignPrefix(this.signScope)),
     };
     return `const APP = ${JSON.stringify(app)};\n`;
   }
 
-  /** The full guest source: the generic CAP op catalog + the injected APP config +
-   *  the orchestration program. */
+  /** The `const BUNDLE = {…};` block (seedkernel §12.4): the facts a runtime derives
+   *  about the app it is running — here from this node's own author (both the preamble
+   *  `author` and, folded into the module names, `this.modules`) rather than from an
+   *  admitted manifest, since a host-side StorageNode has no bundle behind it. Those names
+   *  come from seedkernel's own `kernelNameFor`, so the guest sees the same `BUNDLE.modules`
+   *  either way.
+   *  Built by the SHARED `bundlePreamble`, so the signing prefix it injects is the same
+   *  bytes, from the same derivation, that a shell running the seedstore bundle injects
+   *  — which is what makes a descriptor signed on one verify on the other. */
+  private bundleFacts(): string {
+    return bundlePreamble({
+      app: STORAGE_APP,
+      author: this.signAuthor,
+      modules: { ...this.modules },
+    });
+  }
+
+  /** The full guest source: the generic CAP op catalog + the bundle facts + the
+   *  injected APP config + the orchestration program. */
   private guestFullSource(): string {
-    return capPreamble() + this.appPreamble() + this.guestSource;
+    return capPreamble() + this.bundleFacts() + this.appPreamble() + this.guestSource;
   }
 
   // ── Node surface ───────────────────────────────────────────────────────
@@ -295,92 +354,101 @@ export class StorageNode {
   }
 
   // ── PUT / GET / repair / share (§6, §7, §9, §4.4) — all run in the guest ──
-  /** Run one initiator entrypoint via the realm's async call(), recording it as
-   *  in-flight so close() can await it before disposing the realm (disposing while a call
-   *  is parked mid-await — a repair pass caught by close, waiting out an unreachable
-   *  peer's timeout — would resume into a freed realm: a QuickJS UseAfterFree abort). */
-  private async runInitiator(entry: string, payload: Uint8Array): Promise<Uint8Array> {
-    if (this.closed) throw new Error("storage node closed");
-    const realm = this.realm;
-    // Chain onto the previous call so the initiator runs strictly one at a time.
-    // Concurrent call()s on one realm are now safe (the async seam consumes the arg
-    // before the first await, so they never clobber), so this is no longer required for
-    // correctness — but it keeps a put and a repair pass from competing for the link, and
-    // it keeps `inFlight` a true tail: close() awaits the whole chain, so an earlier
-    // parked call can't resume into a freed realm (the streamed design issues many window
-    // calls per operation, so an interleave is easy to hit).
-    const p = this.inFlight.then(() => realm.call(entry, payload));
+  /** Run one initiator OPERATION — a whole streamed PUT or GET, not a single realm call —
+   *  with exclusive use of the realm, recording it as in-flight so close() can await it
+   *  before disposing (disposing while a call is parked mid-await — a repair pass caught
+   *  by close, waiting out an unreachable peer's timeout — would resume into a freed
+   *  realm: a QuickJS UseAfterFree abort).
+   *
+   *  Exclusive for the whole operation, not per call, because the guest keeps a stream's
+   *  protocol state (K, the running offset, the descriptors placed so far) in realm state
+   *  rather than round-tripping it through the host: two overlapping streams in one realm
+   *  would clobber each other. Chaining whole operations is what makes that single
+   *  implicit session safe by construction — and, as before, it keeps a PUT and a repair
+   *  pass from competing for the link. */
+  private runExclusive<T>(body: () => Promise<T>): Promise<T> {
+    if (this.closed) return Promise.reject(new Error("storage node closed"));
+    const p = this.inFlight.then(body);
     this.inFlight = p.then(() => {}, () => {});
     return p;
   }
 
-  /** PUT a file (§6), orchestrated in the guest via the realm's async `call()`, STREAMED so the
-   *  confined guest heap never holds the whole file (README §3): the plaintext is
-   *  fed one chunk-aligned window at a time and each window's ciphertext is placed
-   *  and dropped before the next is sent. putStart mints K and reports the window
-   *  size; putWindow/putSmall place each window and return its chunk descriptors;
-   *  putManifest seals the manifest over them. The result is assembled here. */
+  /** PUT a file (§6), orchestrated in the guest, STREAMED so the confined guest heap never
+   *  holds the whole file (README §3): putStart opens the stream and reports the plaintext
+   *  window size, putWindow feeds each slice in file order — its ciphertext placed and
+   *  dropped before the next crosses — and putFinish seals the manifest and reports the
+   *  result. K, the chunk descriptors and the replica accounting stay in the guest, so the
+   *  host ships plaintext in and reads one result out, and re-encodes no protocol format. */
   async put(plaintext: Uint8Array): Promise<PutResult> {
-    const fileSize = plaintext.length;
-    const meta = await this.runInitiator("putStart", u64be(fileSize));
-    const key = meta.slice(0, 32);
-    const replicated = meta[32] === 1;
-    const windowBytes = readU32BE(meta, 33);
-
-    const descriptors: Uint8Array[] = [];
-    const blockIds: Uint8Array[] = [];
-    let replicasLanded = 0, replicasIntended = 0;
-    // Decode one window's result:
-    //   [descCount u32]{[len u32][descriptor]}[idCount u32]{id 32}[placed u32][intended u32]
-    const collect = (w: Uint8Array) => {
-      let o = 0;
-      const dc = readU32BE(w, o); o += 4;
-      for (let i = 0; i < dc; i++) { const l = readU32BE(w, o); o += 4; descriptors.push(w.slice(o, o + l)); o += l; }
-      const ic = readU32BE(w, o); o += 4;
-      for (let i = 0; i < ic; i++) { blockIds.push(w.slice(o, o + 32)); o += 32; }
-      replicasLanded += readU32BE(w, o); o += 4;
-      replicasIntended += readU32BE(w, o); o += 4;
-    };
-
-    if (replicated) {
-      collect(await this.runInitiator("putSmall", concatBytes([key, plaintext])));
-    } else {
-      for (let off = 0; off < fileSize; off += windowBytes) {
-        const slice = plaintext.subarray(off, Math.min(off + windowBytes, fileSize));
-        collect(await this.runInitiator("putWindow", concatBytes([key, u64be(off), slice])));
+    return this.runExclusive(async () => {
+      const meta = await this.realm.call("putStart", u64be(plaintext.length));
+      const windowBytes = readU32BE(meta, 0);
+      // ── THE WINDOW BARRIER IS REAL, AND REMOVING IT DOES NOT MAKE PUT FASTER ────
+      // This `await` is a full BARRIER: a window's every OFFER → STORE → ack settles before
+      // the next window's first byte is encoded, so the wire goes idle for the encode+place
+      // of window n+1, once per window. That much is measurable (50 MB to two WS holders
+      // over a ~100 Mbit up link, RS(1,1), 24 MiB window, conns 2) in p2p-cli's four
+      // CUMULATIVE timestamps: `drain` ~7–8.3 s lands BEFORE `queue` ~12–13.5 s — buffers
+      // ran dry ~60% through the send — with `peak buffered` pinned at exactly 42.0 MB,
+      // ~one window's ciphertext, i.e. in-flight bytes bounded by the WINDOW, not the link.
+      //
+      // It is still not the ceiling. TRIED AND REVERTED 2026-07-21: a pipelined guest, in
+      // which putFeed started its window's encode+placement and awaited the PREVIOUS one,
+      // so two windows were open and one was always queued behind the one draining. It
+      // demonstrably worked — `drain` moved after `queue` (13.3 s vs 12.4 s) and `peak
+      // buffered` went 42.0 → 67.5 MB, so the wire really did stop idling — and PUT came
+      // out at 7.2 MB/s wire, dead centre of the 6.8–7.6 MB/s the barrier version gives.
+      // Deeper queue, same drain rate: the bytes moved from "not yet encoded" into kernel
+      // socket buffers, not onto the link. So the idle wire is a SYMPTOM of the receiver
+      // not draining rather than a cause of lost throughput, and the iperf3 headroom
+      // (106 Mbit on 4 flows) is not ours to claim by keeping the sender busy. The cost
+      // was guest pipeline/ordering/latch complexity and ~2× window in guest heap, for a
+      // measured zero. Don't re-implement it.
+      //
+      // Nor is the holder, as far as we can measure. `tests/bench-holder.mjs` prices the
+      // ingest path (hash + descriptor verify + sibling check + 2 fs writes per block) with
+      // the network taken out: at the live geometry on real disk it runs ~96 MB/s per
+      // holder, ~48 MB/s for two co-resident holders on one cpu — about 7× the 7.2 MB/s the
+      // live PUT actually demanded of that box. So the ~6 s settle tail seen on some runs is
+      // not the holder chewing; a holder box would have to be ~7× slower than a dev machine
+      // for ingest to bind. Untimed there: the WS receive path (unmasking, reassembly) on
+      // the holder, the honest remaining unknown — run that bench ON a holder to close it.
+      //
+      // Which leaves the path/transport itself as the live suspect, and the sender-side
+      // levers spent. Widening the window (`windowTargetBytes`) is the wrong lever twice
+      // over: it only makes the idle gaps fewer, not shorter, and costs guest heap (peak
+      // ≈ 3× window at RS(1,1)).
+      //
+      // Do NOT read p2p-cli's printed "MB/s upload" as evidence the link is saturated: it
+      // divides ALL bulk bytes by (drain − encode), a span that by definition did not
+      // carry them all whenever drain < queue, so it over-reports (15.1 MB/s printed vs
+      // ≈7.8 actual).
+      // ───────────────────────────────────────────────────────────────────────────
+      // At least one window always goes in, so a zero-length file is still a PUT.
+      for (let off = 0; ; off += windowBytes) {
+        await this.realm.call("putWindow", plaintext.subarray(off, Math.min(off + windowBytes, plaintext.length)));
+        if (off + windowBytes >= plaintext.length) break;
       }
-    }
-
-    const manParts: Uint8Array[] = [key, u64be(fileSize), u32be(descriptors.length)];
-    for (const d of descriptors) manParts.push(u32be(d.length), d);
-    const manifestId = await this.runInitiator("putManifest", concatBytes(manParts));
-    blockIds.push(manifestId);
-    return { manifestId, replicated, chunkCount: descriptors.length, key, blockIds, replicasLanded, replicasIntended };
+      return decodePutResult(await this.realm.call("putFinish", NO_ARG));
+    });
   }
 
-  /** GET a file (§7), orchestrated in the guest via the realm's async `call()`, STREAMED so the guest
-   *  reconstructs only one window of chunks at a time; the file is assembled here.
-   *  getStart fetches + verifies the manifest and returns the file size, a window
-   *  granularity, and every chunk descriptor; getChunk reconstructs each window. */
+  /** GET a file (§7), orchestrated in the guest, STREAMED so the guest reconstructs only
+   *  one window of chunks at a time; the file is assembled here. getStart fetches the
+   *  manifest and verifies every chunk descriptor once, keeping them in realm state;
+   *  getNext then drains the file one window of plaintext at a time. */
   async get(manifestId: Uint8Array, key: Uint8Array): Promise<Uint8Array> {
-    const start = await this.runInitiator("getStart", concatBytes([manifestId, key]));
-    const fileSize = readU64BE(start, 0);
-    const windowChunks = readU32BE(start, 8);
-    const chunkCount = readU32BE(start, 12);
-    let o = 16;
-    const envs: Uint8Array[] = [];
-    for (let i = 0; i < chunkCount; i++) { const l = readU32BE(start, o); o += 4; envs.push(start.slice(o, o + l)); o += l; }
-
-    const out = new Uint8Array(fileSize);
-    let written = 0;
-    for (let cs = 0; cs < chunkCount; cs += windowChunks) {
-      const windowEnvs = envs.slice(cs, cs + windowChunks);
-      const parts: Uint8Array[] = [key, u32be(cs), u64be(fileSize), u32be(windowEnvs.length)];
-      for (const e of windowEnvs) parts.push(u32be(e.length), e);
-      const chunk = await this.runInitiator("getChunk", concatBytes(parts));
-      out.set(chunk, written); written += chunk.length;
-    }
-    return out;
+    return this.runExclusive(async () => {
+      const fileSize = readU64BE(await this.realm.call("getStart", concatBytes([manifestId, key])), 0);
+      const out = new Uint8Array(fileSize);
+      let written = 0;
+      while (written < fileSize) {
+        const part = await this.realm.call("getNext", NO_ARG);
+        if (part.length === 0) throw new Error(`get: stream ended ${written}/${fileSize} bytes in`);
+        out.set(part, written); written += part.length;
+      }
+      return out;
+    });
   }
 
   /** Pre-warm the realm's codec + crypto caps with a throwaway encode/decode (no
@@ -390,21 +458,21 @@ export class StorageNode {
    *  calls it once after connecting; a pure holder (which only ever serves via callSync)
    *  need not. */
   async warm(): Promise<void> {
-    await this.runInitiator("warm", new Uint8Array(0));
+    await this.runExclusive(() => this.realm.call("warm", NO_ARG));
   }
 
   /** Run one repair pass over every chunk this node holds a block of (§9),
    *  orchestrated in the guest via the realm's async `call()`. Returns the number of blocks
    *  (re-)placed. */
   async runRepair(): Promise<number> {
-    return readU32BE(await this.runInitiator("repair", new Uint8Array(0)), 0);
+    return readU32BE(await this.runExclusive(() => this.realm.call("repair", NO_ARG)), 0);
   }
 
   /** Decayed reciprocity score this node holds for a peer (§13), read from the
    *  installed reputation handler — the same state the guest's verification-fetch
    *  observations write (the guest reaches it the same way, via MODULE_CALL). */
   score(peerPk: Uint8Array): number {
-    const res = this.host.callHandler(this.names.reputation, encodeScoreReq(peerPk, this.now()));
+    const res = this.host.callHandler(this.modules.reputation, encodeScoreReq(peerPk, this.now()));
     if (!res || res.length < 8) return 0;
     return new DataView(res.buffer, res.byteOffset, 8).getFloat64(0, true);
   }
@@ -457,9 +525,10 @@ export class StorageNode {
   /** Tear down the guest realm + the transport, stopping the repair loop if
    *  running (test cleanup). */
   close(): void {
-    this.closed = true; // reject any initiator call raised after this (e.g. the next window
-                        // of a mid-flight streamed put) cleanly, rather than letting it hit
-                        // the freed realm — a diagnosable "storage node closed", not a crash.
+    this.closed = true; // reject any initiator operation raised after this cleanly, rather
+                        // than letting it hit the freed realm — a diagnosable "storage node
+                        // closed", not a crash. An operation already under way keeps its
+                        // window calls (its stream is mid-flight); disposal waits for it.
     this.stopRepairLoop();
     // Close the transport first so any parked initiator round trip settles (times out as
     // unreachable) rather than hanging, and no new holder request arrives (so no callSync
@@ -474,36 +543,28 @@ export class StorageNode {
   }
 
   // ── bootstrap wiring (§19) ──────────────────────────────────────────────
-  private registerBridges(): void {
-    // The only storage-named host service: the no-cap crypto.hash the installed
-    // codec WASM calls for block-ids (§16). The guest reaches net/fs/clock/rand
-    // through the generic cap-bridge (buildBridge), not through storage bridges.
-    registerStorageBridges(this.host, this.names, { crypto: this.crypto });
-  }
-
   private installHandlers(codecBytes: Uint8Array, reputationBytes: Uint8Array): void {
-    // The two pure handlers declare no capabilities, so the structural sandbox
-    // guarantees they reach neither disk nor network even if buggy (§17). The
-    // guest calls them as installed handlers via MODULE_CALL.
-    this.installOne(this.names.codec, codecBytes);
-    this.installOne(this.names.reputation, reputationBytes);
-    // Plant the crypto.hash name on the installed codec so its block-id op can
-    // call the bridge (the same configure the host bakes in at install, §16).
-    const cfg = new Uint8Array(1 + this.names.cryptoHash.length);
-    cfg[0] = this.names.cryptoHash.length; cfg.set(this.names.cryptoHash, 1);
-    this.host.callDynamicExport(this.names.codec, "configure", cfg);
+    // The two pure handlers import nothing and cannot call back into the host
+    // (there is no kernel.call any more), so the structural sandbox guarantees
+    // they reach neither disk nor network even if buggy (§17). The guest calls
+    // them as installed handlers via MODULE_CALL, and computes block-ids itself
+    // via the cap-bridge hash (CAP_HASH) — the codec no longer hashes, so there
+    // is no crypto.hash service to plant on it any more.
+    this.installOne(this.modules.codec, codecBytes);
+    this.installOne(this.modules.reputation, reputationBytes);
   }
 
-  private installOne(name: Uint8Array, wasm: Uint8Array): void {
-    // The node authors its own handlers, so it admits the bytes directly under the
-    // same policy the bundle loader uses (§12.4) — installBundleModule → installDirect
-    // runs the accept-all policy wired in create(). This replaces the old ceremony of
-    // signing a §7.2 install envelope to itself; there is no wire install path.
-    this.host.installBundleModule(name, wasm, this.identity.publicKey);
+  private installOne(name: string, wasm: Uint8Array): void {
+    // The node authors its own handlers, so it binds the bytes straight onto the kernel
+    // table (§3.1, §4). `installWasmHandler` is the raw bind — admission is the bundle
+    // loader's job (§12.4), and a host-side StorageNode has no bundle to admit, so there
+    // is no policy gate and no author argument here. This replaces the old ceremony of
+    // signing an install envelope to itself; there is no wire install path.
+    this.host.installWasmHandler(name, wasm);
   }
 
   /** True if both pure handlers are installed on the kernel (§19). */
   handlersInstalled(): boolean {
-    return this.host.isRegistered(this.names.codec) && this.host.isRegistered(this.names.reputation);
+    return this.host.isBound(this.modules.codec) && this.host.isBound(this.modules.reputation);
   }
 }

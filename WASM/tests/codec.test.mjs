@@ -1,8 +1,8 @@
 // Focused correctness tests for the codec WASM module (Reed–Solomon over
-// GF(2^8), README §4.1). Loads build/codec.wasm directly with a minimal
-// kernel.call import that routes the block-id op to libsodium BLAKE2b-256 —
-// the storage content hash (§4.2). Exhaustive over loss patterns for small
-// codes, randomized for the defaults.
+// GF(2^8), README §4.1). Loads build/codec.wasm directly as a PURE transform —
+// it imports only the AssemblyScript runtime shims (env.*) and makes no host
+// calls (block-ids are the guest's job via the cap-bridge hash, not the codec's).
+// Exhaustive over loss patterns for small codes, randomized for the defaults.
 
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -14,24 +14,12 @@ const sodium = await loadSodium();
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = join(__dirname, "..");
 
-const OP_INFO = 0, OP_ENCODE = 1, OP_DECODE = 2, OP_BLOCKID = 3;
+const OP_INFO = 0, OP_ENCODE = 1, OP_DECODE = 2;
 
 export async function loadCodec() {
   await sodium.ready;
   const bytes = readFileSync(join(root, "build/codec.wasm"));
-  let inst;
   const imports = {
-    kernel: {
-      // The only host call codec makes: crypto.hash (BLAKE2b-256). The
-      // request bytes are at payloadPtr; write the 32-byte digest to scratch.
-      call: (_schemaPtr, _schemaLen, payloadPtr, payloadLen) => {
-        const mem = new Uint8Array(inst.exports.memory.buffer);
-        const data = mem.slice(payloadPtr, payloadPtr + payloadLen);
-        const digest = sodium.crypto_generichash(32, data); // BLAKE2b-256 (the storage content hash)
-        new Uint8Array(inst.exports.memory.buffer, scratch, digest.length).set(digest);
-        return digest.length;
-      },
-    },
     env: {
       abort: (_m, _f, l, c) => { throw new Error(`codec abort ${l}:${c}`); },
       seed: () => Date.now(),
@@ -39,7 +27,7 @@ export async function loadCodec() {
     },
   };
   const mod = new WebAssembly.Module(bytes);
-  inst = new WebAssembly.Instance(mod, imports);
+  const inst = new WebAssembly.Instance(mod, imports);
   const scratch = inst.exports.scratch.value;
 
   const writeReq = (bytes) => {
@@ -48,13 +36,6 @@ export async function loadCodec() {
   };
   const readResp = (len) =>
     new Uint8Array(inst.exports.memory.buffer, scratch, len).slice();
-
-  // Plant a (dummy here) crypto.hash name via configure.
-  const name = sodium.crypto_hash_sha3256(new TextEncoder().encode("crypto.hash"));
-  const cfg = new Uint8Array(1 + name.length);
-  cfg[0] = name.length; cfg.set(name, 1);
-  writeReq(cfg);
-  inst.exports.configure(cfg.length);
 
   const u32be = (v) => [(v >>> 24) & 255, (v >>> 16) & 255, (v >>> 8) & 255, v & 255];
 
@@ -78,13 +59,6 @@ export async function loadCodec() {
       req[7] = cnt;
       for (let r = 0; r < cnt; r++) req[8 + r] = present[r].index;
       for (let r = 0; r < cnt; r++) req.set(present[r].bytes, 8 + cnt + r * bs);
-      const got = writeReq(req);
-      const len = inst.exports.handle(got);
-      return len > 0 ? readResp(len) : null;
-    },
-    blockId(data) {
-      const req = new Uint8Array(1 + data.length);
-      req[0] = OP_BLOCKID; req.set(data, 1);
       const got = writeReq(req);
       const len = inst.exports.handle(got);
       return len > 0 ? readResp(len) : null;
@@ -132,14 +106,6 @@ export async function run(t) {
     t.eq(info[0], 1, "version 1");
     t.eq(info[1], 0x1d, "poly low byte 0x1d");
     t.eq(info[2], 0x01, "poly high byte 0x01 (0x11D)");
-  }
-
-  t.group("codec: block-id equals the host content hash (BLAKE2b-256, §4.2)");
-  {
-    const data = new TextEncoder().encode("the quick brown fox");
-    const id = codec.blockId(data);
-    const expect = sodium.crypto_generichash(32, data);
-    t.ok(id && eq(id, expect), "OP_BLOCKID routes through the crypto.hash bridge");
   }
 
   t.group("codec: encode is deterministic (keyless repair, §9)");

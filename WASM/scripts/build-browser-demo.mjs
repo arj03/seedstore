@@ -15,9 +15,12 @@
 // there to run offline). Needs both builds' minified host: seedstore `npm run build`
 // and seedkernel `npm run build:host && npm run build:host:min`.
 
-import { mkdirSync, copyFileSync, existsSync, readdirSync, statSync, rmSync } from "node:fs";
+import { mkdirSync, copyFileSync, existsSync, readdirSync, statSync, rmSync,
+         readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+
+import { unpackBundle, MANIFEST_FILE } from "seedkernel-wasm/bundle";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = join(__dirname, "..");
@@ -102,7 +105,7 @@ async function copy(src, dst) {
 mkdirSync(out, { recursive: true });
 
 // WASM modules the pages fetch relative to themselves.
-for (const f of ["kernel.wasm", "codec.wasm", "reputation.wasm"]) {
+for (const f of ["codec.wasm", "reputation.wasm"]) {
   await copy(join(build, f), join(out, f));
 }
 
@@ -169,12 +172,24 @@ for (const [pkg, sub, dest, files, allMjs] of VENDOR) {
 // p2p.html fetches ./manifest.bundle and reads its author public key (the first 32
 // bytes) to auto-derive the cohort's signing scope, so a browser joining a cohort of
 // bundle-running holders (seedloaders) matches their author scope without the user
-// pasting a key. Absent → the page falls back to the zero-author default. Only the
-// manifest is staged (32-byte author header + JSON); the *.wasm payloads stay on
-// the holders — the browser needs the author, not the bundle contents.
-const bundleManifest = [join(root, "bundle", "manifest.bundle"), join(build, "bundle", "manifest.bundle")]
+// pasting a key. Absent → the page falls back to the zero-author default.
+//
+// A bundle is one blob (seedkernel §12.4), so unpack it and stage ONLY the manifest
+// envelope from inside — a standalone signed artifact (32-byte author header + sig +
+// JSON) that `verifyManifest` checks on its own. The *.wasm payloads and the guest stay
+// on the holders: the browser needs the author, not megabytes of bundle contents.
+const bundleBlob = [join(root, "bundle", "seedstore.skb"), join(build, "bundle", "seedstore.skb")]
   .find((p) => existsSync(p));
-if (bundleManifest) await copy(bundleManifest, join(out, "manifest.bundle"));
+let bundleManifest = false;
+if (bundleBlob) {
+  const files = unpackBundle(new Uint8Array(readFileSync(bundleBlob)));
+  if (files[MANIFEST_FILE]) {
+    const dst = join(out, MANIFEST_FILE);
+    writeFileSync(dst, files[MANIFEST_FILE]);
+    staged.add(resolve(dst)); // it is unpacked, not copy()'d, so register it or prune eats it
+    bundleManifest = true;
+  }
+}
 
 // Every browser page, into the one dir.
 for (const page of ["index.html", "p2p.html"]) {

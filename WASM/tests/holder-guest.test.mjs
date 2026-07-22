@@ -26,7 +26,6 @@ import { fileURLToPath } from "node:url";
 import { boot } from "seedkernel-wasm/shell";
 import {
   loadSodium, loadWasmBytes, generateKeyPair, LoopbackNetwork, createConnectedCohort,
-  storageSignScope,
 } from "../build/host/node.js";
 import { toHex, bytesEqual, concatBytes } from "../build/host/util.js";
 import { buildBundle } from "./bundle-fixture.mjs";
@@ -47,7 +46,8 @@ export async function run(t) {
   const wasm = await loadWasmBytes();
   const author = generateKeyPair(sodium);
   const bundleDir = mkdtempSync(join(tmpdir(), "seedstore-bundle-"));
-  await buildBundle(bundleDir, author, sodium, build);
+  const bundlePath = join(bundleDir, "seedstore.skb");
+  await buildBundle(bundlePath, author, sodium, build);
   const policyJson = JSON.stringify({ authors: [toHex(author.publicKey)] });
   const tmpDirs = [bundleDir];
 
@@ -59,16 +59,20 @@ export async function run(t) {
     tmpDirs.push(dir);
     const identity = generateKeyPair(sodium);
     const shell = await boot({
-      kernelBytes: wasm.kernelBytes,
       policyJson, dir, identity, network: net, timeoutMs: TIMEOUT,
-      // Quota is operator policy now (not signed into the bundle): the operator
-      // supplies it at boot, merged over the manifest config into the guest's APP.
+      // Quota is operator policy (not signed into the bundle): the operator supplies it
+      // at boot, merged over the bundle's guest config into the guest's APP. NB this is
+      // the SHELL's config — opaque operator input the shell merges wholesale. A
+      // StorageNode's `config` is the typed StorageConfig instead, and takes quota as a
+      // sibling option (`StorageNode.create({ quota })`); the same spelling used there is
+      // rejected rather than ignored. Both drivers run in this file, so the two are easy
+      // to confuse.
       // blockSize is overridden back to test scale — the signed bundle carries the
       // PRODUCTION 256 KiB (storage-bundle.mjs), which would make these tiny test
       // files single-block/replicated instead of exercising the RS path.
       config: { quota: 64 * 1024 * 1024, blockSize: 64 },
     });
-    shell.loadBundle(bundleDir);
+    shell.loadBundle(bundlePath);
     await shell.serve();
     return { shell, peerId: toHex(identity.publicKey) };
   }
@@ -113,7 +117,7 @@ export async function run(t) {
       const [sn] = await createConnectedCohort({
         count: 1, network: net, sodium, wasm, timeoutMs: TIMEOUT,
         // Same deployment as the shells: verify descriptors under the bundle author's scope.
-        signScope: storageSignScope(author.publicKey),
+        signAuthor: author.publicKey,
       });
       for (const e of shells) { sn.addPeer(e.peerId); e.shell.addPeer(sn.peerId); }
       try {
@@ -149,7 +153,7 @@ export async function run(t) {
       const [sn] = await createConnectedCohort({
         count: 1, network: net, sodium, wasm, timeoutMs: TIMEOUT,
         // Same deployment as the shells: verify descriptors under the bundle author's scope.
-        signScope: storageSignScope(author.publicKey),
+        signAuthor: author.publicKey,
       });
       for (const e of shells) sn.addPeer(e.peerId);
       try {

@@ -13,14 +13,14 @@ installed-handler call, a clock — and knows nothing about storage. seed store
 ships as **signed content** that the shell loads and *becomes* a storage node:
 
 ```
-seed store bundle  ──────────── signed by the app author, verified at load ────────────┐
+seed store bundle (seedstore.skb — one signed blob, verified at load) ─────────────────┐
   codec.wasm  reputation.wasm        pure RS + reputation math, declare no capabilities │
-  tier2-guest.js                     PUT/GET/repair (initiator) + HAVE/OFFER/STORE/      │
+  guest.js                           PUT/GET/repair (initiator) + HAVE/OFFER/STORE/      │
                                      FETCH (holder): zero-authority JS, no ambient I/O   │
         │  reaches I/O only through ↓ the single capability seam                        │
   cap-bridge   crypto · net · fs · module-call · clock · identity  ── generic primitives ┘
         │
-  seedkernel runtime (the shell)     module registry → signature → kernel  +  the raw-byte caps
+  seedkernel runtime (the shell)     bundle loader → admission policy → kernel  +  the raw-byte caps
 ```
 
 Everything with *structure* — content-addressing, the signed chunk descriptor,
@@ -91,11 +91,13 @@ mirror, and the bundle producer:
    before the raw `CAP_VERIFY`. The host mirror
    (`signDescriptor`/`verifyDescriptor` in `host/manifest.ts`) produces and
    checks byte-identical preimages, so the `tier2-port`/`holder-guest` parity
-   tests hold. The guest gets the scope bytes host-derived: `storage-node.ts`
-   injects `signPrefix` into the `const APP` block from
-   `guestSignPrefix(signScope)` — the shell derives the scope from the admitted
-   manifest, an in-process `StorageNode` from `STORAGE_SIGN_SCOPE` (zero author,
-   app).
+   tests hold. The guest gets the scope bytes host-derived, and never from
+   author-written config: both drivers inject them through seedkernel's shared
+   `bundlePreamble` as `BUNDLE.signPrefix` — the shell from the admitted
+   manifest's `(author, app)`, an in-process `StorageNode` from its `signAuthor`
+   (the zero author by default). One derivation, so the two cannot disagree; a
+   hand-baked copy in the signed config could, and would fail as signatures that
+   verify nowhere.
 2. **The descriptor's leading byte is the signed-format tag** (spec §16). The
    descriptor core leads with `TAG_DESCRIPTOR = 0x01` (`manifest-core.ts`), and
    the Part II signed formats reserve their own values before they exist
@@ -135,13 +137,12 @@ Then, here:
 
 ```sh
 npm install        # one dependency: the sibling seedkernel-wasm (sumo libsodium + QuickJS live there)
-npm run build      # copy kernel.wasm/signature.wasm, compile codec+reputation WASM, stage the guest, compile host TS
+npm run build      # compile codec+reputation WASM, stage the guest, compile host TS
 npm test           # build + run the full test suite (Node); `bun tests/run.mjs` runs it on Bun
 ```
 
-`npm run build` produces `build/codec.wasm`, `build/reputation.wasm`, the copied
-`build/kernel.wasm` + `build/signature.wasm`, the staged `build/host/tier2-guest.js`,
-and the compiled host in `build/host/`.
+`npm run build` produces `build/codec.wasm`, `build/reputation.wasm`, the staged
+`build/host/tier2-guest.js`, and the compiled host in `build/host/`.
 
 ## Run a node from the command line
 
@@ -170,7 +171,7 @@ for browsers):
 SHELL=../../seedkernel/WASM/build/host/main.js     # the generic runtime
 
 # a holder: verifies + installs the bundle, then serves the confined holder side
-node "$SHELL" --policy allowed-keys.json --bundle ./bundle \
+node "$SHELL" --policy allowed-keys.json --bundle ./bundle/seedstore.skb \
      --dir ./data-A --key ./A.key --listen 127.0.0.1:7401
 #   seedkernel-shell <peer-pubkey>
 #     bundle seedstore v1 → installed codec, reputation
@@ -184,13 +185,13 @@ separated). The client orchestrates PUT inside the confined guest and places blo
 across the cohort:
 
 ```sh
-node "$SHELL" --policy allowed-keys.json --bundle ./bundle --dir ./client \
+node "$SHELL" --policy allowed-keys.json --bundle ./bundle/seedstore.skb --dir ./client \
      --peers "<pkA>@127.0.0.1:7401,<pkB>@127.0.0.1:7402,<pkC>@127.0.0.1:7403,<pkD>@127.0.0.1:7404" \
      --put ./notes.txt
 #   PUT ok: 8 chunk(s)                 ← a ~4 KB file at the default RS(2,2)/256 B blocks
 #     --get bdbc41…:74a32f…            ← manifest-id : content-key K
 
-node "$SHELL" --policy allowed-keys.json --bundle ./bundle --dir ./client \
+node "$SHELL" --policy allowed-keys.json --bundle ./bundle/seedstore.skb --dir ./client \
      --peers "<pkA>@…,<pkB>@…,<pkC>@…,<pkD>@…" \
      --get bdbc41…:74a32f… --out ./restored.txt
 #   GET ok: 4000 B → ./restored.txt
@@ -282,16 +283,22 @@ path; same-machine tabs connect on host candidates without it.)
 - **bridges** — crypto host services, the `store.local` backend, and the
   capability gate end-to-end via seedkernel's forwarder fixture (§8.2).
 - **manifest** — descriptor/manifest round trips, author signature is
-  tamper-evident, manifest encrypt + `manifest_id` stability.
+  tamper-evident, manifest encrypt + `manifest_id` stability, and the one-model
+  descriptor math: coded vs. replicated by id count, `r` = *m*+1, the placement
+  slots, and the loss margin agreeing for both kinds at production geometry.
 - **protocol** — the batched OFFER/FETCH wire (`host/protocol.ts`): self-delimiting
   offer entries, the per-block accept mask, FETCH present/absent blocks, and a
   holder admitting a whole OFFER batch at once — the §6 sibling rule declines a
   sibling offered alongside, the §14 quota declines the tail once the budget is spent.
+  The signed chunk descriptor is mandatory on both OFFER and STORE (§4.3): a
+  descriptor-less entry fails to decode, and one that is forged, of another chunk, or
+  disagrees with the bytes in hand is declined by the holder.
 - **reputation** — passes raise / misses penalize / scores decay with a half-life.
 - **storage** (multi-node loopback) — PUT→GET, small-file replication, offline
-  tolerance (any *k* of *n*), repair restoring redundancy after loss, sharing a
-  sealed key, crypto-shredding, reciprocity from served fetches (the host-side
-  reference path).
+  tolerance (any *k* of *n*), repair restoring redundancy after loss (including a
+  mixed-geometry cohort, where a holder configured RS(1,1) still heals an RS(1,4)
+  chunk back to the *r* = 5 its descriptor signs), sharing a sealed key,
+  crypto-shredding, reciprocity from served fetches.
 - **concurrency** — PUT/GET round-trip economy over a *latency-bearing* link:
   OFFER/STORE/FETCH are batched and windowed *per holder* rather than issued per
   block, so wall-clock tracks round-trip-count × RTT — the cost the zero-latency
@@ -364,8 +371,10 @@ that would let a BLAKE3 `hash_many` vectorize the block-id hashing next.
 
 **Block-id hash choice (BLAKE2b, and the BLAKE3 next step).** Block-ids are
 content addressing *internal* to storage — they never cross into the kernel — so
-they need not be the kernel's SHA-3 genesis hash, and storage hashes them with
-**BLAKE2b** (`crypto_generichash`) — fast and already in libsodium. The next step up is **BLAKE3**: its tree of
+they are storage's own choice, not something the kernel imposes, and storage hashes
+them with **BLAKE2b** (`crypto_generichash`) — fast and already in libsodium.
+(seedkernel has since standardized on BLAKE2b-256 as its own genesis hash too, so
+the two now coincide — but independently, not because one constrains the other.) The next step up is **BLAKE3**: its tree of
 equal-size leaves lines up with the layer's own uniform *B*-byte block splitting,
 so a vectorized `hash_many` produces all *n* block-ids of a chunk across parallel
 SIMD lanes, and the independent per-block hashes thread trivially — projected
@@ -399,11 +408,11 @@ cores and the guest — it never loads a line of the host-side TypeScript:
 |---|---:|---:|
 | `codec.wasm` (incl. SIMD RS + GF tables) | 8.5 KB | — |
 | `reputation.wasm` | 6.7 KB | — |
-| `tier2-guest.js` — the confined guest, shipped minified in the bundle | 29 KB | **7.6 KB** |
+| `guest.js` — the confined guest, shipped minified in the bundle | 29 KB | **7.6 KB** |
 
-riding on the seedkernel shell it shares with any app — `kernel.wasm` +
-`signature.wasm` (11.6 KB), the `KernelHost` JS (28 KB / **5 KB gz**), and the
-sumo libsodium (278 KB, reused not bundled). So **seedstore's own runtime
+riding on the seedkernel shell it shares with any app — the `KernelHost` JS
+(28 KB / **5 KB gz**, handler table included: the kernel is host code, not a
+module) and the sumo libsodium (278 KB, reused not bundled). So **seedstore's own runtime
 footprint is ~15 KB of WASM + ~8 KB of gzipped JS (the guest)** (§2, §16: "logic +
 RS, tens of KB, no second copy of a crypto library").
 
@@ -433,11 +442,11 @@ hosts (`build/host-min`) into the demo.
 assembly/codec/        gf256.ts, rs.ts, index.ts   — Reed–Solomon WASM handler
 assembly/reputation/   index.ts                    — decayed reciprocity WASM handler
 host/  tier2-guest.js          the confined guest: the WHOLE protocol (PUT/GET/repair + holder)
-       storage-node.ts         the host that boots the kernel + drives the guest in one realm
+       storage-node.ts         the host that holds the handler table + drives the guest in one realm
        manifest (+core)/crypto/protocol/store-fs/store-local/names/util  — shared helpers
        node.ts / browser.ts    Node + browser entry points (each loads the guest text)
 scripts/  build-bundle.mjs     produce the signed bundle (npm run build:bundle)
-          copy-kernel, build-browser-demo  — stage all browser pages → build/browser-demo
+          build-browser-demo               — stage all browser pages → build/browser-demo
           serve-rtc-holder + smoke-rtc        — relay-signaled P2P over RtcNetwork + STUN
 tests/    codec / bridges / manifest / protocol / reputation / storage
           concurrency / net / browser / shell-run / holder-guest / bundle-fixture
@@ -466,15 +475,26 @@ has no separate bulk frame kind, so block bytes ride ordinary req/res bodies
 (inside the encrypted record layer) and content-addressing stays the app-level
 admission check.
 
-PUT also places **best-effort**: it spreads a chunk's *n = k+m* blocks across as
+PUT also places **best-effort**: it spreads a chunk's placement slots across as
 many distinct holders as the cohort offers (one block per holder, the §6/§10
-sibling rule) and succeeds once at least *k* land, rather than requiring all *n*
-reachable up front. Redundancy then falls below RS(*k*,*m*) on a thin cohort and
-repair (§9) restores it as holders appear — which is what lets the browser demos
-store across just one or two holders. A deployment that must *guarantee* the full
-durability at write time would instead fail the PUT; the reference favours
-liveness. (A *k*=1 code is degenerate — an RS parity block comes out byte-
-identical to the lone data block — so it behaves as plain replication: the
-repeated block is placed on a second holder, and the returned block set counts
-each distinct id once. The browser demos use *k*=1 deliberately, since surviving
-the loss of a holder in a two- or three-node cohort means replication, not coding.)
+sibling rule) and succeeds once at least *k* distinct blocks land, rather than
+requiring every slot filled up front. Redundancy then falls below the chunk's
+target on a thin cohort and repair (§9) restores it as holders appear — which is
+what lets the browser demos store across just one or two holders. A deployment
+that must *guarantee* the full durability at write time would instead fail the
+PUT; the reference favours liveness.
+
+**Coded and replicated chunks are one model.** A chunk is *k* + *m* ids (coded,
+one block per holder) or *k* ids (replicated, each on *r* = *m*+1 holders), and
+both record the same *m* — "survives *m* losses" (§4.1). Placement expands either
+into the same list of slots, so `placeChunksBatched` fans both out identically;
+reads take any *k* listed blocks; and repair is one audit against one health
+number, the **loss margin**, healed back to whatever the chunk's own signed
+descriptor asks for. Nothing about durability is injected config: *r* and the
+low-water mark ⌈*m*/2⌉ are read off the descriptor (`replicaTarget` /
+`lowWaterMargin` in `manifest-core.ts`), so a repairer needs no deployment config
+and a mixed-geometry cohort heals each chunk to the count its author signed. The
+browser demos run *k*=1 deliberately — surviving the loss of a holder in a two- or
+three-node cohort means replication, not coding — and a *k*=1 chunk is simply the
+replicated shape, never an RS code whose parity would come out byte-identical to
+its lone data block.

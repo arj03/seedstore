@@ -13,7 +13,7 @@
 //     offsets regardless of completion order, and any k of n still reads.
 
 import { loadWasmBytes, loadSodium, createConnectedCohort } from "../build/host/node.js";
-import { bytesEqual } from "../build/host/util.js";
+import { bytesEqual, toHex } from "../build/host/util.js";
 import { LatencyNetwork } from "./latency-net.mjs";
 
 const DELAY = 2;        // ms per send → ~4 ms per request/response round trip
@@ -214,5 +214,27 @@ export async function run(t) {
     t.ok(bytesEqual(windowed.bytes, webrtcData), "the windowed GET reconstructs the tight-cap file byte-identically");
     t.ok(serial.fetchPeak <= 1, `serial GET fetches one block at a time: peak ${serial.fetchPeak} in flight (≤ 1)`);
     t.ok(windowed.fetchPeak >= Nw, `windowed GET pipelines past serial: ${windowed.fetchPeak} in flight (≥ ${Nw}, vs ${serial.fetchPeak} serial)`);
+  }
+
+  t.group("overlapping PUT/GET operations on one node don't clobber the guest's stream state");
+  {
+    // The guest keeps a streamed PUT's protocol state — K, the running byte offset, the
+    // signed descriptors placed so far — in realm state rather than round-tripping it
+    // through the host, so exactly one stream may be open per role at a time. StorageNode
+    // is what makes that safe: runExclusive chains whole OPERATIONS, not individual window
+    // calls, so a second putStart cannot land between the first PUT's windows. Force the
+    // worst case for that — one chunk per window, so each PUT is a dozen separate realm
+    // calls with an await between every one — and fire three PUTs, then three GETs,
+    // concurrently. Per-call chaining would interleave them and hand back crossed or
+    // short files.
+    const cfg = { ...config, windowTargetBytes: config.k * config.blockSize }; // one chunk per window
+    const files = [21, 22, 23].map((seed) => file(N * config.k * config.blockSize, seed));
+    const r = await onCohort(cfg, async (owner) => {
+      const puts = await Promise.all(files.map((f) => owner.put(f)));
+      return { puts, got: await Promise.all(puts.map((p) => owner.get(p.manifestId, p.key))) };
+    });
+    t.ok(r.result.got.every((got, i) => bytesEqual(got, files[i])), "three concurrent multi-window PUT/GETs each round-trip their own bytes");
+    t.ok(r.result.puts.every((p) => p.chunkCount === N), `each PUT sealed a manifest over its own ${N} chunks — no window folded into another's stream`);
+    t.eq(new Set(r.result.puts.map((p) => toHex(p.manifestId))).size, 3, "the three files got three distinct manifests");
   }
 }
