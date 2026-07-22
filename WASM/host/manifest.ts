@@ -18,7 +18,6 @@ import {
 } from "./manifest-core.js";
 import { concatBytes } from "./util.js";
 import { guestSignScope, guestSignPrefix } from "seedkernel-wasm/cap-bridge";
-import { kernelNameFor } from "seedkernel-wasm/bundle";
 
 // The scoped-signature prefix `DOMAIN_guest ‖ scope` (README §16) comes straight from the
 // kernel — the SAME function the SIGN op prepends and the shell injects — so the host
@@ -54,41 +53,9 @@ export function storageSignScope(authorPk: Uint8Array): Uint8Array {
   return guestSignScope(authorPk, STORAGE_APP);
 }
 
-/** The default author for a node with no bundle behind it: a host-side StorageNode
- *  scopes to `(zero author, app)`, so every in-process node derives the same bytes and a
- *  descriptor one signs verifies on another. A cohort joining shell-run holders (the
- *  cross-path tests, p2p.html) passes that bundle's author instead. */
-export const ZERO_AUTHOR = new Uint8Array(32);
-
-/** Where this app's two pure handlers (§17) sit in the kernel table, for a node
- *  running under `author`.
- *
- *  The KEYS are the logical module names — the bundle manifest's `modules[].name`, the
- *  `<name>.wasm` file in the bundle container, and the key the guest reaches each module
- *  by (`BUNDLE.modules`). The VALUES are the kernel names seedkernel binds them at, which
- *  it *derives* from `(author, app, name)` (§5.1): the author is folded INTO the name, so
- *  the same module under a different author is a different kernel name — which is why this
- *  is a function of the node's author rather than a static table.
- *
- *  Still not a coordination point — a kernel name is node-local and never travels between
- *  peers. It exists because a host-side StorageNode installs the handlers itself, with no
- *  bundle load to derive them: calling seedkernel's own `kernelNameFor` with this node's
- *  own author is what keeps that path landing exactly where a bundle-loaded node — which
- *  derives the same names from the admitted manifest's author — lands. */
-export function storageModules(author: Uint8Array): { codec: string; reputation: string } {
-  return {
-    codec: kernelNameFor(author, STORAGE_APP, "codec"),
-    reputation: kernelNameFor(author, STORAGE_APP, "reputation"),
-  };
-}
-
-/** The default in-process signing scope — `storageSignScope(ZERO_AUTHOR)`. */
-export const STORAGE_SIGN_SCOPE = storageSignScope(ZERO_AUTHOR);
-
 /** The scoped preimage the author signs / a verifier checks: `DOMAIN_guest ‖ scope ‖ core`.
- *  `guestSignPrefix(scope)` is `DOMAIN_guest ‖ scope`, from the kernel, so this reconstructs
- *  the byte-identical bytes the kernel's SIGN op prepends — the injected guest verify prefix
- *  (`APP.signPrefix`) is the same value. */
+ *  `guestSignPrefix(scope)` is `DOMAIN_guest ‖ scope`, from the kernel, so this
+ *  reconstructs the byte-identical bytes the kernel's SIGN op prepends. */
 function signPreimage(scope: Uint8Array, core: Uint8Array): Uint8Array {
   return concatBytes([guestSignPrefix(scope), core]);
 }
@@ -96,12 +63,11 @@ function signPreimage(scope: Uint8Array, core: Uint8Array): Uint8Array {
 /** A signed chunk descriptor as stored alongside every block and listed in the
  *  manifest (§4.3): [authorPk 32][sig 64][core ...]. Signing stays sender-side
  *  in the host (§16) — this mirrors what the guest's scoped CAP_SIGN seam does
- *  (Ed25519 over `DOMAIN_guest ‖ scope ‖ core`), invoked directly so repair can verify
- *  a descriptor out-of-band from the author's public key. `scope` must match the scope
- *  the verifying cohort was built with (defaults to the in-process scope). */
+ *  (Ed25519 over `DOMAIN_guest ‖ scope ‖ core`). `scope` must be the cohort's
+ *  signing scope, derived from the bundle author via `storageSignScope(author)`. */
 export function signDescriptor(
   sodium: Sodium, d: Descriptor, authorPk: Uint8Array, authorSk: Uint8Array,
-  scope: Uint8Array = STORAGE_SIGN_SCOPE,
+  scope: Uint8Array,
 ): Uint8Array {
   const core = encodeDescriptorCore(d);
   const sig = sodium.crypto_sign_detached(signPreimage(scope, core), authorSk);
@@ -110,9 +76,9 @@ export function signDescriptor(
 
 /** Verify the author signature over the descriptor (§4.3), reconstructing the same
  *  scoped preimage the signer used. Returns the parsed signed descriptor if valid, else
- *  null. Needs only the author's public key. */
+ *  null. `scope` must match the signing scope the cohort was built with. */
 export function verifyDescriptor(
-  sodium: Sodium, env: Uint8Array, scope: Uint8Array = STORAGE_SIGN_SCOPE,
+  sodium: Sodium, env: Uint8Array, scope: Uint8Array,
 ): SignedDescriptor | null {
   let sd: SignedDescriptor;
   try { sd = parseSignedDescriptor(env); } catch { return null; }

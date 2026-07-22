@@ -35,14 +35,9 @@
 
 import { readFile } from "node:fs/promises";
 import { randomBytes } from "node:crypto";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
 
 import { WsNetwork } from "seedkernel-wasm/net-ws";
-import { unpackBundle, MANIFEST_FILE } from "seedkernel-wasm/bundle";
-import { createStorageNode, loadSodium, defaultConfig, PRODUCTION_BLOCK_SIZE, toHex, fromHex } from "../build/host/node.js";
-
-const __dirname = dirname(fileURLToPath(import.meta.url));
+import { createStorageNode, loadSodium, defaultConfig, PRODUCTION_BLOCK_SIZE, toHex } from "../build/host/node.js";
 
 // ── args ─────────────────────────────────────────────────────────────────────
 const args = new Map();
@@ -178,29 +173,11 @@ const sodium = await loadSodium();
 const identity = sodium.crypto_sign_keypair();
 console.log(`me: ${hex(identity.publicKey).slice(0, 16)}…`);
 
-// The cohort's holders verify under their bundle's author scope (§16), so sign under the
-// same one: read it from the staged bundle's manifest envelope ([authorPk 32][sig 64][json],
-// the MANIFEST_FILE entry of the seedstore.skb archive). A missing bundle is fine — that's
-// a cohort with no signed deployment — but a bundle we can't read the author out of is
-// NOT: it silently degrades to the zero-author scope and every OFFER comes back declined,
-// which reads exactly like a full holder. So fail loud on anything but "no bundle".
-let authorHex = args.get("author") ?? "";
-if (!authorHex) {
-  const path = join(__dirname, "..", "bundle", "seedstore.skb");
-  let blob = null;
-  try {
-    blob = new Uint8Array(await readFile(path));
-  } catch (e) {
-    if (e.code !== "ENOENT") throw e; // unreadable ≠ absent
-  }
-  if (blob) {
-    const env = unpackBundle(blob)[MANIFEST_FILE];
-    if (!env || env.length < 32) throw new Error(`bundle at ${path} has no readable manifest author — pass --author explicitly, or --author none`);
-    authorHex = hex(env.slice(0, 32));
-  }
-}
-const signAuthor = authorHex && authorHex !== "none" ? fromHex(authorHex) : undefined;
-console.log(signAuthor ? `signing scope: bundle author ${authorHex.slice(0, 8)}…` : "signing scope: zero-author default");
+// The node loads the staged seedstore bundle (bundle/seedstore.skb, via loadWasmBytes
+// inside createStorageNode) and derives its signing scope (§16) from that bundle's
+// verified author. Every p2p-cli node running the same staged bundle therefore agrees on
+// scope automatically — there is no separate --author to keep in sync any more.
+console.log("signing scope: derived from the loaded seedstore bundle author");
 
 const peerUp = new Set();
 let onQuorum = null;
@@ -220,7 +197,7 @@ const net = new WsNetwork({
 const config = { ...defaultConfig(kParam, mParam, blockSize), maxMessageBytes, putWindow: windowN, getWindow: windowN,
   ...(wtargetMB > 0 ? { windowTargetBytes: Math.round(wtargetMB * 1024 * 1024) } : {}),
   ...(heapMB > 0 ? { realmMemoryBytes: Math.round(heapMB * 1024 * 1024) } : {}) };
-let node = await createStorageNode({ network: net, identity, config, timeoutMs, signAuthor });
+let node = await createStorageNode({ network: net, identity, config, timeoutMs });
 for (const pid of peerUp) node.addPeer(pid);
 console.log(`node ready: RS(${kParam},${mParam}), ${blockSize / 1024} KiB blocks, batch ${Math.round(maxMessageBytes / 1024)} KiB, window ${windowN}, conns/peer ${connsN}, wtarget ${wtargetMB > 0 ? wtargetMB + " MB" : "4 MiB (default)"}, heap ${heapMB > 0 ? heapMB + " MB" : "64 MiB (default)"}, timeout ${timeoutMs} ms`);
 

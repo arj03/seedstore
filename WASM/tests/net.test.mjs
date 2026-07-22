@@ -209,9 +209,9 @@ export async function run(t) {
       t.eq(decodeMask(have0)[0], false, "HAVE → false before the block exists (over ws)");
 
       // The block travels with its author-signed chunk descriptor (§4.3) — the holder
-      // verifies it before admitting, here as on any other transport. Both nodes are
-      // host-side StorageNodes, so both scope to the zero-author default.
-      const desc = signDescriptor(sodium, { k: 1, m: 0, blockSize: bytes.length, blockIds: [bid] }, idB.publicKey, idB.privateKey);
+      // verifies it before admitting, here as on any other transport. Both nodes load the
+      // same bundle, so they share one signing scope.
+      const desc = signDescriptor(sodium, { k: 1, m: 0, blockSize: bytes.length, blockIds: [bid] }, idB.publicKey, idB.privateKey, S.signScope);
 
       const stored = decodeMask(await B.transport.request(S.peerId, MsgType.STORE, encodeStoreBatch([{ blockId: bid, descriptor: desc, bytes }])));
       t.eq(stored[0], true, "STORE acknowledged over ws");

@@ -18,7 +18,7 @@
     "serve:rtc-holder": "bun scripts/serve-rtc-holder.mjs",
     "smoke:rtc": "node scripts/smoke-rtc.mjs",
     "demo:relay": "node ../../seedkernel/WASM/scripts/relay.mjs",
-    "build": "npm run build:wasm && npm run build:host && npm run build:guest && npm run build:host:min",
+    "build": "npm run build:wasm && npm run build:host && npm run build:guest && npm run build:host:min && npm run build:bundle",
     "build:browser": "npm run build && npm run build:browser-demo",
     "build:debug": "asc assembly/codec/index.ts --config asconfig.codec.json --target debug && asc assembly/reputation/index.ts --config asconfig.reputation.json --target debug",
     "test": "npm run build && node tests/run.mjs"

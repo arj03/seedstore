@@ -18,14 +18,14 @@
 //   node tests/holder-guest.test.mjs
 //   bun  tests/holder-guest.test.mjs
 
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { boot } from "seedkernel-wasm/shell";
 import {
-  loadSodium, loadWasmBytes, generateKeyPair, LoopbackNetwork, createConnectedCohort,
+  loadSodium, generateKeyPair, LoopbackNetwork, createConnectedCohort,
 } from "../build/host/node.js";
 import { toHex, bytesEqual, concatBytes } from "../build/host/util.js";
 import { buildBundle } from "./bundle-fixture.mjs";
@@ -43,11 +43,13 @@ function file(n, seed = 1) {
 
 export async function run(t) {
   const sodium = await loadSodium();
-  const wasm = await loadWasmBytes();
   const author = generateKeyPair(sodium);
   const bundleDir = mkdtempSync(join(tmpdir(), "seedstore-bundle-"));
   const bundlePath = join(bundleDir, "seedstore.skb");
   await buildBundle(bundlePath, author, sodium, build);
+  // The StorageNode cohort loads the SAME signed bundle the shells load, so every node
+  // derives the one author signing scope and a descriptor one signs verifies on another.
+  const bundleBlob = new Uint8Array(readFileSync(bundlePath));
   const policyJson = JSON.stringify({ authors: [toHex(author.publicKey)] });
   const tmpDirs = [bundleDir];
 
@@ -72,7 +74,7 @@ export async function run(t) {
       // files single-block/replicated instead of exercising the RS path.
       config: { quota: 64 * 1024 * 1024, blockSize: 64 },
     });
-    shell.loadBundle(bundlePath);
+    await shell.loadBundle(bundlePath);
     await shell.serve();
     return { shell, peerId: toHex(identity.publicKey) };
   }
@@ -115,9 +117,9 @@ export async function run(t) {
       // one realm must serve holder requests (callSync) while its own initiator is
       // parked mid-await.
       const [sn] = await createConnectedCohort({
-        count: 1, network: net, sodium, wasm, timeoutMs: TIMEOUT,
-        // Same deployment as the shells: verify descriptors under the bundle author's scope.
-        signAuthor: author.publicKey,
+        // Same signed bundle as the shells ⇒ same author scope (cross-path parity).
+        // blockSize back to test scale so this tiny file takes the RS path across the cohort.
+        count: 1, network: net, sodium, wasm: { bundleBlob }, config: { blockSize: 64 }, timeoutMs: TIMEOUT,
       });
       for (const e of shells) { sn.addPeer(e.peerId); e.shell.addPeer(sn.peerId); }
       try {
@@ -151,9 +153,9 @@ export async function run(t) {
       const shells = [];
       for (let i = 0; i < 5; i++) shells.push(await bootShell(net));
       const [sn] = await createConnectedCohort({
-        count: 1, network: net, sodium, wasm, timeoutMs: TIMEOUT,
-        // Same deployment as the shells: verify descriptors under the bundle author's scope.
-        signAuthor: author.publicKey,
+        // Same signed bundle as the shells ⇒ same author scope (cross-path parity).
+        // blockSize back to test scale so this tiny file takes the RS path across the cohort.
+        count: 1, network: net, sodium, wasm: { bundleBlob }, config: { blockSize: 64 }, timeoutMs: TIMEOUT,
       });
       for (const e of shells) sn.addPeer(e.peerId);
       try {

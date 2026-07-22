@@ -125,7 +125,7 @@ export async function run(t) {
     try {
       // Two blocks of ONE chunk (siblings, §6), signed so the holder admits them.
       const sib0 = id(20), sib1 = id(21);
-      const env = signDescriptor(sodium, { k: 1, m: 1, blockSize: 100, blockIds: [sib0, sib1] }, a.identity.publicKey, a.identity.privateKey);
+      const env = signDescriptor(sodium, { k: 1, m: 1, blockSize: 100, blockIds: [sib0, sib1] }, a.identity.publicKey, a.identity.privateKey, a.signScope);
       const offers = [
         { blockId: sib0, descriptor: env },
         { blockId: sib1, descriptor: env }, // sibling of sib0 — must not both pass
@@ -167,7 +167,7 @@ export async function run(t) {
     const [a, b] = await createConnectedCohort({ count: 2, network: net, sodium, wasm, quota: 500, timeoutMs: TIMEOUT });
     try {
       const solo = (blockId) => signDescriptor(
-        sodium, { k: 1, m: 0, blockSize: 100, blockIds: [blockId] }, a.identity.publicKey, a.identity.privateKey,
+        sodium, { k: 1, m: 0, blockSize: 100, blockIds: [blockId] }, a.identity.publicKey, a.identity.privateKey, a.signScope,
       );
       const offers = [id(30), id(31), id(32)].map((blockId) => ({ blockId, descriptor: solo(blockId) }));
       t.eq(offers[0].descriptor.length, 136, "a one-block descriptor envelope is [pk 32][sig 64][core 40]");
@@ -187,7 +187,7 @@ export async function run(t) {
       const b0 = bytes(1000, 1), b1 = bytes(1000, 2);
       const i0 = b.crypto.hash(b0), i1 = b.crypto.hash(b1); // content-addressed (acceptStore hashes)
       const solo = (blockId) => signDescriptor(
-        sodium, { k: 1, m: 0, blockSize: 1000, blockIds: [blockId] }, a.identity.publicKey, a.identity.privateKey,
+        sodium, { k: 1, m: 0, blockSize: 1000, blockIds: [blockId] }, a.identity.publicKey, a.identity.privateKey, a.signScope,
       );
       const stored = decodeMask(await a.transport.request(b.peerId, MsgType.STORE, encodeStoreBatch([
         { blockId: i0, descriptor: solo(i0), bytes: b0 },
@@ -219,7 +219,7 @@ export async function run(t) {
       // Signed, but for a DIFFERENT chunk: the signature verifies and yet this block is
       // not one of its block_ids (§4.3's block_id ∈ block_ids check).
       const other = signDescriptor(
-        sodium, { k: 1, m: 0, blockSize: 100, blockIds: [id(77)] }, a.identity.publicKey, a.identity.privateKey,
+        sodium, { k: 1, m: 0, blockSize: 100, blockIds: [id(77)] }, a.identity.publicKey, a.identity.privateKey, a.signScope,
       );
       const stored2 = decodeMask(await a.transport.request(b.peerId, MsgType.STORE, encodeStoreBatch([
         { blockId: jid, descriptor: other, bytes: junk },
@@ -231,7 +231,7 @@ export async function run(t) {
       // geometry is the descriptor's, so bytes that aren't blockSize long are not the
       // block that was admitted (this is what makes OFFER's old size field redundant).
       const wrongSize = signDescriptor(
-        sodium, { k: 1, m: 0, blockSize: 99, blockIds: [jid] }, a.identity.publicKey, a.identity.privateKey,
+        sodium, { k: 1, m: 0, blockSize: 99, blockIds: [jid] }, a.identity.publicKey, a.identity.privateKey, a.signScope,
       );
       const stored3 = decodeMask(await a.transport.request(b.peerId, MsgType.STORE, encodeStoreBatch([
         { blockId: jid, descriptor: wrongSize, bytes: junk }, // 100 bytes vs a signed blockSize of 99

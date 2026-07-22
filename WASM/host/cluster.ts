@@ -6,21 +6,19 @@
 import type { Sodium } from "./sodium.js";
 import type { Network } from "seedkernel-wasm/net";
 import type { StorageConfig } from "./core.js";
-import type { WasmBytes } from "./node.js";
 import { StorageNode } from "./storage-node.js";
 
 export interface CohortOptions {
   count: number;
   network: Network;
   sodium: Sodium;
-  wasm: WasmBytes;
+  /** The loaded seedstore bundle, as `loadWasmBytes()` returns it — one signed blob,
+   *  the ONE install path. Every node in the cohort loads the same bundle, so they all
+   *  derive the same author scope and interoperate. */
+  wasm: { bundleBlob: Uint8Array };
   config?: Partial<StorageConfig>;
   quota?: number;
   timeoutMs?: number;
-  /** Shared bundle author for the cohort's signing scope (README §16). Omit for the
-   *  in-process default (the zero author); pass a bundle's author when these nodes must
-   *  verify descriptors a shell running that bundle signs (the cross-path tests). */
-  signAuthor?: Uint8Array;
 }
 
 /** Create `count` storage nodes on `network` and connect them into one cohort. */
@@ -30,13 +28,10 @@ export async function createConnectedCohort(opts: CohortOptions): Promise<Storag
     nodes.push(await StorageNode.create({
       network: opts.network,
       sodium: opts.sodium,
-      codecBytes: opts.wasm.codecBytes,
-      reputationBytes: opts.wasm.reputationBytes,
-      guestSource: opts.wasm.guestSource,
+      bundleBlob: opts.wasm.bundleBlob,
       config: opts.config,
       quota: opts.quota,
       timeoutMs: opts.timeoutMs,
-      signAuthor: opts.signAuthor,
     }));
   }
   for (let i = 0; i < nodes.length; i++) {

@@ -101,42 +101,45 @@ export async function run(t) {
   {
     const author = newKey();
     const holder = newKey(); // a malicious holder
+    const authorScope = storageSignScope(author.publicKey);
+    const holderScope = storageSignScope(holder.publicKey);
     const ids = [];
     for (let i = 0; i < 4; i++) ids.push(crypto.hash(new Uint8Array([i + 10])));
     const d = { k: 2, m: 2, blockSize: 256, blockIds: ids };
-    const env = signDescriptor(sodium, d, author.publicKey, author.privateKey);
+    const env = signDescriptor(sodium, d, author.publicKey, author.privateKey, authorScope);
 
-    const ok = verifyDescriptor(sodium, env);
+    const ok = verifyDescriptor(sodium, env, authorScope);
     t.ok(ok !== null, "valid descriptor verifies");
     t.ok(ok && bytesEqual(ok.authorPk, author.publicKey), "author pubkey recovered");
 
     // A holder alters a block id to misdirect repair → signature breaks.
     const tampered = env.slice();
     tampered[96 + 8] ^= 0xff; // flip a byte inside the first block id of core
-    t.ok(verifyDescriptor(sodium, tampered) === null, "tampered descriptor rejected");
+    t.ok(verifyDescriptor(sodium, tampered, authorScope) === null, "tampered descriptor rejected");
 
     // A holder re-signs with its own key → authority is bound to the author,
     // so a repairer keyed to the author's pubkey would not accept holder's key.
-    const forged = signDescriptor(sodium, d, holder.publicKey, holder.privateKey);
-    const fv = verifyDescriptor(sodium, forged);
+    const forged = signDescriptor(sodium, d, holder.publicKey, holder.privateKey, holderScope);
+    const fv = verifyDescriptor(sodium, forged, holderScope);
     t.ok(fv !== null && !bytesEqual(fv.authorPk, author.publicKey), "holder re-sign is detectable (different author)");
 
     // The signature is bound to its signing scope (§16): the same author + core signed
-    // under a different scope does not verify under the default one — a storage signature
+    // under a different scope does not verify under the original one — a storage signature
     // cannot be replayed into another deployment's (author, app) namespace.
     const otherScope = storageSignScope(holder.publicKey);
     const scoped = signDescriptor(sodium, d, author.publicKey, author.privateKey, otherScope);
-    t.ok(verifyDescriptor(sodium, scoped) === null, "a descriptor signed under a different scope is rejected");
+    t.ok(verifyDescriptor(sodium, scoped, authorScope) === null, "a descriptor signed under a different scope is rejected");
     t.ok(verifyDescriptor(sodium, scoped, otherScope) !== null, "…but verifies under its own scope");
   }
 
   t.group("manifest: encode/decode + encrypt round trip (§4.3, §4.4)");
   {
     const author = newKey();
+    const authorScope = storageSignScope(author.publicKey);
     const envs = [0, 1].map((c) => {
       const ids = [];
       for (let i = 0; i < 4; i++) ids.push(crypto.hash(new Uint8Array([c, i])));
-      return signDescriptor(sodium, { k: 2, m: 2, blockSize: 512, blockIds: ids }, author.publicKey, author.privateKey);
+      return signDescriptor(sodium, { k: 2, m: 2, blockSize: 512, blockIds: ids }, author.publicKey, author.privateKey, authorScope);
     });
     // The manifest header carries no (k, m, blockSize): geometry is the descriptor's,
     // self-describing (§4.1/§4.3). Only genuinely per-file metadata travels here.

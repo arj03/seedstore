@@ -222,11 +222,11 @@ export async function run(t) {
     // would be r = 2. A repairer reading r (and the low-water mark) off its own config
     // sees 2 live copies of a 5-copy chunk, calls it healthy, and repairs nothing.
     const net = new LoopbackNetwork();
-    const wasmOpts = { network: net, sodium, wasm, timeoutMs: TIMEOUT };
-    const owner = await StorageNode.create({ ...wasmOpts, codecBytes: wasm.codecBytes, reputationBytes: wasm.reputationBytes, guestSource: wasm.guestSource, config: { k: 1, m: 4, blockSize: 64 } });
+    const wasmOpts = { network: net, sodium, bundleBlob: wasm.bundleBlob, timeoutMs: TIMEOUT };
+    const owner = await StorageNode.create({ ...wasmOpts, config: { k: 1, m: 4, blockSize: 64 } });
     const holders = [];
     for (let i = 0; i < 7; i++) {
-      holders.push(await StorageNode.create({ ...wasmOpts, codecBytes: wasm.codecBytes, reputationBytes: wasm.reputationBytes, guestSource: wasm.guestSource, config: { k: 1, m: 1, blockSize: 64 } }));
+      holders.push(await StorageNode.create({ ...wasmOpts, config: { k: 1, m: 1, blockSize: 64 } }));
     }
     const all = [owner, ...holders];
     for (let i = 0; i < all.length; i++) for (let j = i + 1; j < all.length; j++) StorageNode.connect(all[i], all[j]);

@@ -138,7 +138,7 @@ for (let i = 0; i < 1 + holders; i++) {
   }
   nodes.push(await StorageNode.create({
     network: net, sodium,
-    codecBytes: wasm.codecBytes, reputationBytes: wasm.reputationBytes, guestSource: wasm.guestSource,
+    bundleBlob: wasm.bundleBlob,
     config, fs,
     // Generous: each holder takes ~fileBytes of blocks plus .dsc sidecars, and a §14-full
     // holder would silently decline instead of measuring anything.

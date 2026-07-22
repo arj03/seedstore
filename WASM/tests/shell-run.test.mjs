@@ -10,14 +10,14 @@
 //   node tests/shell-run.test.mjs
 //   bun  tests/shell-run.test.mjs
 
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { boot } from "seedkernel-wasm/shell";
 import {
-  loadSodium, loadWasmBytes, generateKeyPair, LoopbackNetwork, createConnectedCohort,
+  loadSodium, generateKeyPair, LoopbackNetwork, createConnectedCohort,
 } from "../build/host/node.js";
 import { toHex, bytesEqual, concatBytes } from "../build/host/util.js";
 import { buildBundle } from "./bundle-fixture.mjs";
@@ -34,26 +34,27 @@ function file(n, seed = 1) {
 
 export async function run(t) {
   const sodium = await loadSodium();
-  const wasm = await loadWasmBytes();
 
   t.group("shell: a generic seedkernel-shell runs the seedstore guest end-to-end (step 7)");
   {
     // The bundle author fixes the deployment's signing scope (README §16). The shell
     // running the bundle signs descriptors under it, so the host-side StorageNode holders
-    // must verify under the SAME scope — build them with that bundle author.
+    // must verify under the SAME scope — they load the SAME signed bundle.
     const author = generateKeyPair(sodium);
     const net = new LoopbackNetwork();
-    const holders = await createConnectedCohort({
-      count: 6, network: net, sodium, wasm, timeoutMs: 40,
-      signAuthor: author.publicKey,
-    });
 
     const bundleDir = mkdtempSync(join(tmpdir(), "seedstore-bundle-"));
     const bundlePath = join(bundleDir, "seedstore.skb");
     const shellDir = mkdtempSync(join(tmpdir(), "seedstore-shell-"));
-    let shell;
+    let shell, holders = [];
     try {
       await buildBundle(bundlePath, author, sodium, build);
+      const bundleBlob = new Uint8Array(readFileSync(bundlePath));
+      holders = await createConnectedCohort({
+        // Match the shell's test-scale geometry so this tiny file spreads across the
+        // cohort (the signed bundle ships PRODUCTION 256 KiB blocks).
+        count: 6, network: net, sodium, wasm: { bundleBlob }, config: { blockSize: 64 }, timeoutMs: 40,
+      });
 
       // The shell knows only its policy + the kernel; storage arrives as content.
       shell = await boot({
@@ -66,7 +67,7 @@ export async function run(t) {
         // this tiny test file single-block/replicated instead of RS across the cohort).
         config: { blockSize: 64 },
       });
-      const loaded = shell.loadBundle(bundlePath);
+      const loaded = await shell.loadBundle(bundlePath);
       t.eq(loaded.installed.join(","), "codec,reputation", "the shell installed the bundle's signed modules");
 
       // PUT, orchestrated by the confined guest the shell loaded.
@@ -89,7 +90,7 @@ export async function run(t) {
         dir: shell2Dir, identity: generateKeyPair(sodium), network: net,
       });
       let refused = false;
-      try { shell2.loadBundle(bundlePath); } catch { refused = true; }
+      try { await shell2.loadBundle(bundlePath); } catch { refused = true; }
       t.ok(refused, "a shell whose policy omits the author refuses the bundle");
       shell2.close();
       rmSync(shell2Dir, { recursive: true, force: true });
@@ -125,9 +126,9 @@ export async function run(t) {
         policyJson: JSON.stringify({ authors: [toHex(author.publicKey)] }),
         dir: shellDir, identity: generateKeyPair(sodium), network: net, timeoutMs: 40,
       });
-      shell.loadBundle(hiPath); // advances the (author, app) high-water mark to 5
+      await shell.loadBundle(hiPath); // advances the (author, app) high-water mark to 5
       let refused = false;
-      try { shell.loadBundle(loPath); } catch { refused = true; }
+      try { await shell.loadBundle(loPath); } catch { refused = true; }
       t.ok(refused, "a version-3 bundle is refused after a version-5 bundle loaded (no downgrade)");
     } finally {
       if (shell) shell.close();

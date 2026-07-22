@@ -21,7 +21,11 @@ export async function run(t) {
   // program is under host/ (browser.js fetches it as text).
   globalThis.fetch = async (url) => {
     const name = String(url).split("/").pop();
-    const buf = readFileSync(name === "tier2-guest.js" ? join(buildDir, "host", name) : join(buildDir, name));
+    // codec.wasm/reputation.wasm live under build/; the bundle lives under bundle/
+    const path = name === "seedstore.skb"
+      ? join(buildDir, "..", "bundle", name)
+      : name === "tier2-guest.js" ? join(buildDir, "host", name) : join(buildDir, name);
+    const buf = readFileSync(path);
     return {
       arrayBuffer: async () => buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength),
       text: async () => buf.toString("utf8"),

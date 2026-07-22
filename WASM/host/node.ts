@@ -1,9 +1,10 @@
-// Node entry point — reads the three WASM modules from disk and boots a
-// StorageNode against the sumo libsodium. Use this on Node / Bun / Deno; for
-// the browser see ./browser.ts. The kernel module comes from the sibling
-// seedkernel build (copied in by scripts/copy-kernel.mjs) — the signature
-// wrapper is host code inside it now, not a separate module; the codec +
-// reputation are this project's own build output.
+// Node entry point — reads the signed seedstore bundle (.skb) from disk and
+// boots a StorageNode against the sumo libsodium. Use this on Node / Bun / Deno;
+// for the browser see ./browser.ts.
+//
+// With the §12.9 move, the ONE install path is the signed bundle. The raw
+// `codecBytes`/`reputationBytes`/`guestSource` splits are gone — a Node node
+// reads the single `seedstore.skb` and the shared shell loads + verifies + installs it.
 
 import { readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
@@ -17,35 +18,26 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const buildDir = join(__dirname, "..");
 
 export interface WasmBytes {
-  codecBytes: Uint8Array;
-  reputationBytes: Uint8Array;
-  /** The stitched guest program text (build/host/tier2-guest.js). It carries the
-   *  whole protocol; StorageNode runs it but never reads disk, so the loader hands
-   *  it the text (browser.js fetches it instead). */
-  guestSource: string;
+  /** The signed seedstore bundle blob (bundle/seedstore.skb). One file carries
+   *   everything: manifest + codec.wasm + reputation.wasm + guest.js. */
+  bundleBlob: Uint8Array;
 }
 
-/** Read the two WASM modules + the guest program from the build directory. */
+/** Read the signed seedstore bundle from the build tree. */
 export async function loadWasmBytes(dir = buildDir): Promise<WasmBytes> {
-  const [codecBytes, reputationBytes, guestSource] = await Promise.all([
-    readFile(join(dir, "codec.wasm")),
-    readFile(join(dir, "reputation.wasm")),
-    readFile(join(dir, "host", "tier2-guest.js"), "utf8"),
-  ]);
-  return {
-    codecBytes: new Uint8Array(codecBytes),
-    reputationBytes: new Uint8Array(reputationBytes),
-    guestSource,
-  };
+  const bundleBlob = new Uint8Array(
+    await readFile(join(dir, "..", "bundle", "seedstore.skb")),
+  );
+  return { bundleBlob };
 }
 
-/** Boot one storage node, loading WASM + libsodium for you. */
+/** Boot one storage node, loading the bundle + libsodium for you. */
 export async function createStorageNode(
-  opts: Omit<StorageNodeOptions, keyof WasmBytes | "sodium"> & { wasm?: WasmBytes; dir?: string },
+  opts: Omit<StorageNodeOptions, "bundleBlob" | "sodium"> & { wasm?: WasmBytes; dir?: string },
 ): Promise<StorageNode> {
   const sodium = await loadSodium();
   const wasm = opts.wasm ?? (await loadWasmBytes(opts.dir));
-  return StorageNode.create({ ...opts, ...wasm, sodium });
+  return StorageNode.create({ ...opts, bundleBlob: wasm.bundleBlob, sodium });
 }
 
 export {
@@ -55,7 +47,5 @@ export { createConnectedCohort } from "./cluster.js";
 export type { StorageNodeOptions, PutResult } from "./storage-node.js";
 export type { StorageConfig, Identity } from "./core.js";
 export { defaultConfig, PRODUCTION_BLOCK_SIZE } from "./core.js";
-export { STORAGE_APP, STORAGE_SIGN_SCOPE, storageSignScope } from "./manifest.js";
-// Byte helpers, re-exported so scripts driving a node (scripts/p2p-cli.mjs) don't
-// re-declare their own hex pair.
+export { STORAGE_APP, storageSignScope } from "./manifest.js";
 export { toHex, fromHex } from "./util.js";
