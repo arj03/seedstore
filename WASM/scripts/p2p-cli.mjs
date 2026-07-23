@@ -194,7 +194,7 @@ const net = new WsNetwork({
 // math — smallMaxBlocks, r = m+1, the low-water mark — is derived from k/m and from each
 // chunk's signed descriptor, never config). The injection is total — a partial config
 // would feed the strict guest an undefined knob.
-const config = { ...defaultConfig(kParam, mParam, blockSize), maxMessageBytes, putWindow: windowN, getWindow: windowN,
+const config = { ...defaultConfig(kParam, mParam, blockSize), maxMessageBytes, fanoutWindow: windowN,
   ...(wtargetMB > 0 ? { windowTargetBytes: Math.round(wtargetMB * 1024 * 1024) } : {}),
   ...(heapMB > 0 ? { realmMemoryBytes: Math.round(heapMB * 1024 * 1024) } : {}) };
 let node = await createStorageNode({ network: net, identity, config, timeoutMs });

@@ -182,12 +182,12 @@ const blockSizeFor = (mode) => qNum("block", mode === "ws" ? 512 : 32) * 1024;
 // overflow as "absent" and a GET can fail with every block intact. WebRTC reassembles
 // only ~64 KiB, so stay under it (one 32 KiB block + headers per message).
 const maxMessageBytesFor = (mode) => (mode === "ws" ? 1 << 20 : 48 * 1024);
-// getWindow windows the per-holder FETCH sub-batches on GET; putWindow
-// windows the per-holder STOREs on PUT. The WebRTC cap forces ~one block per STORE,
+// fanoutWindow windows the per-holder FETCH sub-batches on GET and the per-holder
+// STOREs on PUT. The WebRTC cap forces ~one block per STORE,
 // so without the window a file pays one serial round trip per block — visibly slower
-// than GET on a low-latency link. Match it to getWindow so PUT pipelines just as
-// wide (each holder's link windowed independently; both holders still run in parallel).
-const CONFIG = { k: 1, m: 1, blockSize: 32 * 1024, getWindow: 64, putWindow: 64 };
+// than GET on a low-latency link. PUT and GET share one fanoutWindow (they have
+// never been tuned apart), so both holders pipeline at the same width. */
+const CONFIG = { k: 1, m: 1, blockSize: 32 * 1024, fanoutWindow: 64 };
 const REQUIRED_PEERS = CONFIG.k + CONFIG.m; // distinct holders a PUT needs
 
 // Streamed-window + heap knobs (README §3): the host driver awaits each window's full

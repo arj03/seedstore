@@ -368,15 +368,17 @@ function maxMsgBytes() { const v = APP.maxMessageBytes; return (typeof v === "nu
 // present block) so a full reply stays under the cap. The GET gather and the repair
 // audit both size their batches this way; the holder caps served bytes the same (§18).
 function fetchMaxIds() { return Math.max(1, Math.floor(maxMsgBytes() / (APP.blockSize + FETCH_FRAME))); }
-// The fan-out windows (transport/operator policy, like maxMessageBytes): how many
-// per-peer sub-batches a single Promise.all round fires at once. putWindow bounds
-// STORE messages PER PEER (peers concurrent → peak W·peers); getWindow bounds FETCH
-// messages TOTAL across the cohort (peak W), so the guest pipelines a holder's many
-// ~1-block messages instead of paying one round trip apiece (the tight-cap WebRTC
-// case the lock-step fan-out was meant to keep windowed). Injected in full by the
-// driver (core.ts homes the default); the guest reads APP and never guesses.
-function putWindow() { return APP.putWindow; }
-function getWindow() { return APP.getWindow; }
+// The fan-out window (transport/operator policy, like maxMessageBytes): how many
+// per-peer sub-batches a single Promise.all round fires at once. PUT and GET share
+// one window — they have never been tuned apart in practice, so fanoutWindow bounds
+// STORE messages PER PEER and FETCH messages TOTAL across the cohort, letting the
+// guest pipeline a holder's many ~1-block messages instead of paying one round trip
+// apiece (the tight-cap WebRTC case the lock-step fan-out was meant to keep
+// windowed). Injected in full by the driver (core.ts homes the default); the guest
+// reads APP and never guesses.
+function putWindow() { return APP.fanoutWindow; }
+function getWindow() { return APP.fanoutWindow; }
+function getWindow() { return APP.fanoutWindow ?? APP.getWindow ?? APP.putWindow ?? 16; }
 function sliceN(arr, size) {
   if (arr.length <= size) return [arr];
   const out = [];
@@ -744,12 +746,12 @@ function assembleChunk(d, got) {
 
 // Target footprint for one window's plaintext slice; the ciphertext it expands to
 // (≈ n/k×) plus the slice stays a small fraction of the realm heap at any file size.
-// The host driver awaits each window fully (OFFER→STORE→ack) before feeding the next,
-// so on a fat/low-loss link a too-small window idles the wire between windows; the
-// deployment raises it (with realmMemoryBytes) via APP.windowTargetBytes. Injected in
-// full by the driver (core.ts homes the default); the guest reads APP and never guesses.
-// This is the reader's/writer's OWN memory policy, not file geometry, so it stays a
-// config value even on the descriptor-authoritative GET path.
+// The host driver derives it from realmMemoryBytes (~realmMemoryBytes / 3, peak
+// guest footprint ratio) and injects it as APP.windowTargetBytes; an explicit
+// override stays for benchmarking. The host awaits each window fully (OFFER→STORE→ack)
+// before feeding the next, so on a fat/low-loss link a too-small window idles the wire
+// between windows. This is the reader's/writer's OWN memory policy, not file geometry,
+// so it stays a config value even on the descriptor-authoritative GET path.
 function windowTarget() { return APP.windowTargetBytes; }
 // A chunk-aligned window size in bytes: as many whole chunks (k·blockSize) as fit
 // under the target, at least one. Kept a multiple of k·blockSize so slicing the file

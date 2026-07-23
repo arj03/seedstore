@@ -166,7 +166,7 @@ export interface Manifest {
 // encryption algorithm, and the ordered list of chunk descriptors.
 
 /** The manifest plaintext (§4.3). It is then encrypted under K and replicated
- *  across cohort peers; manifest_id = genesis_hash(ciphertext). */
+ *  across cohort peers; manifest_id = content_hash(ciphertext). */
 export function encodeManifest(man: Manifest): Uint8Array {
   const head = new Uint8Array(1 + 8 + 1 + 4);
   let o = 0;
@@ -194,7 +194,7 @@ export function decodeManifest(buf: Uint8Array): Manifest {
   const fileSize = hi * 0x100000000 + lo;
   const encAlg = buf[o++];
   const chunkCount = readU32BE(buf, o); o += 4;
-  if (fileSize > 0x10000000000) throw new Error("manifest: fileSize out of bounds"); // 2^40 ≈ 1 TiB sanity cap (the file is assembled in one buffer)
+  if (fileSize > 0x10000000000) throw new Error("manifest: fileSize out of bounds"); // 2^40 ≈ 1 TiB sanity cap
   if (chunkCount === 0) throw new Error("manifest: chunkCount must be >= 1");
   const chunks: Uint8Array[] = [];
   for (let i = 0; i < chunkCount; i++) {

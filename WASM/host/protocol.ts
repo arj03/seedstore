@@ -2,7 +2,7 @@
 // net.send. Each message is a small typed request/response; the bulk block
 // bytes ride the bulk plane (§3) as unsigned, hash-verified frames, except for
 // FETCH responses which return the (small, §27) blocks over the same channel and
-// are still validated by genesis_hash(bytes) == block_id by the reader (§4.2).
+// are still validated by content_hash(bytes) == block_id by the reader (§4.2).
 //
 // OFFER and FETCH are *batched*: one OFFER lists every block headed to a peer and
 // the holder replies a per-block verdict (quota + the §6 sibling rule

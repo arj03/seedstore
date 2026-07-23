@@ -18,7 +18,7 @@ export const DOMAIN_BODY = 0x01;
 
 /** Content-address hash for block_id (§4.2). Block-ids never cross into the
  *  kernel — they are pure content addressing within the storage layer — so the
- *  hash is a storage-local choice, decoupled from the kernel's SHA-3 genesis
+ *  hash is a storage-local choice, decoupled from the kernel's BLAKE2b-256 genesis
  *  hash. We use BLAKE2b (`crypto_generichash`): fast in software and *also*
  *  already in the libsodium the kernel loads, so it ships no new bytes (§16).
  *  (A future BLAKE3 + SIMD `hash_many` over the equal-size blocks is the next

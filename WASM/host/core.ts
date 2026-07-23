@@ -13,19 +13,18 @@ export interface StorageConfig {
   k: number;
   m: number;
   blockSize: number;
-  /** How many per-holder STORE sub-batches a PUT pushes concurrently
-   *  (putWindow) and per-holder FETCH sub-batches a GET pulls
-   *  (getWindow). OFFER/STORE/FETCH are batched per holder, so the round-trip
-   *  count no longer scales with the file; these window the bulk transfers when a
-   *  transport's frame cap splits a holder's blocks across many messages. The
-   *  window binds hardest under a small cap (WebRTC's ~64 KB channel forces ~one
-   *  block per STORE/FETCH): without it those messages would go one serial round
-   *  trip per block. Under a large cap (WS) each holder has only a few big batches,
-   *  so it is a no-op. With the genuinely-async guest seam the guest overlaps the
-   *  round trips itself — one Promise.all over NET_SEND fires W per-peer requests at
-   *  once (the host driving them concurrently) — so W bounds the peak in flight. */
-  putWindow: number;
-  getWindow: number;
+  /** How many per-holder STORE sub-batches a PUT pushes concurrently (and per-holder
+ *  FETCH sub-batches a GET pulls). OFFER/STORE/FETCH are batched per holder, so the
+ *  round-trip count no longer scales with the file; this windows the bulk transfers
+ *  when a transport's frame cap splits a holder's blocks across many messages. The
+ *  window binds hardest under a small cap (WebRTC's ~64 KB channel forces ~one
+ *  block per STORE/FETCH): without it those messages would go one serial round
+ *  trip per block. Under a large cap (WS) each holder has only a few big batches,
+ *  so it is a no-op. With the genuinely-async guest seam the guest overlaps the
+ *  round trips itself — one Promise.all over NET_SEND fires W per-peer requests at
+ *  once (the host driving them concurrently) — so W bounds the peak in flight.
+ *  PUT and GET share one window: they have never been tuned apart in practice. */
+  fanoutWindow: number;
   /** Max bytes in one batched OFFER/STORE/FETCH message. Every per-holder batch is
    *  split to stay under it, so a single message both fits the transport's frame cap
    *  AND transfers within the request timeout — and the holder (synchronous in the
@@ -40,24 +39,34 @@ export interface StorageConfig {
    *  and acks — before the next, so the whole window's ciphertext is dropped before
    *  more plaintext crosses in and the guest heap never holds the file. Bigger windows
    *  mean fewer inter-window barriers (less link idle on a fat/low-loss path) but a
-   *  larger peak guest footprint (≈ n/k× the window in ciphertext), so raise
-   *  realmMemoryBytes alongside it. Always set (defaultConfig homes the 4 MiB default);
-   *  the confined guest reads it from the injected APP and never keeps its own copy. */
-  windowTargetBytes: number;
-  /** Hard cap on the guest realm's QuickJS heap (safe-js default 64 MiB). Raise
-   *  it to run larger windowTargetBytes without the guest OOMing. Host-only (passed to
-   *  createSafeRealm, not injected into the guest APP). Omit for the default. */
+   *  larger peak guest footprint (≈ n/k× the window in ciphertext, peaking at ~3× the
+   *  plaintext window at RS(1,1)). When unset the host derives it from realmMemoryBytes
+   *  (≈ realmMemoryBytes / 3, rounding to the nearest chunk-aligned multiple); explicit
+   *  override stays for benchmarking. The confined guest reads it from the injected APP
+   *  and never keeps its own copy. */
+  windowTargetBytes?: number;
+  /** Memory budget for the guest realm's QuickJS heap. The host derives
+   *  windowTargetBytes from it (~realmMemoryBytes / 3, since peak heap footprint is
+   *  ≈ 3× the plaintext window at RS(1,1)), so the two real flow-control knobs are
+   *  this (the memory number) and maxMessageBytes (the transport number). Host-only
+   *  (passed to createSafeRealm, not injected into the guest APP). Default 64 MiB
+   *  (the safe-js default). */
   realmMemoryBytes?: number;
 }
 
-/** Default fan-out window for putWindow / getWindow: how many per-holder
- *  STORE/FETCH sub-batches are pushed/pulled concurrently. core.ts is the single home
- *  of the guest's config defaults — the confined guest reads the injected APP and keeps
- *  no copy of its own. */
+/** Default fan-out window (fanoutWindow): how many per-holder STORE/FETCH
+ *  sub-batches are pushed/pulled concurrently. core.ts is the single home of the guest's
+ *  config defaults — the confined guest reads the injected APP and keeps no copy of its own. */
 export const DEFAULT_FANOUT_WINDOW = 16;
 
-/** Default target plaintext bytes per streamed PUT/GET window (§3): 4 MiB. Homed here
- *  (not in the guest) for the same reason as DEFAULT_FANOUT_WINDOW. */
+/** Default guest realm memory budget when the operator sets none: 64 MiB.
+ *  windowTargetBytes is derived from this (~ /3) unless explicitly overridden. */
+export const DEFAULT_REALM_MEMORY_BYTES = 64 * 1024 * 1024;
+
+/** Default target plaintext bytes per streamed PUT/GET window (§3): 4 MiB. The legacy
+ *  conservative default; when realmMemoryBytes is set (explicitly or via the 64 MiB
+ *  DEFAULT_REALM_MEMORY_BYTES) the host derives windowTargetBytes from it (~ /3) instead.
+ *  The explicit override — set directly via cmdline or benchmark config — always wins. */
 export const DEFAULT_WINDOW_TARGET_BYTES = 4 * 1024 * 1024;
 
 /** Default committed-tier byte budget (§14) when the operator sets none: 64 MiB.
@@ -93,20 +102,24 @@ export function defaultConfig(k = 2, m = 2, blockSize = 256): StorageConfig {
     k,
     m,
     blockSize,
-    putWindow: DEFAULT_FANOUT_WINDOW,
-    getWindow: DEFAULT_FANOUT_WINDOW,
+    fanoutWindow: DEFAULT_FANOUT_WINDOW,
     // ~1 MiB: a batch transfers well inside a typical request timeout and keeps a
     // synchronous holder's per-message work small, while still collapsing per-block
     // round trips. A transport with a tighter frame cap (WebRTC) lowers it.
     maxMessageBytes: 1 << 20,
-    windowTargetBytes: DEFAULT_WINDOW_TARGET_BYTES,
+    // windowTargetBytes and realmMemoryBytes are both unset here — the two real
+    // flow-control knobs. When omitted the host derives windowTargetBytes from
+    // realmMemoryBytes (≈ /3, peak guest footprint ratio), and when both are
+    // omitted the host applies DEFAULT_WINDOW_TARGET_BYTES as a safe floor.
   };
 }
 
 /** Every key a StorageConfig may carry, at runtime. Derived from defaultConfig() so
  *  the required set cannot drift from the interface as fields are added; only the
  *  OPTIONAL ones (which a default cannot show) are named here. */
-const CONFIG_KEYS: ReadonlySet<string> = new Set([...Object.keys(defaultConfig()), "realmMemoryBytes"]);
+const CONFIG_KEYS: ReadonlySet<string> = new Set([
+  ...Object.keys(defaultConfig()), "realmMemoryBytes", "windowTargetBytes",
+]);
 
 /** Reject unknown keys in a caller-supplied config (StorageConfig is a closed set).
  *
@@ -114,7 +127,7 @@ const CONFIG_KEYS: ReadonlySet<string> = new Set([...Object.keys(defaultConfig()
  *  the CLI scripts, the browser demo — so TypeScript's excess-property check never runs
  *  and a misspelled knob is silently ignored: the node runs on the default and the caller
  *  is never told their setting did nothing. That failure is invisible in exactly the way
- *  a tuning knob must not be (a wrong windowTargetBytes reads as a perf result, not a bug).
+ *  a tuning knob must not be (a wrong fanoutWindow reads as a perf result, not a bug).
  *
  *  `quota` is called out by name because it is not a typo but a genuine collision: it IS
  *  operator policy, spelled inside the opaque boot `config` a seedkernel shell takes — but
@@ -138,6 +151,24 @@ export function assertStorageConfig(config?: Partial<StorageConfig>): void {
       `Known keys: ${[...CONFIG_KEYS].sort().join(", ")}.`,
     );
   }
+}
+
+/** Normalise a caller-supplied partial config into a canonical shape, deriving
+ *  windowTargetBytes from the realm budget when not explicitly set (§3). Called once
+ *  at boot by StorageNode.create. Explicit overrides always win for benchmarking. */
+export function normaliseConfig(raw: Partial<Record<string, unknown>>): Partial<StorageConfig> {
+  const c: Partial<StorageConfig> = { ...raw } as Partial<StorageConfig>;
+
+  // Derive windowTargetBytes from realmMemoryBytes when not explicitly set. Peak guest
+  // heap footprint is ≈ n/k× the window in ciphertext, peaking at ~3× the plaintext
+  // window at RS(1,1), so a third of the realm budget is a safe window. The caller can
+  // always pass an explicit windowTargetBytes (or --wtarget) for benchmarking.
+  if (c.windowTargetBytes == null) {
+    const realm = c.realmMemoryBytes ?? DEFAULT_REALM_MEMORY_BYTES;
+    c.windowTargetBytes = Math.round(realm / 3);
+  }
+
+  return c;
 }
 
 /** peer_id is the hex of a peer's kernel public key (§2). */

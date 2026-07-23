@@ -24,7 +24,7 @@ import { MemoryFs } from "seedkernel-wasm/fs";
 import { FsBlobView, type BlobView } from "./store-view.js";
 import { Crypto } from "./crypto.js";
 import {
-  type Identity, type StorageConfig, defaultConfig, assertStorageConfig, DEFAULT_QUOTA_BYTES,
+  type Identity, type StorageConfig, defaultConfig, assertStorageConfig, normaliseConfig, DEFAULT_QUOTA_BYTES,
 } from "./core.js";
 import { STORAGE_APP, storageSignScope } from "./manifest.js";
 import { encodeScoreReq } from "./reputation-core.js";
@@ -145,7 +145,7 @@ export class StorageNode {
     // alone would only agree when the override happened to name every field. guest.config
     // is untyped JSON (Record<string,string|number>), so coerce it to the config shape at
     // this boundary — the bundle producer writes the numeric geometry.
-    const override = opts.config;
+    const override = normaliseConfig(opts.config ?? {});
     assertStorageConfig(override);
     const signed = (loaded.manifest.guest?.config ?? {}) as unknown as Partial<StorageConfig>;
     const merged: Partial<StorageConfig> = { ...signed, ...override };
@@ -166,11 +166,14 @@ export class StorageNode {
     const fs = opts.fs ?? new MemoryFs();
     const network = opts.network;
 
-    // realmMemoryBytes is host-only (the QuickJS heap bound) — split it out of the
-    // config that becomes the guest's APP, and pass it to the shell as the realm limit.
-    // The rest of opts.config is the operator override merged OVER the bundle's signed
-    // guest.config; quota is operator policy (§14), never author-signed, added here.
-    const { realmMemoryBytes, ...guestOverride } = opts.config ?? {};
+    // Normalise the operator override: derive windowTargetBytes from realmMemoryBytes
+    // when not explicitly set (§3). realmMemoryBytes is host-only (the QuickJS heap
+    // bound) — split it out of the config that becomes the guest's APP, and pass it to
+    // the shell as the realm limit. The rest of opts.config is the operator override
+    // merged OVER the bundle's signed guest.config; quota is operator policy (§14),
+    // never author-signed, added here.
+    const norm = normaliseConfig(opts.config ?? {});
+    const { realmMemoryBytes, ...guestOverride } = norm;
 
     opts = { ...opts, fs }; // share the one fs instance with the constructor below
 

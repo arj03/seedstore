@@ -11,8 +11,8 @@ export interface Sodium {
   ready: Promise<void>;
   // content-address hash for block_id (§4.2). Block-ids never cross into the
   // kernel, so the storage layer hashes them with BLAKE2b (crypto_generichash)
-  // — fast and already in libsodium — rather than the kernel's SHA-3 genesis
-  // hash. (SHA-3 stays the kernel's hash for handler-name derivation, not here.)
+  // — fast and already in libsodium — rather than the kernel's BLAKE2b-256 genesis
+  // hash. (BLAKE2b-256 is the kernel's hash for handler-name derivation too.)
   crypto_generichash(hashLength: number, message: Uint8Array, key?: Uint8Array | null): Uint8Array;
   crypto_generichash_BYTES: number;
   // length-preserving stream cipher (§4.4): same op encrypts and decrypts

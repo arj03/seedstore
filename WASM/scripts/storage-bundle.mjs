@@ -125,7 +125,7 @@ export function writeStorageBundle({ path, sodium, sk, pk, build, version = 1, l
         // merges over the signed config), and a mismatched client degrades to tail
         // re-requests instead of failing (runFetchTasks).
         maxMessageBytes: cfg.maxMessageBytes,
-        putWindow: cfg.putWindow, getWindow: cfg.getWindow,
+        fanoutWindow: cfg.fanoutWindow,
         windowTargetBytes: cfg.windowTargetBytes,
       },
     },
