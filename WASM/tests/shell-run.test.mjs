@@ -16,6 +16,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { boot } from "seedkernel-wasm/shell";
+import { kernelNameFor } from "seedkernel-wasm/bundle";
 import {
   loadSodium, generateKeyPair, LoopbackNetwork, createConnectedCohort,
 } from "../build/host/node.js";
@@ -68,7 +69,10 @@ export async function run(t) {
         config: { blockSize: 64 },
       });
       const loaded = await shell.loadBundle(bundlePath);
-      t.eq(loaded.installed.join(","), "codec,reputation", "the shell installed the bundle's signed modules");
+      for (const m of loaded.manifest.modules) {
+        t.ok(shell.host.isBound(kernelNameFor(author.publicKey, loaded.manifest.app, m.name)),
+          `module ${m.name} installed`);
+      }
 
       // PUT, orchestrated by the confined guest the shell loaded.
       const data = file(600, 7); // > smallMaxBlocks → the RS path, placed across the cohort

@@ -1,9 +1,7 @@
 // Build a signed seedstore bundle file on disk for the shell tests (shell-run +
 // holder-guest). The bundle *content* is assembled by scripts/storage-bundle.mjs
 // — the same code scripts/build-bundle.mjs uses — so the fixture and the real
-// producer are byte-identical and cannot drift. The module kernel names are derived
-// deterministically, so they match what a shell's own host (and the guest's
-// BUNDLE.modules) resolve to.
+// producer are byte-identical and cannot drift.
 
 import { writeStorageBundle } from "../scripts/storage-bundle.mjs";
 

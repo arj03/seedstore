@@ -88,12 +88,12 @@ const NET_PROTO = strBytes("seedstore");
 const HAVE_ID_LEN = 32;      // a HAVE/FETCH request names 32-byte block_ids (§18)
 const FETCH_FRAME = 5;       // a present block costs [found u8][len u32] in a FETCH response (§18)
 const STORE_BLK = ".blk", STORE_DSC = ".dsc";
-// The kernel names this app's own modules landed at, from BUNDLE.modules — keyed by the
-// logical name the manifest declares (seedkernel §12.4), so the guest never re-derives a
-// name or reads one an author retyped into config. Kernel names are strings (§5.1) and
-// cross the MODULE_CALL seam as their UTF-8 bytes; both are ASCII, so strBytes encodes.
-const CODEC_NAME = strBytes(BUNDLE.modules.codec);
-const REP_NAME = strBytes(BUNDLE.modules.reputation);
+// The logical names this app's own modules are installed under. The guest calls
+// its own modules by the logical name from its manifest — the cap-bridge resolves
+// to the kernel name so kernel names never leave the host. Both are ASCII, so
+// strBytes encodes.
+const CODEC_NAME = strBytes("codec");
+const REP_NAME = strBytes("reputation");
 // The scoped-signature prefix `DOMAIN_guest ‖ scope` (README §16): the CAP_SIGN op signs
 // `prefix ‖ msg`, never the raw msg, so a descriptor signature verifies only in this app's
 // scope. CAP_VERIFY stays raw, so verifyEnv rebuilds `prefix ‖ core` before checking. The
@@ -104,7 +104,7 @@ const SIGN_PREFIX = fromHex(BUNDLE.signPrefix);
 
 // Two injected constants, with a hard split (seedkernel §12.4):
 //   BUNDLE  facts the RUNTIME derived from the admitted manifest — author, app, the
-//           signing prefix, this app's module kernel names. Not operator-writable.
+//           signing prefix. Not operator-writable.
 //   APP     the author's signed config, with operator policy merged over it
 //           (storage-node.ts appPreamble builds it host-side; the shell merges
 //           --app-config over the bundle's). Read directly as `APP.*`.
