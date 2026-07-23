@@ -376,9 +376,7 @@ function fetchMaxIds() { return Math.max(1, Math.floor(maxMsgBytes() / (APP.bloc
 // apiece (the tight-cap WebRTC case the lock-step fan-out was meant to keep
 // windowed). Injected in full by the driver (core.ts homes the default); the guest
 // reads APP and never guesses.
-function putWindow() { return APP.fanoutWindow; }
-function getWindow() { return APP.fanoutWindow; }
-function getWindow() { return APP.fanoutWindow ?? APP.getWindow ?? APP.putWindow ?? 16; }
+function fanoutWindow() { return APP.fanoutWindow; }
 function sliceN(arr, size) {
   if (arr.length <= size) return [arr];
   const out = [];
@@ -449,7 +447,7 @@ function encodeChunk(source, localCi, globalCi, K) {
   return makeChunk(d, blocks, signChunk(d));
 }
 // THE placement engine (§6/§10). Place every job's slots with one batched OFFER per peer
-// per round, then the accepted blocks STORE'd in putWindow()-deep fan-outs per peer.
+// per round, then the accepted blocks STORE'd in fanoutWindow()-deep fan-outs per peer.
 // Slot i targets cands[i], cands[i+slots], … (a disjoint residue class per i, so one
 // job's slots land on distinct peers — which is the sibling rule for a coded chunk, the
 // r distinct replica holders for a replicated one, and "somewhere new" for a repaired
@@ -499,7 +497,7 @@ async function placeChunksBatched(jobs, what) {
     // complete before its STOREs (no optimistic STORE — §6). The OFFER
     // phase carries ≤1 message per peer per fan-out (a peer's offers are small and
     // rarely exceed maxOffers, so the sub-batch index is round-robined one-per-peer).
-    // The STORE phase windows up to putWindow() of a peer's byte-bounded sub-batches
+    // The STORE phase windows up to fanoutWindow() of a peer's byte-bounded sub-batches
     // into each fan-out (peers concurrent → peak W·peers), so a holder's many capped
     // STORE messages pipeline instead of going one round trip apiece — a within-phase
     // parallelism bounded by putWindow. Within a phase every peer goes in
@@ -537,13 +535,13 @@ async function placeChunksBatched(jobs, what) {
     }
 
     // ── STORE phase ── the accepted blocks, byte-bounded per peer, fanned out in
-    // windows of putWindow() per peer: each round packs up to W of a peer's STORE
+    // windows of fanoutWindow() per peer: each round packs up to W of a peer's STORE
     // sub-batches into one netSendMany (all peers concurrent → peak W·peers).
     const storeGroups = new Map(); // peer → [group]
     for (const [peer, accepted] of acceptedByPeer) {
       storeGroups.set(peer, batchBytes(accepted, ({ ch, i }) => 40 + ch.descriptor.length + ch.slotBlocks[i].length, maxBytes));
     }
-    const putW = putWindow();
+    const putW = fanoutWindow();
     for (let base = 0; ; base += putW) {
       const reqs = [], groupOf = [];
       for (const [peer, groups] of storeGroups) {
@@ -593,8 +591,8 @@ async function fetchBlock(id) {
 }
 // Run a windowed batched FETCH over a peer→[idHex] plan. Self reads the local store
 // directly (no round trip, no scoring); every other holder's sub-batches are flattened
-// into one task list and fanned out getWindow() FETCH messages at a time (peak W in
-// flight, the getWindow window). `apply(peer, sliceHex, ids, blocks)` sees each
+// into one task list and fanned out fanoutWindow() FETCH messages at a time (peak W in
+// flight, the fanoutWindow window). `apply(peer, sliceHex, ids, blocks)` sees each
 // sub-batch's result — blocks aligned to ids (bytes|null), or null for the whole slice
 // if the peer was unreachable (partial, never a §8 miss). Shared by the GET gather and
 // the repair audit, so both express the same window through one Promise.all round.
@@ -621,7 +619,7 @@ async function runFetchTasks(byPeer, maxIds, apply) {
     if (peer === me) continue;
     for (const slice of sliceN(byPeer.get(peer), maxIds)) tasks.push({ peer, slice, ids: slice.map(fromHex) });
   }
-  const getW = getWindow();
+  const getW = fanoutWindow();
   for (let base = 0; base < tasks.length; base += getW) {
     const window = tasks.slice(base, base + getW);
     const results = await netSendMany(window.map(({ peer, ids }) => ({ peer, type: MSG_FETCH, payload: encodeFetchBatchReq(ids) })));
@@ -644,8 +642,8 @@ async function runFetchTasks(byPeer, maxIds, apply) {
 }
 // Fetch every block the file's chunks need, batched per holder. After the file-wide
 // have/want, each still-missing block is requested from its best untried holder,
-// sub-batched under the frame cap and fanned out getWindow() FETCH messages at a time
-// (peak W in flight, the getWindow window); a coded chunk stops at k, preferring
+// sub-batched under the frame cap and fanned out fanoutWindow() FETCH messages at a time
+// (peak W in flight, the fanoutWindow window); a coded chunk stops at k, preferring
 // data blocks. Every returned block is hash-verified (§4.2) and scores its holder
 // (§8). Returns a Map id-hex → bytes.
 async function gatherBlocks(descriptors, holders) {
@@ -710,7 +708,7 @@ async function gatherBlocks(descriptors, holders) {
       }
     };
 
-    // Self reads local; every other holder's sub-batches window by getWindow() (§8/§13).
+    // Self reads local; every other holder's sub-batches window by fanoutWindow() (§8/§13).
     await runFetchTasks(byPeer, maxIds, applyFetch);
   }
   return got;
@@ -752,7 +750,7 @@ function assembleChunk(d, got) {
 // before feeding the next, so on a fat/low-loss link a too-small window idles the wire
 // between windows. This is the reader's/writer's OWN memory policy, not file geometry,
 // so it stays a config value even on the descriptor-authoritative GET path.
-function windowTarget() { return APP.windowTargetBytes; }
+function windowTarget() { return APP.windowTargetBytes ?? 4 * 1024 * 1024; }
 // A chunk-aligned window size in bytes: as many whole chunks (k·blockSize) as fit
 // under the target, at least one. Kept a multiple of k·blockSize so slicing the file
 // at window boundaries never splits a chunk. This is the WRITE side, so k·blockSize is
@@ -1012,7 +1010,7 @@ async function doGet(arg) {
 // `bytes` — healing re-places THOSE instead of re-fetching (a whole-cohort have/want
 // per id, the pre-batch cost). The verification is unchanged per (peer, block): the
 // same hash-check (§4.2) + repObserve (§8), just batched one FETCH per holder (all the
-// ids it advertised) and windowed by getWindow(), not one round trip per (id, holder).
+// ids it advertised) and windowed by fanoutWindow(), not one round trip per (id, holder).
 async function liveHolders(ids) {
   const advertised = await haveWant(ids);
   const me = myPeer();
