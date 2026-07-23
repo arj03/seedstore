@@ -296,7 +296,7 @@ async function haveWant(ids) {
 }
 // The HAVE/OFFER/STORE/FETCH wire codecs (encode/decodeHaveReq, encode/decodeOfferBatch,
 // encode/decodeStoreBatch, encode/decodeFetchBatchReq, encode/decodeFetchBatchRes, and
-// the shared encode/decodeMask that all three of the HAVE/OFFER/STORE responses use)
+// the shared encodeMask / decodeMask that all three of the HAVE/OFFER/STORE responses use)
 // come from the SHARED host/protocol.ts, stitched in ahead of this body — one
 // definition of the §18 control-plane format, not a hand-copied mirror. Composing them
 // with netSend — and with the unreachable-peer (null) case — is transport policy, and
@@ -359,20 +359,6 @@ function verifyDescriptor(env) {
 function signChunk(d) { return signCore(encodeDescriptorCore(d)); }
 
 // ── placement + fetch (coordinator §6/§7) ────────────────────────────────────
-// Appended to a placement-failure throw. A holder declines an OFFER/STORE for one of
-// two reasons, indistinguishable to the initiator: (1) no §14 quota left, or (2) the
-// descriptor fails its verify — most often a SIGNING-SCOPE mismatch (§16): the holder
-// verifies under storageSignScope(bundleAuthor) but this node signed under a different
-// scope (e.g. the zero-author default vs. a seedloader running a signed bundle). GET
-// still works either way (serving a FETCH checks neither quota nor the author scope).
-//
-// Cause (a) leads with the UNCONFIGURED case, not the exhausted one: quota is operator
-// policy that is deliberately absent from the signed bundle, and `quota()` fails closed
-// at 0 — so a shell holder booted with no --app-config declines every STORE while looking
-// perfectly healthy (it connects, serves FETCH, and logs nothing). That is far and away
-// the likeliest way to land here, and "OUT OF STORAGE" used to send readers hunting a
-// full disk instead.
-const OUT_OF_STORAGE_HINT = " — holders answered but declined. Two causes look identical here: (a) the holders have NO QUOTA to admit into — most often none was configured at all (quota is operator policy, absent from the signed bundle and failing closed at 0: pass it in the shell's --app-config), otherwise they are genuinely full (clear their data dirs or raise the quota); or (b) a SIGNING-SCOPE mismatch (§16) — the cohort's holders run a signed bundle and verify under its author scope, but this node signs under a different one (set the cohort's bundle author). Or simply connect more holders";
 // A batched OFFER / STORE / FETCH is split to stay under APP.maxMessageBytes —
 // the per-transport cap that keeps one message inside the frame cap AND the request
 // timeout. Transport/operator policy injected via the APP preamble (like quota);
@@ -488,6 +474,10 @@ async function placeChunksBatched(jobs, what) {
   const entryBytes = 36 + (jobs.length ? jobs[0].descriptor.length : 0); // one OFFER entry: [blockId 32][dlen u32][descriptor]
   const maxOffers = Math.max(1, Math.floor(maxBytes / entryBytes));
 
+  // Advisory diagnostics collected from holder verdicts — a holder may lie, so the
+  // reason is never policy, but the error a failed PUT throws becomes exact.
+  const diag = { quota: 0, sibling: 0, descriptor: 0 };
+
   for (let r = 0; ; r++) {
     const byPeer = new Map(); // peer → [{ch, i}]
     for (const ch of jobs) {
@@ -532,7 +522,12 @@ async function placeChunksBatched(jobs, what) {
       for (let ri = 0; ri < results.length; ri++) {
         const slice = sliceOf[ri];
         const mask = results[ri].ok ? decodeMask(results[ri].bytes) : [];
-        const accepted = slice.filter((_, j) => mask[j]);
+        const accepted = slice.filter((_, j) => mask[j] === VERDICT_ACCEPTED);
+        for (let j = 0; j < slice.length; j++) {
+          if (mask[j] === VERDICT_QUOTA) diag.quota++;
+          else if (mask[j] === VERDICT_SIBLING) diag.sibling++;
+          else if (mask[j] === VERDICT_DESCRIPTOR) diag.descriptor++;
+        }
         if (accepted.length === 0) continue;
         let list = acceptedByPeer.get(results[ri].peer); if (!list) acceptedByPeer.set(results[ri].peer, (list = []));
         for (const it of accepted) list.push(it);
@@ -561,7 +556,12 @@ async function placeChunksBatched(jobs, what) {
       for (let ri = 0; ri < results.length; ri++) {
         const group = groupOf[ri];
         const stored = results[ri].ok ? decodeMask(results[ri].bytes) : [];
-        for (let j = 0; j < group.length; j++) if (stored[j]) group[j].ch.placedPeer[group[j].i] = results[ri].peer;
+        for (let j = 0; j < group.length; j++) {
+          if (stored[j] === VERDICT_ACCEPTED) { group[j].ch.placedPeer[group[j].i] = results[ri].peer; }
+          else if (stored[j] === VERDICT_QUOTA) diag.quota++;
+          else if (stored[j] === VERDICT_SIBLING) diag.sibling++;
+          else if (stored[j] === VERDICT_DESCRIPTOR) diag.descriptor++;
+        }
       }
     }
   }
@@ -569,7 +569,14 @@ async function placeChunksBatched(jobs, what) {
   for (const ch of jobs) {
     const distinct = new Set();
     for (let i = 0; i < ch.slotIds.length; i++) if (ch.placedPeer[i]) distinct.add(toHex(ch.slotIds[i]));
-    if (distinct.size < ch.floor) throw new Error("put: " + what + " landed " + distinct.size + "/" + ch.floor + " distinct blocks" + OUT_OF_STORAGE_HINT);
+    if (distinct.size < ch.floor) {
+      const parts = []; let total = 0;
+      if (diag.quota) { parts.push("quota"); total += diag.quota; }
+      if (diag.sibling) { parts.push("sibling"); total += diag.sibling; }
+      if (diag.descriptor) { parts.push("descriptor-rejected"); total += diag.descriptor; }
+      const detail = parts.length ? " (" + total + " holders: " + parts.join(", ") + ")" : "";
+      throw new Error("put: " + what + " landed " + distinct.size + "/" + ch.floor + " distinct blocks — holders declined" + detail + ". Check quota (--app-config), signing scope (§16), or connect more holders");
+    }
     ch.placedIds = [...distinct].map(fromHex);  // the distinct ids that landed, for the PUT result
   }
 }
@@ -1219,31 +1226,32 @@ function admitBatch(offers) {
   const provisional = new Set();
   return offers.map((o) => {
     const d = verifyDescriptor(o.descriptor);
-    if (!d) return false;                                  // absent, forged, unsigned, or malformed
-    if (!descriptorContains(d, o.blockId)) return false;    // not a block of this chunk
+    if (!d) return VERDICT_DESCRIPTOR;                       // absent, forged, unsigned, or malformed
+    if (!descriptorContains(d, o.blockId)) return VERDICT_DESCRIPTOR; // not a block of this chunk
     // Geometry is the SIGNED descriptor's, never a field the sender picks: every block
     // is exactly blockSize bytes, so bytes in hand that disagree are not the block that
     // was offered, whatever they hash to.
-    if (o.size != null && o.size !== d.blockSize) return false;
+    if (o.size != null && o.size !== d.blockSize) return VERDICT_DESCRIPTOR;
     // Charge what storeWrite will actually commit — the ciphertext AND its .dsc
     // sidecar — so this pre-check answers the same question the binding write does
     // instead of over-admitting by the descriptor's own size.
     const cost = d.blockSize + o.descriptor.length;
-    if (cost > free) return false;
+    if (cost > free) return VERDICT_QUOTA;
     for (const sib of d.blockIds) {
       if (bytesEqual(sib, o.blockId)) continue;
-      if (storeHas(sib) || provisional.has(toHex(sib))) return false;
+      if (storeHas(sib) || provisional.has(toHex(sib))) return VERDICT_SIBLING;
     }
     free -= cost;
     provisional.add(toHex(o.blockId));
-    return true;
+    return VERDICT_ACCEPTED;
   });
 }
 function acceptStore(blockId, descriptor, bytes) {
   // The bytes must hash to the claimed id (§4.2) — every holder, every hop.
-  if (!bytesEqual(hash(bytes), blockId)) return false;
-  if (!admit(descriptor, blockId, bytes.length)) return false;
-  try { storeWrite(blockId, bytes, descriptor); return true; } catch (_e) { return false; }
+  if (!bytesEqual(hash(bytes), blockId)) return VERDICT_DECLINED;
+  const v = admit(descriptor, blockId, bytes.length);
+  if (v !== VERDICT_ACCEPTED) return v;
+  try { storeWrite(blockId, bytes, descriptor); return VERDICT_ACCEPTED; } catch (_e) { return VERDICT_QUOTA; }
 }
 // Serve a batched FETCH, but never emit much more than one message's worth of bytes:
 // an honest requester caps itself at fetchMaxIds() so its whole response fits, but a

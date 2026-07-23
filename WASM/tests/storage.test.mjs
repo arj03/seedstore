@@ -6,7 +6,7 @@
 import {
   LoopbackNetwork, loadWasmBytes, loadSodium, createConnectedCohort, StorageNode,
 } from "../build/host/node.js";
-import { encodeFetchBatchReq, decodeFetchBatchRes, FETCH_UNANSWERED } from "../build/host/protocol.js";
+import { encodeFetchBatchReq, decodeFetchBatchRes, FETCH_UNANSWERED, VERDICT_ACCEPTED, VERDICT_DECLINED, VERDICT_QUOTA, VERDICT_SIBLING, VERDICT_DESCRIPTOR } from "../build/host/protocol.js";
 import { parseSignedDescriptor } from "../build/host/manifest.js";
 import { toHex, fromHex, bytesEqual } from "../build/host/util.js";
 import { liveBlockCount } from "./helpers.mjs";
@@ -423,6 +423,24 @@ export async function run(t) {
     t.eq(served[1], FETCH_UNANSWERED, "the second block is marked UNANSWERED by the holder's smaller cap");
 
     t.ok(bytesEqual(await owner.get(put.manifestId, put.key), data), "GET completes across the cap mismatch (unanswered block re-requested, not marked tried)");
+    nodes.forEach((n) => n.close());
+  }
+
+  // ── Verdict diagnostics ────────────────────────────────────────────────────
+  t.group("a zero-quota holder declines every OFFER/STORE as VERDICT_QUOTA, and the error names the reason");
+  {
+    const net = new LoopbackNetwork();
+    const cfg = { ...config, k: 1, m: 0 };               // one block per chunk, no parity
+    const nodes = await createConnectedCohort({ count: 2, network: net, sodium, wasm, config: cfg, quota: 0, timeoutMs: TIMEOUT });
+    const data = file(128, 7);                            // 2 blocks → windowed path, 2 chunks
+    let err = null;
+    try {
+      await nodes[0].put(data);
+    } catch (e) { err = e; }
+    t.ok(err !== null, "PUT fails when every holder declines");
+    t.ok(err && /quota/.test(err.message), "the error names 'quota' in the declined-reason summary");
+    t.ok(err && /holders declined/.test(err.message), "the error includes the per-verdict count");
+    t.ok(err && /landed 0/.test(err.message), "the error reports 0 blocks landed");
     nodes.forEach((n) => n.close());
   }
 }

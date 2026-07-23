@@ -113,7 +113,7 @@ try {
   let onAll = true;
   for (const p of owner.node.cohortPeers()) {
     const res = await owner.node.transport.request(p, SEEDSTORE_PROTO, MsgType.HAVE, encodeHaveReq(r.blockIds));
-    const held = decodeMask(res).filter(Boolean).length;
+    const held = decodeMask(res).filter((v) => v === 1).length;
     console.log(`  ${p.slice(0, 8)}…  ${held}/${r.blockIds.length} blocks`);
     if (held < r.blockIds.length) onAll = false;
   }

@@ -17,6 +17,7 @@ import {
   encodeStoreBatch, decodeStoreBatch,
   encodeFetchBatchReq, decodeFetchBatchReq, encodeFetchBatchRes, decodeFetchBatchRes,
   FETCH_UNANSWERED, MsgType,
+  VERDICT_ACCEPTED, VERDICT_DECLINED, VERDICT_QUOTA, VERDICT_SIBLING, VERDICT_DESCRIPTOR,
 } from "../build/host/protocol.js";
 import { signDescriptor } from "../build/host/manifest.js";
 import {
@@ -56,7 +57,7 @@ export async function run(t) {
     }
     t.ok(same, "blockId and the variable-length descriptor round-trip — an entry carries no size, the descriptor's signed blockSize is the geometry");
 
-    const mask = [true, false, true];
+    const mask = [VERDICT_ACCEPTED, VERDICT_DECLINED, VERDICT_ACCEPTED];
     t.ok(decodeMask(encodeMask(mask)).every((v, i) => v === mask[i]), "accept-mask round-trips");
   }
 
@@ -75,7 +76,7 @@ export async function run(t) {
         && bytesEqual(back[i].descriptor, stores[i].descriptor);
     }
     t.ok(same, "blockId, descriptor, and variable-length bytes all round-trip");
-    const mask = [true, true, false];
+    const mask = [VERDICT_ACCEPTED, VERDICT_ACCEPTED, VERDICT_DECLINED];
     t.ok(decodeMask(encodeMask(mask)).every((v, i) => v === mask[i]), "stored-mask round-trips");
   }
 
@@ -133,8 +134,8 @@ export async function run(t) {
         { blockId: sib1, descriptor: env }, // sibling of sib0 — must not both pass
       ];
       const mask = decodeMask(await a.transport.request(b.peerId, SEEDSTORE_PROTO, MsgType.OFFER, encodeOfferBatch(offers)));
-      t.eq(mask[0], true, "the holder accepts the first block of the chunk");
-      t.eq(mask[1], false, "it declines the second — a sibling provisionally accepted in the same batch (§6)");
+      t.eq(mask[0], VERDICT_ACCEPTED, "the holder accepts the first block of the chunk");
+      t.eq(mask[1], VERDICT_SIBLING, "it declines the second — a sibling provisionally accepted in the same batch (§6)");
     } finally { a.close(); b.close(); }
   }
 
@@ -174,9 +175,9 @@ export async function run(t) {
       const offers = [id(30), id(31), id(32)].map((blockId) => ({ blockId, descriptor: solo(blockId) }));
       t.eq(offers[0].descriptor.length, 136, "a one-block descriptor envelope is [pk 32][sig 64][core 40]");
       const mask = decodeMask(await a.transport.request(b.peerId, SEEDSTORE_PROTO, MsgType.OFFER, encodeOfferBatch(offers)));
-      t.eq(mask[0], true, "first block fits the quota (236 ≤ 500)");
-      t.eq(mask[1], true, "second still fits (cumulative 472 ≤ 500)");
-      t.eq(mask[2], false, "third declined — the running budget is spent (§14)");
+      t.eq(mask[0], VERDICT_ACCEPTED, "first block fits the quota (236 ≤ 500)");
+      t.eq(mask[1], VERDICT_ACCEPTED, "second still fits (cumulative 472 ≤ 500)");
+      t.eq(mask[2], VERDICT_QUOTA, "third declined — the running budget is spent (§14)");
     } finally { a.close(); b.close(); }
   }
 
@@ -195,8 +196,8 @@ export async function run(t) {
         { blockId: i0, descriptor: solo(i0), bytes: b0 },
         { blockId: i1, descriptor: solo(i1), bytes: b1 }, // would overrun the 1500-byte budget
       ])));
-      t.eq(stored[0], true, "first block stored");
-      t.eq(stored[1], false, "second rejected — its predecessor in the batch already spent the quota (§14)");
+      t.eq(stored[0], VERDICT_ACCEPTED, "first block stored");
+      t.eq(stored[1], VERDICT_QUOTA, "second rejected — its predecessor in the batch already spent the quota (§14)");
       t.ok(b.store.has(i0) && !b.store.has(i1), "only the first block actually committed to the store");
     } finally { a.close(); b.close(); }
   }
@@ -215,7 +216,7 @@ export async function run(t) {
       const stored = decodeMask(await a.transport.request(b.peerId, SEEDSTORE_PROTO, MsgType.STORE, encodeStoreBatch([
         { blockId: jid, descriptor: bytes(136, 1), bytes: junk }, // unsigned garbage of descriptor shape
       ])));
-      t.eq(stored[0], false, "STORE declined — the descriptor carries no valid author signature");
+      t.eq(stored[0], VERDICT_DESCRIPTOR, "STORE declined — the descriptor carries no valid author signature");
       t.ok(!b.store.has(jid), "nothing committed to the store");
 
       // Signed, but for a DIFFERENT chunk: the signature verifies and yet this block is
@@ -226,7 +227,7 @@ export async function run(t) {
       const stored2 = decodeMask(await a.transport.request(b.peerId, SEEDSTORE_PROTO, MsgType.STORE, encodeStoreBatch([
         { blockId: jid, descriptor: other, bytes: junk },
       ])));
-      t.eq(stored2[0], false, "STORE declined — validly signed, but the block is not of that chunk");
+      t.eq(stored2[0], VERDICT_DESCRIPTOR, "STORE declined — validly signed, but the block is not of that chunk");
       t.ok(!b.store.has(jid), "still nothing committed");
 
       // Signed, of this chunk, but the bytes disagree with the signed blockSize: the
@@ -238,8 +239,19 @@ export async function run(t) {
       const stored3 = decodeMask(await a.transport.request(b.peerId, SEEDSTORE_PROTO, MsgType.STORE, encodeStoreBatch([
         { blockId: jid, descriptor: wrongSize, bytes: junk }, // 100 bytes vs a signed blockSize of 99
       ])));
-      t.eq(stored3[0], false, "STORE declined — the bytes in hand aren't the descriptor's blockSize");
+      t.eq(stored3[0], VERDICT_DESCRIPTOR, "STORE declined — the bytes in hand aren't the descriptor's blockSize");
       t.ok(!b.store.has(jid), "still nothing committed");
+
+      // Correctly signed descriptor, correct blockSize, but the BYTES don't hash to the
+      // claimed blockId — a content-address mismatch the holder checks before admission (§4.2).
+      const goodDesc = signDescriptor(
+        sodium, { k: 1, m: 0, blockSize: 100, blockIds: [b.crypto.hash(junk)] }, a.identity.publicKey, a.identity.privateKey, a.signScope,
+      );
+      const stored4 = decodeMask(await a.transport.request(b.peerId, SEEDSTORE_PROTO, MsgType.STORE, encodeStoreBatch([
+        { blockId: id(99), descriptor: goodDesc, bytes: junk }, // blockId ≠ hash(bytes)
+      ])));
+      t.eq(stored4[0], VERDICT_DECLINED, "STORE declined — bytes don't hash to the claimed blockId (§4.2 content-address check)");
+      t.ok(!b.store.has(id(99)), "nothing committed to the store");
     } finally { a.close(); b.close(); }
   }
 

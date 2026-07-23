@@ -22,6 +22,7 @@ import { NodeFs } from "seedkernel-wasm/fs-node";
 import { bytesCompare } from "seedkernel-wasm/net";
 import {
   MsgType, encodeHaveReq, decodeMask, encodeStoreBatch, encodeFetchBatchReq, decodeFetchBatchRes,
+  VERDICT_ACCEPTED, VERDICT_DECLINED,
 } from "../build/host/protocol.js";
 import { signDescriptor } from "../build/host/manifest.js";
 import { toHex, fromHex, bytesEqual } from "../build/host/util.js";
@@ -208,7 +209,7 @@ export async function run(t) {
       const bid = S.crypto.hash(bytes);
 
       const have0 = await B.transport.request(S.peerId, SEEDSTORE_PROTO, MsgType.HAVE, encodeHaveReq([bid]));
-      t.eq(decodeMask(have0)[0], false, "HAVE → false before the block exists (over ws)");
+      t.eq(decodeMask(have0)[0], VERDICT_DECLINED, "HAVE → false before the block exists (over ws)");
 
       // The block travels with its author-signed chunk descriptor (§4.3) — the holder
       // verifies it before admitting, here as on any other transport. Both nodes load the
@@ -216,11 +217,11 @@ export async function run(t) {
       const desc = signDescriptor(sodium, { k: 1, m: 0, blockSize: bytes.length, blockIds: [bid] }, idB.publicKey, idB.privateKey, S.signScope);
 
       const stored = decodeMask(await B.transport.request(S.peerId, SEEDSTORE_PROTO, MsgType.STORE, encodeStoreBatch([{ blockId: bid, descriptor: desc, bytes }])));
-      t.eq(stored[0], true, "STORE acknowledged over ws");
+      t.eq(stored[0], VERDICT_ACCEPTED, "STORE acknowledged over ws");
       t.ok(S.store.has(bid), "server now holds the block");
 
       const have1 = await B.transport.request(S.peerId, SEEDSTORE_PROTO, MsgType.HAVE, encodeHaveReq([bid]));
-      t.eq(decodeMask(have1)[0], true, "HAVE → true after STORE (over ws)");
+      t.eq(decodeMask(have1)[0], VERDICT_ACCEPTED, "HAVE → true after STORE (over ws)");
 
       const fetched = await B.transport.request(S.peerId, SEEDSTORE_PROTO, MsgType.FETCH, encodeFetchBatchReq([bid]));
       const back = decodeFetchBatchRes(fetched)[0];

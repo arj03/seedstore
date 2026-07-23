@@ -424,10 +424,10 @@ Every storage message is a request/response between two cohort peers on the auth
 
 | Message | Request | Response |
 | --- | --- | --- |
-| `have` | block-ids the asker wants located (§5) | per-id held / not-held mask |
-| `offer` | per block headed to this peer: `block_id` + its **signed descriptor** (§6) | per-block accept/decline mask — quota (§14) and the sibling rule (§6), judged over the whole batch |
-| `store` | per accepted block: `block_id`, signed descriptor, the bytes (§6 step 4 — the bulk plane's push carrier, §3) | per-block stored/failed mask — the **binding** admission point: content address (§4.2), sibling rule, and quota are re-checked here, so `offer` stays advisory |
-| `fetch` | wanted block-ids (§7; also the §8 verification-fetch) | the blocks, present/absent per id (the bulk plane's pull carrier, §3), each hash-verified by the receiver (§4.2) |
+| `have` | block-ids the asker wants located (§5) | per-id held / not-held mask (1/0) |
+| `offer` | per block headed to this peer: `block_id` + its **signed descriptor** (§6) | per-block **verdict** byte: 1 = accepted, 0 = declined, 2 = quota, 3 = sibling, 4 = descriptor-rejected. Quota (§14) and the sibling rule (§6) are judged over the whole batch. Verdicts > 1 are **advisory diagnostics** — a holder may lie, so the reason is never policy — but they turn the initiator's failure message from a guessing essay into an exact report. |
+| `store` | per accepted block: `block_id`, signed descriptor, the bytes (§6 step 4 — the bulk plane's push carrier, §3) | per-block **verdict** byte (same codes as `offer`) — the **binding** admission point: content address (§4.2), sibling rule, and quota are re-checked here, so `offer` stays advisory |
+| `fetch` | wanted block-ids (§7; also the §8 verification-fetch) | the blocks, present/absent per id (the bulk plane's pull carrier, §3), each hash-verified by the receiver (§4.2). A block the holder has but its response cap leaves no room for is tagged `UNANSWERED` (2), distinct from a genuine miss (0), so the reader re-requests it. |
 
 PUT and GET are not messages — they are the coordinator's local API, and it speaks only these four to the cohort. Repair adds no message of its own: it runs on `have`, `fetch`, `offer`, and `store` (§9). The optional verifiable-reputation layer (§20) adds `proof.challenge` / `proof.receipt` and `rep.gossip`, and the optional tombstone layer (§25) adds its signed tombstone; the base protocol uses none of them.
 

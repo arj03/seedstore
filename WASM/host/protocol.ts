@@ -5,7 +5,7 @@
 // are still validated by genesis_hash(bytes) == block_id by the reader (§4.2).
 //
 // OFFER and FETCH are *batched*: one OFFER lists every block headed to a peer and
-// the holder replies a per-block accept-mask (quota + the §6 sibling rule
+// the holder replies a per-block verdict (quota + the §6 sibling rule
 // evaluated over the whole batch); one FETCH names every block wanted from a peer
 // and the holder returns them together. That collapses N per-block control round
 // trips (and N QuickJS holder invocations) into one per peer. STORE stays
@@ -26,15 +26,21 @@ export const MsgType = {
 } as const;
 
 // ── the response mask shared by HAVE, OFFER, and STORE ──────────────────────
-// All three replies are the same shape: one byte per batch entry, 1 or 0. HAVE's
-// is "held", OFFER's is "accepted", STORE's is "stored" — one codec, three uses.
-export function encodeMask(bits: boolean[]): Uint8Array {
+// All three replies are the same shape: one byte per batch entry. HAVE's is
+// "held" (1/0), OFFER's is a VERDICT_* code, STORE's is a VERDICT_* code —
+// one codec, three uses. A verdict ≠ 1 is a decline; codes 2–4 carry advisory
+// diagnostics (quota, sibling, descriptor-rejected) that turn the initiator's
+// error from a guessing essay into an exact report.
+export function encodeMask(bits: (boolean | number)[]): Uint8Array {
   const out = new Uint8Array(bits.length);
-  for (let i = 0; i < bits.length; i++) out[i] = bits[i] ? 1 : 0;
+  for (let i = 0; i < bits.length; i++) {
+    const v = bits[i];
+    out[i] = typeof v === "boolean" ? (v ? 1 : 0) : v;
+  }
   return out;
 }
-export function decodeMask(buf: Uint8Array): boolean[] {
-  return Array.from(buf, (b) => b === 1);
+export function decodeMask(buf: Uint8Array): number[] {
+  return Array.from(buf);
 }
 
 // ── HAVE (disc.have/want, §5) ──────────────────────────────────────────────
@@ -103,11 +109,19 @@ export function decodeOfferBatch(buf: Uint8Array): Offer[] {
   }
   return out;
 }
-// The OFFER response is a per-block accept-mask — encodeMask / decodeMask above.
+// The OFFER response verdict codes (§18): one byte per entry.
+//  1 = accepted. 0 = declined. Diagnostic codes > 1 are advisory — a holder
+//  may lie, so the reason is never policy (no new trust surface), but the error
+//  a failed PUT throws becomes exact instead of an essay of guesses.
+export const VERDICT_DECLINED   = 0;
+export const VERDICT_ACCEPTED   = 1;
+export const VERDICT_QUOTA      = 2; // §14 quota exhausted
+export const VERDICT_SIBLING    = 3; // §6 sibling already held
+export const VERDICT_DESCRIPTOR = 4; // descriptor verify failed (§4.3)
 
 // ── STORE (the push, §6 step 4) ─────────────────────────────────────────────
 // Batched per holder: every block headed to a peer streams in one message, and
-// the holder replies a per-block stored/failed mask. Each entry carries its own
+// the holder replies a per-block verdict. Each entry carries its own
 // descriptor + bytes (different chunks → different descriptors in one batch). This
 // is the upload twin of the batched FETCH download — one streamed transfer + one
 // ack instead of a request/response per block. STORE is still the BINDING
@@ -152,7 +166,7 @@ export function decodeStoreBatch(buf: Uint8Array): StoreReq[] {
   }
   return out;
 }
-// The STORE response is a per-block stored-mask — encodeMask / decodeMask above.
+// The STORE response is a per-block verdict — encodeMask / decodeMask above.
 
 // ── FETCH (block.fetch_req / block.data, §7, §8) ────────────────────────────
 // A batch names every block wanted from one peer; the response returns them in
