@@ -12,6 +12,8 @@ import { toHex, fromHex, bytesEqual } from "../build/host/util.js";
 import { liveBlockCount } from "./helpers.mjs";
 
 const TIMEOUT = 40; // ms — keep offline-peer timeouts snappy in tests
+const enc = new TextEncoder();
+const SEEDSTORE_PROTO = enc.encode("seedstore");
 
 function file(n, seed = 1) {
   const out = new Uint8Array(n);
@@ -415,7 +417,7 @@ export async function run(t) {
     const holder = holders.find((h) => h.store.list().length >= 2);
     t.ok(!!holder, "a holder carries at least two blocks");
     const [idA, idB] = holder.store.list();
-    const raw = await owner.transport.request(holder.peerId, 3 /* MSG_FETCH */, encodeFetchBatchReq([idA, idB]));
+    const raw = await owner.transport.request(holder.peerId, SEEDSTORE_PROTO, 3 /* MSG_FETCH */, encodeFetchBatchReq([idA, idB]));
     const served = decodeFetchBatchRes(raw);
     t.ok(served[0] !== null && bytesEqual(served[0], holder.store.get(idA).bytes), "the first present block is always served, even near the cap");
     t.eq(served[1], FETCH_UNANSWERED, "the second block is marked UNANSWERED by the holder's smaller cap");

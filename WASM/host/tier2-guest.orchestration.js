@@ -81,6 +81,10 @@ function bytesToStr(b) { let s = ""; for (let i = 0; i < b.length; i++) s += Str
 const CODEC_ENCODE = 1, CODEC_DECODE = 2;     // assembly/codec/index.ts
 // Control-plane message types carried over net.send (host/protocol.ts §18).
 const MSG_HAVE = 1, MSG_OFFER = 2, MSG_FETCH = 3, MSG_STORE = 4;
+// The protocol id this app speaks on the wire (§12.10) — placed in every NET_SEND frame
+// so the receiving host routes it to this app. The app name from the manifest ("seedstore")
+// is the default protocol id. strBytes encodes ASCII without TextEncoder (QuickJS has none).
+const NET_PROTO = strBytes("seedstore");
 const HAVE_ID_LEN = 32;      // a HAVE/FETCH request names 32-byte block_ids (§18)
 const FETCH_FRAME = 5;       // a present block costs [found u8][len u32] in a FETCH response (§18)
 const STORE_BLK = ".blk", STORE_DSC = ".dsc";
@@ -241,8 +245,13 @@ function rank(peers) { return makeRanker()(peers); }
 // The one genuinely-async cap: CAP_NET_SEND resolves to a Promise the initiator
 // awaits (the host round-trips it). An unreachable peer resolves to `[0]` (never a
 // reject), so this maps it to null within the request window.
+// Wire format: [peer 32][pidLen u8][protocolId][type u8][payload] (§12.10).
 async function netSend(peer, type, payload) {
-  const head = new Uint8Array(33); head.set(fromHex(peer), 0); head[32] = type;
+  const head = new Uint8Array(33 + 1 + NET_PROTO.length); // peer(32) + pidLen(1) + proto + type(1)
+  head.set(fromHex(peer), 0);
+  head[32] = NET_PROTO.length;
+  head.set(NET_PROTO, 33);
+  head[33 + NET_PROTO.length] = type;
   const r = await host.call(CAP_NET_SEND, concat([head, payload]));
   return r[0] === 1 ? r.slice(1) : null; // null = peer unreachable within the window
 }

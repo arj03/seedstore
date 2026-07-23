@@ -28,6 +28,8 @@ import { toHex, fromHex, bytesEqual } from "../build/host/util.js";
 import { plantBlock } from "./helpers.mjs";
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const enc = new TextEncoder();
+const SEEDSTORE_PROTO = enc.encode("seedstore");
 
 function file(n, seed = 1) {
   const out = new Uint8Array(n);
@@ -205,7 +207,7 @@ export async function run(t) {
       const bytes = file(64, 21);
       const bid = S.crypto.hash(bytes);
 
-      const have0 = await B.transport.request(S.peerId, MsgType.HAVE, encodeHaveReq([bid]));
+      const have0 = await B.transport.request(S.peerId, SEEDSTORE_PROTO, MsgType.HAVE, encodeHaveReq([bid]));
       t.eq(decodeMask(have0)[0], false, "HAVE → false before the block exists (over ws)");
 
       // The block travels with its author-signed chunk descriptor (§4.3) — the holder
@@ -213,14 +215,14 @@ export async function run(t) {
       // same bundle, so they share one signing scope.
       const desc = signDescriptor(sodium, { k: 1, m: 0, blockSize: bytes.length, blockIds: [bid] }, idB.publicKey, idB.privateKey, S.signScope);
 
-      const stored = decodeMask(await B.transport.request(S.peerId, MsgType.STORE, encodeStoreBatch([{ blockId: bid, descriptor: desc, bytes }])));
+      const stored = decodeMask(await B.transport.request(S.peerId, SEEDSTORE_PROTO, MsgType.STORE, encodeStoreBatch([{ blockId: bid, descriptor: desc, bytes }])));
       t.eq(stored[0], true, "STORE acknowledged over ws");
       t.ok(S.store.has(bid), "server now holds the block");
 
-      const have1 = await B.transport.request(S.peerId, MsgType.HAVE, encodeHaveReq([bid]));
+      const have1 = await B.transport.request(S.peerId, SEEDSTORE_PROTO, MsgType.HAVE, encodeHaveReq([bid]));
       t.eq(decodeMask(have1)[0], true, "HAVE → true after STORE (over ws)");
 
-      const fetched = await B.transport.request(S.peerId, MsgType.FETCH, encodeFetchBatchReq([bid]));
+      const fetched = await B.transport.request(S.peerId, SEEDSTORE_PROTO, MsgType.FETCH, encodeFetchBatchReq([bid]));
       const back = decodeFetchBatchRes(fetched)[0];
       t.ok(back && bytesEqual(back, bytes), "FETCH returns the bytes over ws");
       t.ok(netS.framesDelivered > 0, "server received frames over the websocket");

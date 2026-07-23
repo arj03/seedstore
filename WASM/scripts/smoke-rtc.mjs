@@ -18,6 +18,8 @@ import { RtcNetwork, relaySignaling } from "seedkernel-wasm/net-rtc";
 import { weriftPeerConnectionFactory } from "seedkernel-wasm/net-rtc-node";
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const enc = new TextEncoder();
+const SEEDSTORE_PROTO = enc.encode("seedstore");
 const HOLDERS = Number(process.env.HOLDERS) || 3;
 
 // Two modes. Default: an in-process signaling hub (offline, Node or Bun). With
@@ -110,7 +112,7 @@ try {
 
   let onAll = true;
   for (const p of owner.node.cohortPeers()) {
-    const res = await owner.node.transport.request(p, MsgType.HAVE, encodeHaveReq(r.blockIds));
+    const res = await owner.node.transport.request(p, SEEDSTORE_PROTO, MsgType.HAVE, encodeHaveReq(r.blockIds));
     const held = decodeMask(res).filter(Boolean).length;
     console.log(`  ${p.slice(0, 8)}…  ${held}/${r.blockIds.length} blocks`);
     if (held < r.blockIds.length) onAll = false;

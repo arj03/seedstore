@@ -12,7 +12,7 @@
 //
 // One control request/response is two sends, so the round-trip latency a caller
 // observes is 2 × delayMs. Frame layout (host/net.ts):
-//   req = [kind u8][corr u32][type u8][payload…]
+//   req = [kind u8][corr u32][pidLen u8][protocolId utf8][type u8][payload…]
 //   res = [kind u8][corr u32][payload…]      (no type — the requester matches by corr)
 // We read `kind` to pair a request (KIND_REQ) with its response (KIND_RES). Only
 // the request carries `type`, so we remember it keyed by (requester, corr) and
@@ -22,6 +22,13 @@
 
 const KIND_REQ = 0, KIND_RES = 1;
 const TYPE_HAVE = 1; // MsgType.HAVE — discovery fan-out, excluded from the "work" signal
+
+function readFrameType(frame) {
+  if (frame[0] !== KIND_REQ || frame.length < 6) return undefined;
+  const idLen = frame[5];
+  if (frame.length < 6 + idLen + 1) return undefined;
+  return frame[6 + idLen];
+}
 
 export class LatencyNetwork {
   constructor(delayMs = 2) {
@@ -65,14 +72,15 @@ export class LatencyNetwork {
     const copy = frame.slice();
     const kind = copy[0];
     // corr (u32 BE at bytes 1..4) pairs a response with its request. The request
-    // carries `type` at byte 5; the response does not, so look it up by corr.
+    // carries `type` after the variable-length protocol id (§12.10); the response
+    // does not, so look it up by corr.
     const corr = ((copy[1] << 24) | (copy[2] << 16) | (copy[3] << 8) | copy[4]) >>> 0;
     let type;
     if (kind === KIND_REQ) {
-      type = copy[5];
-      this.pendingType.set(`${from}|${corr}`, type); // requester is the sender of a request
+      type = readFrameType(copy);
+      if (type !== undefined) this.pendingType.set(`${from}|${corr}`, type);
     } else {
-      const key = `${to}|${corr}`;                   // …and the recipient of its response
+      const key = `${to}|${corr}`;
       type = this.pendingType.get(key);
       this.pendingType.delete(key);
     }

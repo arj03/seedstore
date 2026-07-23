@@ -26,6 +26,8 @@ import { bytesEqual, toHex } from "../build/host/util.js";
 import { plantBlock } from "./helpers.mjs";
 
 const TIMEOUT = 200;
+const enc = new TextEncoder();
+const SEEDSTORE_PROTO = enc.encode("seedstore");
 
 function id(seed) {
   const out = new Uint8Array(32);
@@ -130,7 +132,7 @@ export async function run(t) {
         { blockId: sib0, descriptor: env },
         { blockId: sib1, descriptor: env }, // sibling of sib0 — must not both pass
       ];
-      const mask = decodeMask(await a.transport.request(b.peerId, MsgType.OFFER, encodeOfferBatch(offers)));
+      const mask = decodeMask(await a.transport.request(b.peerId, SEEDSTORE_PROTO, MsgType.OFFER, encodeOfferBatch(offers)));
       t.eq(mask[0], true, "the holder accepts the first block of the chunk");
       t.eq(mask[1], false, "it declines the second — a sibling provisionally accepted in the same batch (§6)");
     } finally { a.close(); b.close(); }
@@ -171,7 +173,7 @@ export async function run(t) {
       );
       const offers = [id(30), id(31), id(32)].map((blockId) => ({ blockId, descriptor: solo(blockId) }));
       t.eq(offers[0].descriptor.length, 136, "a one-block descriptor envelope is [pk 32][sig 64][core 40]");
-      const mask = decodeMask(await a.transport.request(b.peerId, MsgType.OFFER, encodeOfferBatch(offers)));
+      const mask = decodeMask(await a.transport.request(b.peerId, SEEDSTORE_PROTO, MsgType.OFFER, encodeOfferBatch(offers)));
       t.eq(mask[0], true, "first block fits the quota (236 ≤ 500)");
       t.eq(mask[1], true, "second still fits (cumulative 472 ≤ 500)");
       t.eq(mask[2], false, "third declined — the running budget is spent (§14)");
@@ -189,7 +191,7 @@ export async function run(t) {
       const solo = (blockId) => signDescriptor(
         sodium, { k: 1, m: 0, blockSize: 1000, blockIds: [blockId] }, a.identity.publicKey, a.identity.privateKey, a.signScope,
       );
-      const stored = decodeMask(await a.transport.request(b.peerId, MsgType.STORE, encodeStoreBatch([
+      const stored = decodeMask(await a.transport.request(b.peerId, SEEDSTORE_PROTO, MsgType.STORE, encodeStoreBatch([
         { blockId: i0, descriptor: solo(i0), bytes: b0 },
         { blockId: i1, descriptor: solo(i1), bytes: b1 }, // would overrun the 1500-byte budget
       ])));
@@ -210,7 +212,7 @@ export async function run(t) {
     try {
       const junk = bytes(100, 8);
       const jid = b.crypto.hash(junk); // correctly content-addressed — only the descriptor is bad
-      const stored = decodeMask(await a.transport.request(b.peerId, MsgType.STORE, encodeStoreBatch([
+      const stored = decodeMask(await a.transport.request(b.peerId, SEEDSTORE_PROTO, MsgType.STORE, encodeStoreBatch([
         { blockId: jid, descriptor: bytes(136, 1), bytes: junk }, // unsigned garbage of descriptor shape
       ])));
       t.eq(stored[0], false, "STORE declined — the descriptor carries no valid author signature");
@@ -221,7 +223,7 @@ export async function run(t) {
       const other = signDescriptor(
         sodium, { k: 1, m: 0, blockSize: 100, blockIds: [id(77)] }, a.identity.publicKey, a.identity.privateKey, a.signScope,
       );
-      const stored2 = decodeMask(await a.transport.request(b.peerId, MsgType.STORE, encodeStoreBatch([
+      const stored2 = decodeMask(await a.transport.request(b.peerId, SEEDSTORE_PROTO, MsgType.STORE, encodeStoreBatch([
         { blockId: jid, descriptor: other, bytes: junk },
       ])));
       t.eq(stored2[0], false, "STORE declined — validly signed, but the block is not of that chunk");
@@ -233,7 +235,7 @@ export async function run(t) {
       const wrongSize = signDescriptor(
         sodium, { k: 1, m: 0, blockSize: 99, blockIds: [jid] }, a.identity.publicKey, a.identity.privateKey, a.signScope,
       );
-      const stored3 = decodeMask(await a.transport.request(b.peerId, MsgType.STORE, encodeStoreBatch([
+      const stored3 = decodeMask(await a.transport.request(b.peerId, SEEDSTORE_PROTO, MsgType.STORE, encodeStoreBatch([
         { blockId: jid, descriptor: wrongSize, bytes: junk }, // 100 bytes vs a signed blockSize of 99
       ])));
       t.eq(stored3[0], false, "STORE declined — the bytes in hand aren't the descriptor's blockSize");
@@ -251,7 +253,7 @@ export async function run(t) {
       plantBlock(b.fs, toHex(heldId), held); // seed the holder directly, bypassing the protocol
       const absentId = id(99);
 
-      const res = decodeFetchBatchRes(await a.transport.request(b.peerId, MsgType.FETCH, encodeFetchBatchReq([heldId, absentId])));
+      const res = decodeFetchBatchRes(await a.transport.request(b.peerId, SEEDSTORE_PROTO, MsgType.FETCH, encodeFetchBatchReq([heldId, absentId])));
       t.eq(res.length, 2, "one entry per requested id");
       t.ok(res[0] && bytesEqual(res[0], held), "the held block comes back in the batch");
       t.eq(res[1], null, "the absent block comes back null — the reader falls to another holder");
