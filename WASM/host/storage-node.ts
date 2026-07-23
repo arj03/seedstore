@@ -30,7 +30,7 @@ import { STORAGE_APP, storageSignScope } from "./manifest.js";
 import { encodeScoreReq } from "./reputation-core.js";
 import { toHex, readU32BE, readU64BE, writeU64BE, concatBytes } from "./util.js";
 import {
-  createShell, openPolicy, type Shell, type KernelTable,
+  createShell, admitAll, type Shell, type KernelTable,
 } from "seedkernel-wasm/shell-core";
 import { FreshnessMarks, kernelNameFor, type LoadedBundle } from "seedkernel-wasm/bundle";
 import type { Sodium } from "./sodium.js";
@@ -189,8 +189,8 @@ export class StorageNode {
       // Open admission: a storage node loads exactly the one signed bundle its operator
       // handed it (opts.bundleBlob) — the choice of bundle is the trust decision, so
       // there is no author allow-list to clear (the manifest signature + module hashes
-      // are still verified by loadBundleBlob). See seedkernel policy.openPolicy.
-      policy: openPolicy(),
+      // are still verified by loadBundleBlob). The admitAll predicate is that posture.
+      admit: admitAll,
       timeoutMs: opts.timeoutMs,
       config: { ...guestOverride, quota: opts.quota ?? DEFAULT_QUOTA_BYTES },
       realmMemoryBytes,
