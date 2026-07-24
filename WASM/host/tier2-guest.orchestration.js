@@ -874,24 +874,20 @@ async function doPut(plaintext) {
 // ── GET (§7) ─────────────────────────────────────────────────────────────────
 // Fetch, reconstruct (§4.1) and decrypt (§4.4) the plaintext for a run of already-
 // verified chunk descriptors `ds` whose first chunk is global index `chunkStart`.
-// `fileSize` bounds the tail so the last chunk's zero-padding is trimmed. One
-// have/want + batched FETCH per holder (gatherBlocks) over just these chunks' block
-// ids — shared by the whole-file `get` and the streamed getChunk window.
-async function reconstructChunks(ds, K, chunkStart, fileSize) {
+// `byteOffset` is the pre-computed cumulative plaintext byte position of chunkStart
+// (sum of d.k·d.blockSize over earlier descriptors). `fileSize` bounds the tail so
+// the last chunk's zero-padding is trimmed. One have/want + batched FETCH per holder
+// (gatherBlocks) over just these chunks' block ids — shared by the whole-file `get`
+// and the streamed getChunk window. Geometry is the DESCRIPTOR's, never config's
+// (§4.1/§4.3): a reader decodes (assembleChunk/rsDecode use d.k/d.blockSize) and
+// offsets by the SAME numbers — the cumulative sum of d.k·d.blockSize from the
+// manifest — with nothing to disagree.
+async function reconstructChunks(ds, K, chunkStart, byteOffset, fileSize) {
   const allIds = [];
   for (const d of ds) for (const id of d.blockIds) allIds.push(id);
   const holders = await haveWant(allIds);
   const got = await gatherBlocks(ds, holders);
-  // Geometry is the DESCRIPTOR's, never config's (§4.1/§4.3): descriptors are self-
-  // describing, so a reader/repairer needs no config and — the point of the fix — a file
-  // decodes (assembleChunk/rsDecode use d.k/d.blockSize) and offsets by the SAME numbers,
-  // never one by the descriptor and the other by a config that could disagree. Each chunk
-  // contributes its own k·blockSize plaintext bytes; only the file's final chunk may be
-  // shorter (trailing padding, trimmed below). Full chunks always carry APP.k blocks
-  // (they are padded to that in encodeChunk), so the byte offset of chunk N is
-  // N × APP.k·blockSize.
-  const fullChunkBytes = APP.k * APP.blockSize;
-  let written = chunkStart * fullChunkBytes;
+  let written = byteOffset;
   const parts = [];
   for (let i = 0; i < ds.length; i++) {
     const d = ds[i];
@@ -924,10 +920,13 @@ async function getStart(manifestId, K) {
     if (!d) throw new Error("get: chunk descriptor signature invalid");
     return d;
   });
-  // Full chunks are APP.k·blockSize plaintext (they are padded to that in encodeChunk),
-  // so the window count is target / fullChunkBytes.
-  const fullChunkBytes = APP.k * APP.blockSize;
-  getStream = { K, ds, fileSize: man.fileSize, next: 0, windowChunks: getWindowChunks(fullChunkBytes) };
+  // Pre-compute per-chunk plaintext sizes and cumulative byte offsets from the
+  // descriptors themselves — the GET path never consults APP.k/APP.blockSize.
+  const chunkBytes = ds.map((d) => d.k * d.blockSize);
+  const offsets = [0];
+  for (let i = 0; i < chunkBytes.length; i++) offsets.push(offsets[i] + chunkBytes[i]);
+  const maxChunkBytes = chunkBytes.length ? Math.max(...chunkBytes) : 0;
+  getStream = { K, ds, fileSize: man.fileSize, next: 0, offsets, windowChunks: getWindowChunks(maxChunkBytes) };
   return man.fileSize;
 }
 // The next window's plaintext, in file order. Empty once the file is exhausted, which
@@ -939,7 +938,7 @@ async function getNext() {
   const start = s.next;
   const ds = s.ds.slice(start, start + s.windowChunks);
   s.next = start + ds.length;
-  return reconstructChunks(ds, s.K, start, s.fileSize);
+  return reconstructChunks(ds, s.K, start, s.offsets[start], s.fileSize);
 }
 
 // [manifestId 32][K 32] → [fileSize u64]: open the stream, report how much to drain.
