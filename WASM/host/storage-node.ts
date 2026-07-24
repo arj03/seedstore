@@ -106,6 +106,10 @@ export class StorageNode {
    *   argument matches what the guest's verifyPrefix checks. */
   readonly signScope: Uint8Array;
   private readonly modules: { codec: string; reputation: string };
+  /** Durable cohort roster: the set of peers this node has a storage relationship
+   *   with. The network owns connectivity; the cohort is app state — independent
+   *   of who is currently online — and feeds the guest's NET_PEERS cap. */
+  readonly cohort: Set<PeerId>;
   private repairLoopOn = false;
   private repairTimer: ReturnType<typeof setTimeout> | null = null;
   private inFlight: Promise<unknown> = Promise.resolve();
@@ -116,6 +120,7 @@ export class StorageNode {
     shell: Shell,
     identity: Identity,
     loaded: LoadedBundle,
+    cohort: Set<PeerId>,
   ) {
     this.sodium = opts.sodium;
     this.shell = shell;
@@ -128,6 +133,7 @@ export class StorageNode {
     this.clockFn = opts.clock ?? (() => Date.now());
     this.crypto = new Crypto(opts.sodium);
     this.transport = shell.transport;
+    this.cohort = cohort;
 
     // Derive signing scope and kernel names from the verified bundle author —
     // the same derivation a shell-run node uses.
@@ -177,6 +183,8 @@ export class StorageNode {
 
     opts = { ...opts, fs }; // share the one fs instance with the constructor below
 
+    const cohort = new Set<PeerId>();
+
     const shell = createShell({
       platform: {
         sodium: opts.sodium,
@@ -185,6 +193,7 @@ export class StorageNode {
         freshnessStore: new FreshnessMarks(),
         network,
         now: opts.clock,
+        livePeers: () => [...cohort],
       },
       // Open admission: a storage node loads exactly the one signed bundle its operator
       // handed it (opts.bundleBlob) — the choice of bundle is the trust decision, so
@@ -199,18 +208,18 @@ export class StorageNode {
     const loaded = await shell.loadBundleBlob(opts.bundleBlob);
     await shell.serve();
 
-    return new StorageNode(opts, shell, identity, loaded);
+    return new StorageNode(opts, shell, identity, loaded, cohort);
   }
 
   // ── cohort membership (§5.1) ───────────────────────────────────────────
   now(): number { return this.clockFn(); }
-  cohortPeers(): PeerId[] { return [...this.shell.peers]; }
+  cohortPeers(): PeerId[] { return [...this.cohort]; }
 
   addPeer(peerId: PeerId): void {
-    this.shell.addPeer(peerId);
+    this.cohort.add(peerId);
   }
   removePeer(peerId: PeerId): void {
-    this.shell.removePeer(peerId);
+    this.cohort.delete(peerId);
   }
 
   static connect(a: StorageNode, b: StorageNode): void {

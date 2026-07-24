@@ -53,6 +53,11 @@ export async function run(t) {
   const policyJson = JSON.stringify({ authors: [toHex(author.publicKey)] });
   const tmpDirs = [bundleDir];
 
+  // Durable cohort set shared by all shells in the group — the network owns
+  // connectivity, the cohort is app state. All shells reference this set via
+  // their livePeers closure so NET_PEERS is consistent.
+  let cohortSet = new Set();
+
   // Boot a generic shell that both initiates and holds: it loads the bundle and
   // serves the confined holder side. Knows nothing about storage; storage is
   // content. Returns the shell + its peer id (for cohort wiring).
@@ -62,6 +67,7 @@ export async function run(t) {
     const identity = generateKeyPair(sodium);
     const shell = await boot({
       policyJson, dir, identity, network: net, timeoutMs: TIMEOUT,
+      livePeers: () => [...cohortSet],
       // Quota is operator policy (not signed into the bundle): the operator supplies it
       // at boot, merged over the bundle's guest config into the guest's APP. NB this is
       // the SHELL's config — opaque operator input the shell merges wholesale. A
@@ -79,13 +85,14 @@ export async function run(t) {
     return { shell, peerId: toHex(identity.publicKey) };
   }
   const connectAll = (entries) => {
-    for (const a of entries) for (const b of entries) if (a !== b) a.shell.addPeer(b.peerId);
+    for (const a of entries) for (const b of entries) if (a !== b) cohortSet.add(b.peerId);
   };
 
   try {
     t.group("holder: a cohort of generic shells runs storage end-to-end, holder side confined too (step 8)");
     {
       const net = new LoopbackNetwork();
+      cohortSet = new Set();
       const shells = [];
       for (let i = 0; i < 5; i++) shells.push(await bootShell(net));
       connectAll(shells);
@@ -109,6 +116,7 @@ export async function run(t) {
     t.group("holder: the confined holder serves (callSync) while the node's own initiator is parked mid-await in the same realm (§2.1)");
     {
       const net = new LoopbackNetwork();
+      cohortSet = new Set();
       const shells = [];
       for (let i = 0; i < 5; i++) shells.push(await bootShell(net));
       connectAll(shells);
@@ -121,7 +129,7 @@ export async function run(t) {
         // blockSize back to test scale so this tiny file takes the RS path across the cohort.
         count: 1, network: net, sodium, wasm: { bundleBlob }, config: { blockSize: 64 }, timeoutMs: TIMEOUT,
       });
-      for (const e of shells) { sn.addPeer(e.peerId); e.shell.addPeer(sn.peerId); }
+      for (const e of shells) { sn.addPeer(e.peerId); cohortSet.add(sn.peerId); }
       try {
         const dataA = file(800, 11), dataB = file(800, 12);
         // Concurrent: the shell's guest PUT (its initiator parks on net) runs while
@@ -149,6 +157,7 @@ export async function run(t) {
     t.group("holder: a confined shell holder is byte-compatible with the host-side initiator (cross-path parity)");
     {
       const net = new LoopbackNetwork();
+      cohortSet = new Set();
       // Pure holders — they never initiate, so they need no peers of their own.
       const shells = [];
       for (let i = 0; i < 5; i++) shells.push(await bootShell(net));
