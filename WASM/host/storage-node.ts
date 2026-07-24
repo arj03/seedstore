@@ -30,7 +30,7 @@ import { STORAGE_APP, storageSignScope } from "./manifest.js";
 import { encodeScoreReq } from "./reputation-core.js";
 import { toHex, readU32BE, readU64BE, writeU64BE, concatBytes } from "./util.js";
 import {
-  createShell, admitAll, type Shell, type KernelTable,
+  createShell, admitAll, KernelHost, type Shell, type KernelTable, type RealmFactory,
 } from "seedkernel-wasm/shell-core";
 import { FreshnessMarks, kernelNameFor, type LoadedBundle } from "seedkernel-wasm/bundle";
 import type { Sodium } from "./sodium.js";
@@ -38,6 +38,8 @@ import type { Sodium } from "./sodium.js";
 const NO_ARG = new Uint8Array(0);
 
 function u64be(n: number): Uint8Array { const b = new Uint8Array(8); writeU64BE(b, 0, n); return b; }
+
+const createRealm: RealmFactory = async (o) => (await import("seedkernel-wasm/safe-js")).createSafeRealm(o);
 
 /** Decode the guest's PUT result — the single result format every driver reads
  *  (`encodePutResult` in tier2-guest.orchestration.js). */
@@ -187,9 +189,11 @@ export class StorageNode {
       platform: {
         sodium: opts.sodium,
         identity,
+        kernel: new KernelHost(),
         fs,
         freshnessStore: new FreshnessMarks(),
         network,
+        createRealm,
         now: opts.clock,
         livePeers: () => [...cohort],
       },
