@@ -99,8 +99,7 @@ export async function run(t) {
       try {
         const data = file(800, 7); // 4 blocks → the RS path, placed across the cohort
         const r = await shells[0].shell.runGuest("put", data);
-        const manifestId = r.slice(0, 32), key = r.slice(37, 69);
-        t.ok(r[32] === 0, "the shell-run guest took the RS path");
+        const manifestId = r.slice(0, 32), key = r.slice(36, 68);
 
         const holding = shells.slice(1).filter((e) => e.shell.fs.list().length > 0);
         t.ok(holding.length >= 4, "the confined holders admitted + stored blocks (fs writes via the guest)");
@@ -139,7 +138,7 @@ export async function run(t) {
           shells[0].shell.runGuest("put", dataA),
           sn.put(dataB),
         ]);
-        const midA = rA.slice(0, 32), keyA = rA.slice(37, 69);
+        const midA = rA.slice(0, 32), keyA = rA.slice(36, 68);
 
         const [gotA, gotB] = await Promise.all([
           shells[0].shell.runGuest("get", concatBytes([midA, keyA])),

@@ -145,7 +145,6 @@ export async function run(t) {
       const owner = nodes[0];
       const data = file(200); // 4 blocks → 2 RS chunks
       const put = await owner.put(data);
-      t.ok(!put.replicated, "a multi-block file takes the RS path");
       t.eq(put.chunkCount, 2, "200 bytes / (k=2 × 64) → 2 chunks");
 
       const got = await owner.get(put.manifestId, put.key);

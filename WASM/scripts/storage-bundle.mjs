@@ -117,8 +117,8 @@ export function writeStorageBundle({ path, sodium, sk, pk, build, version = 1, l
         // The APP injection is TOTAL: the guest reads APP and never guesses a default, so
         // the signed config must carry every value the guest reads (except `quota`, which
         // is operator policy merged at boot — see above — and the §4.1 durability math,
-        // which is derived: smallMaxBlocks from k/m, and the replica count + low-water
-        // mark from each chunk's own signed descriptor). Transport/operator knobs pinned
+        // which is derived: the replica count + low-water mark from each chunk's own signed
+        // descriptor). Transport/operator knobs pinned
         // here: a holder bounds one FETCH response by ITS maxMessageBytes (serveFetch), so
         // the cohort agrees on it deliberately, and the fan-out/window knobs match core.ts's
         // defaults. Operator config can still override any of these at boot (the shell

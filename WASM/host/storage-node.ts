@@ -43,15 +43,14 @@ function u64be(n: number): Uint8Array { const b = new Uint8Array(8); writeU64BE(
  *  (`encodePutResult` in tier2-guest.orchestration.js). */
 function decodePutResult(r: Uint8Array): PutResult {
   const blockIds: Uint8Array[] = [];
-  const idCount = readU32BE(r, 77);
-  for (let i = 0; i < idCount; i++) blockIds.push(r.slice(81 + i * 32, 81 + (i + 1) * 32));
+  const idCount = readU32BE(r, 76);
+  for (let i = 0; i < idCount; i++) blockIds.push(r.slice(80 + i * 32, 80 + (i + 1) * 32));
   return {
     manifestId: r.slice(0, 32),
-    replicated: r[32] === 1,
-    chunkCount: readU32BE(r, 33),
-    key: r.slice(37, 69),
-    replicasLanded: readU32BE(r, 69),
-    replicasIntended: readU32BE(r, 73),
+    chunkCount: readU32BE(r, 32),
+    key: r.slice(36, 68),
+    replicasLanded: readU32BE(r, 68),
+    replicasIntended: readU32BE(r, 72),
     blockIds,
   };
 }
@@ -60,7 +59,6 @@ export interface PutResult {
   manifestId: Uint8Array;
   key: Uint8Array;
   chunkCount: number;
-  replicated: boolean;
   blockIds: Uint8Array[];
   replicasLanded: number;
   replicasIntended: number;

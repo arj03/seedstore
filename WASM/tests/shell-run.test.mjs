@@ -75,10 +75,9 @@ export async function run(t) {
       }
 
       // PUT, orchestrated by the confined guest the shell loaded.
-      const data = file(600, 7); // > smallMaxBlocks → the RS path, placed across the cohort
+      const data = file(600, 7); // > k blocks → multi-chunk RS path
       const r = await shell.runGuest("put", data);
-      const manifestId = r.slice(0, 32), key = r.slice(37, 69);
-      t.ok(r[32] === 0, "the shell-run guest took the RS path");
+      const manifestId = r.slice(0, 32), key = r.slice(36, 68);
       t.ok(holders.filter((h) => h.store.list().length > 0).length >= 4,
         "the shell's guest placed blocks across several distinct holders");
       t.eq(shell.fs.list().length, 0, "the shell itself holds nothing — durability is the cohort's");

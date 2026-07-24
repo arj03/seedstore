@@ -191,7 +191,7 @@ const net = new WsNetwork({
 });
 
 // Base on defaultConfig so the fan-out/window defaults are all set (the §4.1 durability
-// math — smallMaxBlocks, r = m+1, the low-water mark — is derived from k/m and from each
+// math — r = m+1, the low-water mark — is derived from k/m and from each
 // chunk's signed descriptor, never config). The injection is total — a partial config
 // would feed the strict guest an undefined knob.
 const config = { ...defaultConfig(kParam, mParam, blockSize), maxMessageBytes, fanoutWindow: windowN,

@@ -108,16 +108,8 @@ const SIGN_PREFIX = fromHex(BUNDLE.signPrefix);
 //   APP     the author's signed config, with operator policy merged over it
 //           (storage-node.ts appPreamble builds it host-side; the shell merges
 //           --app-config over the bundle's). Read directly as `APP.*`.
-// smallMaxBlocks is §4.1 MATH, not an injected knob: it is fixed by (k, m), so the guest
-// derives it here rather than reading an APP field that could disagree with k/m. It is the
-// largest file (in blocks) still worth replicating whole instead of padding out to a chunk
-// — replication beats padding while d < (k+m)/(m+1), so the largest replicated d is
-// ceil((k+m)/(m+1)) − 1. The other two derived quantities, the replica count r = m + 1 and
-// the low-water mark, are the same kind of math one step further out: they come off the
-// SIGNED DESCRIPTOR (replicaTarget / lowWaterMargin in the shared manifest-core), so repair
-// reads them from the chunk in hand and consults no config at all (§4.1, §9). This one is a
-// WRITE-side choice — which shape to cut a new file into — so config is its only source.
-function smallMaxBlocks() { const c = APP; return Math.max(1, Math.ceil((c.k + c.m) / (c.m + 1)) - 1); }
+// read them from the chunk in hand and consults no config at all (§4.1, §9).
+//
 
 // ── crypto primitives + storage framing ──
 function hash(bytes) { return host.call(CAP_HASH, bytes); }
@@ -417,33 +409,25 @@ function makeJob(slotIds, slotBlocks, descriptor, floor, exclude) {
   };
 }
 // A signed chunk ready to place, expanded into its placement slots (§6/§10). Placement
-// then treats both kinds identically: it only ever sees a list of slots to land on
-// distinct peers. The floor is the chunk's OWN k, not config's — a small file's chunk has
-// k = d — and a fresh chunk excludes nothing.
+// only ever sees a list of slots to land on distinct peers. The floor is the chunk's OWN k,
+// not config's, and a fresh chunk excludes nothing.
 function makeChunk(d, blocks, descriptor) {
   const slots = slotIndices(d);
   return makeJob(slots.map((i) => d.blockIds[i]), slots.map((i) => blocks[i]), descriptor, d.k, new Set());
 }
-// Encode + sign one chunk: encrypt k data blocks, then add m parity (k ≥ 2, a coded
-// chunk) or, at k = 1, replicate the lone block r = m+1 ways (see below). `source` is
-// the plaintext this chunk is cut from — the whole file (localCi == globalCi) or just a
-// window slice (localCi indexes within the slice). The AEAD counter is the GLOBAL chunk
-// index (§4.4), so a windowed encode is byte-identical to a whole-file one regardless of
-// how the plaintext was sliced.
+// Encode + sign one chunk at its OWN k: every chunk is coded at k = ceil(plain / blockSize),
+// the actual block count it carries, rather than padded to the deployment's k. At k = 1
+// the code degenerates: RS(1,m) parity ≡ data, so the chunk is the lone block replicated
+// r = m+1 ways and the codec is skipped. At k ≥ 2 it is RS(k, m). The AEAD counter is the
+// GLOBAL chunk index (§4.4), so a windowed encode is byte-identical to a whole-file one.
 function encodeChunk(source, localCi, globalCi, K) {
   const c = APP;
-  const start = localCi * c.k * c.blockSize;
-  const chunkPlain = source.slice(start, start + c.k * c.blockSize);
-  const ct = encrypt(K, DOMAIN_BODY, globalCi, padTo(chunkPlain, c.k * c.blockSize));
+  const plain = source.slice(localCi * c.k * c.blockSize, (localCi + 1) * c.k * c.blockSize);
+  const kc = Math.max(1, Math.ceil(plain.length / c.blockSize));
+  const ct = encrypt(K, DOMAIN_BODY, globalCi, padTo(plain, kc * c.blockSize));
   const dataBlocks = splitBlocks(ct, c.blockSize);
-  // RS(1,m) is replication in disguise: its m parity blocks come out byte-identical to
-  // the lone data block (parity ≡ data), so the chunk is ONE block on r = m+1 distinct
-  // peers and the codec is skipped entirely — coding is k ≥ 2 only. The descriptor is a
-  // replicated one (its k ids listed once) and still records the SAME m: "survives m
-  // losses", bought with copies rather than parity. Nothing downstream branches on which
-  // it got — makeChunk expands either into slots, and repair reads m off the signature.
-  const blocks = c.k === 1 ? dataBlocks : [...dataBlocks, ...rsEncode(c.k, c.m, c.blockSize, dataBlocks)];
-  const d = { k: c.k, m: c.m, blockSize: c.blockSize, blockIds: blocks.map(hash) };
+  const blocks = kc === 1 ? dataBlocks : [...dataBlocks, ...rsEncode(kc, c.m, c.blockSize, dataBlocks)];
+  const d = { k: kc, m: c.m, blockSize: c.blockSize, blockIds: blocks.map(hash) };
   return makeChunk(d, blocks, signChunk(d));
 }
 // THE placement engine (§6/§10). Place every job's slots with one batched OFFER per peer
@@ -761,29 +745,9 @@ function putWindowBytes() { const chunkData = APP.k * APP.blockSize; return Math
 // is the DESCRIPTOR's geometry (§4.3), passed in by the reader, never config's.
 function getWindowChunks(chunkData) { return Math.max(1, Math.floor(windowTarget() / chunkData)); }
 
-// Replicate a small file r = m+1 times, not coded (§4.1) — a file too small to fill a
-// chunk. It is ONE replicated chunk of d ≤ smallMaxBlocks() blocks: its descriptor lists
-// those d ids (so k = d, the file's own geometry, not config's) and records the same m the
-// deployment codes with, since r = m+1 copies survive the same m losses a coded chunk does.
-// From there it is an ordinary chunk — the same slot expansion and the same batched
-// placement a window uses. The file is small by definition, so it needs no windowing.
-async function placeSmall(plaintext, K) {
-  const c = APP;
-  const d = Math.max(1, Math.ceil(plaintext.length / c.blockSize));
-  const ct = encrypt(K, DOMAIN_BODY, 0, padTo(plaintext, d * c.blockSize));
-  const blocks = splitBlocks(ct, c.blockSize);
-  const desc = { k: d, m: c.m, blockSize: c.blockSize, blockIds: blocks.map(hash) };
-  const chunks = [makeChunk(desc, blocks, signChunk(desc))];
-  await placeChunksBatched(chunks, "chunk");
-  return chunks;
-}
-
 // Encode + place the chunks wholly contained in `slice` — a chunk-aligned slice of the
-// file starting at byte offset `baseByteOffset` (a multiple of k·blockSize). Returns the
-// placed chunks; their ciphertext blocks fall out of scope once the caller has folded
-// the descriptors into the stream. A k ≥ 2 window is RS-coded (n distinct blocks per
-// chunk, one per peer); a k = 1 window is replication (one block per chunk, r = m+1
-// copies on r distinct peers) — encodeChunk decides, placeChunksBatched fans both out
+// file starting at byte offset `baseByteOffset`. Each chunk is coded at its own k
+// (§4.1): RS(kc, m) at kc ≥ 2, replication at kc = 1. placeChunksBatched places both
 // the same way.
 async function placeWindow(slice, baseByteOffset, K) {
   const c = APP;
@@ -823,18 +787,13 @@ function requirePut() {
   if (!putStream) throw new Error("put: no stream open — call putStart first");
   return putStream;
 }
-// Open a stream: mint K, decide the file's shape (§4.1 — a file too small to fill a chunk
-// is replicated whole rather than coded), and answer with the plaintext window the driver
-// should feed. A replicated file is ONE window, since it is smaller than a chunk by
-// definition; the `max(1, …)` keeps a driver's feed loop finite for an empty file.
+// Open a stream: mint K and answer with the plaintext window the driver should feed.
 function putStart(fileSize) {
-  const c = APP;
-  const replicated = Math.max(1, Math.ceil(fileSize / c.blockSize)) <= smallMaxBlocks();
   putStream = {
-    K: randomKey(), fileSize, replicated, offset: 0,
+    K: randomKey(), fileSize, offset: 0,
     descriptors: [], placedIds: [], placed: 0, intended: 0,
   };
-  return replicated ? Math.max(1, fileSize) : putWindowBytes();
+  return putWindowBytes();
 }
 // Fold one placed window's chunks into the stream (§8). Durability accounting counts
 // REPLICA PLACEMENTS — one stored (block, peer), i.e. one filled slot — not distinct ids:
@@ -858,7 +817,7 @@ function recordWindow(chunks) {
 // returns; the driver never learns the window's byte offset, because the stream knows it.
 async function putFeed(slice) {
   const s = requirePut();
-  recordWindow(s.replicated ? await placeSmall(slice, s.K) : await placeWindow(slice, s.offset, s.K));
+  recordWindow(await placeWindow(slice, s.offset, s.K));
   s.offset += slice.length;
 }
 // Seal the stream: replicate the manifest over every descriptor placed, then report the
@@ -872,7 +831,7 @@ async function putFinish() {
   return encodePutResult(manifestId, s);
 }
 // The ONE PUT result format, read by every driver:
-//   [manifestId 32][replicated u8][chunkCount u32][K 32][placed u32][intended u32]
+//   [manifestId 32][chunkCount u32][K 32][placed u32][intended u32]
 //   [idCount u32]{id 32}
 // Offsets 0–68 are fixed and the id tail comes last, so the byte-in/byte-out drivers (the
 // seedkernel shell, the Go loader) can read the root and K without knowing the rest.
@@ -880,15 +839,14 @@ async function putFinish() {
 // were reachable-and-intended — so a driver can warn on a PUT that met the ≥ k floor but
 // is silently under-replicated (a full/declining holder, or a short cohort).
 function encodePutResult(manifestId, s) {
-  const out = new Uint8Array(81 + s.placedIds.length * 32);
+  const out = new Uint8Array(80 + s.placedIds.length * 32);
   out.set(manifestId, 0);
-  out[32] = s.replicated ? 1 : 0;
-  wU32(out, 33, s.descriptors.length);
-  out.set(s.K, 37);
-  wU32(out, 69, s.placed);
-  wU32(out, 73, s.intended);
-  wU32(out, 77, s.placedIds.length);
-  for (let i = 0; i < s.placedIds.length; i++) out.set(s.placedIds[i], 81 + i * 32);
+  wU32(out, 32, s.descriptors.length);
+  out.set(s.K, 36);
+  wU32(out, 68, s.placed);
+  wU32(out, 72, s.intended);
+  wU32(out, 76, s.placedIds.length);
+  for (let i = 0; i < s.placedIds.length; i++) out.set(s.placedIds[i], 80 + i * 32);
   return out;
 }
 
@@ -927,18 +885,18 @@ async function reconstructChunks(ds, K, chunkStart, fileSize) {
   // Geometry is the DESCRIPTOR's, never config's (§4.1/§4.3): descriptors are self-
   // describing, so a reader/repairer needs no config and — the point of the fix — a file
   // decodes (assembleChunk/rsDecode use d.k/d.blockSize) and offsets by the SAME numbers,
-  // never one by the descriptor and the other by a config that could disagree. Every full
-  // chunk contributes k·blockSize plaintext bytes; only the file's final chunk is shorter
-  // (trailing padding, trimmed below), and all of a file's chunks share one geometry.
-  const chunkData = ds.length ? ds[0].k * ds[0].blockSize : 0;
-  let written = chunkStart * chunkData; // bytes of the file before this run (all prior chunks are full)
+  // never one by the descriptor and the other by a config that could disagree. Each chunk
+  // contributes its own k·blockSize plaintext bytes; only the file's final chunk may be
+  // shorter (trailing padding, trimmed below). Full chunks always carry APP.k blocks
+  // (they are padded to that in encodeChunk), so the byte offset of chunk N is
+  // N × APP.k·blockSize.
+  const fullChunkBytes = APP.k * APP.blockSize;
+  let written = chunkStart * fullChunkBytes;
   const parts = [];
   for (let i = 0; i < ds.length; i++) {
     const d = ds[i];
     const chunkCipher = assembleChunk(d, got);
-    // AEAD counter = the GLOBAL chunk index (§4.4), matching encodeChunk. A replicated
-    // chunk is no special case: placeSmall's whole-file chunk is index 0, and a windowed
-    // k=1 chunk carries its own index, so both decrypt at chunkStart + i.
+    // AEAD counter = the GLOBAL chunk index (§4.4), matching encodeChunk.
     const chunkPlain = decrypt(K, DOMAIN_BODY, chunkStart + i, chunkCipher);
     const take = Math.min(chunkPlain.length, fileSize - written);
     parts.push(take === chunkPlain.length ? chunkPlain : chunkPlain.subarray(0, take));
@@ -966,10 +924,10 @@ async function getStart(manifestId, K) {
     if (!d) throw new Error("get: chunk descriptor signature invalid");
     return d;
   });
-  // Window granularity from the chunk's OWN geometry (§4.3), not config: a full chunk is
-  // k·blockSize plaintext, and the reader holds windowTarget()-worth at a time.
-  const chunkData = ds.length ? ds[0].k * ds[0].blockSize : 1;
-  getStream = { K, ds, fileSize: man.fileSize, next: 0, windowChunks: getWindowChunks(chunkData) };
+  // Full chunks are APP.k·blockSize plaintext (they are padded to that in encodeChunk),
+  // so the window count is target / fullChunkBytes.
+  const fullChunkBytes = APP.k * APP.blockSize;
+  getStream = { K, ds, fileSize: man.fileSize, next: 0, windowChunks: getWindowChunks(fullChunkBytes) };
   return man.fileSize;
 }
 // The next window's plaintext, in file order. Empty once the file is exhausted, which

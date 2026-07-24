@@ -63,7 +63,6 @@ export async function run(t) {
     const owner = nodes[0];
     const data = file(200); // 4 blocks → 2 RS chunks
     const put = await owner.put(data);
-    t.ok(!put.replicated, "a multi-block file takes the RS path");
     t.eq(put.chunkCount, 2, "200 bytes / (k=2 × 64) → 2 chunks");
     const got = await owner.get(put.manifestId, put.key);
     t.ok(bytesEqual(got, data), "GET reconstructs the original file");
@@ -89,23 +88,21 @@ export async function run(t) {
     const owner = nodes[0];
     const data = file(bigCfg.k * bigCfg.blockSize * 3 - 5000, 9); // ~3 chunks, last chunk short
     const put = await owner.put(data);
-    t.ok(!put.replicated, "a many-block file takes the RS path");
     t.eq(put.chunkCount, 3, "spans 3 RS chunks");
     const got = await owner.get(put.manifestId, put.key);
     t.ok(bytesEqual(got, data), "GET reconstructs a file coded in > 128 KB blocks");
     nodes.forEach((n) => n.close());
   }
 
-  t.group("small file replication path (§4.1)");
+  t.group("small file — sub-chunk plaintext → k=1 replicated chunk (§4.1)");
   {
     const net = new LoopbackNetwork();
     const nodes = await createConnectedCohort({ count: 6, network: net, sodium, wasm, config, timeoutMs: TIMEOUT });
     const owner = nodes[0];
-    const data = file(40, 9); // < 1 block → replicated, not coded
+    const data = file(40, 9); // < 1 block → k=1 replicated chunk
     const put = await owner.put(data);
-    t.ok(put.replicated, "a sub-chunk file is replicated, not RS-coded");
     const got = await owner.get(put.manifestId, put.key);
-    t.ok(bytesEqual(got, data), "replicated small file reads back");
+    t.ok(bytesEqual(got, data), "sub-chunk file round-trips via per-chunk k");
     nodes.forEach((n) => n.close());
   }
 
@@ -177,7 +174,6 @@ export async function run(t) {
     // "2 holders" + idempotence checks below exercise both end-to-end.
     const data = file(256, 11);                            // 4 blocks → 4 RS(1,1) chunks
     const put = await owner.put(data);
-    t.ok(!put.replicated, "a multi-block k=1 file windows (not the whole-file small path); each chunk is replicated (healReplicated)");
     // put.blockIds = each chunk's single (replicated) block id + the manifest.
     t.eq(minHolders(nodes, net, put.blockIds), 2, "every block — chunks and manifest — is on 2 holders after PUT");
 
@@ -212,7 +208,6 @@ export async function run(t) {
     const owner = nodes[0];
     const data = file(256, 41);                            // 4 blocks → windowed (per-chunk replication)
     const put = await owner.put(data);
-    t.ok(!put.replicated, "multi-block k=1 file windows; each chunk is replicated r=5 ways");
 
     let replaced = 0;
     for (const n of nodes.filter((x) => x !== owner)) replaced += await n.runRepair();
@@ -239,9 +234,8 @@ export async function run(t) {
     const all = [owner, ...holders];
     for (let i = 0; i < all.length; i++) for (let j = i + 1; j < all.length; j++) StorageNode.connect(all[i], all[j]);
 
-    const data = file(64, 47);                             // 1 block → the small replicated path
+    const data = file(64, 47);                             // 1 block → k=1 replicated chunk
     const put = await owner.put(data);
-    t.ok(put.replicated, "the owner wrote one replicated chunk at its own RS(1,4)");
     t.eq(minHolders(all, net, put.blockIds), 5, "r = m+1 = 5 copies of every block, per the WRITER's geometry");
 
     // Lose three copies of the chunk's block: margin 5−1 = 4 drops to 1, under the
@@ -352,7 +346,6 @@ export async function run(t) {
     const data = file(400, 23); // > 1 block → windowed, several chunks
 
     const put = await owner.put(data);
-    t.ok(!put.replicated, "k=1 multi-block file windows into per-chunk replication");
 
     // The returned set must name each placed id once: the 13/13 probe was a
     // duplicate id leaking into blockIds (the old degenerate coded k=1), not the store lying.
@@ -414,7 +407,6 @@ export async function run(t) {
 
     const data = file(256, 41); // 4 blocks → 2 RS(2,2) chunks, block i of each on holder i
     const put = await owner.put(data);
-    t.ok(!put.replicated, "the file takes the RS path");
 
     // Pin the scenario at the wire: a raw 2-id FETCH to a holder that stores both
     // must come back with the first block served (the progress guarantee) and the second

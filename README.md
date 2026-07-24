@@ -117,16 +117,16 @@ Defaults: `k = 10, m = 6` → `n = 16`, 1.6× storage overhead, surviving the lo
 
 **This alignment — `chunk = k blocks` — is what collapses the data model.** A block *is* an erasure shard *is* the unit on the wire, so there is no distinct "fragment" object to slice, list, or address; a chunk's descriptor is simply its list of `n` block-ids, and one block per message is always true by construction. (Fixed-size chunking is also the simplest; a deployment that wants cross-file dedup can swap in content-defined chunking, at the cost of variable-length blocks that no longer map one-to-one onto shards.)
 
-**A file too small to fill a chunk is replicated, not coded.** A whole file — or the final partial chunk of a larger one — of only one or two blocks is stored as `r = m + 1` plain replicas on distinct peers (the path the manifest itself takes, §4.3), not padded out to `k` and RS-encoded. Padding tiny data is wasteful: `d` data blocks need `d·(m + 1)` replicas to match `RS(k, m)`'s loss tolerance, which beats the constant `k + m` blocks a padded chunk always emits only while `d < (k + m)/(m + 1)` — two blocks at the default `RS(10, 6)`. So the codec runs only where it earns its keep, the most common small files skip it entirely, and `r = m + 1` survives the same `m` losses as a coded chunk. A replica is the same content-addressed block, so discovery (§5), repair (just copy a missing replica from any live holder), and the §10 invariant all carry over unchanged.
+**Every chunk is coded at its own `k`.** A chunk carries `kc = max(1, ceil(plaintext / B))` data blocks — the chunk's own `k`, ≤ the deployment's `k` — and is RS(`kc`, `m`) encoded. At `kc ≥ 2` this produces `kc + m` distinct blocks. At `kc = 1` RS(1, `m`) degenerates: its parity blocks are byte-identical to the lone data block (parity ≡ data over GF(2⁸)), so the chunk is the one block replicated `r = m + 1` ways on distinct peers — which is also the path the manifest itself takes (§4.3). Per-chunk `k` means a partial chunk is never padded to the deployment's `k`; it pays `d + m` blocks instead of `k + m`, which strictly dominates both replication and padding for all `d ≥ 2`. The descriptor is self-describing (§4.3): each chunk records its own `(k, m, B)`, so a reader offsets and decodes by the chunk's own numbers.
 
-**One descriptor model covers both.** A replicated chunk's descriptor lists its `d` data block-ids and no parity, and records **the same `m`** a coded one does — because `m` means the same thing in both: *this chunk survives `m` losses*. Only the way it buys that survival differs, and the id count is the whole of the difference:
+**One descriptor model covers both shapes.** The id count is the whole of the distinction:
 
 | | `block_ids` | what the ids mean | survives |
 |---|---|---|---|
 | **coded** | `k + m` | one block per peer | `m` |
-| **replicated** | `k` | each block on `r = m + 1` peers | `m` |
+| **replicated** | `k = 1` | the lone block on `r = m + 1` peers | `m` |
 
-So a repairer reads `k`, `m`, and the id count off the signed bytes and knows the chunk's shape, its replica target, and its low-water mark (§8) without consulting deployment config — which is what keeps the self-describing promise of §4.1 true for *both* kinds of chunk, and what lets a mixed-geometry cohort repair each chunk back to the count its own author signed. (`m = 0` is the one place the two coincide: no parity and no second copy are the same zero-redundancy chunk.)
+Replication at `k > 1` does not exist — RS(`d`, `m`) strictly dominates it for all `d ≥ 2`. A repairer reads `k`, `m`, and the id count off the signed bytes and knows the chunk's shape, its replica target, and its low-water mark (§8) without consulting deployment config — which is what keeps the self-describing promise of §4.1 true for *both* kinds of chunk, and what lets a mixed-geometry cohort repair each chunk back to the count its own author signed. (`m = 0` is the one place the two coincide: no parity and no second copy are the same zero-redundancy chunk.)
 
 ### 4.2 Blocks are content-addressed
 

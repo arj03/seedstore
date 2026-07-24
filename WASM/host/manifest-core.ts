@@ -27,15 +27,16 @@ export const TAG_HEAD = 0x03;      // reserved: the §27.3 mutable file head (no
 
 // ── chunk descriptor ───────────────────────────────────────────────────────
 
-// `m` means the same thing for both kinds of chunk: **this chunk survives m losses**
-// (§4.1). How it buys that survival is the id count, and nothing else:
+// `m` means the same thing for either kind of chunk: **this chunk survives m losses**
+// (§4.1). The id count is the whole of the distinction:
 //
 //   coded       blockIds.length === k + m   the k data + m parity blocks, one per peer
-//   replicated  blockIds.length === k       the k data blocks, each on r = m + 1 peers
+//   replicated  blockIds.length === k       (k = 1 only) the lone block on r = m + 1 peers
 //
-// So a descriptor stays self-describing all the way to the durability target: a
-// repairer reads k, m, and the id count off the signed bytes and needs no deployment
-// config to know the shape, the replica count, or the low-water mark (§9).
+// Replicated at k > 1 cannot be produced — a partial chunk is coded at its own k, which
+// strictly dominates replication for all k ≥ 2. k = 1 is the degenerate case where
+// RS(1,m) parity ≡ data, so the codec is skipped and the block is replicated r ways
+// instead (the manifest's path, and any single-block file).
 export interface Descriptor {
   k: number;            // data blocks (0..k are data rows)
   m: number;            // losses this chunk survives: m parity blocks, or m extra replicas
@@ -47,8 +48,8 @@ export interface Descriptor {
  *  the descriptor format tag (§16). */
 export function encodeDescriptorCore(d: Descriptor): Uint8Array {
   const n = d.blockIds.length;
-  if (n !== d.k && n !== d.k + d.m) {
-    throw new Error("descriptor: blockIds.length must be k (replicated) or k+m (coded)");
+  if (n !== d.k + d.m && !(n === d.k && d.k === 1)) {
+    throw new Error("descriptor: blockIds.length must be k+m (coded) or k=1 (replicated)");
   }
   const head = new Uint8Array(1 + 1 + 1 + 4 + 1);
   head[0] = TAG_DESCRIPTOR; // leading format tag (§16)
@@ -66,7 +67,7 @@ export function decodeDescriptorCore(core: Uint8Array): Descriptor {
   if (k < 1) throw new Error("descriptor: k must be >= 1");
   if (blockSize < 1) throw new Error("descriptor: blockSize must be >= 1");
   const n = core[7];
-  if (n !== k && n !== k + m) throw new Error("descriptor: n must be k (replicated) or k+m (coded)");
+  if (n !== k + m && !(n === k && k === 1)) throw new Error("descriptor: n must be k+m (coded) or k=1 (replicated)");
   if (core.length !== 8 + n * BLOCK_ID_LEN) throw new Error("descriptor: truncated");
   const blockIds: Uint8Array[] = [];
   for (let i = 0; i < n; i++) blockIds.push(core.slice(8 + i * BLOCK_ID_LEN, 8 + (i + 1) * BLOCK_ID_LEN));
@@ -100,9 +101,9 @@ export function descriptorContains(d: Descriptor, blockId: Uint8Array): boolean 
 // out of step with the chunk it describes. A cohort running mixed geometry (§4.1) is
 // therefore repaired correctly chunk by chunk, from each chunk's own bytes.
 
-/** Replicated ⇔ the descriptor lists only its k data blocks, each destined for
- *  r = m + 1 peers; coded ⇔ it lists all k + m blocks, one per peer (§4.1). (At m = 0
- *  the two coincide — no parity and no second copy is the same zero-redundancy chunk.) */
+/** Replicated ⇔ the descriptor lists only k = 1 data block, destined for r = m + 1
+ *  peers; coded ⇔ it lists all k + m blocks, one per peer (§4.1). (At m = 0 the two
+ *  coincide — no parity and no second copy is the same zero-redundancy chunk.) */
 export function isReplicated(d: Descriptor): boolean {
   return d.blockIds.length === d.k;
 }

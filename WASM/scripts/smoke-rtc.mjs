@@ -114,7 +114,7 @@ try {
   const data = new Uint8Array(1000);
   for (let i = 0; i < data.length; i++) data[i] = (i * 7 + 3) & 255;
   const r = await owner.node.put(data);
-  console.log(`\nowner PUT ${data.length} B → ${r.replicated ? "replicated" : r.chunkCount + " RS chunk(s)"}, ${r.blockIds.length} block(s) across ${owner.node.cohortPeers().length} holder(s)`);
+  console.log(`\nowner PUT ${data.length} B → ${r.chunkCount} chunk(s), ${r.blockIds.length} block(s) across ${owner.node.cohortPeers().length} holder(s)`);
 
   let onAll = true;
   for (const p of owner.node.cohortPeers()) {

@@ -57,8 +57,8 @@ export async function run(t) {
     const id = (i) => crypto.hash(new Uint8Array([i]));
     const ids = (n, base = 0) => Array.from({ length: n }, (_, i) => id(base + i));
 
-    // Production geometry, both shapes. The id COUNT is the whole discriminant: k+m ids
-    // means coded (one block per peer), k ids means replicated (each on r = m+1 peers).
+    // Production geometry, both shapes. k+m ids means coded (one block per peer),
+    // k=1 ids means replicated (the lone block on r = m+1 peers).
     const coded = { k: 10, m: 6, blockSize: 4096, blockIds: ids(16) };
     const repl = { k: 1, m: 6, blockSize: 4096, blockIds: ids(1, 100) };
     t.ok(!isReplicated(coded), "16 = k+m ids → coded");
@@ -84,17 +84,16 @@ export async function run(t) {
     t.eq(lossMargin(coded, new Array(10).fill(1).concat(new Array(6).fill(0))), 0, "k live blocks → one loss from death");
     t.eq(lossMargin(repl, [1]), 0, "one copy left → one loss from death");
 
-    // A multi-block replicated chunk (a small file, §4.1): every listed block is needed,
-    // so the margin is the *fewest* copies any of them has, not an average.
-    const small = { k: 2, m: 2, blockSize: 256, blockIds: ids(2, 200) };
-    t.ok(isReplicated(small), "a small file's d = k ids read as replicated");
-    t.eq(lossMargin(small, [3, 1]), 0, "the weakest block sets the margin");
-    t.eq(slotIndices(small).length, 6, "d blocks × r copies = d·(m+1) slots");
-
-    // An id count that is neither k nor k+m is malformed, signature notwithstanding.
+    // Replicated at k > 1 is rejected: RS(d, m) strictly dominates for d ≥ 2, so the
+    // descriptor format only accepts the replicated shape at k = 1.
     let threw = false;
+    try { encodeDescriptorCore({ k: 2, m: 2, blockSize: 256, blockIds: ids(2, 200) }); } catch { threw = true; }
+    t.ok(threw, "replicated at k=2 is rejected — the shape does not exist");
+
+    // An id count that is neither k+m nor k=1 (replicated) is malformed.
+    threw = false;
     try { encodeDescriptorCore({ k: 10, m: 6, blockSize: 4096, blockIds: ids(12) }); } catch { threw = true; }
-    t.ok(threw, "an id count that is neither k nor k+m is rejected");
+    t.ok(threw, "an id count that is neither k+m nor k=1 (replicated) is rejected");
   }
 
   t.group("descriptor: author signature, tamper-evident (§4.3, §9)");
