@@ -244,27 +244,46 @@ host). One build stages both browser pages into `build/browser-demo`:
 npm run build && npm run build:browser-demo
 npx http-server build/browser-demo -p 3000
 #   in-tab cohort:          http://localhost:3000/index.html
-#   real P2P (relay+STUN):  http://localhost:3000/p2p.html    (relay + holders, below)
+#   real P2P:               http://localhost:3000/p2p.html    (holders, below)
 ```
 
 **`index.html`** boots a cohort of nodes in one browser tab, stores a file with
 client-side encryption + erasure coding across them, reads it back, and lets you
 take peers offline and watch repair restore redundancy.
 
-**`p2p.html`** makes each *tab* a full storage node. Tabs — and **console nodes** —
-find each other through a WebSocket signaling relay (`npm run demo:relay`) and then
-talk **directly, peer-to-peer over WebRTC**: the relay only introduces peers, STUN
-punches the path through NAT, and no server sits in the data path. A file dropped in
-one is encrypted and erasure-coded (RS(1,1)) across the others; any node rebuilds it
-from the retrieval token. Run the cohort either as **3+ tabs** in the same room, or
-as one tab plus **console holders** — the same `RtcNetwork`, driven on the Node/Bun
-side by werift's pure-JS WebRTC (§12.6):
+**`p2p.html`** makes the tab a full storage node against a real cohort. A file dropped
+in is encrypted and erasure-coded (RS(1,1)) across the other nodes; any node rebuilds it
+from the retrieval token. Two transports, picked on the page:
+
+**Direct WebSocket** (the default) dials natively-reachable nodes straight at their
+`--ws-listen` port — no relay, no STUN, no signaling of any kind. Start `seedloader`
+holders, copy each one's `pubkey[.secret]@host:port` into the peers box, and store:
 
 ```sh
-npm run demo:relay          # the signaling relay (Node), ws://localhost:8080
-npm run serve:rtc-holder    # a real StorageNode joining the room over relay+STUN (Bun); run two
-#   then open http://localhost:3000/p2p.html  (relay ws://localhost:8080, room "seedstore-demo")
+seedloader --ws-listen 0.0.0.0:47210 …   # one per holder; disk-backed store
+#   then open http://localhost:3000/p2p.html and paste the endpoints
 ```
+
+**WebRTC** instead has peers find each other through a WebSocket signaling relay and
+then talk directly, peer-to-peer: the relay only introduces peers, STUN punches the path
+through NAT, and no server sits in the data path. What it buys over a direct dial is
+exactly that NAT traversal — reaching holders with no port you could paste — so if you
+can copy a holder's endpoint you do not need it. The relay is app-neutral and ships with
+[seedchat](https://github.com/arj03/seedchat) (`npm run relay` there); seed store runs
+none of its own. The cohort is either **3+ tabs** in one room, or one tab plus **console
+holders** — the same `RtcNetwork`, driven on the Node/Bun side by werift's pure-JS
+WebRTC (§12.6):
+
+```sh
+cd ../../seedchat && npm run relay   # signaling rendezvous, ws://localhost:8080
+npm run serve:rtc-holder             # a real StorageNode joining the room (Bun); run two
+#   then open p2p.html, pick WebRTC  (relay ws://localhost:8080, room "seedstore-demo")
+```
+
+A caveat on the all-tabs cohort: a tab's `BlobStore` is in-RAM — the OPFS/IndexedDB
+backend (§12) is not built yet — so tabs-as-holders forget everything on reload. Until
+that lands, read the browser as the cohort's **owner** and let `seedloader` or the
+console holders be the ones that actually keep bytes.
 
 (`npm run smoke:rtc` proves the same PUT→GET path headless — owner + holders, no relay
 process or browser.)

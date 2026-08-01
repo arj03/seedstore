@@ -67,22 +67,33 @@
 <p class="muted">
   Each tab is a full storage node. A file you drop here is encrypted and erasure-coded
   across the cohort's nodes; any tab can reconstruct it. Two ways to reach the cohort:
-  <strong>WebRTC</strong> — tabs find each other through a WebSocket relay (signaling
-  only) and then talk directly, peer-to-peer, no server in the data path (the same
-  <code>RtcNetwork</code> a Node peer joins via node-datachannel, README §13.6); or
   <strong>Direct WebSocket</strong> — dial a known set of natively-reachable nodes
   (a public IP / LAN / port-forward) straight at their <code>--ws-listen</code> port,
-  no relay and no STUN (<code>WsNetwork</code>).
+  no relay and no STUN (<code>WsNetwork</code>); or <strong>WebRTC</strong> — tabs find
+  each other through a WebSocket relay (signaling only) and then talk directly,
+  peer-to-peer, no server in the data path (the same <code>RtcNetwork</code> a Node peer
+  joins via node-datachannel, README §13.6).
+</p>
+<p class="muted">
+  Direct WebSocket is the default because its holders are <code>seedloader</code> processes
+  with a real disk-backed store. A tab's own store is in-RAM — there is no OPFS/IndexedDB
+  backend yet — so a cohort <em>of tabs</em> forgets everything on reload, and the tab is
+  best read as the cohort's <em>owner</em> rather than one of its holders. What WebRTC buys
+  over a direct dial is NAT traversal, for holders with no reachable port; when you can copy
+  a holder's endpoint, you do not need it.
 </p>
 
 <h2>1 · connect to the cohort</h2>
 <div class="row">
   transport:
-  <label><input type="radio" name="transport" value="rtc" checked /> WebRTC (relay + STUN)</label>
-  <label><input type="radio" name="transport" value="ws" /> Direct WebSocket</label>
+  <label><input type="radio" name="transport" value="ws" checked /> Direct WebSocket</label>
+  <label><input type="radio" name="transport" value="rtc" /> WebRTC (relay + STUN)</label>
 </div>
-<div id="rtcConfig">
-  <p class="muted">Start a relay with <code>npm run demo:relay</code>, then open this page in <strong>3+ tabs</strong> using the same room.</p>
+<div id="rtcConfig" style="display:none">
+  <p class="muted">Needs a signaling relay, which ships with seedchat — <code>npm run relay</code>
+    there (it is app-neutral; seed store does not run one of its own). Then open this page in
+    <strong>3+ tabs</strong> using the same room, or one tab plus console holders
+    (<code>npm run serve:rtc-holder</code>).</p>
   <div class="row">
     relay <input id="relay" class="url mono" type="text" value="ws://localhost:8080" />
     room <input id="room" class="room mono" type="text" value="seedstore-demo" />
@@ -95,7 +106,7 @@
     relay. Blank means an open room, which is fine on localhost. A <em>wrong</em> secret has no
     error: peers simply never link.</p>
 </div>
-<div id="wsConfig" style="display:none">
+<div id="wsConfig">
   <p class="muted">Dial natively-reachable nodes started with <code>seedloader --ws-listen 0.0.0.0:&lt;port&gt;</code>.
     One <code>pubkey[.secret]@host:port</code> per line (or comma-separated). Need at least
     <span class="mono">k+m</span> distinct holders. The optional <code>.secret</code> is that node's

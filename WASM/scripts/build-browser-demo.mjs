@@ -232,4 +232,5 @@ console.log("serve it:   npm run serve:demo        (re-stages + http-server with
 console.log("  ── DO NOT use a plain `http-server` without -c-1: its default max-age=3600 makes");
 console.log("     the browser keep a STALE codec.wasm after a rebuild → confusing errors.");
 console.log("  in-page cohort:        http://localhost:3000/index.html");
-console.log("  real P2P (relay+STUN): npm run demo:relay  +  npm run serve:rtc-holder  → http://localhost:3000/p2p.html");
+console.log("  real P2P (direct WS):  seedloader --ws-listen nodes, endpoints pasted in → http://localhost:3000/p2p.html");
+console.log("  real P2P (relay+STUN): seedchat's `npm run relay`  +  npm run serve:rtc-holder  → same page, WebRTC transport");

@@ -10,8 +10,10 @@
 //   RELAY=ws://localhost:8080 ROOM=seedstore-demo bun scripts/serve-rtc-holder.mjs
 //
 // Needs a global WebSocket (relaySignaling) → run on Bun (or Node ≥22). Start the
-// relay first, on NODE not Bun (Bun's http upgrade swallows writes):
-//   npm run demo:relay        (= node ../../seedkernel/WASM/scripts/relay.mjs)
+// relay first, on NODE not Bun (Bun's http upgrade swallows writes). It ships with
+// seedchat rather than here — it is app-neutral infrastructure, and seed store's own
+// default demo (p2p.html's Direct WebSocket mode) needs no signaling at all:
+//   cd ../../seedchat && npm run relay
 
 import { loadSodium, loadWasmBytes } from "../build/host/node.js";
 import { StorageNode } from "../build/host/storage-node.js";

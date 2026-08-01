@@ -40,7 +40,7 @@ if (RELAY && typeof WebSocket === "undefined") {
 }
 
 // An in-memory N-party signaling hub: every JSON signal from one member is delivered
-// to all OTHER members in the room — exactly what scripts/relay.mjs does over a
+// to all OTHER members in the room — exactly what seedchat's scripts/relay.mjs does over a
 // WebSocket, minus the network. RtcNetwork filters by from/to itself.
 //
 // Delivery is DEFERRED (setTimeout 0), not synchronous: RtcNetwork's perfect-
