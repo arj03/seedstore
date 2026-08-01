@@ -1252,7 +1252,8 @@ function serveFetch(ids) {
 // every branch is local fs + crypto; the initiator owns the round trips. OFFER and
 // FETCH carry a batch of blocks (one per peer per PUT/GET) and answer all at once.
 function doHandle(arg) {
-  const type = arg[0], payload = arg.slice(1);
+  const sender = arg.slice(0, 32);
+  const type = arg[32], payload = arg.slice(33);
   if (type === MSG_HAVE) return encodeMask(decodeHaveReq(payload).map((id) => storeHas(id)));
   if (type === MSG_OFFER) return encodeMask(admitBatch(decodeOfferBatch(payload)));
   if (type === MSG_STORE) return encodeMask(decodeStoreBatch(payload).map((s) => acceptStore(s.blockId, s.descriptor, s.bytes)));

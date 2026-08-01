@@ -20,7 +20,7 @@
 
 import type { Network, PeerId, Transport as ITransport } from "seedkernel-wasm/net";
 import type { Fs } from "seedkernel-wasm/fs";
-import { MemoryFs } from "seedkernel-wasm/fs";
+import { MemoryFs, scopedFs } from "seedkernel-wasm/fs";
 import { FsBlobView, type BlobView } from "./store-view.js";
 import { Crypto } from "./crypto.js";
 import {
@@ -32,7 +32,7 @@ import { toHex, readU32BE, readU64BE, writeU64BE, concatBytes } from "./util.js"
 import {
   createShell, admitAll, KernelHost, type Shell, type KernelTable, type RealmFactory,
 } from "seedkernel-wasm/shell-core";
-import { FreshnessMarks, kernelNameFor, type LoadedBundle } from "seedkernel-wasm/bundle";
+import { FreshnessMarks, kernelNameFor, appScopeFor, type LoadedBundle } from "seedkernel-wasm/bundle";
 import type { Sodium } from "./sodium.js";
 
 const NO_ARG = new Uint8Array(0);
@@ -105,6 +105,13 @@ export class StorageNode {
    *   holder path will verify — signDescriptor() with this scope as the 5th
    *   argument matches what the guest's verifyPrefix checks. */
   readonly signScope: Uint8Array;
+  /** This app's fs keyspace prefix (seedkernel §12.2). Every key the holder writes is
+   *   `appScope + key` on the raw backend, so tooling that opens a node's directory
+   *   *cold* — outside a running node, where `this.fs` is already scoped — has to wrap
+   *   the backend in `scopedFs(raw, appScope)` to see the same blocks. Without it a
+   *   read view finds nothing at all: FsBlobView drops any key whose hex is not 64
+   *   chars, so a prefixed key is skipped rather than misread. */
+  readonly appScope: string;
   private readonly modules: { codec: string; reputation: string };
   /** Durable cohort roster: the set of peers this node has a storage relationship
    *   with. The network owns connectivity; the cohort is app state — independent
@@ -139,6 +146,7 @@ export class StorageNode {
     // the same derivation a shell-run node uses.
     this.signAuthor = loaded.author;
     this.signScope = storageSignScope(this.signAuthor);
+    this.appScope = appScopeFor(opts.sodium, this.signAuthor, STORAGE_APP);
     this.modules = {
       codec: kernelNameFor(this.signAuthor, STORAGE_APP, "codec"),
       reputation: kernelNameFor(this.signAuthor, STORAGE_APP, "reputation"),
@@ -181,8 +189,6 @@ export class StorageNode {
     const norm = normaliseConfig(opts.config ?? {});
     const { realmMemoryBytes, ...guestOverride } = norm;
 
-    opts = { ...opts, fs }; // share the one fs instance with the constructor below
-
     const cohort = new Set<PeerId>();
 
     const shell = createShell({
@@ -209,6 +215,16 @@ export class StorageNode {
 
     const loaded = await shell.loadBundleBlob(opts.bundleBlob);
     await shell.serve();
+
+    // The guest does NOT reach the backend directly: the shell hands it
+    // `scopedFs(fs, appScopeFor(author, app))`, so every key the holder writes lands
+    // under this app's opaque prefix (seedkernel §12.2). The host's read view has to
+    // enter through the same door, or `store.list()` walks past the guest's writes and
+    // reads back scope-prefixed keys as if they were block ids. One keyspace per app,
+    // one handle to it — the scope is derived here rather than passed in because it
+    // depends on the *verified* bundle author, which only exists after the load above.
+    const appFs = scopedFs(fs, appScopeFor(opts.sodium, loaded.author, STORAGE_APP));
+    opts = { ...opts, fs: appFs }; // share the one fs instance with the constructor below
 
     return new StorageNode(opts, shell, identity, loaded, cohort);
   }

@@ -17,6 +17,7 @@ import { StorageNode } from "../build/host/storage-node.js";
 import { NodeNetwork } from "seedkernel-wasm/net-node";
 import { FsBlobView } from "../build/host/store-view.js";
 import { NodeFs } from "seedkernel-wasm/fs-node";
+import { scopedFs } from "seedkernel-wasm/fs";
 // `bytesCompare` is a transport helper from the seedkernel `./net` barrel, used
 // by the cohort below to canonicalise dial direction (lower pubkey dials higher).
 import { bytesCompare } from "seedkernel-wasm/net";
@@ -180,7 +181,10 @@ export async function run(t) {
       for (let i = 1; i < nodes.length; i++) if (nodes[i].store.list().length > 0) { holderIdx = i; break; }
       t.ok(holderIdx > 0, "located a holder with blocks");
       const idsBefore = nodes[holderIdx].store.list().map(toHex).sort();
-      const cold = new FsBlobView(new NodeFs(dirs[holderIdx]));
+      // Cold reopen enters through the app's fs scope, exactly as the live node does
+      // (seedkernel §12.2): the holder's keys are `appScope + <hex>.blk` on the raw
+      // backend, so a view over the unwrapped NodeFs would list nothing.
+      const cold = new FsBlobView(scopedFs(new NodeFs(dirs[holderIdx]), nodes[holderIdx].appScope));
       const idsAfter = cold.list().map(toHex).sort();
       t.eq(idsAfter.join(","), idsBefore.join(","), "cold reopen sees exactly the same block ids");
       const onDisk = readdirSync(dirs[holderIdx]).filter((f) => f.endsWith(".blk"));
