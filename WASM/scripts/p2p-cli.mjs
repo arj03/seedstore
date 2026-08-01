@@ -26,8 +26,15 @@
 //
 // Usage (Node ≥20 needs the WebSocket global):
 //   node --experimental-websocket scripts/p2p-cli.mjs \
-//     --peers "pk@host:port,pk@host:port" [--size 10] [--file path] \
+//     --peers "pk[.secret]@host:port,…" [--size 10] [--file path] \
 //     [--puts 1] [--gets 1] [--author hex|none] [--block 256] [--batch 1024] [--window 64]
+//
+// The optional `.secret` is THAT PEER's 32-byte hex contact secret — what it demands of
+// anyone dialing it (`seedloader --contact-secret <hex>`). It is the peer's credential,
+// not ours: we are a dialer only, we never listen, so we have no inbound secret of our
+// own. Omit it for an open peer. Get it wrong and the dial draws SILENCE rather than an
+// error — a gated node refuses without answering, by design — so a peer that never
+// reaches "link up" with a secret set is the symptom to look for.
 //
 // NOTE each PUT permanently costs every holder ~fileSize bytes of its §14 quota
 // (content-addressed under a fresh random K, so re-putting the same file never
@@ -52,7 +59,7 @@ const num = (k, d) => (args.has(k) ? Number(args.get(k)) : d);
 const peersArg = args.get("peers") ?? "";
 const specs = peersArg.split(/[\s,]+/).map((s) => s.trim()).filter(Boolean);
 if (specs.length === 0) {
-  console.error("need --peers \"pk@host:port,pk@host:port\"");
+  console.error("need --peers \"pk[.secret]@host:port,…\"  (.secret = that peer's 32-byte hex contact secret, if it gates)");
   process.exit(1);
 }
 const puts = num("puts", 1);

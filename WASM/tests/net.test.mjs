@@ -55,14 +55,22 @@ function newKey(sodium) {
 // dials higher) so no pair double-connects.
 async function tcpCohort({ count, sodium, wasm, config, baseDir }) {
   const ids = Array.from({ length: count }, () => newKey(sodium));
-  const nets = ids.map((id) => new NodeNetwork({ identity: id, sodium, listen: { host: "127.0.0.1", port: 0 } }));
+  // One contact secret PER NODE, not one for the cohort: the secret is what a node demands
+  // of callers, so it belongs to the node being dialled. Per-node is also what containment
+  // buys — a leaked secret exposes that node's inbound side and nothing else. Dialling
+  // therefore carries the TARGET's secret on the address, never our own.
+  const secrets = Array.from({ length: count }, () => sodium.randombytes_buf(32));
+  const nets = ids.map((id, i) => new NodeNetwork({
+    identity: id, contactSecret: secrets[i], sodium, listen: { host: "127.0.0.1", port: 0 },
+  }));
   await Promise.all(nets.map((n) => n.start()));
 
   for (let i = 0; i < count; i++) {
     for (let j = 0; j < count; j++) {
       if (i === j) continue;
       if (bytesCompare(ids[i].publicKey, ids[j].publicKey) < 0) {
-        nets[i].addPeerAddr(toHex(ids[j].publicKey), { host: "127.0.0.1", port: nets[j].port, transport: "tcp" });
+        nets[i].addPeerAddr(toHex(ids[j].publicKey),
+          { host: "127.0.0.1", port: nets[j].port, transport: "tcp", contactSecret: secrets[j] });
       }
     }
   }
@@ -200,10 +208,14 @@ export async function run(t) {
   t.group("control plane round-trips over a real WebSocket (browser ↔ node, §16)");
   {
     const idS = newKey(sodium), idB = newKey(sodium);
-    const netS = new NodeNetwork({ identity: idS, sodium, listen: { host: "127.0.0.1", port: 0 }, wsListen: { host: "127.0.0.1", port: 0 } });
+    // S gates its listener; B is a dialer only, so it has no inbound secret of its own —
+    // it carries S's on the address it dials.
+    const secretS = sodium.randombytes_buf(32);
+    const netS = new NodeNetwork({ identity: idS, contactSecret: secretS, sodium, listen: { host: "127.0.0.1", port: 0 }, wsListen: { host: "127.0.0.1", port: 0 } });
     await netS.start();
     const netB = new NodeNetwork({ identity: idB, sodium }); // browser-like: dials out only
-    netB.addPeerAddr(toHex(idS.publicKey), { host: "127.0.0.1", port: netS.wsPort, transport: "ws" });
+    netB.addPeerAddr(toHex(idS.publicKey),
+      { host: "127.0.0.1", port: netS.wsPort, transport: "ws", contactSecret: secretS });
 
     // Default store = FsBlobView over each node's (in-RAM) fs, so S.store reflects
     // what the confined guest holder writes via fs.* when B stores to it.
@@ -239,6 +251,57 @@ export async function run(t) {
     } finally {
       S.close(); B.close();
       netS.close(); netB.close();
+    }
+  }
+
+  // ── the contact secret actually gates ──────────────────────────────────────
+  //
+  // The positive paths above prove a correct secret gets through, which a node that
+  // ignored the field entirely would also pass. This is the other half: a dialer with
+  // the WRONG secret must get nowhere. Refusal is silent by design (§12.6.2) — no close,
+  // no error — so the only observable is a link that never comes up. `ready()` rejecting
+  // on timeout IS the pass condition here.
+  t.group("a wrong contact secret draws silence — no link, no frames");
+  {
+    const idS = newKey(sodium), idB = newKey(sodium);
+    const secretS = sodium.randombytes_buf(32);
+    const netS = new NodeNetwork({ identity: idS, contactSecret: secretS, sodium, listen: { host: "127.0.0.1", port: 0 } });
+    await netS.start();
+
+    // Delivery is the observable. ready() resolves on its own timer whether or not the
+    // peer came up, so it cannot tell "linked" from "gave up waiting"; and
+    // NodeNetworkCore takes no onPeerUp (only WsNetwork/RtcNetwork do), so a callback
+    // passed here would be silently ignored and read as a pass. Count frames instead.
+    let received = 0;
+    netS.endpoint(toHex(idS.publicKey)).onFrame(() => { received++; });
+
+    // Right address, right pubkey, wrong credential.
+    const netB = new NodeNetwork({ identity: idB, sodium });
+    const epB = netB.endpoint(toHex(idB.publicKey));
+    epB.onFrame(() => {});
+    netB.addPeerAddr(toHex(idS.publicKey),
+      { host: "127.0.0.1", port: netS.port, transport: "tcp", contactSecret: sodium.randombytes_buf(32) });
+
+    // Control: the SAME dial with the right secret must get through. Without it, this
+    // group would also pass on a cohort that never links at all — which is exactly the
+    // failure the first draft of this test hid.
+    const idOk = newKey(sodium);
+    const netOk = new NodeNetwork({ identity: idOk, sodium });
+    const epOk = netOk.endpoint(toHex(idOk.publicKey));
+    epOk.onFrame(() => {});
+    netOk.addPeerAddr(toHex(idS.publicKey),
+      { host: "127.0.0.1", port: netS.port, transport: "tcp", contactSecret: secretS });
+
+    try {
+      epB.send(toHex(idS.publicKey), new Uint8Array([1]));
+      await sleep(1500);
+      t.eq(received, 0, "a dialer presenting the wrong contact secret gets nothing through");
+
+      epOk.send(toHex(idS.publicKey), new Uint8Array([2]));
+      await sleep(1500);
+      t.eq(received, 1, "the same dial with the RIGHT secret delivers — the gate is what refused");
+    } finally {
+      netS.close(); netB.close(); netOk.close();
     }
   }
 

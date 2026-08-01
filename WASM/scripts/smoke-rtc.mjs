@@ -80,11 +80,21 @@ const pcFactory = weriftPeerConnectionFactory({ iceAdditionalHostAddresses: ["12
 // a batch past the data channel either.
 const config = { k: 1, m: HOLDERS, blockSize: 48 * 1024, maxMessageBytes: 48 * 1024 };
 
-function makeNode() {
+// The room's shared contact secret. A cohort in one room is symmetric — every node both
+// accepts and dials — so one value serves as both the secret we demand of callers and
+// the one we present when dialing. Gating this smoke (rather than running it open) is
+// what makes it cover the credential path the real demos use, not just the transport.
+const CONTACT = process.env.CONTACT
+  ? Uint8Array.from(process.env.CONTACT.match(/../g).map((b) => parseInt(b, 16)))
+  : sodium.randombytes_buf(32);
+
+function makeNode(contact = CONTACT) {
   const identity = (() => { const kp = sodium.crypto_sign_keypair(); return { publicKey: kp.publicKey, privateKey: kp.privateKey }; })();
   const entry = { identity, node: null };
   entry.net = new RtcNetwork({
     identity, sodium, signaling: join(), peerConnectionFactory: pcFactory,
+    contactSecret: contact,
+    peerContactFor: () => contact,
     onPeerUp: (pid) => entry.node?.addPeer(pid),
     onPeerDown: (pid) => entry.node?.removePeer(pid),
   });
@@ -126,10 +136,29 @@ try {
 
   const got = await owner.node.get(r.manifestId, r.key);
   const roundTrip = bytesEqual(got, data);
-  ok = roundTrip && onAll;
+
+  // Negative: a stranger with the right room but the WRONG contact secret. It reaches
+  // signaling and gets as far as a data channel — the gate is in the handshake, not the
+  // rendezvous — and then draws nothing. Refusal is SILENT by design (§12.6.2), so the
+  // only observable is a peer that never links; we assert exactly that, giving it the
+  // same 30 s the real holders got so a slow werift handshake can't fake a pass.
+  const stranger = makeNode(sodium.randombytes_buf(32));
+  nodes.push(stranger);
+  stranger.node = await StorageNode.create({
+    network: stranger.net, sodium, ...wasm, identity: stranger.identity, config, timeoutMs: 8000 });
+  stranger.net.join();
+  const before = owner.node.cohortPeers().length;
+  const t1 = Date.now();
+  while (stranger.node.cohortPeers().length === 0 && Date.now() - t1 < 30000) await sleep(150);
+  const gated = stranger.node.cohortPeers().length === 0 && owner.node.cohortPeers().length === before;
+  console.log(gated
+    ? `\ngate holds — a peer with the wrong contact secret linked 0 nodes in 30 s (refused in silence)`
+    : `\nGATE FAILED — stranger linked ${stranger.node.cohortPeers().length}, owner cohort ${before} → ${owner.node.cohortPeers().length}`);
+
+  ok = roundTrip && onAll && gated;
   console.log(ok
     ? `\nOK — file replicated to all ${HOLDERS} holders + retrieved over RtcNetwork (data peer-to-peer; relay = signaling only in the real demo)`
-    : `\nFAIL — roundTrip=${roundTrip}, onAllHolders=${onAll}`);
+    : `\nFAIL — roundTrip=${roundTrip}, onAllHolders=${onAll}, gated=${gated}`);
 } catch (e) {
   console.error("\nFAILED:", e?.message ?? e);
 } finally {

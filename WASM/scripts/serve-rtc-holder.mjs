@@ -29,6 +29,26 @@ const base = (process.env.RELAY ?? "ws://localhost:8080").replace(/\/+$/, "");
 const room = process.env.ROOM ?? "seedstore-demo";
 const url = `${base}/${encodeURIComponent(room)}`;
 
+// CONTACT — the room's shared contact secret, 32 bytes of hex. A cohort in one room is
+// symmetric: every node both accepts and dials, so the secret we demand of callers and
+// the one we present when dialing are the same value. It gates the RELAY out too — the
+// relay carries our signaling and therefore knows the room, but without this it cannot
+// complete a handshake with us. Unset ⇒ open: anyone who finds the room is served.
+//
+//   CONTACT=$(openssl rand -hex 32) ROOM=my-room bun scripts/serve-rtc-holder.mjs
+//
+// A mismatched secret has NO error path — a gated peer refuses in silence (§12.6.2), so
+// the symptom is peers that never link, not a message. Hence the hard check here.
+const contactSecret = (() => {
+  const hex = process.env.CONTACT;
+  if (!hex) return undefined;
+  if (!/^[0-9a-f]{64}$/i.test(hex)) {
+    console.error("CONTACT must be 32-byte hex (64 chars) — e.g. CONTACT=$(openssl rand -hex 32)");
+    process.exit(1);
+  }
+  return Uint8Array.from(hex.match(/../g).map((b) => parseInt(b, 16)));
+})();
+
 // Public STUN so the data channel can punch NAT/CGNAT to a browser/peer off-LAN —
 // the same list browser/p2p.html uses. (Symmetric CGNAT with no IPv6 can still
 // defeat hole punching; that is the ~5–10% case TURN exists for.)
@@ -46,6 +66,10 @@ let node = null;
 const net = new RtcNetwork({
   identity, sodium, rtcConfig: RTC_CONFIG,
   signaling: relaySignaling(url),
+  // Symmetric room: `contactSecret` is what we demand inbound, `peerContactFor` what we
+  // present when dialing. One shared value, so both sides are the same secret.
+  contactSecret,
+  peerContactFor: () => contactSecret,
   // Console side: drive the very same RtcNetwork as the browser, but with werift's
   // RTCPeerConnection (pure-JS, no native addon — bundles into `bun --compile`).
   peerConnectionFactory: weriftPeerConnectionFactory(),
@@ -61,6 +85,9 @@ net.join(); // announce into the room → present peers begin the WebRTC handsha
 console.log(`\nseed store RTC holder ${short(node.peerId)} ready — handlers installed: ${node.handlersInstalled()}`);
 console.log(`joined ${url}  (RS k=${config.k} m=${config.m}, ${config.blockSize} B blocks)`);
 console.log(`open browser/p2p.html with the SAME relay + room "${room}" (or run more holders), then store a file.`);
+console.log(contactSecret
+  ? `contact secret: SET — peers must dial with the same CONTACT value or they draw silence.`
+  : `contact secret: none (open room) — set CONTACT=<32-byte hex> to gate who may reach this holder.`);
 
 // Self-healing per spec §9: a holder runs repair on a jittered interval, so when a
 // peer leaves and a chunk drops below its redundancy target, the surviving holders
