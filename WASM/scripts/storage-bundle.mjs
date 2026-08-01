@@ -10,10 +10,14 @@
 // Three deliberate choices live here, once:
 //   • `caps` declares capability *domains* (cap-bridge CAP_DOMAINS keys), not op
 //     numbers. The shell expands them to the enforced op set + wires only the
-//     matching backends. Storage reaches all five. (There is no `ops` catalog in
+//     matching backends. Storage reaches all six. (There is no `ops` catalog in
 //     the manifest — the guest's ABI is the injected CAP_* preamble, not signed
 //     content; the grant is `caps`.) It lives inside `guest`, where the authority it
 //     grants does.
+//   • `abi` names the guest seam this program was written against (seedkernel §12.2).
+//     Not a version of the bundle or of storage — of the HOST contract the guest calls
+//     through — so it is the constant the runtime exports, never a literal here: a seam
+//     change must fail this build, not this node's first request.
 //   • `quota` is absent from the signed config. It is OPERATOR policy, supplied at
 //     boot (seedkernel ShellOptions.config), never baked into author-signed content.
 //   • Nothing the RUNTIME derives is in the config. The codec/reputation kernel names
@@ -27,6 +31,7 @@ import { dirname, join } from "node:path";
 
 import { signManifest, packBundle, genesisHash, MANIFEST_FILE, GUEST_FILE, moduleFile }
   from "seedkernel-wasm/bundle";
+import { GUEST_ABI_VERSION } from "seedkernel-wasm/cap-bridge";
 import { defaultConfig, PRODUCTION_BLOCK_SIZE } from "../build/host/core.js";
 import { toHex } from "../build/host/util.js";
 
@@ -37,7 +42,14 @@ const APP_NAME = "seedstore";
 
 // The capability domains the storage guest reaches (cap-bridge CAP_DOMAINS keys).
 // Storage uses all of them; declaring them is exactly what the shell enforces.
-const STORAGE_CAPS = ["crypto", "net", "fs", "module", "clock"];
+//
+// `crypto` and `transform` are separate grants and storage needs both: it signs
+// descriptors and draws nonces under the node identity (SIGN, IDENTITY, RANDOM — the
+// authority half), and it hashes chunks, verifies peers' descriptor signatures and runs
+// the XChaCha20 keystream (HASH, VERIFY, STREAM_XOR — pure transforms of their
+// arguments). An app that only did the latter would ask for `transform` alone and never
+// hold a signing oracle.
+const STORAGE_CAPS = ["crypto", "transform", "net", "fs", "module", "clock"];
 
 /**
  * Write a complete signed seedstore bundle to `path` (one blob, seedkernel §12.4).
@@ -105,6 +117,10 @@ export function writeStorageBundle({ path, sodium, sk, pk, build, version = 1, l
     // authority; storage has one, so it declares both.
     guest: {
       hash: toHex(genesisHash(sodium, files[GUEST_FILE])),
+      // Which host seam this guest was written against (seedkernel §12.2). Read from the
+      // runtime rather than written as a literal, so a seam change breaks the build here
+      // instead of surfacing as a wrong answer at the first `host.call`.
+      abi: GUEST_ABI_VERSION,
       // The enforced capability grant (domains, not op numbers). The guest's op ABI
       // is the CAP_* preamble the shell injects at load, not a signed catalog.
       caps: [...STORAGE_CAPS],

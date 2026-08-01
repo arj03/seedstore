@@ -18,9 +18,12 @@ import { NodeNetwork } from "seedkernel-wasm/net-node";
 import { FsBlobView } from "../build/host/store-view.js";
 import { NodeFs } from "seedkernel-wasm/fs-node";
 import { scopedFs } from "seedkernel-wasm/fs";
-// `bytesCompare` is a transport helper from the seedkernel `./net` barrel, used
-// by the cohort below to canonicalise dial direction (lower pubkey dials higher).
-import { bytesCompare } from "seedkernel-wasm/net";
+// `bytesCompare` is the link layer's byte-order comparator, used by the cohort below to
+// canonicalise dial direction (lower pubkey dials higher) — the same rule link-router.ts
+// applies to collapse a simultaneous dial, which is why this takes it from there rather
+// than rolling its own. It moved to `./net-link` when the `./net` barrel was deleted:
+// `./net` is now the request/response structure alone, and the channel is `./net-link`.
+import { bytesCompare } from "seedkernel-wasm/net-link";
 import {
   MsgType, encodeHaveReq, decodeMask, encodeStoreBatch, encodeFetchBatchReq, decodeFetchBatchRes,
   VERDICT_ACCEPTED, VERDICT_DECLINED,
