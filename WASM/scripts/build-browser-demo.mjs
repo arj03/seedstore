@@ -124,6 +124,20 @@ async function copyJs(srcDir, dstDir) {
 await copyJs(seedstoreHost, join(out, "host"));
 await copyJs(seedkernelHost, join(out, "seedkernel"));
 
+// ML-DSA-65 (seedkernel §12.4 manifest suite 0x02) — the same artifact Node reads and
+// the Go loader embeds. p2p.html mixes it into its sodium instance so `verifyManifest`
+// can read a hybrid cohort's author id; without it a 0x02 manifest is refused as an
+// unsupported suite and the page would silently fall back to the zero-author scope.
+{
+  const src = join(root, "..", "..", "seedkernel", "WASM", "browser", "mldsa65.wasm");
+  if (!existsSync(src)) {
+    console.error(`seedkernel mldsa65.wasm not found at ${src} — build it first ` +
+      "(in seedkernel/WASM:  npm run build:pq).");
+    process.exit(1);
+  }
+  await copy(src, join(out, "mldsa65.wasm"));
+}
+
 // ── vendor the browser-only npm deps so the demo runs OFFLINE ────────────────
 // QuickJS (quickjs-emscripten + the two quickjs-ng wasm variants) and sumo libsodium
 // are multi-file ESM packages with their own bare-specifier imports and a .wasm each;
