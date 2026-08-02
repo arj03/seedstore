@@ -29,6 +29,24 @@ export interface Sodium {
   crypto_sign_detached(message: Uint8Array, sk: Uint8Array): Uint8Array;
   crypto_sign_verify_detached(sig: Uint8Array, message: Uint8Array, pk: Uint8Array): boolean;
   randombytes_buf(length: number): Uint8Array;
+  // The rest of the sumo surface the shared shell needs — the cap-bridge crypto
+  // catalog (CapSodium: the AEAD + X25519 + ML-KEM primitives) and the bundle
+  // manifest checks. One libsodium instance serves the kernel, the shell and the
+  // storage host (README §2, §16), so the type is the union, not the seedstore
+  // slice. All of these exist on the sumo build `seedkernel-wasm` loads.
+  crypto_aead_chacha20poly1305_ietf_encrypt(
+    message: Uint8Array, additional_data: Uint8Array | null, secret_nonce: Uint8Array | null,
+    public_nonce: Uint8Array, key: Uint8Array,
+  ): Uint8Array;
+  crypto_aead_chacha20poly1305_ietf_decrypt(
+    secret_nonce: Uint8Array | null, ciphertext: Uint8Array, additional_data: Uint8Array | null,
+    public_nonce: Uint8Array, key: Uint8Array,
+  ): Uint8Array;
+  crypto_scalarmult(sk: Uint8Array, pk: Uint8Array): Uint8Array;
+  ml_kem768_keypair_from_seed(seed: Uint8Array): { publicKey: Uint8Array; privateKey: Uint8Array };
+  ml_kem768_encaps(pk: Uint8Array, coins: Uint8Array): { ciphertext: Uint8Array; sharedSecret: Uint8Array } | null;
+  ml_kem768_decaps(sk: Uint8Array, ct: Uint8Array): Uint8Array | null;
+  ml_dsa65_verify_detached?(sig: Uint8Array, message: Uint8Array, pk: Uint8Array): boolean;
 }
 
 let cached: Sodium | null = null;

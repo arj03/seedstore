@@ -16,19 +16,25 @@
 <!-- The host code is platform-neutral. The kernel is imported with bare,
      EXTENSIONLESS specifiers ("seedkernel-wasm/safe-js"), so each maps explicitly to
      its real ./seedkernel/*.js file (a folder-prefix map would resolve to an
-     extensionless path a static server 404s). "net" maps to transport.js. safe-js is
-     the QuickJS sandbox the storage node runs the guest in; its quickjs-emscripten +
-     quickjs-ng wasm variants, plus sumo libsodium, are VENDORED into ./vendor/ by
-     scripts/build-browser-demo.mjs (runtime files + each package's .wasm, with a map
-     entry per bare specifier in their graph) so the demo runs fully offline. -->
+     extensionless path a static server 404s). The minified kernel tree ships as
+     host/ + core/ (host modules import ../core/* by relative path); the seedstore
+     host needs shell-core, the bundle loader, the cap-bridge, the transport driver +
+     the artifact transport bundle (the signed program that IS the node's network),
+     and safe-js. safe-js is the QuickJS sandbox the storage node runs the guest in;
+     its quickjs-emscripten + quickjs-ng wasm variants, plus sumo libsodium, are
+     VENDORED into ./vendor/ by scripts/build-browser-demo.mjs (runtime files + each
+     package's .wasm, with a map entry per bare specifier in their graph) so the demo
+     runs fully offline. -->
 <script type="importmap">
 {
   "imports": {
-    "seedkernel-wasm/browser":   "./seedkernel/browser.js",
-    "seedkernel-wasm/cap-bridge": "./seedkernel/cap-bridge.js",
-    "seedkernel-wasm/fs":        "./seedkernel/fs.js",
-    "seedkernel-wasm/net":       "./seedkernel/transport.js",
-    "seedkernel-wasm/safe-js":   "./seedkernel/safe-js.js",
+    "seedkernel-wasm/shell-core":     "./seedkernel/host/shell-core.js",
+    "seedkernel-wasm/bundle":         "./seedkernel/host/bundle.js",
+    "seedkernel-wasm/cap-bridge":     "./seedkernel/host/cap-bridge.js",
+    "seedkernel-wasm/fs":             "./seedkernel/core/fs.js",
+    "seedkernel-wasm/transport-host": "./seedkernel/host/transport-host.js",
+    "seedkernel-wasm/transport-bundle": "./seedkernel/host/transport-bundle.js",
+    "seedkernel-wasm/safe-js":        "./seedkernel/host/safe-js.js",
     "quickjs-emscripten":                         "./vendor/quickjs-emscripten/index.mjs",
     "quickjs-emscripten-core":                    "./vendor/quickjs-emscripten-core/index.mjs",
     "@jitl/quickjs-ffi-types":                    "./vendor/quickjs-ffi-types/index.mjs",
@@ -98,8 +104,9 @@ document.getElementById("store").onclick = async () => {
     log(`\nPUT ${data.length} bytes…`);
     lastPut = await nodes[0].put(data);
     log(`  manifest_id = ${hex(lastPut.manifestId).slice(0, 32)}…`);
-    log(`  ${lastPut.replicated ? "replicated (small file)" : lastPut.chunkCount + " RS chunk(s)"} placed across the cohort`);
-    const holders = nodes.filter((n) => n !== nodes[0] && n.store.list().length > 0).length;
+    log(`  ${lastPut.chunkCount} RS chunk(s) placed across the cohort`);
+    let holders = 0;
+    for (const n of nodes) if (n !== nodes[0] && (await n.store.list()).length > 0) holders++;
     log(`  blocks now held by ${holders} distinct peers; owner holds none`);
     document.getElementById("get").disabled = false;
     document.getElementById("kill").disabled = false;
@@ -115,7 +122,8 @@ document.getElementById("get").onclick = async () => {
 };
 
 document.getElementById("kill").onclick = async () => {
-  const holders = nodes.filter((n) => n !== nodes[0] && n.store.list().length > 0);
+  const holders = [];
+  for (const n of nodes) { if (n !== nodes[0] && (await n.store.list()).length > 0) holders.push(n); }
   net.setOnline(holders[0].peerId, false);
   net.setOnline(holders[1].peerId, false);
   log(`\ntook 2 holders offline (${holders[0].peerId.slice(0, 8)}, ${holders[1].peerId.slice(0, 8)})`);

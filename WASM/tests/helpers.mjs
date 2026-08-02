@@ -44,8 +44,14 @@ export async function loadHost() {
  *  holds the id. On the loopback this is the redundancy the old
  *  cohort.liveBlockCount measured (reachable + serves), without a protocol round
  *  trip: a test can read every node's store directly. */
-export function liveBlockCount(nodes, net, ids) {
-  return ids.filter((id) => nodes.some((n) => net.isOnline(n.peerId) && n.store.has(id))).length;
+export async function liveBlockCount(nodes, net, ids) {
+  let live = 0;
+  for (const id of ids) {
+    for (const n of nodes) {
+      if (net.isOnline(n.peerId) && (await n.store.has(id))) { live++; break; }
+    }
+  }
+  return live;
 }
 
 /** Plant a block straight into a node's store.local, bypassing the protocol — for
@@ -57,7 +63,7 @@ export function liveBlockCount(nodes, net, ids) {
  *  Seed BEFORE the holder is otherwise exercised: the guest rebuilds its byte total
  *  from the fs lazily, so a plant after it has started counting is invisible to its
  *  §14 accounting until the realm is rebuilt. */
-export function plantBlock(fs, idHex, bytes, descriptor = null) {
-  fs.put(idHex + ".blk", bytes);
-  if (descriptor) fs.put(idHex + ".dsc", descriptor);
+export async function plantBlock(fs, idHex, bytes, descriptor = null) {
+  await fs.put(idHex + ".blk", bytes);
+  if (descriptor) await fs.put(idHex + ".dsc", descriptor);
 }

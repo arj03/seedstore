@@ -42,10 +42,14 @@ export async function run(t) {
   const data = file(N * config.k * config.blockSize, 7); // exactly N RS chunks (N > W)
 
   // Stand up a fresh cohort, run `body(owner)`, and return its wall-clock plus the
-  // link's request counters (reset just before the body runs).
+  // link's request counters (reset just before the body runs). The latency link is
+  // the new in-process fabric with the transport drivers wrapped (latency-net.mjs):
+  // every node's outbound request is delayed + counted, exactly where the old
+  // frame-level network counted them.
   async function onCohort(cfg, body) {
     const net = new LatencyNetwork(DELAY);
     const nodes = await createConnectedCohort({ count: 6, network: net, sodium, wasm, config: cfg, timeoutMs: TIMEOUT });
+    net.wrapAll(nodes);
     net.reset();
     const t0 = performance.now();
     const result = await body(nodes[0], net);
@@ -125,6 +129,7 @@ export async function run(t) {
     // manifest, and assembles byte-identically.
     const net = new LatencyNetwork(DELAY);
     const nodes = await createConnectedCohort({ count: 6, network: net, sodium, wasm, config: { ...config, fanoutWindow: W }, timeoutMs: TIMEOUT });
+    net.wrapAll(nodes);
     const owner = nodes[0];
     const put = await owner.put(data);
 
@@ -139,6 +144,7 @@ export async function run(t) {
       `batched FETCH: ${fetches} FETCHes to recover ${N} chunks (≤ one per holder + manifest, vs ${N * config.k} per-block)`);
     t.ok(fetches * 3 < N * config.k, `FETCH round trips are a fraction of the per-block count (${fetches} vs ${N * config.k})`);
     nodes.forEach((nn) => nn.close());
+    net.close();
   }
 
   t.group("the batched paths preserve every invariant under latency");
@@ -147,6 +153,7 @@ export async function run(t) {
     // confirm the batched path is correct end-to-end and tolerates loss.
     const net = new LatencyNetwork(DELAY);
     const nodes = await createConnectedCohort({ count: 6, network: net, sodium, wasm, config, timeoutMs: TIMEOUT });
+    net.wrapAll(nodes);
     const owner = nodes[0];
     const put = await owner.put(data);
     t.ok(bytesEqual(await owner.get(put.manifestId, put.key), data), "PUT → GET round-trips on a latency-bearing link");
@@ -155,6 +162,7 @@ export async function run(t) {
     net.setOnline(nodes[2].peerId, false);
     t.ok(bytesEqual(await owner.get(put.manifestId, put.key), data), "batched GET still reads with two holders offline");
     nodes.forEach((nn) => nn.close());
+    net.close();
   }
 
   t.group("placement + gather fan out across holders (Promise.all over NET_SEND), not one round trip at a time");
@@ -166,6 +174,7 @@ export async function run(t) {
     // round trip) to the holder count.
     const net = new LatencyNetwork(DELAY);
     const nodes = await createConnectedCohort({ count: 6, network: net, sodium, wasm, config, timeoutMs: TIMEOUT });
+    net.wrapAll(nodes);
     const owner = nodes[0];
 
     net.reset();
@@ -183,6 +192,7 @@ export async function run(t) {
     t.ok(fetchPeak > 1, `FETCH fan-out overlaps holders: peak ${fetchPeak} in flight (a serial path would be 1)`);
 
     nodes.forEach((nn) => nn.close());
+    net.close();
   }
 
   t.group("GET windows the per-holder FETCHes so they pipeline (fanoutWindow), not one serial round trip per block");

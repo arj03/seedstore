@@ -43,13 +43,14 @@ const APP_NAME = "seedstore";
 // The capability domains the storage guest reaches (cap-bridge CAP_DOMAINS keys).
 // Storage uses all of them; declaring them is exactly what the shell enforces.
 //
-// `crypto` and `transform` are separate grants and storage needs both: it signs
-// descriptors and draws nonces under the node identity (SIGN, IDENTITY, RANDOM — the
-// authority half), and it hashes chunks, verifies peers' descriptor signatures and runs
-// the XChaCha20 keystream (HASH, VERIFY, STREAM_XOR — pure transforms of their
-// arguments). An app that only did the latter would ask for `transform` alone and never
-// hold a signing oracle.
-const STORAGE_CAPS = ["crypto", "transform", "net", "fs", "module", "clock"];
+// `crypto` is the authority half (SIGN, IDENTITY, RANDOM — under the node identity).
+// The pure transforms — BLAKE2b, XChaCha20, Ed25519 verify — are not grants at all:
+// the runtime retired the old `crypto`/`transform` split because the primitive
+// catalog (CAP_CRYPTO, host.crypto("name", …)) is ungated by construction — a
+// function of a guest's own arguments grants nothing, so asking for a domain to
+// hash a byte string would describe an authority that does not exist. One domain
+// remains, and storage declares it for the signing oracle.
+const STORAGE_CAPS = ["crypto", "net", "fs", "module", "clock"];
 
 /**
  * Write a complete signed seedstore bundle to `path` (one blob, seedkernel §12.4).

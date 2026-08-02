@@ -64,13 +64,31 @@ const sodium = await loadSodium();
 const wasm = await loadWasmBytes();
 const identity = (() => { const kp = sodium.crypto_sign_keypair(); return { publicKey: kp.publicKey, privateKey: kp.privateKey }; })();
 
+// The transport is now a signed bundle: boot the shared shell with it admitted
+// (the node's network standing), then put the WebRTC socket seam under the driver.
+// This is a browser-edge-style node — no TCP/WS listeners; links arrive through the
+// driver's openLink. The room's contact secret gates the ACCEPTING side, so it is
+// the driver's (the shell's platform), and `peerContactFor` presents it when dialing.
+const { bootTransportShell } = await import("../build/host/storage-node.js");
+const { shell } = await bootTransportShell({
+  sodium, identity, timeoutMs: 6000, contactSecret,
+  // The geometry rides in as operator config — the shell merges it over the bundle's
+  // signed config into the guest's APP (a shared shell cannot be re-configured after
+  // boot, so the operator config must be here, not on StorageNode.create).
+  config: { ...config, quota: 64 * 1024 * 1024 },
+  // The guest's NET_PEERS (cohortPeers — repair fans out over it) reads this; the
+  // node's cohort set is populated by onPeerUp below.
+  livePeers: () => node ? node.cohortPeers() : [],
+});
+
 let node = null;
 const net = new RtcNetwork({
-  identity, sodium, rtcConfig: RTC_CONFIG,
+  driver: shell.net,
+  rtcConfig: RTC_CONFIG,
   signaling: relaySignaling(url),
-  // Symmetric room: `contactSecret` is what we demand inbound, `peerContactFor` what we
-  // present when dialing. One shared value, so both sides are the same secret.
-  contactSecret,
+  // Symmetric room: the accepting side gate is the driver's contactSecret (above);
+  // `peerContactFor` is what we present when dialing. One shared value, so both
+  // sides are the same secret.
   peerContactFor: () => contactSecret,
   // Console side: drive the very same RtcNetwork as the browser, but with werift's
   // RTCPeerConnection (pure-JS, no native addon — bundles into `bun --compile`).
@@ -81,7 +99,7 @@ const net = new RtcNetwork({
 
 // A real StorageNode serving HAVE / OFFER / STORE / FETCH over the P2P links. Default
 // store.local is an in-RAM fs, read back through the node's FsBlobView.
-node = await StorageNode.create({ network: net, sodium, ...wasm, identity, config, timeoutMs: 6000 });
+node = await StorageNode.create({ shell, sodium, ...wasm, identity, config, timeoutMs: 6000 });
 net.join(); // announce into the room → present peers begin the WebRTC handshake
 
 console.log(`\nseed store RTC holder ${short(node.peerId)} ready — handlers installed: ${node.handlersInstalled()}`);

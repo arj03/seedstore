@@ -24,12 +24,13 @@
      specifiers ("seedkernel-wasm/safe-js"), so each is mapped explicitly to its real
      ./seedkernel/*.js file — a folder-prefix map ("seedkernel-wasm/" → "./seedkernel/")
      can't be used because it would resolve to an extensionless path a static server
-     404s. "net" is the one that maps to transport.js rather than net.js. safe-js is the
-     QuickJS sandbox the storage node runs the guest in; it imports quickjs-emscripten +
-     the two quickjs-ng wasm variants. Those, plus sumo libsodium, are VENDORED into
-     ./vendor/ by scripts/build-browser-demo.mjs so the demo runs fully offline — each
-     package's runtime files + its .wasm are copied and every bare specifier in their
-     graph (…-core, quickjs-ffi-types, the /emscripten-module subpaths, libsodium-sumo)
+     404s. The minified kernel tree ships as host/ + core/ (host modules import
+     ../core/* by relative path). safe-js is the QuickJS sandbox the storage node runs
+     the guest in; it imports quickjs-emscripten + the two quickjs-ng wasm variants.
+     Those, plus sumo libsodium, are VENDORED into ./vendor/ by
+     scripts/build-browser-demo.mjs so the demo runs fully offline — each package's
+     runtime files + its .wasm are copied and every bare specifier in their graph
+     (…-core, quickjs-ffi-types, the /emscripten-module subpaths, libsodium-sumo)
      gets a map entry. The umbrella statically references the four default Bellard
      variants (quickjs-wasmfile-{release,debug}-{sync,asyncify}) that we never select
      (safe-js always passes the -ng variants), so those alias to the vendored -ng
@@ -38,15 +39,16 @@
 <script type="importmap">
 {
   "imports": {
-    "seedkernel-wasm/browser":   "./seedkernel/browser.js",
-    "seedkernel-wasm/bundle":    "./seedkernel/bundle.js",
-    "seedkernel-wasm/pq":        "./seedkernel/pq.js",
-    "seedkernel-wasm/cap-bridge": "./seedkernel/cap-bridge.js",
-    "seedkernel-wasm/fs":        "./seedkernel/fs.js",
-    "seedkernel-wasm/net":       "./seedkernel/transport.js",
-    "seedkernel-wasm/net-rtc":   "./seedkernel/net-rtc.js",
-    "seedkernel-wasm/net-ws":    "./seedkernel/net-ws.js",
-    "seedkernel-wasm/safe-js":   "./seedkernel/safe-js.js",
+    "seedkernel-wasm/shell-core":     "./seedkernel/host/shell-core.js",
+    "seedkernel-wasm/bundle":         "./seedkernel/host/bundle.js",
+    "seedkernel-wasm/pq":             "./seedkernel/core/pq.js",
+    "seedkernel-wasm/cap-bridge":     "./seedkernel/host/cap-bridge.js",
+    "seedkernel-wasm/fs":             "./seedkernel/core/fs.js",
+    "seedkernel-wasm/transport-host": "./seedkernel/host/transport-host.js",
+    "seedkernel-wasm/transport-bundle": "./seedkernel/host/transport-bundle.js",
+    "seedkernel-wasm/net-rtc":        "./seedkernel/host/net-rtc.js",
+    "seedkernel-wasm/net-ws":         "./seedkernel/host/net-ws.js",
+    "seedkernel-wasm/safe-js":        "./seedkernel/host/safe-js.js",
     "quickjs-emscripten":                         "./vendor/quickjs-emscripten/index.mjs",
     "quickjs-emscripten-core":                    "./vendor/quickjs-emscripten-core/index.mjs",
     "@jitl/quickjs-ffi-types":                    "./vendor/quickjs-ffi-types/index.mjs",
@@ -155,6 +157,7 @@
 <script type="module">
 import sodium from "libsodium-wrappers-sumo";
 import { createStorageNode } from "./host/browser.js";
+import { bootTransportShell } from "./host/storage-node.js";
 import { RtcNetwork, relaySignaling } from "seedkernel-wasm/net-rtc";
 import { WsNetwork } from "seedkernel-wasm/net-ws";
 import { verifyManifest } from "seedkernel-wasm/bundle";
@@ -318,8 +321,8 @@ async function boot() {
   try {
     log("readying libsodium (sumo)…");
     await sodium.ready;
-    // One identity, shared by the transport (PeerLink) and the storage node so
-    // their peer ids match (Transport registers under this id on the network).
+    // One identity, shared by the transport and the storage node so their peer ids
+    // match (the transport registers under this id).
     const identity = sodium.crypto_sign_keypair();
     $("me").textContent = hex(identity.publicKey).slice(0, 16) + "…";
 
@@ -329,25 +332,58 @@ async function boot() {
     const onPeerDown = (pid) => { node?.removePeer(pid); log(`P2P link down: ${pid.slice(0, 8)}…`); refreshPeers(); };
 
     const mode = transport();
-    if (mode === "ws") {
-      net = new WsNetwork({ identity, sodium, onPeerUp, onPeerDown, connsPerPeer: connsPerPeerFor(mode) });
-    } else {
+    // The request timeout is a STALL bound (the transport re-arms it on every frame
+    // from the peer), so it only needs to cover the longest silence, ≈ one
+    // maxMessageBytes batch over the uplink. 20 s on WS tolerates uplinks down to
+    // ~50 KB/s and brief WiFi stalls; WebRTC's 48 KiB messages keep gaps tiny.
+    const timeoutMs = mode === "ws" ? 20000 : 5000;
+
+    // The transport is now a signed bundle: boot the shared shell with it admitted
+    // (the node's network standing), then put the WS/WebRTC socket seam under the
+    // driver. The room's contact secret gates the ACCEPTING side, so it is the
+    // driver's (the shell's platform); `peerContactFor` presents it when dialing.
+    // The geometry rides in as operator config — a shared shell's APP is fixed at
+    // boot, so the config must be here, not on createStorageNode.
+    let contactSecret;
+    let relayUrl = "";
+    if (mode === "rtc") {
       const base = $("relay").value.trim().replace(/\/+$/, "");
       const room = $("room").value.trim();
-      const url = room ? `${base}/${encodeURIComponent(room)}` : base;
-      // One shared room secret. Every tab both accepts and dials, so the secret we demand
-      // inbound and the one we present when dialing are the same value.
+      relayUrl = room ? `${base}/${encodeURIComponent(room)}` : base;
       const secretHex = $("contact").value.trim();
       if (secretHex && !/^[0-9a-f]{64}$/i.test(secretHex)) {
         throw new Error("secret must be 32-byte hex (64 chars), or blank for an open room");
       }
-      const contactSecret = secretHex
+      contactSecret = secretHex
         ? Uint8Array.from(secretHex.match(/../g).map((b) => parseInt(b, 16)))
         : undefined;
-      log(`connecting to relay ${url} …${contactSecret ? " (gated room)" : ""}`);
+      log(`connecting to relay ${relayUrl} …${contactSecret ? " (gated room)" : ""}`);
+    }
+    // The WS/TCP path carries far larger frames than WebRTC, so it gets bigger
+    // blocks (fewer chunks → fewer round trips) and a bigger per-message batch cap;
+    // WebRTC stays under the werift ~64 KiB channel on both. realmMemoryBytes is
+    // host-only — split out of the APP config, passed as the realm limit.
+    const config = { ...CONFIG, blockSize: blockSizeFor(mode), maxMessageBytes: maxMessageBytesFor(mode),
+      windowTargetBytes: windowTargetBytesFor(mode), realmMemoryBytes: realmMemoryBytesFor() };
+    const { realmMemoryBytes, ...appConfig } = config;
+    const { shell } = await bootTransportShell({
+      sodium, identity, timeoutMs,
+      contactSecret,
+      config: { ...appConfig, quota: 64 * 1024 * 1024 },
+      realmMemoryBytes,
+    });
+    if (mode === "ws") {
+      net = new WsNetwork({
+        driver: shell.net,
+        webSocketFactory: (u) => new WebSocket(u),
+        connsPerPeer: connsPerPeerFor(mode),
+        onPeerUp, onPeerDown,
+      });
+    } else {
       net = new RtcNetwork({
-        identity, sodium, rtcConfig: RTC_CONFIG, signaling: relaySignaling(url),
-        contactSecret, peerContactFor: () => contactSecret,
+        driver: shell.net,
+        rtcConfig: RTC_CONFIG, signaling: relaySignaling(relayUrl),
+        peerContactFor: () => contactSecret,
         onPeerUp, onPeerDown,
       });
     }
@@ -367,20 +403,8 @@ async function boot() {
       signAuthor = fromHex(authorHex);
       $("author").value = authorHex; // reflect the auto-detected scope in the UI
     }
-    // The WS/TCP path carries far larger frames than WebRTC, so it gets bigger
-    // blocks (fewer chunks → fewer round trips) and a bigger per-message batch cap;
-    // WebRTC stays under the werift ~64 KiB channel on both.
-    const config = { ...CONFIG, blockSize: blockSizeFor(mode), maxMessageBytes: maxMessageBytesFor(mode),
-      windowTargetBytes: windowTargetBytesFor(mode), realmMemoryBytes: realmMemoryBytesFor() };
-    // The request timeout is a STALL bound (Transport re-arms it on every frame from
-    // the peer), so it no longer needs to cover a whole PUT STORE round — only the
-    // longest silence, ≈ one maxMessageBytes batch over the uplink. 20 s on WS
-    // tolerates uplinks down to ~50 KB/s and brief WiFi stalls; the cost is only how
-    // long a genuinely dead peer takes to fail. WebRTC's 48 KiB messages keep gaps
-    // tiny, so it stays snappy at 5 s.
-    const timeoutMs = mode === "ws" ? 20000 : 5000;
     node = await createStorageNode({
-      network: net, sodium, identity, baseUrl: "./", config, timeoutMs, signAuthor,
+      shell, sodium, identity, baseUrl: "./", config, timeoutMs, signAuthor,
     });
     // Log the LIVE config the coordinator actually uses (after defaultConfig
     // merge), so a stale/cached build that lost maxMessageBytes is visible here.
@@ -492,13 +516,48 @@ $("store").onclick = async () => {
   } catch (e) {
     const msg = e?.message ?? String(e);
     log("  PUT failed: " + msg);
-    // The slow-to-diagnose case: the cohort is connected and GET works, but every
-    // OFFER is declined because the holders are full. Make it loud + actionable.
-    if (/out of storage|declined|no peer accepted/i.test(msg)) {
-      $("status").textContent = "holders full?"; $("status").className = "pill warn";
-      log("  ⚠ the cohort accepted no blocks — the holders are most likely OUT OF STORAGE (their quota/disk is full).");
-      log("    GET keeps working because serving a read never checks the quota; only a write (OFFER) does.");
-      log("    fix: clear each holder's data directory, or raise its quota, then retry.");
+    // TWO different failures wear the same "holders declined" sentence, and only the
+    // parenthetical separates them — so read that, never the prose. The guest counts a
+    // verdict only for a reply it actually received (`results[ri].ok ? decodeMask(…) :
+    // []`), so it appends "(N holders: quota, sibling, descriptor-rejected)" when holders
+    // answered and refused, and appends NOTHING when no holder answered at all.
+    //
+    // This branch used to fire on the bare word "declined" and announce OUT OF STORAGE
+    // either way, which is the expensive kind of wrong: it sends you to clear disks on
+    // holders that were never asked. (It also matched "out of storage" and "no peer
+    // accepted", two phrases no longer produced anywhere in the tree — the prose moved and
+    // the pattern silently kept matching only the one word that stayed.) Report the
+    // holders' own verdicts when there are some, and say plainly that there are none when
+    // there aren't.
+    const verdicts = /\((\d+) holders?: ([^)]+)\)/.exec(msg);
+    if (verdicts) {
+      const [, count, reasons] = verdicts;
+      $("status").textContent = "holders declining"; $("status").className = "pill warn";
+      if (/quota/.test(reasons)) {
+        log(`  ⚠ ${count} holder reply/replies refused on QUOTA — those holders are OUT OF STORAGE (quota/disk full).`);
+        log("    GET keeps working because serving a read never checks the quota; only a write (OFFER) does.");
+        log("    fix: clear each holder's data directory, or raise its quota, then retry.");
+      }
+      if (/descriptor/.test(reasons)) {
+        log("  ⚠ holders rejected the DESCRIPTOR — this node signs under a different scope than the cohort (§16).");
+        log("    fix: set the cohort bundle author above to the holders' bundle author, then reconnect.");
+      }
+      if (/sibling/.test(reasons)) {
+        log("  ⚠ holders refused under the SIBLING rule (§6) — they already hold another block of this chunk.");
+        log("    fix: connect more distinct holders (a full chunk needs k+m of them).");
+      }
+    } else if (/landed \d+\/\d+ distinct blocks/.test(msg)) {
+      // No verdict came back from anyone, so nothing was refused. Either the OFFERs never
+      // went out (the guest's cohort is empty) or they drew silence. The two are
+      // distinguishable from here: `linkedPeers()` is the transport's authenticated set,
+      // which is exactly what the guest's NET_PEERS cap reports.
+      const links = net?.linkedPeers?.().length ?? 0;
+      $("status").textContent = "no holder answered"; $("status").className = "pill warn";
+      log("  ⚠ NOT a decline: no holder returned a verdict, so nothing was refused —");
+      log(`    quota and signing scope are both unproven here. Transport reports ${links} authenticated link(s).`);
+      log(links === 0
+        ? "    with 0 links there was no one to OFFER to: reconnect, and check the peer list/contact secret."
+        : "    links are up, so the holders took the OFFER and never replied — check them for a stall or a crash.");
     }
   }
 };

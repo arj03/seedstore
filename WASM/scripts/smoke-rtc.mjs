@@ -11,7 +11,7 @@
 //   node scripts/smoke-rtc.mjs            (or: bun scripts/smoke-rtc.mjs)   HOLDERS=n
 
 import { loadSodium, loadWasmBytes } from "../build/host/node.js";
-import { StorageNode } from "../build/host/storage-node.js";
+import { StorageNode, bootTransportShell } from "../build/host/storage-node.js";
 import { MsgType, encodeHaveReq, decodeMask } from "../build/host/protocol.js";
 import { bytesEqual } from "../build/host/util.js";
 import { RtcNetwork, relaySignaling } from "seedkernel-wasm/net-rtc";
@@ -74,7 +74,7 @@ const wasm = await loadWasmBytes();
 const join = RELAY ? () => relaySignaling(`${RELAY}/${encodeURIComponent(ROOM)}`) : makeSignalingHub();
 // Loopback host candidate so every pair connects with no STUN (the smoke is offline).
 const pcFactory = weriftPeerConnectionFactory({ iceAdditionalHostAddresses: ["127.0.0.1"] });
-// Small file → replicated to every holder (≤ blockSize); 48 KiB stays under werift's
+// Small file — replicated to every holder (≤ blockSize); 48 KiB stays under werift's
 // 64 KiB data-channel reassembly cap on the receiving (console) side. maxMessageBytes
 // holds a batched OFFER/STORE/FETCH to the same ceiling, so a larger file can't pack
 // a batch past the data channel either.
@@ -88,12 +88,24 @@ const CONTACT = process.env.CONTACT
   ? Uint8Array.from(process.env.CONTACT.match(/../g).map((b) => parseInt(b, 16)))
   : sodium.randombytes_buf(32);
 
-function makeNode(contact = CONTACT) {
+// The transport is a signed bundle: each node boots a shared shell with it admitted
+// (the node's network standing — no TCP/WS listeners, a WebRTC-edge node), then the
+// RtcNetwork puts the WebRTC socket seam under the driver. The geometry rides in as
+// operator config — a shared shell's APP is fixed at boot, so the operator config
+// must be here, not on StorageNode.create.
+async function makeNode(contact = CONTACT) {
   const identity = (() => { const kp = sodium.crypto_sign_keypair(); return { publicKey: kp.publicKey, privateKey: kp.privateKey }; })();
-  const entry = { identity, node: null };
+  const entry = { identity, node: null, shell: null };
+  entry.shell = (await bootTransportShell({
+    sodium, identity, timeoutMs: 8000, contactSecret: contact,
+    config: { ...config, quota: 64 * 1024 * 1024 },
+    // The guest's NET_PEERS (cohortPeers) reads this; the node's cohort set is
+    // populated by onPeerUp before any PUT/repair runs.
+    livePeers: () => entry.node ? entry.node.cohortPeers() : [],
+  })).shell;
   entry.net = new RtcNetwork({
-    identity, sodium, signaling: join(), peerConnectionFactory: pcFactory,
-    contactSecret: contact,
+    driver: entry.shell.net,
+    signaling: join(), peerConnectionFactory: pcFactory,
     peerContactFor: () => contact,
     onPeerUp: (pid) => entry.node?.addPeer(pid),
     onPeerDown: (pid) => entry.node?.removePeer(pid),
@@ -105,8 +117,8 @@ const nodes = [];
 let ok = false;
 try {
   for (let i = 0; i < HOLDERS + 1; i++) {
-    const e = makeNode();
-    e.node = await StorageNode.create({ network: e.net, sodium, ...wasm, identity: e.identity, config, timeoutMs: 8000 });
+    const e = await makeNode();
+    e.node = await StorageNode.create({ shell: e.shell, sodium, ...wasm, identity: e.identity, config, timeoutMs: 8000 });
     nodes.push(e);
   }
   const owner = nodes[0];
@@ -142,10 +154,10 @@ try {
   // rendezvous — and then draws nothing. Refusal is SILENT by design (§12.6.2), so the
   // only observable is a peer that never links; we assert exactly that, giving it the
   // same 30 s the real holders got so a slow werift handshake can't fake a pass.
-  const stranger = makeNode(sodium.randombytes_buf(32));
+  const stranger = await makeNode(sodium.randombytes_buf(32));
   nodes.push(stranger);
   stranger.node = await StorageNode.create({
-    network: stranger.net, sodium, ...wasm, identity: stranger.identity, config, timeoutMs: 8000 });
+    shell: stranger.shell, sodium, ...wasm, identity: stranger.identity, config, timeoutMs: 8000 });
   stranger.net.join();
   const before = owner.node.cohortPeers().length;
   const t1 = Date.now();

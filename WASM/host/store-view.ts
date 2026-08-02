@@ -34,17 +34,22 @@ export interface StoredBlock {
 }
 
 /** A read-only view of the holder's blobs. All ids are 32-byte block_ids; keys are
- *  their hex. There is no write half by design — see the header. */
+ *  their hex. There is no write half by design — see the header.
+ *
+ *  Every method is async, because the `fs.*` seam it reads through is async
+ *  (seedkernel core/fs.ts): a synchronous `get` is a shape no browser backend can
+ *  implement — IndexedDB is asynchronous by construction. An in-RAM backend
+ *  resolves in a microtask; a caller that needs one await. */
 export interface BlobView {
-  get(id: Uint8Array): StoredBlock | null;
-  has(id: Uint8Array): boolean;
+  get(id: Uint8Array): Promise<StoredBlock | null>;
+  has(id: Uint8Array): Promise<boolean>;
   /** All stored ids (optionally restricted to a hex prefix). */
-  list(prefix?: string): Uint8Array[];
+  list(prefix?: string): Promise<Uint8Array[]>;
   /** Committed-tier bytes on the backend (§14): every `<hex>.blk` plus its `.dsc`
    *  sidecar. What the holder charges against its quota — but this view only
    *  reports it; the quota itself is the node's (operator) policy and the guest's
    *  to enforce. */
-  usedBytes(): number;
+  usedBytes(): Promise<number>;
 }
 
 /** The read view over the kernel's raw-byte `fs.*` capability: a node directory on
@@ -52,19 +57,19 @@ export interface BlobView {
 export class FsBlobView implements BlobView {
   constructor(private readonly fs: Fs) {}
 
-  get(id: Uint8Array): StoredBlock | null {
+  async get(id: Uint8Array): Promise<StoredBlock | null> {
     const hex = toHex(id);
-    const bytes = this.fs.get(hex + BLK);
+    const bytes = await this.fs.get(hex + BLK);
     if (!bytes) return null;
-    const descriptor = this.fs.get(hex + DSC);
+    const descriptor = await this.fs.get(hex + DSC);
     return { bytes, descriptor: descriptor ?? null };
   }
 
-  has(id: Uint8Array): boolean { return this.fs.size(toHex(id) + BLK) >= 0; }
+  async has(id: Uint8Array): Promise<boolean> { return (await this.fs.size(toHex(id) + BLK)) >= 0; }
 
-  list(prefix?: string): Uint8Array[] {
+  async list(prefix?: string): Promise<Uint8Array[]> {
     const out: Uint8Array[] = [];
-    for (const key of this.fs.list()) {
+    for (const key of await this.fs.list()) {
       if (!key.endsWith(BLK)) continue;
       const hex = key.slice(0, -BLK.length);
       if (hex.length !== 64) continue;
@@ -74,11 +79,11 @@ export class FsBlobView implements BlobView {
     return out;
   }
 
-  usedBytes(): number {
+  async usedBytes(): Promise<number> {
     let used = 0;
-    for (const key of this.fs.list()) {
+    for (const key of await this.fs.list()) {
       if (key.endsWith(BLK) || key.endsWith(DSC)) {
-        const sz = this.fs.size(key);
+        const sz = await this.fs.size(key);
         if (sz > 0) used += sz;
       }
     }
