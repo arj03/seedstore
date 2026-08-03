@@ -229,11 +229,26 @@ const windowTargetBytesFor = (mode) => qNum("window", mode === "ws" ? 24 : 8) * 
 const realmMemoryBytesFor = () => qNum("heap", 256) * 1024 * 1024;
 // Parallel TCP flows per holder — WS only (WebRTC is one data channel). Stripes bulk
 // frames across N sockets to fill a link a single flow can't, once the window no longer
-// idles the wire. Default 2: measured ~+18-40% PUT over 1 flow (2- AND 4-holder cohorts,
-// browser + CLI) and never slower now the window barrier is gone. Holders must run the
-// multi-link routing core (a legacy single-link holder collapses the 2nd conn). ?conns=1
-// to A/B against a single flow.
-const connsPerPeerFor = (mode) => (mode === "ws" ? qNum("conns", 2) : 1);
+// idles the wire. Holders must run the multi-link routing core (a legacy single-link
+// holder collapses the 2nd conn). ?conns=1 to A/B against a single flow.
+//
+// Default 16 (raised from 2 on 2026-08-03). This is the fix for the long-standing "the
+// app only gets ~half the link" gap, and the gap was never about our load SHAPE: an
+// interleaved conns × batch sweep to the live iola holders showed throughput tracking
+// flow COUNT monotonically (4.9 / 5.8 / 6.8 / 9.0 / 10.4 / 11.7 / 13.3 MB/s wire at
+// conns 1/2/4/8/16/32/64) while the batch axis moved little and the WRONG way for a
+// burstiness story — smoothing the offered load to 256 KiB was the worst config of all
+// and burstier 4 MiB beat it. That is a per-flow cwnd cap on a loss-limited path
+// (Mathis), not cwnd collapse between bursts. Same-conditions A/B at 50 MB, conns 2 →
+// 16: PUT 6.5 → 10.3 MB/s wire, 15.4 → 9.7 s, and the starved-wire signature (`drain`
+// before `queue`, buffers pinned at one window) disappears 3/3 → 0/3.
+//
+// Why 16 and not 64: the curve never flattens through 64, but 16 takes ~80% of the win
+// for 32 sockets against a 2-holder cohort instead of 128, and at a small 2 MB PUT the
+// win is already flat (3.9 → 4.5 MB/s) while per-connection setup starts showing up
+// before the first byte. Note this buys throughput by claiming a bigger share of a
+// congested link — it weakens no protocol guarantee, but it is not free to neighbours.
+const connsPerPeerFor = (mode) => (mode === "ws" ? qNum("conns", 16) : 1);
 
 // Public STUN so peers on different machines/NATs can still find a path; for
 // same-machine tabs host candidates connect without it.

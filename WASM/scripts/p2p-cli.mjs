@@ -14,10 +14,17 @@
 //
 // They are NOT ordered: `drain` BEFORE `queue` is the diagnostic that matters. It means
 // the buffers ran dry while frames were still being handed over — the wire was STARVED
-// and the link was waiting on us, not the reverse. That is the streamed PUT's per-window
-// OFFER→STORE→ack barrier idling the wire between windows; `peak buffered` pinning at
-// ~one window's ciphertext across runs confirms in-flight bytes are window-bounded rather
-// than link-bounded. The full analysis, with numbers, is on put() in host/storage-node.ts.
+// and the link was waiting on us, not the reverse, with `peak buffered` pinning at ~one
+// window's ciphertext.
+//
+// CORRECTED 2026-08-03 — that signature was long read as the streamed PUT's per-window
+// OFFER→STORE→ack barrier idling the wire, i.e. an APP-side serialisation to be
+// pipelined away. It is not. Raising --conns makes it vanish (drain<queue 3/3 runs at
+// conns 2 → 0/3 at conns 16, peak buffered 42 MB → 0) while a window sweep at fixed
+// conns moves throughput only ~6%. So the starved wire means we were handing frames to
+// TOO FEW TCP FLOWS to absorb them, not that the window was too shallow: the buffers
+// drain early because a loss-limited path's per-flow cwnd caps each socket, and the
+// remaining frames then trickle. Read drain<queue as "add flows", not "deepen window".
 //
 // CAVEAT on the "MB/s upload" printed with drain: it divides ALL bulk bytes by
 // (drain − encode). Whenever drain < queue that span did not carry all of them, so the
@@ -73,9 +80,16 @@ const kParam = num("k", 1);
 const mParam = num("m", 1);
 // Parallel connections per holder — bulk transfers stripe frames across them so N TCP
 // flows fill a link one flow can't, once the window no longer idles the wire. Independent
-// of k/m: raises flows-per-holder rather than holders-per-chunk. Default 2 (measured
-// ~+18-40% PUT over 1 flow); --conns 1 to A/B. Holders must run the multi-link core.
-const connsN = num("conns", 2);
+// of k/m: raises flows-per-holder rather than holders-per-chunk. Holders must run the
+// multi-link core. --conns 1 to A/B against a single flow.
+//
+// Default 16 (raised from 2 on 2026-08-03) — flow count, not load shape, is what the
+// long-standing "app gets half the link" gap was made of. Interleaved sweep to the live
+// iola holders: 4.9 / 5.8 / 6.8 / 9.0 / 10.4 / 11.7 / 13.3 MB/s wire at conns
+// 1/2/4/8/16/32/64, monotonic, while --batch barely moved and moved the wrong way for a
+// burstiness story (256 KiB was the WORST config, 4 MiB beat it). 50 MB A/B, conns 2 →
+// 16: 6.5 → 10.3 MB/s wire, 15.4 → 9.7 s. See the long note in browser/p2p.html.
+const connsN = num("conns", 16);
 const blockSize = num("block", PRODUCTION_BLOCK_SIZE / 1024) * 1024;
 const maxMessageBytes = num("batch", 1024) * 1024;
 const windowN = num("window", 64);
