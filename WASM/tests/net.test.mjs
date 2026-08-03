@@ -128,15 +128,15 @@ export async function run(t) {
   {
     const baseDir = mkdtempSync(join(tmpdir(), "seedstore-tcp-"));
     const { nodes } = await tcpCohort({
-      count: 6, sodium, wasm, config: { k: 2, m: 2, blockSize: 64 }, baseDir,
+      count: 6, sodium, wasm, config: { k: 2, m: 2, blockSize: 1024 }, baseDir,
     });
     try {
       const owner = nodes[0];
-      const data = file(200); // 4 blocks → 2 RS chunks
+      const data = file(3200); // 4 blocks → 2 RS chunks
       const put = await owner.put(data);
-      t.eq(put.chunkCount, 2, "200 bytes / (k=2 × 64) → 2 chunks");
+      t.eq(put.chunkCount, 2, "3200 bytes / (k=2 × 1024) → 2 chunks");
 
-      const got = await owner.get(put.manifestId, put.key);
+      const got = await owner.get(put.root, put.key);
       t.ok(bytesEqual(got, data), "GET reconstructs the file over the wire");
 
       const holders = [];
@@ -157,11 +157,11 @@ export async function run(t) {
   {
     const baseDir = mkdtempSync(join(tmpdir(), "seedstore-persist-"));
     const { nodes, dirs } = await tcpCohort({
-      count: 6, sodium, wasm, config: { k: 2, m: 2, blockSize: 64 }, baseDir,
+      count: 6, sodium, wasm, config: { k: 2, m: 2, blockSize: 1024 }, baseDir,
     });
     try {
       const owner = nodes[0];
-      const put = await owner.put(file(256, 7));
+      const put = await owner.put(file(4096, 7));
       t.ok(put.chunkCount >= 1, "file placed");
 
       // Find a holder index with blocks and reopen *its* directory cold.
@@ -218,7 +218,7 @@ export async function run(t) {
       // The block travels with its author-signed chunk descriptor (§4.3) — the holder
       // verifies it before admitting, here as on any other transport. Both nodes load the
       // same bundle, so they share one signing scope.
-      const desc = signDescriptor(sodium, { k: 1, m: 0, blockSize: bytes.length, blockIds: [bid] }, idB.publicKey, idB.privateKey, S.signScope);
+      const desc = signDescriptor(sodium, { level: 0, k: 1, m: 0, blockSize: bytes.length, tailBytes: bytes.length, blockIds: [bid] }, idB.publicKey, idB.privateKey, S.signScope);
 
       const stored = decodeMask(await B.transport.request(S.peerId, SEEDSTORE_PROTO, typed(MsgType.STORE, encodeStoreBatch([{ blockId: bid, descriptor: desc, bytes }]))));
       t.eq(stored[0], VERDICT_ACCEPTED, "STORE acknowledged over ws");

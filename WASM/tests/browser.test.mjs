@@ -33,7 +33,7 @@ export async function run(t) {
 
     t.group("browser entry: fetch-loaded bundle + injected sodium runs a node");
     const net = new LoopbackNetwork();
-    const config = { k: 2, m: 2, blockSize: 64 };
+    const config = { k: 2, m: 2, blockSize: 1024 };
     const nodes = [];
     for (let i = 0; i < 5; i++) {
       nodes.push(await createStorageNode({ network: net, sodium, baseUrl: "build/", config, timeoutMs: 40 }));
@@ -45,7 +45,7 @@ export async function run(t) {
 
     const data = new Uint8Array(200).map((_, i) => (i * 5 + 1) & 255);
     const put = await nodes[0].put(data);
-    const got = await nodes[0].get(put.manifestId, put.key);
+    const got = await nodes[0].get(put.root, put.key);
     t.ok(bytesEqual(got, data), "PUT/GET round trip works through the browser entry point");
 
     nodes.forEach((n) => n.close());

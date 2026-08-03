@@ -35,7 +35,7 @@ export async function run(t) {
   // RS(2,2): every chunk places n = k + m = 4 distinct blocks; a 6-node cohort
   // leaves 5 holders, enough for placement. N (> W) chunks → a per-block PUT would
   // pay N×n OFFER round trips; batching folds them to ≈ one OFFER per holder.
-  const config = { k: 2, m: 2, blockSize: 64 };
+  const config = { k: 2, m: 2, blockSize: 4096 };
   const N = 12;
   const n = config.k + config.m;        // blocks per chunk
   const replicas = config.m + 1;        // manifest copies (defaultConfig: m+1)
@@ -134,7 +134,7 @@ export async function run(t) {
     const put = await owner.put(data);
 
     net.reset();
-    const bytes = await owner.get(put.manifestId, put.key);
+    const bytes = await owner.get(put.root, put.key);
     const fetches = net.byType[FETCH] ?? 0;
 
     t.ok(bytesEqual(bytes, data), "batched GET reconstructs the file byte-identically");
@@ -156,11 +156,11 @@ export async function run(t) {
     net.wrapAll(nodes);
     const owner = nodes[0];
     const put = await owner.put(data);
-    t.ok(bytesEqual(await owner.get(put.manifestId, put.key), data), "PUT → GET round-trips on a latency-bearing link");
+    t.ok(bytesEqual(await owner.get(put.root, put.key), data), "PUT → GET round-trips on a latency-bearing link");
     // Drop two holders (≤ m of any chunk): any k of n still reads.
     net.setOnline(nodes[1].peerId, false);
     net.setOnline(nodes[2].peerId, false);
-    t.ok(bytesEqual(await owner.get(put.manifestId, put.key), data), "batched GET still reads with two holders offline");
+    t.ok(bytesEqual(await owner.get(put.root, put.key), data), "batched GET still reads with two holders offline");
     nodes.forEach((nn) => nn.close());
     net.close();
   }
@@ -186,7 +186,7 @@ export async function run(t) {
     t.eq(put.chunkCount, N, "placed every RS chunk");
 
     net.reset();
-    const bytes = await owner.get(put.manifestId, put.key);
+    const bytes = await owner.get(put.root, put.key);
     const fetchPeak = net.maxInflightByType[FETCH] ?? 0;
     t.ok(bytesEqual(bytes, data), "GET reconstructs the file byte-identically under latency");
     t.ok(fetchPeak > 1, `FETCH fan-out overlaps holders: peak ${fetchPeak} in flight (a serial path would be 1)`);
@@ -213,7 +213,7 @@ export async function run(t) {
       const r = await onCohort({ ...cfg, fanoutWindow }, async (owner, net) => {
         const put = await owner.put(webrtcData);
         net.reset();
-        return owner.get(put.manifestId, put.key);
+        return owner.get(put.root, put.key);
       });
       return { bytes: r.result, fetchPeak: r.peakByType[FETCH] ?? 0 };
     }
@@ -241,10 +241,10 @@ export async function run(t) {
     const files = [21, 22, 23].map((seed) => file(N * config.k * config.blockSize, seed));
     const r = await onCohort(cfg, async (owner) => {
       const puts = await Promise.all(files.map((f) => owner.put(f)));
-      return { puts, got: await Promise.all(puts.map((p) => owner.get(p.manifestId, p.key))) };
+      return { puts, got: await Promise.all(puts.map((p) => owner.get(p.root, p.key))) };
     });
     t.ok(r.result.got.every((got, i) => bytesEqual(got, files[i])), "three concurrent multi-window PUT/GETs each round-trip their own bytes");
     t.ok(r.result.puts.every((p) => p.chunkCount === N), `each PUT sealed a manifest over its own ${N} chunks — no window folded into another's stream`);
-    t.eq(new Set(r.result.puts.map((p) => toHex(p.manifestId))).size, 3, "the three files got three distinct manifests");
+    t.eq(new Set(r.result.puts.map((p) => toHex(p.root))).size, 3, "the three files got three distinct manifests");
   }
 }

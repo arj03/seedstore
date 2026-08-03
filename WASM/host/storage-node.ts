@@ -37,7 +37,7 @@ import {
 } from "./core.js";
 import { STORAGE_APP, storageSignScope } from "./manifest.js";
 import { encodeScoreReq } from "./reputation-core.js";
-import { toHex, readU32BE, readU64BE, writeU64BE, concatBytes } from "./util.js";
+import { toHex, readU32BE, readU64BE, concatBytes } from "./util.js";
 import {
   createShell, KernelHost, type Shell, type KernelTable, type RealmFactory,
 } from "seedkernel-wasm/shell-core";
@@ -47,8 +47,6 @@ import type { ChannelFactoryLike } from "./loopback.js";
 import type { Sodium } from "./sodium.js";
 
 const NO_ARG = new Uint8Array(0);
-
-function u64be(n: number): Uint8Array { const b = new Uint8Array(8); writeU64BE(b, 0, n); return b; }
 
 const createRealm: RealmFactory = async (o) => (await import("seedkernel-wasm/safe-js")).createSafeRealm(o);
 
@@ -65,23 +63,29 @@ function transportBlob(): Uint8Array {
 }
 
 /** Decode the guest's PUT result — the single result format every driver reads
- *  (`encodePutResult` in tier2-guest.orchestration.js). */
+ *  (`encodePutResult` in tier2-guest.orchestration.js):
+ *    [K 32][chunkCount u32][placed u32][intended u32][rootLen u32][root ...][idCount u32]{id 32} */
 function decodePutResult(r: Uint8Array): PutResult {
+  const rootLen = readU32BE(r, 44);
+  const tail = 48 + rootLen;
   const blockIds: Uint8Array[] = [];
-  const idCount = readU32BE(r, 76);
-  for (let i = 0; i < idCount; i++) blockIds.push(r.slice(80 + i * 32, 80 + (i + 1) * 32));
+  const idCount = readU32BE(r, tail);
+  for (let i = 0; i < idCount; i++) blockIds.push(r.slice(tail + 4 + i * 32, tail + 4 + (i + 1) * 32));
   return {
-    manifestId: r.slice(0, 32),
+    key: r.slice(0, 32),
+    root: r.slice(48, tail),
     chunkCount: readU32BE(r, 32),
-    key: r.slice(36, 68),
-    replicasLanded: readU32BE(r, 68),
-    replicasIntended: readU32BE(r, 72),
+    replicasLanded: readU32BE(r, 36),
+    replicasIntended: readU32BE(r, 40),
     blockIds,
   };
 }
 
 export interface PutResult {
-  manifestId: Uint8Array;
+  /** The file's ROOT DESCRIPTOR (§4.3) — the signed envelope a reader is handed, which
+   *  replaced the old 32-byte manifest_id when the manifest stopped being an object. It
+   *  is variable-length: a one-chunk file's root is that chunk's own descriptor. */
+  root: Uint8Array;
   key: Uint8Array;
   chunkCount: number;
   blockIds: Uint8Array[];
@@ -307,7 +311,7 @@ export class StorageNode {
   /** PUT a file (§6), orchestrated in the guest, STREAMED. */
   async put(plaintext: Uint8Array): Promise<PutResult> {
     return this.runExclusive(async () => {
-      const meta = await this.shell.runGuest("putStart", u64be(plaintext.length));
+      const meta = await this.shell.runGuest("putStart", NO_ARG);
       const windowBytes = readU32BE(meta, 0);
       for (let off = 0; ; off += windowBytes) {
         await this.shell.runGuest("putWindow", plaintext.subarray(off, Math.min(off + windowBytes, plaintext.length)));
@@ -317,10 +321,12 @@ export class StorageNode {
     });
   }
 
-  /** GET a file (§7), orchestrated in the guest, STREAMED. */
-  async get(manifestId: Uint8Array, key: Uint8Array): Promise<Uint8Array> {
+  /** GET a file (§7), orchestrated in the guest, STREAMED. `root` is the signed root
+   *  descriptor from the PUT (or shared alongside `key`); K leads the argument so the
+   *  variable-length root can be its tail. */
+  async get(root: Uint8Array, key: Uint8Array): Promise<Uint8Array> {
     return this.runExclusive(async () => {
-      const fileSize = readU64BE(await this.shell.runGuest("getStart", concatBytes([manifestId, key])), 0);
+      const fileSize = readU64BE(await this.shell.runGuest("getStart", concatBytes([key, root])), 0);
       const out = new Uint8Array(fileSize);
       let written = 0;
       while (written < fileSize) {
@@ -471,7 +477,7 @@ export async function bootTransportShell(
     admit: (v) => (v.manifest.role === "transport"
       ? toHex(v.author) === transportAuthorHex
       : true),
-    timeoutMs: opts.timeoutMs,
+    requestDeadlineMs: opts.timeoutMs,
     config: { ...(opts.config ?? {}), ...(opts.quota != null ? { quota: opts.quota } : {}) },
     realmMemoryBytes: opts.realmMemoryBytes,
   });

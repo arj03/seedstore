@@ -103,7 +103,7 @@ document.getElementById("store").onclick = async () => {
     const data = new TextEncoder().encode(document.getElementById("data").value);
     log(`\nPUT ${data.length} bytes…`);
     lastPut = await nodes[0].put(data);
-    log(`  manifest_id = ${hex(lastPut.manifestId).slice(0, 32)}…`);
+    log(`  root descriptor = ${hex(lastPut.root).slice(0, 32)}… (${lastPut.root.length} B)`);
     log(`  ${lastPut.chunkCount} RS chunk(s) placed across the cohort`);
     let holders = 0;
     for (const n of nodes) if (n !== nodes[0] && (await n.store.list()).length > 0) holders++;
@@ -116,7 +116,7 @@ document.getElementById("store").onclick = async () => {
 document.getElementById("get").onclick = async () => {
   try {
     log("GET (locate via have/want, fetch any k, decode, decrypt)…");
-    const out = await nodes[0].get(lastPut.manifestId, lastPut.key);
+    const out = await nodes[0].get(lastPut.root, lastPut.key);
     log("  recovered: " + JSON.stringify(new TextDecoder().decode(out)));
   } catch (e) { log("  GET failed: " + e.message); }
 };

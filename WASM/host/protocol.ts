@@ -28,9 +28,9 @@ export const MsgType = {
 // ── the response mask shared by HAVE, OFFER, and STORE ──────────────────────
 // All three replies are the same shape: one byte per batch entry. HAVE's is
 // "held" (1/0), OFFER's is a VERDICT_* code, STORE's is a VERDICT_* code —
-// one codec, three uses. A verdict ≠ 1 is a decline; codes 2–4 carry advisory
-// diagnostics (quota, sibling, descriptor-rejected) that turn the initiator's
-// error from a guessing essay into an exact report.
+// one codec, three uses. A verdict ≠ 1 is a decline; codes 2–5 carry advisory
+// diagnostics (quota, sibling, descriptor-rejected, holder-error) that turn the
+// initiator's error from a guessing essay into an exact report.
 export function encodeMask(bits: (boolean | number)[]): Uint8Array {
   const out = new Uint8Array(bits.length);
   for (let i = 0; i < bits.length; i++) {
@@ -118,6 +118,12 @@ export const VERDICT_ACCEPTED   = 1;
 export const VERDICT_QUOTA      = 2; // §14 quota exhausted
 export const VERDICT_SIBLING    = 3; // §6 sibling already held
 export const VERDICT_DESCRIPTOR = 4; // descriptor verify failed (§4.3)
+// The holder ADMITTED the block and then failed to commit it — a full disk, a
+// backend error, a realm OOM. Distinct from VERDICT_QUOTA because the two send an
+// operator to opposite places: quota is a policy number to raise, this is a broken
+// holder to inspect. They were one code once, and a mislabelled internal failure
+// cost a live debugging session chasing a budget that was never the problem.
+export const VERDICT_ERROR      = 5;
 
 // ── STORE (the push, §6 step 4) ─────────────────────────────────────────────
 // Batched per holder: every block headed to a peer streams in one message, and

@@ -29,7 +29,7 @@ import { TRANSPORT_BUNDLE_B64 } from "seedkernel-wasm/transport-bundle";
 import {
   loadSodium, generateKeyPair, LoopbackNetwork, createConnectedCohort,
 } from "../build/host/node.js";
-import { toHex, bytesEqual, concatBytes } from "../build/host/util.js";
+import { toHex, bytesEqual, concatBytes, readU32BE } from "../build/host/util.js";
 import { buildBundle } from "./bundle-fixture.mjs";
 import { makeT } from "./harness.mjs";
 
@@ -96,7 +96,7 @@ export async function run(t) {
       // blockSize is overridden back to test scale — the signed bundle carries the
       // PRODUCTION 256 KiB (storage-bundle.mjs), which would make these tiny test
       // files single-block/replicated instead of exercising the RS path.
-      config: { quota: 64 * 1024 * 1024, blockSize: 64 },
+      config: { quota: 64 * 1024 * 1024, blockSize: 1024 },
     });
     await shell.net.start(); // bind the loopback port the cohort dials
     await shell.loadBundle(bundlePath);
@@ -128,16 +128,16 @@ export async function run(t) {
       for (let i = 0; i < 5; i++) shells.push(await bootShell(net));
       await connectAll(net, shells);
       try {
-        const data = file(800, 7); // 4 blocks → the RS path, placed across the cohort
+        const data = file(12800, 7); // several blocks → the RS path, placed across the cohort
         const r = await shells[0].shell.runGuest("put", data);
-        const manifestId = r.slice(0, 32), key = r.slice(36, 68);
+        const key = r.slice(0, 32), root = r.slice(48, 48 + readU32BE(r, 44));
 
         let holding = 0;
         for (const e of shells.slice(1)) if ((await e.shell.fs.list()).length > 0) holding++;
         t.ok(holding >= 4, "the confined holders admitted + stored blocks (fs writes via the guest)");
         t.eq((await shells[0].shell.fs.list()).length, 0, "the initiator holds nothing — durability is the cohort's");
 
-        const got = await shells[0].shell.runGuest("get", concatBytes([manifestId, key]));
+        const got = await shells[0].shell.runGuest("get", concatBytes([key, root]));
         t.ok(bytesEqual(got, data), "PUT → GET round-trips: a generic shell served the holder side from the confined guest");
       } finally {
         shells.forEach((e) => e.shell.close());
@@ -159,12 +159,12 @@ export async function run(t) {
       const [sn] = await createConnectedCohort({
         // Same signed bundle as the shells ⇒ same author scope (cross-path parity).
         // blockSize back to test scale so this tiny file takes the RS path across the cohort.
-        count: 1, network: net, sodium, wasm: { bundleBlob }, config: { blockSize: 64 }, timeoutMs: TIMEOUT,
+        count: 1, network: net, sodium, wasm: { bundleBlob }, config: { blockSize: 1024 }, timeoutMs: TIMEOUT,
       });
       const all = [...shells, { shell: null, peerId: sn.peerId, net: sn.net, addPeer: (p) => sn.addPeer(p) }];
       await connectAll(net, all);
       try {
-        const dataA = file(800, 11), dataB = file(800, 12);
+        const dataA = file(12800, 11), dataB = file(12800, 12);
         // Concurrent: the shell's guest PUT (its initiator parks on net) runs while
         // the StorageNode places STOREs on that same shell — the shell's holder path
         // must answer (queued behind the parked initiator, served as it drains).
@@ -172,11 +172,11 @@ export async function run(t) {
           shells[0].shell.runGuest("put", dataA),
           sn.put(dataB),
         ]);
-        const midA = rA.slice(0, 32), keyA = rA.slice(36, 68);
+        const keyA = rA.slice(0, 32), rootA = rA.slice(48, 48 + readU32BE(rA, 44));
 
         const [gotA, gotB] = await Promise.all([
-          shells[0].shell.runGuest("get", concatBytes([midA, keyA])),
-          sn.get(putB.manifestId, putB.key),
+          shells[0].shell.runGuest("get", concatBytes([keyA, rootA])),
+          sn.get(putB.root, putB.key),
         ]);
         t.ok(bytesEqual(gotA, dataA), "the shell's own file round-trips despite serving holder requests mid-PUT");
         t.ok(bytesEqual(gotB, dataB), "the StorageNode's file round-trips — the shell held + served its blocks concurrently");
@@ -193,28 +193,32 @@ export async function run(t) {
     t.group("holder: a confined shell holder is byte-compatible with the host-side initiator (cross-path parity)");
     {
       const net = new LoopbackNetwork();
-      // Pure holders — they never initiate, so they need no peers of their own.
+      cohortSet = new Set();
+      // Pure holders — they never initiate. They still need the WRITER in their roster,
+      // because a holder anchors a descriptor's author to a peer it knows (§4.3): a
+      // signature that verifies against a key nobody knows binds authority to nothing.
       const shells = [];
       for (let i = 0; i < 5; i++) shells.push(await bootShell(net));
       const [sn] = await createConnectedCohort({
         // Same signed bundle as the shells ⇒ same author scope (cross-path parity).
         // blockSize back to test scale so this tiny file takes the RS path across the cohort.
-        count: 1, network: net, sodium, wasm: { bundleBlob }, config: { blockSize: 64 }, timeoutMs: TIMEOUT,
+        count: 1, network: net, sodium, wasm: { bundleBlob }, config: { blockSize: 1024 }, timeoutMs: TIMEOUT,
       });
       for (const e of shells) {
         sn.addPeer(e.peerId);
+        cohortSet.add(sn.peerId);
         sn.net.addPeerAddr(e.peerId, { host: "127.0.0.1", port: e.net.port, transport: "tcp" });
         e.net.addPeerAddr(sn.peerId, { host: "127.0.0.1", port: sn.net.port, transport: "tcp" });
       }
       await Promise.all([sn.net.ready(), ...shells.map((e) => e.net.ready())]);
       try {
         // Written by the trusted host-side path, served entirely by confined shells.
-        const data = file(800, 21);
+        const data = file(12800, 21);
         const put = await sn.put(data);
         let holding = 0;
         for (const e of shells) if ((await e.shell.fs.list()).length > 0) holding++;
         t.ok(holding >= 4, "the host-side initiator placed blocks across the confined shell holders");
-        const got = await sn.get(put.manifestId, put.key);
+        const got = await sn.get(put.root, put.key);
         t.ok(bytesEqual(got, data), "host-side PUT reads back through the confined holders — the guest holder is wire-compatible");
       } finally {
         shells.forEach((e) => e.shell.close());

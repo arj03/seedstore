@@ -11,10 +11,11 @@
 import type { Sodium } from "./sodium.js";
 import { writeU32BE } from "./util.js";
 
-// Nonce domain tags separating the manifest stream from the body stream so the
-// two never share a (K, nonce) pair (§4.4).
-export const DOMAIN_MANIFEST = 0x00;
-export const DOMAIN_BODY = 0x01;
+// The nonce's domain byte is the chunk's own index-tree LEVEL (§4.3): 0 for the
+// file's ciphertext, ℓ > 0 for the index chunks above it. Levels never share a
+// (K, nonce) pair with each other or with the body, and there is no separate
+// manifest domain to keep in step (§4.4).
+export const LEVEL_BODY = 0x00;
 
 /** Content-address hash for block_id (§4.2). Block-ids never cross into the
  *  kernel — they are pure content addressing within the storage layer — so the

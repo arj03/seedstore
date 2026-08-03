@@ -9,7 +9,7 @@
 // admission and the §14 quota — is the confined holder's, covered end-to-end over
 // the real wire in protocol.test.mjs.
 
-import { Crypto, DOMAIN_BODY, DOMAIN_MANIFEST } from "../build/host/crypto.js";
+import { Crypto, LEVEL_BODY } from "../build/host/crypto.js";
 import { bytesEqual } from "../build/host/util.js";
 
 import { ensureSodium, newKey } from "./helpers.mjs";
@@ -28,14 +28,14 @@ export async function run(t) {
   {
     const K = crypto.randomKey();
     const plain = sodium.randombytes_buf(1000);
-    const ct = crypto.encrypt(K, DOMAIN_BODY, 0, plain);
+    const ct = crypto.encrypt(K, LEVEL_BODY, 0, plain);
     t.eq(ct.length, plain.length, "ciphertext is same length as plaintext (no MAC)");
-    const back = crypto.decrypt(K, DOMAIN_BODY, 0, ct);
+    const back = crypto.decrypt(K, LEVEL_BODY, 0, ct);
     t.ok(bytesEqual(back, plain), "decrypt(encrypt(x)) == x");
-    // Different domain / index → different keystream, so ciphertext differs.
-    const ctManifest = crypto.encrypt(K, DOMAIN_MANIFEST, 0, plain);
-    const ctIdx1 = crypto.encrypt(K, DOMAIN_BODY, 1, plain);
-    t.ok(!bytesEqual(ct, ctManifest), "domain tag separates manifest from body stream");
+    // A different LEVEL or chunk index → different keystream, so ciphertext differs.
+    const ctIndex = crypto.encrypt(K, LEVEL_BODY + 1, 0, plain);
+    const ctIdx1 = crypto.encrypt(K, LEVEL_BODY, 1, plain);
+    t.ok(!bytesEqual(ct, ctIndex), "the level byte separates an index stream from the body stream");
     t.ok(!bytesEqual(ct, ctIdx1), "chunk index changes the keystream");
   }
 

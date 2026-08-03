@@ -200,7 +200,7 @@ node "$SHELL" --policy allowed-keys.json --bundle ./bundle/seedstore.skb --dir .
      --peers "<pkA>@127.0.0.1:7401,<pkB>@127.0.0.1:7402,<pkC>@127.0.0.1:7403,<pkD>@127.0.0.1:7404" \
      --put ./notes.txt
 #   PUT ok: 8 chunk(s)                 ← a ~4 KB file at the default RS(2,2)/256 B blocks
-#     --get bdbc41…:74a32f…            ← manifest-id : content-key K
+#     --get 0155a2…:74a32f…            ← root descriptor : content-key K
 
 node "$SHELL" --policy allowed-keys.json --bundle ./bundle/seedstore.skb --dir ./client \
      --peers "<pkA>@…,<pkB>@…,<pkC>@…,<pkD>@…" \
@@ -208,8 +208,8 @@ node "$SHELL" --policy allowed-keys.json --bundle ./bundle/seedstore.skb --dir .
 #   GET ok: 4000 B → ./restored.txt
 ```
 
-`--get` is `<manifest-id>:<key>` — the pair PUT printed; without `--out` the bytes
-go to stdout. The manifest-id locates the file; the key `K` decrypts it (lose `K`
+`--get` is `<root-descriptor>:<key>` — the pair PUT printed; without `--out` the bytes
+go to stdout. The root descriptor locates the file; the key `K` decrypts it (lose `K`
 and the holders keep only permanent noise, §11). The shell flags themselves
 (`--listen`/`--ws-listen`/`--peers`/`--dir`/`--key`/`--timeout`) are the generic
 ones (seedkernel §12.8); `--put`, `--get`, and the storage bundle are what this
@@ -316,8 +316,8 @@ path; same-machine tabs connect on host candidates without it.)
 - **bridges** — crypto host services, the `store.local` backend, and the
   capability gate end-to-end via seedkernel's forwarder fixture (§8.2).
 - **manifest** — descriptor/manifest round trips, author signature is
-  tamper-evident, manifest encrypt + `manifest_id` stability, and the one-model
-  descriptor math: coded vs. replicated by id count, `r` = *m*+1, the placement
+  tamper-evident, index-list encrypt round trip, and the one-shape descriptor
+  math: multiplicity as the replica count, `r` = *m*+1, the placement
   slots, and the loss margin agreeing for both kinds at production geometry.
 - **protocol** — the batched OFFER/FETCH wire (`host/protocol.ts`): self-delimiting
   offer entries, the per-block accept mask, FETCH present/absent blocks, and a
@@ -518,17 +518,28 @@ what lets the browser demos store across just one or two holders. A deployment
 that must *guarantee* the full durability at write time would instead fail the
 PUT; the reference favours liveness.
 
-**Coded and replicated chunks are one model.** A chunk is *k* + *m* ids (coded,
-one block per holder) or *k* ids (replicated, each on *r* = *m*+1 holders), and
-both record the same *m* — "survives *m* losses" (§4.1). Placement expands either
-into the same list of slots, so `placeChunksBatched` fans both out identically;
-reads take any *k* listed blocks; and repair is one audit against one health
-number, the **loss margin**, healed back to whatever the chunk's own signed
-descriptor asks for. Nothing about durability is injected config: *r* and the
-low-water mark ⌈*m*/2⌉ are read off the descriptor (`replicaTarget` /
-`lowWaterMargin` in `manifest-core.ts`), so a repairer needs no deployment config
-and a mixed-geometry cohort heals each chunk to the count its author signed. The
-browser demos run *k*=1 deliberately — surviving the loss of a holder in a two- or
-three-node cohort means replication, not coding — and a *k*=1 chunk is simply the
-replicated shape, never an RS code whose parity would come out byte-identical to
-its lone data block.
+**Coded and replicated chunks are one SHAPE, not two models.** Every chunk lists
+*n* = *k* + *m* ids and records the same *m* — "survives *m* losses" (§4.1). Where
+the code degenerates (*k*=1, RS(1,*m*) parity ≡ data) the descriptor simply lists
+its one block *m*+1 times, so **multiplicity is the replica count** and there is
+nothing to branch on: the placement slots are the listed ids, reads take any *k*
+distinct listed blocks, and repair is one audit against one health number — the
+**loss margin**, `Σ min(live, multiplicity) − k` — healed back to whatever the
+chunk's own signed descriptor asks for. Nothing about durability is injected
+config: *r* and the low-water mark ⌈*m*/2⌉ are read off the descriptor
+(`copyTargets` / `lowWaterMargin` in `manifest-core.ts`), so a repairer needs no
+deployment config and a mixed-geometry cohort heals each chunk to the count its
+author signed. The browser demos run *k*=1 deliberately — surviving the loss of a
+holder in a two- or three-node cohort means replication, not coding.
+
+**A chunk holds file bytes or descriptors; a file is one descriptor.** There is no
+manifest object and no second code path: `placeStream` is the only thing that turns
+bytes into placed chunks, and a file's descriptor list is bytes, so `putFinish`
+calls it again on its own output until one chunk is left. That loop runs *zero*
+times for a file under `k·B`, once up to ~1 GB, twice up to ~2.5 TB — bounded and
+shallow because one chunk holds thousands of descriptors. Its only precondition —
+a chunk holds two descriptors — depends on `(k, blockSize)` alone and is checked
+when a PUT opens. What a reader is handed is the **root descriptor**
+(variable-length, `PutResult.root`) rather than a 32-byte id — the whole ergonomic
+cost — and in exchange the nonce domain is the chunk's own signed `level`, and no
+block on the wire is ever larger than `blockSize`.

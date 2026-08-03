@@ -275,7 +275,7 @@ for (let i = 0; i < gets && tokens.length; i++) {
   const e = newEpoch(`get${i}`);
   const t0 = now();
   try {
-    const out = await node.get(tok.manifestId, tok.key);
+    const out = await node.get(tok.root, tok.key);
     const ms = now() - t0;
     const ok = out.length === data.length;
     console.log(`GET #${i + 1}: ${ms.toFixed(0)} ms — ${mbs(out.length, ms)} MB/s ${ok ? "(bytes match)" : "(LENGTH MISMATCH!)"}`);

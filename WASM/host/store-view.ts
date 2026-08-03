@@ -23,13 +23,13 @@ const DSC = ".dsc"; // author-signed chunk descriptor envelope (§4.3)
 
 /** What a holder keeps for one block: the ciphertext and the signed descriptor
  *  envelope its chunk travels under (§4.3). The descriptor is stored verbatim
- *  so a repairer that lacks the manifest still has the chunk's shape. */
+ *  so a repairer that lacks the file's index still has the chunk's shape. */
 export interface StoredBlock {
   bytes: Uint8Array;
   /** The author-signed chunk-descriptor envelope (wire bytes). Anything the guest
    *  holder admits over the wire has one — the §18 placement messages make it
-   *  mandatory, the replicated manifest block included — so null here means only
-   *  that this block was planted into the fs directly (tests, tooling). */
+   *  mandatory, an index chunk's blocks included — so null here means only that
+   *  this block was planted into the fs directly (tests, tooling). */
   descriptor: Uint8Array | null;
 }
 

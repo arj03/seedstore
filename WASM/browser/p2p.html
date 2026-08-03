@@ -147,7 +147,7 @@
 
 <h2>3 · retrieve a file (GET)</h2>
 <div class="row">
-  <input id="getToken" class="token mono" type="text" placeholder="manifestIdHex:keyHex" />
+  <input id="getToken" class="token mono" type="text" placeholder="rootHex:keyHex" />
 </div>
 <div class="row"><button id="get" disabled>Retrieve &amp; download</button></div>
 
@@ -495,7 +495,7 @@ $("store").onclick = async () => {
     const t0 = performance.now();
     const r = await node.put(data);
     const ms = performance.now() - t0;
-    const token = hex(r.manifestId) + ":" + hex(r.key);
+    const token = hex(r.root) + ":" + hex(r.key);
     $("token").textContent = token;
     // A PUT uploads (k+m)/k × the file (RS(1,1) = 2× — a copy to each holder), so
     // "wire MB/s" is the real upload rate; compare it to GET's MB/s. If wire MB/s ≈
@@ -565,7 +565,7 @@ $("store").onclick = async () => {
 $("get").onclick = async () => {
   try {
     const [mHex, kHex] = $("getToken").value.trim().split(":");
-    if (!mHex || !kHex) { log("token must be manifestIdHex:keyHex"); return; }
+    if (!mHex || !kHex) { log("token must be rootHex:keyHex"); return; }
     log("\nGET (locate via have/want, fetch any k, decode, decrypt)…");
     const t0 = performance.now();
     const out = await node.get(fromHex(mHex), fromHex(kHex));

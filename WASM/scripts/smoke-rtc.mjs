@@ -146,7 +146,7 @@ try {
     if (held < r.blockIds.length) onAll = false;
   }
 
-  const got = await owner.node.get(r.manifestId, r.key);
+  const got = await owner.node.get(r.root, r.key);
   const roundTrip = bytesEqual(got, data);
 
   // Negative: a stranger with the right room but the WRONG contact secret. It reaches

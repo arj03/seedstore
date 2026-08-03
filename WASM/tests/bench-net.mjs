@@ -71,7 +71,7 @@ async function measure(W) {
 
   net.reset();
   t0 = performance.now();
-  const got = await owner.get(put.manifestId, put.key);
+  const got = await owner.get(put.root, put.key);
   const getMs = performance.now() - t0;
   const getPeak = net.maxInflightWork;
   const getReqs = net.requests;

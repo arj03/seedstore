@@ -1,17 +1,22 @@
-// The PURE, cap-free core of the file descriptor + manifest (README §4.3): the
-// fixed binary codecs and structural validation, with NO crypto/capability
-// dependency. This is the *one definition* of the descriptor/manifest wire format,
-// shared two ways: the host imports it (manifest.ts re-exports it and adds the
-// sodium-backed sign/verify), and the build stitches it verbatim into the
-// zero-authority guest bundle (scripts/build-guest.mjs) so the confined
-// orchestration never re-implements the format. Every function here is synchronous
-// and QuickJS-safe (Uint8Array only — no TextEncoder/Buffer).
+// The PURE, cap-free core of the file descriptor (README §4.3): the fixed binary
+// codecs and structural validation, with NO crypto/capability dependency. This is
+// the *one definition* of the descriptor wire format, shared two ways: the host
+// imports it (manifest.ts re-exports it and adds the sodium-backed sign/verify),
+// and the build stitches it verbatim into the zero-authority guest bundle
+// (scripts/build-guest.mjs) so the confined orchestration never re-implements the
+// format. Every function here is synchronous and QuickJS-safe (Uint8Array only —
+// no TextEncoder/Buffer).
+//
+// There is no manifest *object* here, and no manifest codec: a file's index is an
+// ordered list of these same descriptors, chunked and placed exactly like the file
+// body (§4.3), so the only list format is the self-delimiting one at the bottom of
+// this file.
 //
 // Signing/verifying lives in manifest.ts (host) and the guest's CAP_SIGN/CAP_VERIFY
 // seam, NOT here — the author signature is checked from the author's *public* key
 // alone, never the read key, which is what preserves keyless repair (§9).
 
-import { bytesEqual, writeU32BE, readU32BE, concatBytes } from "./util.js";
+import { bytesEqual, toHex, writeU32BE, readU32BE, concatBytes } from "./util.js";
 
 export const BLOCK_ID_LEN = 32;
 
@@ -27,51 +32,60 @@ export const TAG_HEAD = 0x03;      // reserved: the §27.3 mutable file head (no
 
 // ── chunk descriptor ───────────────────────────────────────────────────────
 
-// `m` means the same thing for either kind of chunk: **this chunk survives m losses**
-// (§4.1). The id count is the whole of the distinction:
+// ONE chunk shape, not two. `n = k + m` always, and `m` always means **this chunk
+// survives m losses** (§4.1). Where the code degenerates — `k = 1`, where RS(1, m)
+// parity is byte-identical to the lone data block — the descriptor simply LISTS that
+// block `m + 1` times: multiplicity carries the replica count, so a coded chunk and a
+// replicated one are the same object read the same way. There is no id count to branch
+// on, no replica target to compute, and no second row in a table anywhere.
 //
-//   coded       blockIds.length === k + m   the k data + m parity blocks, one per peer
-//   replicated  blockIds.length === k       (k = 1 only) the lone block on r = m + 1 peers
-//
-// Replicated at k > 1 cannot be produced — a partial chunk is coded at its own k, which
-// strictly dominates replication for all k ≥ 2. k = 1 is the degenerate case where
-// RS(1,m) parity ≡ data, so the codec is skipped and the block is replicated r ways
-// instead (the manifest's path, and any single-block file).
+// `level` places the chunk in the file's index tree (§4.3) and doubles as the nonce
+// domain (§4.4): level 0 is the file's own ciphertext, level ℓ > 0 an index chunk whose
+// plaintext is the ordered descriptor list of level ℓ−1. `tailBytes` is how many of the
+// chunk's `k × blockSize` plaintext bytes are real, which is what replaces the manifest's
+// old `file_size` field — a reader trims each chunk by its own signed number.
 export interface Descriptor {
+  level: number;        // 0 = file body, ℓ > 0 = index over level ℓ−1 (also the nonce domain)
   k: number;            // data blocks (0..k are data rows)
   m: number;            // losses this chunk survives: m parity blocks, or m extra replicas
   blockSize: number;
-  blockIds: Uint8Array[]; // k + m ids by generator-row index (coded), or k ids (replicated)
+  tailBytes: number;    // real plaintext bytes in this chunk; the rest is zero padding
+  blockIds: Uint8Array[]; // k + m ids by generator-row index; a k=1 chunk repeats its one id
 }
+
+const CORE_HEAD = 13; // tag,level,k,m (4) + blockSize (4) + tailBytes (4) + n (1)
 
 /** The descriptor's signed core — the bytes the author signs over (§4.3). Leads with
  *  the descriptor format tag (§16). */
 export function encodeDescriptorCore(d: Descriptor): Uint8Array {
   const n = d.blockIds.length;
-  if (n !== d.k + d.m && !(n === d.k && d.k === 1)) {
-    throw new Error("descriptor: blockIds.length must be k+m (coded) or k=1 (replicated)");
-  }
-  const head = new Uint8Array(1 + 1 + 1 + 4 + 1);
+  if (n !== d.k + d.m) throw new Error("descriptor: blockIds.length must be k+m");
+  if (d.tailBytes > d.k * d.blockSize) throw new Error("descriptor: tailBytes exceeds the chunk");
+  const head = new Uint8Array(CORE_HEAD);
   head[0] = TAG_DESCRIPTOR; // leading format tag (§16)
-  head[1] = d.k;
-  head[2] = d.m;
-  writeU32BE(head, 3, d.blockSize);
-  head[7] = n;
+  head[1] = d.level;
+  head[2] = d.k;
+  head[3] = d.m;
+  writeU32BE(head, 4, d.blockSize);
+  writeU32BE(head, 8, d.tailBytes);
+  head[12] = n;
   return concatBytes([head, ...d.blockIds]);
 }
 
 export function decodeDescriptorCore(core: Uint8Array): Descriptor {
-  if (core.length < 8 || core[0] !== TAG_DESCRIPTOR) throw new Error("descriptor: bad core");
-  const k = core[1], m = core[2];
-  const blockSize = readU32BE(core, 3);
+  if (core.length < CORE_HEAD || core[0] !== TAG_DESCRIPTOR) throw new Error("descriptor: bad core");
+  const level = core[1], k = core[2], m = core[3];
+  const blockSize = readU32BE(core, 4);
+  const tailBytes = readU32BE(core, 8);
   if (k < 1) throw new Error("descriptor: k must be >= 1");
   if (blockSize < 1) throw new Error("descriptor: blockSize must be >= 1");
-  const n = core[7];
-  if (n !== k + m && !(n === k && k === 1)) throw new Error("descriptor: n must be k+m (coded) or k=1 (replicated)");
-  if (core.length !== 8 + n * BLOCK_ID_LEN) throw new Error("descriptor: truncated");
+  if (tailBytes > k * blockSize) throw new Error("descriptor: tailBytes exceeds the chunk");
+  const n = core[12];
+  if (n !== k + m) throw new Error("descriptor: n must be k+m");
+  if (core.length !== CORE_HEAD + n * BLOCK_ID_LEN) throw new Error("descriptor: truncated");
   const blockIds: Uint8Array[] = [];
-  for (let i = 0; i < n; i++) blockIds.push(core.slice(8 + i * BLOCK_ID_LEN, 8 + (i + 1) * BLOCK_ID_LEN));
-  return { k, m, blockSize, blockIds };
+  for (let i = 0; i < n; i++) blockIds.push(core.slice(CORE_HEAD + i * BLOCK_ID_LEN, CORE_HEAD + (i + 1) * BLOCK_ID_LEN));
+  return { level, k, m, blockSize, tailBytes, blockIds };
 }
 
 export interface SignedDescriptor {
@@ -82,7 +96,7 @@ export interface SignedDescriptor {
 }
 
 export function parseSignedDescriptor(env: Uint8Array): SignedDescriptor {
-  if (env.length < 32 + 64 + 8) throw new Error("signed descriptor: too short");
+  if (env.length < 32 + 64 + CORE_HEAD) throw new Error("signed descriptor: too short");
   const authorPk = env.slice(0, 32);
   const sig = env.slice(32, 96);
   const core = env.slice(96);
@@ -97,50 +111,36 @@ export function descriptorContains(d: Descriptor, blockId: Uint8Array): boolean 
 
 // ── descriptor-derived geometry (§4.1, §8, §9) ───────────────────────────────
 // Everything a reader or a repairer needs beyond the ids themselves is computed from
-// the signed (k, m, id-count) here, so it can never be a deployment knob that drifts
+// the signed (k, m, id list) here, so it can never be a deployment knob that drifts
 // out of step with the chunk it describes. A cohort running mixed geometry (§4.1) is
 // therefore repaired correctly chunk by chunk, from each chunk's own bytes.
 
-/** Replicated ⇔ the descriptor lists only k = 1 data block, destined for r = m + 1
- *  peers; coded ⇔ it lists all k + m blocks, one per peer (§4.1). (At m = 0 the two
- *  coincide — no parity and no second copy is the same zero-redundancy chunk.) */
-export function isReplicated(d: Descriptor): boolean {
-  return d.blockIds.length === d.k;
-}
-
-/** Copies of each *listed* block a healthy chunk wants on distinct peers: r = m + 1
- *  replicas, or the single copy of each of a coded chunk's k + m blocks, whose
- *  redundancy is the parity instead (§4.1, §10). */
-export function replicaTarget(d: Descriptor): number {
-  return isReplicated(d) ? d.m + 1 : 1;
-}
-
-/** The placement slots a chunk wants — one (block, distinct peer) target apiece, as
- *  indices into blockIds (§6, §10). Coded: one slot per block. Replicated: r slots per
- *  block, replica-major, so the first k slots are one whole copy and a thin cohort
- *  fills a complete copy before starting a second. */
-export function slotIndices(d: Descriptor): number[] {
-  const out: number[] = [];
-  const r = replicaTarget(d);
-  for (let c = 0; c < r; c++) for (let i = 0; i < d.blockIds.length; i++) out.push(i);
-  return out;
+/** How many copies of each DISTINCT listed block a healthy chunk wants, on distinct
+ *  peers (§4.1, §10). A coded chunk lists each of its k + m blocks once, so each wants
+ *  one holder and the parity is its redundancy; a k = 1 chunk lists its lone block
+ *  m + 1 times, so multiplicity *is* the replica count. Keyed by id hex. */
+export function copyTargets(d: Descriptor): Map<string, number> {
+  const want = new Map<string, number>();
+  for (const id of d.blockIds) {
+    const h = toHex(id);
+    want.set(h, (want.get(h) ?? 0) + 1);
+  }
+  return want;
 }
 
 /** The chunk's **loss margin**: how many further losses it survives right now, given
- *  the live-holder count of each listed block (in blockIds order). Coded: any k of the
- *  k + m blocks reconstruct, so the spare is live-blocks − k. Replicated: every listed
- *  block is needed and each carries copies, so the spare is the fewest copies − 1.
- *  Both are m on a fully-healthy chunk and 0 one loss from death — one health number
- *  for both kinds of chunk (§8). */
+ *  the live-holder count of each listed block (in blockIds order — repeats of one id
+ *  repeat its count). Each distinct block contributes at most the copies the descriptor
+ *  asked for, so an over-replicated block can never inflate the margin, and the sum
+ *  minus k is the spare: `live_blocks − k` for a coded chunk, `min(copies, m+1) − 1` for
+ *  a k = 1 one. Both are m on a fully-healthy chunk and 0 one loss from death — one
+ *  health number, one formula (§8). */
 export function lossMargin(d: Descriptor, copies: number[]): number {
-  if (isReplicated(d)) {
-    let min = copies.length > 0 ? copies[0] : 0;
-    for (let i = 1; i < copies.length; i++) if (copies[i] < min) min = copies[i];
-    return min - 1;
-  }
-  let live = 0;
-  for (let i = 0; i < copies.length; i++) if (copies[i] > 0) live++;
-  return live - d.k;
+  const live = new Map<string, number>();
+  for (let i = 0; i < d.blockIds.length; i++) live.set(toHex(d.blockIds[i]), copies[i] ?? 0);
+  let usable = 0;
+  for (const [h, want] of copyTargets(d)) usable += Math.min(live.get(h) ?? 0, want);
+  return usable - d.k;
 }
 
 /** The low-water mark, in loss margin: repair fires while the margin is below ⌈m/2⌉ —
@@ -150,36 +150,17 @@ export function lowWaterMargin(d: Descriptor): number {
   return Math.ceil(d.m / 2);
 }
 
-// ── manifest ─────────────────────────────────────────────────────────────
+// ── the index list (§4.3) ────────────────────────────────────────────────────
+// A file's index level is nothing but its ordered signed descriptors, length-prefixed
+// so the list is self-delimiting. It carries no header: there is no version (the
+// descriptor's own tag covers it), no file_size (each descriptor signs its tailBytes),
+// and no enc alg (the format version fixes it). This byte stream is then encrypted and
+// chunked by the SAME window/chunk path the file body takes, so it has no size ceiling
+// of its own and no object type of its own.
 
-export const ENC_XCHACHA20 = 1;
-
-export interface Manifest {
-  fileSize: number;
-  encAlg: number;            // §4.4
-  chunks: Uint8Array[];      // signed descriptor envelopes, in file order
-}
-
-// The manifest header does NOT carry (k, m, blockSize): the geometry is the chunk
-// descriptor's, which is self-describing (§4.1/§4.3) — GET and repair read k/m/blockSize
-// from each signed descriptor, never from a manifest field or deployment config that
-// could disagree. The manifest holds only what is genuinely per-file: the size, the
-// encryption algorithm, and the ordered list of chunk descriptors.
-
-/** The manifest plaintext (§4.3). It is then encrypted under K and replicated
- *  across cohort peers; manifest_id = content_hash(ciphertext). */
-export function encodeManifest(man: Manifest): Uint8Array {
-  const head = new Uint8Array(1 + 8 + 1 + 4);
-  let o = 0;
-  head[o++] = 1; // version
-  // file_size as u64 BE
-  const hi = Math.floor(man.fileSize / 0x100000000);
-  writeU32BE(head, o, hi); o += 4;
-  writeU32BE(head, o, man.fileSize >>> 0); o += 4;
-  head[o++] = man.encAlg;
-  writeU32BE(head, o, man.chunks.length); o += 4;
-  const parts: Uint8Array[] = [head];
-  for (const env of man.chunks) {
+export function encodeDescriptorList(envelopes: Uint8Array[]): Uint8Array {
+  const parts: Uint8Array[] = [];
+  for (const env of envelopes) {
     const len = new Uint8Array(4);
     writeU32BE(len, 0, env.length);
     parts.push(len, env);
@@ -187,22 +168,15 @@ export function encodeManifest(man: Manifest): Uint8Array {
   return concatBytes(parts);
 }
 
-export function decodeManifest(buf: Uint8Array): Manifest {
-  if (buf.length < 14 || buf[0] !== 1) throw new Error("manifest: bad header");
-  let o = 1;
-  const hi = readU32BE(buf, o); o += 4;
-  const lo = readU32BE(buf, o); o += 4;
-  const fileSize = hi * 0x100000000 + lo;
-  const encAlg = buf[o++];
-  const chunkCount = readU32BE(buf, o); o += 4;
-  if (fileSize > 0x10000000000) throw new Error("manifest: fileSize out of bounds"); // 2^40 ≈ 1 TiB sanity cap
-  if (chunkCount === 0) throw new Error("manifest: chunkCount must be >= 1");
-  const chunks: Uint8Array[] = [];
-  for (let i = 0; i < chunkCount; i++) {
-    if (o + 4 > buf.length) throw new Error("manifest: truncated chunk length");
+export function decodeDescriptorList(buf: Uint8Array): Uint8Array[] {
+  const out: Uint8Array[] = [];
+  let o = 0;
+  while (o < buf.length) {
+    if (o + 4 > buf.length) throw new Error("descriptor list: truncated length");
     const len = readU32BE(buf, o); o += 4;
-    if (o + len > buf.length) throw new Error("manifest: truncated chunk");
-    chunks.push(buf.slice(o, o + len)); o += len;
+    if (len === 0 || o + len > buf.length) throw new Error("descriptor list: truncated entry");
+    out.push(buf.slice(o, o + len)); o += len;
   }
-  return { fileSize, encAlg, chunks };
+  if (out.length === 0) throw new Error("descriptor list: empty");
+  return out;
 }

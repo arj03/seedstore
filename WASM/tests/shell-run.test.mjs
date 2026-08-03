@@ -27,7 +27,7 @@ import { TRANSPORT_BUNDLE_B64 } from "seedkernel-wasm/transport-bundle";
 import {
   loadSodium, generateKeyPair, LoopbackNetwork, createConnectedCohort,
 } from "../build/host/node.js";
-import { toHex, bytesEqual, concatBytes } from "../build/host/util.js";
+import { toHex, bytesEqual, concatBytes, readU32BE } from "../build/host/util.js";
 import { buildBundle } from "./bundle-fixture.mjs";
 import { makeT } from "./harness.mjs";
 
@@ -80,13 +80,18 @@ export async function run(t) {
       holders = await createConnectedCohort({
         // Match the shell's test-scale geometry so this tiny file spreads across the
         // cohort (the signed bundle ships PRODUCTION 256 KiB blocks).
-        count: 6, network: net, sodium, wasm: { bundleBlob }, config: { blockSize: 64 }, timeoutMs: 40,
+        count: 6, network: net, sodium, wasm: { bundleBlob }, config: { blockSize: 1024 }, timeoutMs: 40,
       });
 
       // The shell knows only its policy + the kernel; storage arrives as content. The
       // policy admits the bundle author for apps AND the transport bundle's author for
       // the transport role — the latter is what stands the shell's network up.
+      //
+      // A cohort is MUTUAL: the holders must know the shell too, because a holder now
+      // anchors a descriptor's author to a peer it knows (§4.3) — a valid signature from
+      // a stranger is exactly the forgery the anchor exists to stop.
       const shellIdentity = generateKeyPair(sodium);
+      for (const h of holders) h.addPeer(toHex(shellIdentity.publicKey));
       shell = await boot({
         policyJson: JSON.stringify({
           authors: [toHex(author.publicKey)],
@@ -100,7 +105,7 @@ export async function run(t) {
         // Operator config merges over the signed bundle config: bring blockSize back
         // to test scale (the bundle ships the PRODUCTION 256 KiB, which would make
         // this tiny test file single-block/replicated instead of RS across the cohort).
-        config: { blockSize: 64 },
+        config: { blockSize: 1024 },
       });
       await shell.net.start();
       for (const h of holders) await link(shell, toHex(shellIdentity.publicKey), h, new Set());
@@ -111,16 +116,16 @@ export async function run(t) {
       }
 
       // PUT, orchestrated by the confined guest the shell loaded.
-      const data = file(600, 7); // > k blocks → multi-chunk RS path
+      const data = file(9600, 7); // > k blocks → multi-chunk RS path
       const r = await shell.runGuest("put", data);
-      const manifestId = r.slice(0, 32), key = r.slice(36, 68);
+      const key = r.slice(0, 32), root = r.slice(48, 48 + readU32BE(r, 44));
       let holding = 0;
       for (const h of holders) if ((await h.store.list()).length > 0) holding++;
       t.ok(holding >= 4, "the shell's guest placed blocks across several distinct holders");
       t.eq((await shell.fs.list()).length, 0, "the shell itself holds nothing — durability is the cohort's");
 
       // GET, same confined guest, reconstructing from the holders.
-      const got = await shell.runGuest("get", concatBytes([manifestId, key]));
+      const got = await shell.runGuest("get", concatBytes([key, root]));
       t.ok(bytesEqual(got, data), "PUT → GET round-trips: the generic shell ran storage over primitive caps");
 
       // A shell whose policy does not allow the bundle author refuses to load it.

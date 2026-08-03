@@ -228,7 +228,7 @@ if (offerReqs) {
 // ── GET side, for context ──────────────────────────────────────────────────
 net.stats.clear();
 const g0 = performance.now();
-const got = await initiator.get(put.manifestId, put.key);
+const got = await initiator.get(put.root, put.key);
 const getMs = performance.now() - g0;
 let fetchMs = 0, fetchReqs = 0;
 for (const id of holderIds) {

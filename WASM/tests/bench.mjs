@@ -7,7 +7,7 @@
 
 import { readFileSync } from "node:fs";
 import { performance } from "node:perf_hooks";
-import { Crypto, DOMAIN_BODY } from "../build/host/crypto.js";
+import { Crypto, LEVEL_BODY } from "../build/host/crypto.js";
 import { CodecClient } from "./codec-client.mjs";
 import { loadSodium } from "seedkernel-wasm";
 
@@ -72,7 +72,7 @@ let dec = performance.now() - t0;
 // ── component breakdown (encrypt-only, hash-only) ──────────────────────────
 const key = crypto.randomKey();
 t0 = performance.now();
-for (let c = 0; c < numChunks; c++) crypto.encrypt(key, DOMAIN_BODY, c, data.subarray(c * chunkData, (c + 1) * chunkData));
+for (let c = 0; c < numChunks; c++) crypto.encrypt(key, LEVEL_BODY, c, data.subarray(c * chunkData, (c + 1) * chunkData));
 let encr = performance.now() - t0;
 
 // Hash the n blocks of every chunk (data + parity = 1.6× the file).
@@ -89,7 +89,7 @@ let hsh = performance.now() - t0;
 // ── full PUT-style pipeline: encrypt + hash every block + encode ───────────
 t0 = performance.now();
 for (let c = 0; c < numChunks; c++) {
-  const ct = crypto.encrypt(key, DOMAIN_BODY, c, data.subarray(c * chunkData, (c + 1) * chunkData));
+  const ct = crypto.encrypt(key, LEVEL_BODY, c, data.subarray(c * chunkData, (c + 1) * chunkData));
   const dataBlocks = split(ct, 0, K, B);
   const parity = codec.rsEncode(K, M, B, dataBlocks);
   for (const b of dataBlocks) crypto.hash(b);

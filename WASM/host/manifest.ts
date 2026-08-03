@@ -1,5 +1,6 @@
-// The two small objects that describe a file (README §4.3): the per-chunk
-// *signed* descriptor and the file *manifest*.
+// The one object that describes a file (README §4.3): the per-chunk *signed*
+// descriptor. There is no separate manifest object — a file's index is an ordered
+// list of these same descriptors, chunked and placed like any other bytes.
 //
 // The pure binary codecs + structural validation live in manifest-core.ts — the
 // single definition of the wire format, shared with the zero-authority guest
@@ -8,7 +9,9 @@
 // author signature. The descriptor is signed by the file's author (the §2 identity)
 // so a holder cannot forge it to misdirect repair; crucially the signature is
 // checked from the author's *public* key alone, never the read key, which is what
-// preserves keyless repair (§9). The manifest names *what* blocks a file is made
+// preserves keyless repair (§9). A holder additionally anchors that key to a peer
+// its cohort knows (§4.3) — a signature that verifies against a key nobody knows
+// binds authority to nothing. The descriptor names *what* blocks a chunk is made
 // of, never *which* peers hold them — placement is discovered live via have/want
 // (§5), so it never goes stale under churn.
 
@@ -27,12 +30,12 @@ import { guestSignScope, guestSignPrefix } from "seedkernel-wasm/cap-bridge";
 export { guestSignPrefix };
 
 export {
-  BLOCK_ID_LEN, ENC_XCHACHA20,
+  BLOCK_ID_LEN,
   encodeDescriptorCore, decodeDescriptorCore, parseSignedDescriptor,
-  descriptorContains, encodeManifest, decodeManifest,
-  isReplicated, replicaTarget, slotIndices, lossMargin, lowWaterMargin,
+  descriptorContains, encodeDescriptorList, decodeDescriptorList,
+  copyTargets, lossMargin, lowWaterMargin,
 } from "./manifest-core.js";
-export type { Descriptor, SignedDescriptor, Manifest } from "./manifest-core.js";
+export type { Descriptor, SignedDescriptor } from "./manifest-core.js";
 
 // ── scoped signing (README §16, seedkernel §12.2/§14) ────────────────────────
 // The guest's SIGN op is a *scoped* oracle: the kernel signs `DOMAIN_guest ‖ scope ‖
