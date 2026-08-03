@@ -3,29 +3,35 @@
 // implementation of placement, k-of-n, admission, the wire format, and repair: the
 // host (host/storage-node.ts) only boots the kernel and runs this guest in one
 // realm. Every capability is reached through the one `host.call(op, bytes)` seam.
-// The seam is genuinely async: a net op (`CAP_NET_SEND`) resolves to a real Promise
-// the initiator `await`s — so a fan-out is just `await Promise.all(peers.map(...))`,
-// with the host driving the concurrent round trips — while every other cap
-// (crypto/fs/clock/module) still resolves synchronously to its bytes.
+// The seam is genuinely async where the world behind it is: a net op
+// (`CAP_NET_SEND`) and every `FS_*` op resolve to a real Promise the guest
+// `await`s — so a fan-out is just `await Promise.all(peers.map(...))`, and the
+// holder's own store reads await like the initiator's round trips — while the pure
+// crypto (the `host.crypto(name, args)` primitive catalog), clock and module-call
+// resolve synchronously to their bytes.
 //
 // Two roles share this one program and this one realm. The *initiator* entrypoints
 // (`put`/`get`/`repair`) are async — they fan out over net and park mid-`await`
 // while their round trips settle. The *holder* entrypoint (`handle`: HAVE/OFFER/
-// STORE/FETCH, admission, content-addressing, quota, fs writes) is purely
-// synchronous (local fs + crypto, no net) and is invoked re-entrantly (`callSync`),
-// so a node can answer a peer's request *while* its own initiator is parked mid-
-// await in the same realm — a suspended async function is just heap state (the
-// runtime split). Whichever entrypoint runs, the other role's code is dormant.
+// STORE/FETCH, admission, content-addressing, quota, fs writes) is async too, for
+// the same reason the fs seam is: a holder answers from local storage, and storage
+// does not answer in the same turn on a target whose backend is asynchronous
+// (seedkernel core/fs.ts). What once kept the two roles from interleaving — a
+// synchronous second entry that never pumped the job queue — is now the realm's
+// explicit per-realm FIFO (seedkernel realm-queue.ts): one entrypoint runs to
+// completion before the next begins, so an inbound request queues behind a parked
+// initiator and is served when the queue drains (the serialization cost the
+// runtime documents; a node that must serve while initiating runs two realms).
 //
 // This is a plain script, not a module: it has no imports/exports and no ambient
 // authority. It is loaded as source by the host (host/storage-node.ts, or the
 // seedkernel shell) which prepends two constant blocks — the generic
 // `const CAP_* = n;` op catalog (seedkernel's host/cap-bridge.ts) and an `APP`
 // object carrying the storage config + the codec/reputation kernel names — and
-// runs it after the safe-js PREAMBLE that defines `host.call` and `register`.
-// Every capability the guest reaches is an application-neutral primitive; all
-// storage *structure* is right here. The same file is hosted by JSC on Bun today
-// and by WAMR in the native node later — one artifact, both runtimes.
+// runs it after the safe-js PREAMBLE that defines `host.call`, `host.crypto` and
+// `register`. Every capability the guest reaches is an application-neutral
+// primitive; all storage *structure* is right here. The same file is hosted by JSC
+// on Bun today and by WAMR in the native node later — one artifact, both runtimes.
 
 "use strict";
 
@@ -70,9 +76,11 @@ function bytesToStr(b) { let s = ""; for (let i = 0; i < b.length; i++) s += Str
 // the <hex>.blk/.dsc store layout (read back host-side by host/store-view.ts, which
 // implements none of the policy — see there). Config + the codec and
 // reputation kernel names arrive as the injected `APP` constant (prepended by
-// the driver), not as kernel ops. A sync op (crypto/fs/clock/module) resolves to
-// its bytes directly, so its wrapper reads as an ordinary synchronous function; the
-// net wrappers below are `async` and `await` the one round-trip op.
+// the driver), not as kernel ops. The pure crypto primitives go through the
+// name-based catalog (`host.crypto("blake2b-256", …)` etc.) and resolve to their
+// bytes directly; the net and fs wrappers are `async` and `await` their one
+// round-trip op (the fs seam is asynchronous on every backend, so the holder
+// awaits its store ops exactly as the initiator awaits its round trips).
 
 // The op bytes of the codec handler (the guest owns its ABI). The reputation handler's
 // op bytes + request framing (REP_OBSERVE/REP_SCORE, encodeScoreReq/encodeObserveReq)
@@ -96,8 +104,9 @@ const CODEC_NAME = strBytes("codec");
 const REP_NAME = strBytes("reputation");
 // The scoped-signature prefix `DOMAIN_guest ‖ scope` (README §16): the CAP_SIGN op signs
 // `prefix ‖ msg`, never the raw msg, so a descriptor signature verifies only in this app's
-// scope. CAP_VERIFY stays raw, so verifyEnv rebuilds `prefix ‖ core` before checking. The
-// runtime derives these bytes from the admitted manifest's (author, app) and injects them
+// scope. The "ed25519/verify" primitive stays raw, so verifyEnv rebuilds `prefix ‖ core`
+// before checking. The runtime derives these bytes from the admitted manifest's
+// (author, app) and injects them
 // as BUNDLE — the guest treats them as an opaque prefix, never reconstructing the kernel's
 // domain string itself, and no build step ever restates them.
 const SIGN_PREFIX = fromHex(BUNDLE.signPrefix);
@@ -112,24 +121,32 @@ const SIGN_PREFIX = fromHex(BUNDLE.signPrefix);
 //
 
 // ── crypto primitives + storage framing ──
-function hash(bytes) { return host.call(CAP_HASH, bytes); }
+// The pure transforms reach the host through the primitive catalog
+// (host.crypto("name", args), the cap-bridge CAP_CRYPTO seam — seedkernel §12.2):
+// BLAKE2b-256 for block-ids, XChaCha20 stream XOR for the §4.4 keystream, and raw
+// Ed25519 verify for the descriptor envelope (which rebuilds the scoped preimage
+// itself, since SIGN scopes but VERIFY stays raw). The authorities — SIGN,
+// IDENTITY, RANDOM — stay ordinary host.call ops, as does the clock and the
+// module call.
+function hash(bytes) { return host.crypto("blake2b-256", bytes); }
 function randomKey() { const n = new Uint8Array(4); wU32(n, 0, 32); return host.call(CAP_RANDOM, n); }
 function identity() { return host.call(CAP_IDENTITY, EMPTY); }
 let myPeerCache = null;
 function myPeer() { if (myPeerCache === null) myPeerCache = toHex(identity()); return myPeerCache; }
 // 24-byte nonce = [domain u8][index u32 BE][0…] (§4.4) — the guest's convention.
 function nonce(domain, index) { const n = new Uint8Array(24); n[0] = domain & 255; wU32(n, 1, index >>> 0); return n; }
-function streamXor(K, non, msg) { return host.call(CAP_STREAM_XOR, concat([non, K, msg])); }
+// host.crypto takes [nonce 24][key 32][message ..] for the xchacha20/xor primitive.
+function streamXor(K, non, msg) { return host.crypto("xchacha20/xor", concat([non, K, msg])); }
 function encrypt(K, domain, index, msg) { return streamXor(K, nonce(domain, index), msg); }
 function decrypt(K, domain, index, ct) { return streamXor(K, nonce(domain, index), ct); }
 // Signed chunk descriptor envelope: [authorPk 32][sig 64][core] (§4.3, §16). The
 // prefix rides both paths: CAP_SIGN prepends `DOMAIN_guest ‖ scope` for us (so signCore
 // passes the bare core and gets back a scoped signature), and verifyEnv rebuilds the same
-// preimage for the raw CAP_VERIFY. The stored envelope still holds only [pk][sig][core] —
-// the prefix is preimage-only, never transmitted.
+// preimage for the raw "ed25519/verify" primitive. The stored envelope still holds only
+// [pk][sig][core] — the prefix is preimage-only, never transmitted.
 function signCore(core) { return concat([identity(), host.call(CAP_SIGN, core), core]); }
 function verifyEnv(env) {
-  return host.call(CAP_VERIFY, concat([env.slice(0, 32), env.slice(32, 96), SIGN_PREFIX, env.slice(96)]))[0] === 1;
+  return host.crypto("ed25519/verify", concat([env.slice(0, 32), env.slice(32, 96), SIGN_PREFIX, env.slice(96)]))[0] === 1;
 }
 
 // ── codec + reputation via the generic module-call ──
@@ -183,25 +200,27 @@ function repObserve(peerPk, t, pass) {
 }
 
 // ── local store over fs.* (the <hex>.blk / <hex>.dsc layout) ─────────────────
-// Existence is `size ≥ 0` (there is no CAP_FS_HAS): the raw CAP_FS_SIZE is 0xFFFFFFFF
+// Every FS_* op round-trips now (the seam is async — seedkernel core/fs.ts), so
+// the whole store layer is async and every caller awaits it. Existence is
+// `size ≥ 0` (there is no CAP_FS_HAS): the raw CAP_FS_SIZE is 0xFFFFFFFF
 // (fs.size → -1) only for an absent key, so a present-but-empty value still reads as held.
-function storeHas(id) { return fsSizeRaw(toHex(id) + STORE_BLK) !== 0xffffffff; }
-function storeGet(id) {
+async function storeHas(id) { return (await fsSizeRaw(toHex(id) + STORE_BLK)) !== 0xffffffff; }
+async function storeGet(id) {
   const hex = toHex(id);
-  const blk = host.call(CAP_FS_GET, strBytes(hex + STORE_BLK));
+  const blk = await host.call(CAP_FS_GET, strBytes(hex + STORE_BLK));
   if (blk[0] !== 1) return null;
-  const dsc = host.call(CAP_FS_GET, strBytes(hex + STORE_DSC));
+  const dsc = await host.call(CAP_FS_GET, strBytes(hex + STORE_DSC));
   return { bytes: blk.slice(1), descriptor: dsc[0] === 1 ? dsc.slice(1) : null };
 }
 // Just the <hex>.dsc sidecar, without dragging the block ciphertext across the
 // bridge — repair audits chunk shape from the descriptor and never needs the .blk
 // bytes (it re-fetches those from holders only where healing actually places).
-function storeGetDescriptor(id) {
-  const dsc = host.call(CAP_FS_GET, strBytes(toHex(id) + STORE_DSC));
+async function storeGetDescriptor(id) {
+  const dsc = await host.call(CAP_FS_GET, strBytes(toHex(id) + STORE_DSC));
   return dsc[0] === 1 ? dsc.slice(1) : null;
 }
-function storeList() {
-  const r = host.call(CAP_FS_LIST, EMPTY), out = [];
+async function storeList() {
+  const r = await host.call(CAP_FS_LIST, EMPTY), out = [];
   let o = 0; const n = rU32(r, o); o += 4;
   for (let i = 0; i < n; i++) {
     const klen = rU32(r, o); o += 4;
@@ -266,7 +285,7 @@ function netSendMany(requests) {
 async function haveWant(ids) {
   const holders = new Map();
   for (const id of ids) holders.set(toHex(id), new Set());
-  for (const id of ids) if (storeHas(id)) holders.get(toHex(id)).add(myPeer());
+  for (const id of ids) if (await storeHas(id)) holders.get(toHex(id)).add(myPeer());
   const peers = cohortPeers();
   // Split the id list so one HAVE request stays under the frame cap, exactly as
   // OFFER/STORE/FETCH do (§18). A HAVE request is 32 bytes/id (the reply is a 1-byte
@@ -300,7 +319,7 @@ async function haveWant(ids) {
 // reachable-but-didn't-serve as a §8 miss but never an unreachable peer. The
 // caller hash-verifies every block (§4.2).
 async function fetchBatch(peer, ids) {
-  if (peer === myPeer()) return ids.map((id) => { const sb = storeGet(id); return sb ? sb.bytes : null; });
+  if (peer === myPeer()) return Promise.all(ids.map(async (id) => { const sb = await storeGet(id); return sb ? sb.bytes : null; }));
   const resp = await netSend(peer, MSG_FETCH, encodeFetchBatchReq(ids));
   if (resp === null) return null;
   const blocks = decodeFetchBatchRes(resp);
@@ -311,7 +330,7 @@ async function fetchBatch(peer, ids) {
 // host's. Used for the manifest + repair; the GET path uses the batched fetchBatch.
 async function verificationFetch(peer, id) {
   if (peer === myPeer()) {
-    const sb = storeGet(id);
+    const sb = await storeGet(id);
     return sb && bytesEqual(hash(sb.bytes), id) ? sb.bytes : null;
   }
   const resp = await netSend(peer, MSG_FETCH, encodeFetchBatchReq([id]));
@@ -334,14 +353,14 @@ async function verificationFetch(peer, id) {
 // encode/decodeManifest, descriptorContains, ENC_XCHACHA20, BLOCK_ID_LEN — come from
 // the SHARED host/manifest-core.ts, stitched in ahead of this body (one definition).
 // What stays here is only the part that needs a capability: verify/sign over the
-// CAP_VERIFY / CAP_SIGN seam, composed with the shared parser/encoder.
+// "ed25519/verify" primitive / CAP_SIGN seam, composed with the shared parser/encoder.
 //
 // verifyDescriptor checks the author signature AND structurally validates the core
 // (the parity the host holder has): a *signed* but malformed descriptor (junk core, an id
 // count that is neither k nor k+m) is rejected — not parsed into garbage block-ids that
 // sidestep the §10 sibling rule — because parseSignedDescriptor throws on a bad core.
 function verifyDescriptor(env) {
-  // Length-gate before the CAP_VERIFY seam: the envelope is [pk 32][sig 64][core ≥8]
+  // Length-gate before the verify seam: the envelope is [pk 32][sig 64][core ≥8]
   // (parseSignedDescriptor's own bound), so anything shorter — an absent descriptor
   // included — is rejected here rather than handed to verify as a short buffer.
   if (!env || env.length < 32 + 64 + 8) return null;
@@ -1079,8 +1098,8 @@ async function repairChunk(descEnv) {
 async function doRepair() {
   const seen = new Set();
   let replaced = 0;
-  for (const id of storeList()) {
-    const descriptor = storeGetDescriptor(id);
+  for (const id of await storeList()) {
+    const descriptor = await storeGetDescriptor(id);
     if (!descriptor) continue;
     const key = toHex(hash(descriptor));
     if (seen.has(key)) continue;
@@ -1097,15 +1116,13 @@ async function doRepair() {
 // rule + §14 quota), content-addressing (§4.2), and the <hex>.blk/.dsc + quota
 // writes — all of it confined here, and nowhere else: the host has a read view of
 // the same fs (host/store-view.ts) and no write path at all.
-// Reached only through the generic caps, and entirely *synchronous*: a holder
-// answers from local fs + crypto and never makes a net round trip, so it is invoked
-// synchronously (`callSync`) and can respond while this realm's own initiator is
-// parked mid-await (the runtime split — a suspended async function is just heap
-// state). Because it reaches only sync ops, `doHandle` and every function it calls
-// must stay synchronous: an `await` here would return a guest promise that callSync
-// cannot settle. This is the ONLY implementation of the quota rule — the host keeps a
-// read view of the fs (host/store-view.ts) and no write path — so bytesUsed is the
-// budget, rebuilt lazily from the fs the first time it matters.
+// Reached only through the generic caps, and *async*: a holder answers from local
+// fs, and the fs seam is asynchronous on every backend (seedkernel core/fs.ts), so
+// `doHandle` is an async entrypoint — the transport driver already accepts an async
+// app handler (it answers through the `respond` entrypoint on a later turn). This
+// is the ONLY implementation of the quota rule — the host keeps a read view of the
+// fs (host/store-view.ts) and no write path — so bytesUsed is the budget, rebuilt
+// lazily from the fs the first time it matters.
 let bytesUsed = -1;
 // The §14 byte budget is OPERATOR policy, not author content: the StorageNode injects
 // its store's quota, and a seedkernel shell merges the operator's config over the
@@ -1119,40 +1136,40 @@ function quota() { return APP.quota != null ? APP.quota : 0; }
 // fsSizeRaw preserves that sentinel — it is how existence is asked (storeHas), since
 // there is no CAP_FS_HAS. fsSize maps the sentinel to 0 so sizing a bare block's missing
 // .dsc adds nothing to the quota total, not ~4 GiB.
-function fsSizeRaw(keyStr) { return rU32(host.call(CAP_FS_SIZE, strBytes(keyStr)), 0); }
-function fsSize(keyStr) { const v = fsSizeRaw(keyStr); return v === 0xffffffff ? 0 : v; }
-function ensureUsed() {
+async function fsSizeRaw(keyStr) { return rU32(await host.call(CAP_FS_SIZE, strBytes(keyStr)), 0); }
+async function fsSize(keyStr) { const v = await fsSizeRaw(keyStr); return v === 0xffffffff ? 0 : v; }
+async function ensureUsed() {
   if (bytesUsed >= 0) return;
   bytesUsed = 0;
   // The committed tier is the <hex>.blk ciphertext AND its <hex>.dsc descriptor
   // sidecar — the descriptor is real bytes a holder keeps per block, so charging only
   // .blk would over-admit by the whole descriptor tier (§14). Rebuilt from the fs, so
   // a restarted holder re-derives its budget from what is actually on the backend.
-  for (const id of storeList()) { const hex = toHex(id); bytesUsed += fsSize(hex + STORE_BLK) + fsSize(hex + STORE_DSC); }
+  for (const id of await storeList()) { const hex = toHex(id); bytesUsed += await fsSize(hex + STORE_BLK) + await fsSize(hex + STORE_DSC); }
 }
-function quotaFree() { ensureUsed(); return Math.max(0, quota() - bytesUsed); }
-function fsPut(keyStr, bytes) {
+async function quotaFree() { await ensureUsed(); return Math.max(0, quota() - bytesUsed); }
+async function fsPut(keyStr, bytes) {
   const kb = strBytes(keyStr);
   const head = new Uint8Array(4); wU32(head, 0, kb.length);
-  host.call(CAP_FS_PUT, concat([head, kb, bytes]));
+  await host.call(CAP_FS_PUT, concat([head, kb, bytes]));
 }
 // The one write path into store.local: the <hex>.blk ciphertext + its sibling
 // <hex>.dsc descriptor, under the quota budget. Throws past quota so admission
 // refuses rather than over-commits.
-function storeWrite(id, bytes, descriptor) {
-  ensureUsed();
+async function storeWrite(id, bytes, descriptor) {
+  await ensureUsed();
   const hex = toHex(id);
   // Charge the ciphertext AND the descriptor sidecar, crediting whatever was already
   // stored under this id, instead of writing the .dsc for free. Admission (admitBatch)
   // has already verified the descriptor, so every committed block has one: the .dsc
   // write is unconditional, with no described-block-overwritten-by-a-bare-one case to
   // unwind.
-  const prevBlk = storeHas(id) ? fsSize(hex + STORE_BLK) : 0;
-  const prevDsc = fsSize(hex + STORE_DSC);
+  const prevBlk = (await storeHas(id)) ? await fsSize(hex + STORE_BLK) : 0;
+  const prevDsc = await fsSize(hex + STORE_DSC);
   const next = bytesUsed - prevBlk - prevDsc + bytes.length + descriptor.length;
   if (next > quota()) throw new Error("store: quota exceeded");
-  fsPut(hex + STORE_BLK, bytes);
-  fsPut(hex + STORE_DSC, descriptor);
+  await fsPut(hex + STORE_BLK, bytes);
+  await fsPut(hex + STORE_DSC, descriptor);
   bytesUsed = next;
 }
 // Admission (§4.3 descriptor check, §6 sibling rule, §14 quota): a holder verifies
@@ -1164,8 +1181,8 @@ function storeWrite(id, bytes, descriptor) {
 //
 // `size` is the length of the block ACTUALLY in hand, which only STORE has; an OFFER
 // carries no size on the wire (the geometry is the descriptor's) and passes null.
-function admit(descriptor, blockId, size) {
-  return admitBatch([{ blockId, descriptor, size }])[0];
+async function admit(descriptor, blockId, size) {
+  return (await admitBatch([{ blockId, descriptor, size }]))[0];
 }
 // Batched admission: one OFFER's worth of blocks checked cumulatively — the §14 quota
 // budget shrinks as blocks are provisionally accepted, and a block whose sibling (§6)
@@ -1178,42 +1195,46 @@ function admit(descriptor, blockId, size) {
 // branch: one would be an admission gated by quota alone, letting any cohort peer push
 // arbitrary bytes past the sibling rule — the wire decoders reject a descriptor-less
 // entry outright, and a forged, malformed, or not-of-this-chunk one is declined here.
-function admitBatch(offers) {
-  let free = quotaFree();
+async function admitBatch(offers) {
+  let free = await quotaFree();
   const provisional = new Set();
-  return offers.map((o) => {
+  const verdicts = [];
+  for (const o of offers) {
     const d = verifyDescriptor(o.descriptor);
-    if (!d) return VERDICT_DESCRIPTOR;                       // absent, forged, unsigned, or malformed
-    if (!descriptorContains(d, o.blockId)) return VERDICT_DESCRIPTOR; // not a block of this chunk
+    if (!d) { verdicts.push(VERDICT_DESCRIPTOR); continue; }           // absent, forged, unsigned, or malformed
+    if (!descriptorContains(d, o.blockId)) { verdicts.push(VERDICT_DESCRIPTOR); continue; } // not a block of this chunk
     // Geometry is the SIGNED descriptor's, never a field the sender picks: every block
     // is exactly blockSize bytes, so bytes in hand that disagree are not the block that
     // was offered, whatever they hash to.
-    if (o.size != null && o.size !== d.blockSize) return VERDICT_DESCRIPTOR;
+    if (o.size != null && o.size !== d.blockSize) { verdicts.push(VERDICT_DESCRIPTOR); continue; }
     // Charge what storeWrite will actually commit — the ciphertext AND its .dsc
     // sidecar — so this pre-check answers the same question the binding write does
     // instead of over-admitting by the descriptor's own size.
     const cost = d.blockSize + o.descriptor.length;
-    if (cost > free) return VERDICT_QUOTA;
+    if (cost > free) { verdicts.push(VERDICT_QUOTA); continue; }
+    let sibling = false;
     for (const sib of d.blockIds) {
       if (bytesEqual(sib, o.blockId)) continue;
-      if (storeHas(sib) || provisional.has(toHex(sib))) return VERDICT_SIBLING;
+      if ((await storeHas(sib)) || provisional.has(toHex(sib))) { sibling = true; break; }
     }
+    if (sibling) { verdicts.push(VERDICT_SIBLING); continue; }
     free -= cost;
     provisional.add(toHex(o.blockId));
-    return VERDICT_ACCEPTED;
-  });
+    verdicts.push(VERDICT_ACCEPTED);
+  }
+  return verdicts;
 }
-function acceptStore(blockId, descriptor, bytes) {
+async function acceptStore(blockId, descriptor, bytes) {
   // The bytes must hash to the claimed id (§4.2) — every holder, every hop.
   if (!bytesEqual(hash(bytes), blockId)) return VERDICT_DECLINED;
-  const v = admit(descriptor, blockId, bytes.length);
+  const v = await admit(descriptor, blockId, bytes.length);
   if (v !== VERDICT_ACCEPTED) return v;
-  try { storeWrite(blockId, bytes, descriptor); return VERDICT_ACCEPTED; } catch (_e) { return VERDICT_QUOTA; }
+  try { await storeWrite(blockId, bytes, descriptor); return VERDICT_ACCEPTED; } catch (_e) { return VERDICT_QUOTA; }
 }
 // Serve a batched FETCH, but never emit much more than one message's worth of bytes:
 // an honest requester caps itself at fetchMaxIds() so its whole response fits, but a
 // hostile cohort member can name the same id thousands of times in one ~1 MB request
-// and make this sync holder concat thousands × blockSize into one reply. Cap the served
+// and make this holder concat thousands × blockSize into one reply. Cap the served
 // bytes at maxMsgBytes (accounting for the response framing). A block the holder has but
 // that won't fit under the cap is tagged FETCH_UNANSWERED, so the reader re-requests
 // exactly those (runFetchTasks); a block it doesn't have is ABSENT. The FIRST present
@@ -1223,7 +1244,7 @@ function acceptStore(blockId, descriptor, bytes) {
 // they can diverge) degrades to one block per round trip instead of an absent-forever
 // block it verifiably holds. The DoS bound stays: one block + cap per request. A per-id
 // memo keeps a repeated id from costing a fresh storeGet.
-function serveFetch(ids) {
+async function serveFetch(ids) {
   const cap = maxMsgBytes();
   const out = new Array(ids.length).fill(null);
   const seen = new Map(); // idHex → bytes|null, so a repeated id is one storeGet
@@ -1232,7 +1253,7 @@ function serveFetch(ids) {
   for (let i = 0; i < ids.length; i++) {
     const h = toHex(ids[i]);
     let bytes = seen.get(h);
-    if (bytes === undefined) { const sb = storeGet(ids[i]); bytes = sb ? sb.bytes : null; seen.set(h, bytes); }
+    if (bytes === undefined) { const sb = await storeGet(ids[i]); bytes = sb ? sb.bytes : null; seen.set(h, bytes); }
     if (!bytes) continue; // genuine miss — leave it ABSENT (null)
     const framed = bytes.length + FETCH_FRAME;
     if (servedAny && used + framed > cap) { out[i] = FETCH_UNANSWERED; continue; } // held but over the byte cap → mark for re-ask
@@ -1248,16 +1269,28 @@ function serveFetch(ids) {
 // host/protocol.ts stitched in ahead of this body — the holder admits over the SAME
 // §18 format the initiator speaks, by construction, not by a hand-kept mirror.
 
-// Dispatch one incoming control message: arg = [type u8][payload]. Synchronous —
-// every branch is local fs + crypto; the initiator owns the round trips. OFFER and
-// FETCH carry a batch of blocks (one per peer per PUT/GET) and answer all at once.
-function doHandle(arg) {
+// Dispatch one incoming control message: arg = [type u8][payload]. Async — every
+// branch is local fs + crypto, and the fs seam is async (core/fs.ts), so the holder
+// awaits its store ops like the initiator awaits its round trips. OFFER and FETCH
+// carry a batch of blocks (one per peer per PUT/GET) and answer all at once.
+//
+// A STORE batch is processed SEQUENTIALLY, not in parallel: admission spends the
+// §14 budget cumulatively across the batch (admitBatch's provisional accounting is
+// the same rule, and a parallel fan-out would race `bytesUsed` — two blocks both
+// seeing the pre-batch budget and both passing). A HAVE batch is independent reads
+// and may fan out.
+async function doHandle(arg) {
   const sender = arg.slice(0, 32);
   const type = arg[32], payload = arg.slice(33);
-  if (type === MSG_HAVE) return encodeMask(decodeHaveReq(payload).map((id) => storeHas(id)));
-  if (type === MSG_OFFER) return encodeMask(admitBatch(decodeOfferBatch(payload)));
-  if (type === MSG_STORE) return encodeMask(decodeStoreBatch(payload).map((s) => acceptStore(s.blockId, s.descriptor, s.bytes)));
-  if (type === MSG_FETCH) return encodeFetchBatchRes(serveFetch(decodeFetchBatchReq(payload)));
+  if (type === MSG_HAVE) return encodeMask((await Promise.all(decodeHaveReq(payload).map((id) => storeHas(id)))));
+  if (type === MSG_OFFER) return encodeMask(await admitBatch(decodeOfferBatch(payload)));
+  if (type === MSG_STORE) {
+    const stores = decodeStoreBatch(payload);
+    const verdicts = [];
+    for (const s of stores) verdicts.push(await acceptStore(s.blockId, s.descriptor, s.bytes));
+    return encodeMask(verdicts);
+  }
+  if (type === MSG_FETCH) return encodeFetchBatchRes(await serveFetch(decodeFetchBatchReq(payload)));
   return EMPTY;
 }
 

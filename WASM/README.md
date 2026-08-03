@@ -46,7 +46,7 @@ structural sandbox guarantees they touch neither disk nor network even if buggy
 | `codec` — GF(2⁸) + systematic Reed–Solomon RS(k,m) encode/decode, block-id | installed kernel handler | **WASM**, no caps (`assembly/codec`) | §4.1, §4.2, §9 |
 | `reputation` — decayed per-peer reciprocity counters | installed kernel handler | **WASM**, no caps (`assembly/reputation`) | §13 |
 | coordinator (PUT/GET, placement, manifest) + cohort (have/want, verification-fetch) + repair | confined QuickJS realm — **async** `call()` | zero-authority JS (`host/tier2-guest.js`) | §5–§9 |
-| holder side — admission, sibling rule, content-addressing, quota, the store writes | the **same** realm — **sync** `callSync()` | zero-authority JS (`host/tier2-guest.js`) | §6, §10, §14 |
+| holder side — admission, sibling rule, content-addressing, quota, the store writes | the **same** realm — **async** `call()` | zero-authority JS (`host/tier2-guest.js`) | §6, §10, §14 |
 | the capability seam the guest reaches I/O through | seedkernel runtime | `cap-bridge` (generic primitives) | §16 |
 | `crypto.*`, `net.*`, `fs.*`, `clock` backends | seedkernel runtime | raw-byte capabilities | §12, §16 |
 
@@ -59,15 +59,20 @@ descriptor envelope and nonce convention on top of the scoped `SIGN`
 
 **The one realm.** Storage runs its whole guest in a single confined realm
 seedkernel provides (§12.3), over its genuinely-async seam: the initiator
-(PUT/GET/repair) is async — it fans out over `net` and awaits *real* net promises
-(`await Promise.all(...)`) — through the realm's `call()`, while the holder side
-answers from local `fs` + crypto without yielding, through the same realm's
-synchronous `callSync()`, so it can serve a request *while this node's own
-initiator is parked mid-`await`* in that realm — a suspended async function is
-just heap state, and `callSync` never pumps the job queue, so it cannot advance
-the parked initiator. `StorageNode` (`host/storage-node.ts`) keeps a host-side
-copy of both sides as the reference/parity path — the role the host-side classes
-play in the tests — but the **shipped** node runs the confined guest.
+(PUT/GET/repair) fans out over `net` and awaits *real* net promises
+(`await Promise.all(...)`), and the holder side answers from local `fs` + crypto,
+both through the realm's `call()`. The fs seam is asynchronous on every backend
+(seedkernel core/fs.ts — a synchronous `get` is a shape no browser backend can
+implement), so the holder awaits its store ops exactly as the initiator awaits
+its round trips. What once kept the two roles from interleaving — a synchronous
+second entry (`callSync`) that never pumped the job queue — is now the realm's
+explicit per-realm FIFO (seedkernel realm-queue.ts): one entrypoint runs to
+completion before the next begins, so an inbound request to a node whose
+initiator is parked waits for the queue to drain — the serialization cost the
+runtime documents, and the price of a holder that may `await` its own store.
+`StorageNode` (`host/storage-node.ts`) keeps a host-side copy of both sides as the
+reference/parity path — the role the host-side classes play in the tests — but
+the **shipped** node runs the confined guest.
 
 ## Signing scope, existence, and bundle versioning
 
@@ -75,7 +80,8 @@ Three seedkernel runtime contracts reach into the storage code, and each has a
 seedstore-side counterpart worth pinning down. The contracts themselves are
 documented on the runtime side — the **scoped `SIGN`** op (a guest signature is
 over `DOMAIN_guest ‖ scope ‖ msg`, the `scope` host-derived from the admitted
-manifest; `VERIFY` stays raw — seedkernel §12.2), **existence-by-size** (no
+manifest; the pure `ed25519/verify` primitive stays raw — seedkernel §12.2),
+**existence-by-size** (no
 `FS_HAS`; a key exists iff `FS_SIZE ≥ 0`, and `./fs` is
 `get`/`put`/`size`/`list`/`delete`/`stat` — seedkernel §12.1–§12.2), and the
 **monotonic bundle `version`** that refuses a downgrade (seedkernel §12.4). The
@@ -88,14 +94,14 @@ mirror, and the bundle producer:
    `[authorPk 32][sig 64][core ..]` — the prefix is preimage-only, never stored
    — but `signCore` passes the bare core to the scoped `CAP_SIGN`, which signs
    `DOMAIN_guest ‖ scope ‖ core`, and `verifyEnv` reconstructs that same preimage
-   before the raw `CAP_VERIFY`. The host mirror
+   for the raw `"ed25519/verify"` primitive. The host mirror
    (`signDescriptor`/`verifyDescriptor` in `host/manifest.ts`) produces and
    checks byte-identical preimages, so the `tier2-port`/`holder-guest` parity
    tests hold. The guest gets the scope bytes host-derived, and never from
    author-written config: both drivers inject them through seedkernel's shared
    `bundlePreamble` as `BUNDLE.signPrefix` — the shell from the admitted
-   manifest's `(author, app)`, an in-process `StorageNode` from its `signAuthor`
-   (the zero author by default). One derivation, so the two cannot disagree; a
+   manifest's `(author, app)`, a `StorageNode` from the loaded bundle's verified
+   author. One derivation, so the two cannot disagree; a
    hand-baked copy in the signed config could, and would fail as signatures that
    verify nowhere.
 2. **The descriptor's leading byte is the signed-format tag** (spec §16). The
@@ -146,8 +152,11 @@ npm test           # build + run the full test suite (Node); `bun tests/run.mjs`
 
 ## Run a node from the command line
 
-A node is the generic seedkernel **shell** plus the signed seed store **bundle**.
-First build the bundle once (the offline producer holds the app author key):
+A node is the generic seedkernel **shell** plus two signed bundles: the
+kernel-shipped **transport bundle** (the signed program that IS the node's
+network — the shell admits it for the transport role and stands its driver up)
+and the signed seed store **bundle**. First build the bundle once (the offline
+producer holds the app author key):
 
 ```sh
 npm run build:bundle      # → ./bundle/ (manifest + codec/reputation wasm + installs + guest),
@@ -156,10 +165,11 @@ npm run build:bundle      # → ./bundle/ (manifest + codec/reputation wasm + in
 
 The shell admits content only from authors named in its policy file
 (seedkernel §12.5). Take the author public key it printed (`author …`) and allow
-it:
+it — the transport role needs the transport author's key too (ask the shell for
+it, or omit `roles` and the node boots without a network):
 
 ```sh
-echo '{ "authors": ["<author-pubkey-hex>"] }' > allowed-keys.json
+echo '{ "authors": ["<author-pubkey-hex>"], "roles": { "transport": ["<transport-author-hex>"] } }' > allowed-keys.json
 ```
 
 Now run the shell from the seedkernel checkout. A **serving** node that has loaded
@@ -170,7 +180,8 @@ for browsers):
 ```sh
 SHELL=../../seedkernel/WASM/build/host/main.js     # the generic runtime
 
-# a holder: verifies + installs the bundle, then serves the confined holder side
+# a holder: admits the transport bundle + the storage bundle, then serves the
+# confined holder side
 node "$SHELL" --policy allowed-keys.json --bundle ./bundle/seedstore.skb \
      --dir ./data-A --key ./A.key --listen 127.0.0.1:7401
 #   seedkernel-shell <peer-pubkey>
@@ -227,13 +238,16 @@ const put = await nodes[0].put(data);                 // chunk → encrypt → R
 const got = await nodes[0].get(put.manifestId, put.key); // locate → fetch any k → decode → decrypt
 ```
 
-`LoopbackNetwork` wires nodes in one process. There is one protocol
-implementation: `put`/`get`/`repair` always run the *confined* guest
-(`host/tier2-guest.orchestration.js`) inside a QuickJS realm, and the holder side
-(HAVE/OFFER/STORE/FETCH) runs the same guest in a synchronous realm —
-`StorageNode` is just the host that boots the kernel and drives it (§19, §2.1).
-The `BlobStore` backend is in-memory by default; a server uses a directory
-(`new NodeFs(dir)`), a browser uses OPFS/IndexedDB (§12).
+`LoopbackNetwork` (host/loopback.ts) wires nodes in one process: the real
+transport bundle runs between them — AKE, record layer, routing — over
+microtask-delivered channel pairs, so an in-process cohort exercises the shipped
+stack. There is one protocol implementation: `put`/`get`/`repair` always run the
+*confined* guest (`host/tier2-guest.orchestration.js`) inside a QuickJS realm,
+and the holder side (HAVE/OFFER/STORE/FETCH) runs the same guest in the same
+realm — `StorageNode` is just the host that boots the kernel, admits the signed
+transport + storage bundles, and drives it (§19, §2.1). The `BlobStore` backend
+is in-memory by default; a server uses a directory (`new NodeFs(dir)`), a
+browser uses OPFS/IndexedDB (§12).
 
 ## Browser
 
@@ -332,9 +346,10 @@ path; same-machine tabs connect on host candidates without it.)
   signed bundle and runs the guest as the PUT/GET *initiator* against a cohort.
 - **holder-guest** — a cohort of generic shells runs storage end-to-end with the
   *holder* side confined too; a guest initiator and a host-side initiator place
-  concurrently (so a shell serves its holder side via `callSync` while its own
-  initiator is parked mid-await in that same realm); and a host-side initiator →
-  confined shell holders round-trips (parity).
+  concurrently (the realm serializes — an inbound request to a node whose
+  initiator is parked queues behind it and is served as the queue drains, so the
+  overlap costs latency on a busy realm, never correctness); and a host-side
+  initiator → confined shell holders round-trips (parity).
 - **browser** — the same node booted through the `fetch`-based browser entry.
 
 ## Performance

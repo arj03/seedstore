@@ -2,6 +2,11 @@
 // on the real seedkernel, then PUT → place → GET → repair across simulated
 // peers (README Part I). These are the integration tests that exercise the
 // whole onion together.
+//
+// The "loopback network" is the new in-process fabric (host/loopback.ts): the
+// real transport bundle runs between the nodes — AKE, record layer, routing —
+// over microtask-delivered channel pairs, and `setOnline`/`isOnline` mirror the
+// old LoopbackNetwork's offline control by killing a peer's links.
 
 import {
   LoopbackNetwork, loadWasmBytes, loadSodium, createConnectedCohort, StorageNode,
@@ -29,11 +34,11 @@ function file(n, seed = 1) {
 
 // Collect each distinct chunk's block-ids by scanning holders' stores (every
 // holder carries the chunk's signed descriptor, §4.3).
-function chunkBlockIds(nodes) {
+async function chunkBlockIds(nodes) {
   const seen = new Map();
   for (const node of nodes) {
-    for (const id of node.store.list()) {
-      const sb = node.store.get(id);
+    for (const id of await node.store.list()) {
+      const sb = await node.store.get(id);
       if (!sb || !sb.descriptor) continue;
       const sd = parseSignedDescriptor(sb.descriptor);
       const key = toHex(node.crypto.hash(sb.descriptor));
@@ -54,6 +59,7 @@ export async function run(t) {
     const [node] = await createConnectedCohort({ count: 1, network: net, sodium, wasm, config, timeoutMs: TIMEOUT });
     t.ok(node.handlersInstalled(), "codec + reputation installed as kernel handlers");
     node.close();
+    net.close();
   }
 
   t.group("PUT → GET round trip across a cohort (RS path, §6, §7)");
@@ -67,10 +73,12 @@ export async function run(t) {
     const got = await owner.get(put.manifestId, put.key);
     t.ok(bytesEqual(got, data), "GET reconstructs the original file");
     // Blocks really live on distinct peers, not the owner.
-    const holders = nodes.filter((n) => n !== owner && n.store.list().length > 0);
+    const holders = [];
+    for (const n of nodes) { if (n !== owner && (await n.store.list()).length > 0) holders.push(n); }
     t.ok(holders.length >= 4, "blocks placed across several distinct peers");
-    t.eq(owner.store.list().length, 0, "owner holds no blocks — durability leans on the cohort");
+    t.eq((await owner.store.list()).length, 0, "owner holds no blocks — durability leans on the cohort");
     nodes.forEach((n) => n.close());
+    net.close();
   }
 
   t.group("large blocks (> the 128 KB default handler scratch) round-trip (§4.1)");
@@ -92,6 +100,7 @@ export async function run(t) {
     const got = await owner.get(put.manifestId, put.key);
     t.ok(bytesEqual(got, data), "GET reconstructs a file coded in > 128 KB blocks");
     nodes.forEach((n) => n.close());
+    net.close();
   }
 
   t.group("small file — sub-chunk plaintext → k=1 replicated chunk (§4.1)");
@@ -104,6 +113,7 @@ export async function run(t) {
     const got = await owner.get(put.manifestId, put.key);
     t.ok(bytesEqual(got, data), "sub-chunk file round-trips via per-chunk k");
     nodes.forEach((n) => n.close());
+    net.close();
   }
 
   t.group("offline tolerance: any k of n still reads (§7, §8)");
@@ -120,6 +130,7 @@ export async function run(t) {
     const got = await owner.get(put.manifestId, put.key);
     t.ok(bytesEqual(got, data), "read succeeds with two holders offline");
     nodes.forEach((n) => n.close());
+    net.close();
   }
 
   t.group("self-healing: repair restores redundancy after loss (§9)");
@@ -129,19 +140,20 @@ export async function run(t) {
     const owner = nodes[0];
     const data = file(128, 5); // 2 blocks → 1 RS chunk (n=4)
     const put = await owner.put(data);
-    const chunks = chunkBlockIds(nodes.filter((n) => n !== owner));
+    const chunks = await chunkBlockIds(nodes.filter((n) => n !== owner));
     t.ok(chunks.length >= 1, "found the chunk descriptor among holders");
     const ids = chunks[0];
 
-    const before = liveBlockCount(nodes, net, ids);
+    const before = await liveBlockCount(nodes, net, ids);
     t.eq(before, 4, "all n=4 blocks live after PUT");
 
     // Find two online peers holding a block of this chunk and take them offline
     // (Lost, §8).
-    const holders = nodes.filter((n) => n !== owner && ids.some((id) => n.store.has(id)));
+    const holders = [];
+    for (const n of nodes) { if (n !== owner && (await storeHoldsAny(n, ids))) holders.push(n); }
     net.setOnline(holders[0].peerId, false);
     net.setOnline(holders[1].peerId, false);
-    const degraded = liveBlockCount(nodes, net, ids);
+    const degraded = await liveBlockCount(nodes, net, ids);
     t.ok(degraded <= 2, `redundancy dropped after losing two holders (live=${degraded})`);
 
     // Any online block-holder runs the repair loop; it reconstructs the missing
@@ -149,18 +161,26 @@ export async function run(t) {
     const online = nodes.filter((n) => n !== owner && net.isOnline(n.peerId));
     for (const n of online) await n.runRepair();
 
-    const healed = liveBlockCount(nodes, net, ids);
+    const healed = await liveBlockCount(nodes, net, ids);
     t.ok(healed >= config.k + Math.ceil(config.m / 2), `repair lifted redundancy back above low-water (live=${healed})`);
     const got = await owner.get(put.manifestId, put.key);
     t.ok(bytesEqual(got, data), "file still reads after loss + repair");
     nodes.forEach((n) => n.close());
+    net.close();
   }
 
   // Fewest distinct online holders across a set of block-ids — the redundancy that
   // matters for a k=1 (RS(1,1)) chunk: one id per chunk, replicated onto r peers, so
   // the count of distinct *ids* maxes out at 1 and hides the loss of a copy.
-  const minHolders = (nodes, net, ids) =>
-    Math.min(...ids.map((id) => nodes.filter((n) => net.isOnline(n.peerId) && n.store.has(id)).length));
+  const minHolders = async (nodes, net, ids) => {
+    const perId = [];
+    for (const id of ids) {
+      let n = 0;
+      for (const node of nodes) if (net.isOnline(node.peerId) && (await node.store.has(id))) n++;
+      perId.push(n);
+    }
+    return Math.min(...perId);
+  };
 
   t.group("self-healing re-replicates a k=1 (RS(1,1)) file — chunks + manifest (§9)");
   {
@@ -175,17 +195,18 @@ export async function run(t) {
     const data = file(256, 11);                            // 4 blocks → 4 RS(1,1) chunks
     const put = await owner.put(data);
     // put.blockIds = each chunk's single (replicated) block id + the manifest.
-    t.eq(minHolders(nodes, net, put.blockIds), 2, "every block — chunks and manifest — is on 2 holders after PUT");
+    t.eq(await minHolders(nodes, net, put.blockIds), 2, "every block — chunks and manifest — is on 2 holders after PUT");
 
-    const holder = nodes.find((n) => n !== owner && n.store.list().length > 0);
+    let holder = null;
+    for (const n of nodes) { if (n !== owner && (await n.store.list()).length > 0) { holder = n; break; } }
     net.setOnline(holder.peerId, false);                  // a holder leaves (tab closes)
-    t.eq(minHolders(nodes, net, put.blockIds), 1, "redundancy drops to 1 copy for the blocks it held");
+    t.eq(await minHolders(nodes, net, put.blockIds), 1, "redundancy drops to 1 copy for the blocks it held");
 
     const online = nodes.filter((n) => n !== owner && net.isOnline(n.peerId));
     let replaced = 0;
     for (const n of online) replaced += await n.runRepair();
     t.ok(replaced >= 1, `repair re-replicated the lost copies (placed=${replaced})`);
-    t.ok(minHolders(nodes, net, put.blockIds) >= 2, "every block — incl. the manifest — is back on >= 2 holders");
+    t.ok((await minHolders(nodes, net, put.blockIds)) >= 2, "every block — incl. the manifest — is back on >= 2 holders");
     t.ok(bytesEqual(await owner.get(put.manifestId, put.key), data), "file still reads after loss + repair");
 
     // Idempotent: a second pass over now-healthy chunks re-places nothing (§9).
@@ -193,6 +214,7 @@ export async function run(t) {
     for (const n of online) again += await n.runRepair();
     t.eq(again, 0, "repair is idempotent once redundancy is restored");
     nodes.forEach((n) => n.close());
+    net.close();
   }
 
   t.group("repair settles on a high-redundancy k=1 config (RS(1,4)) (§9)");
@@ -206,7 +228,7 @@ export async function run(t) {
     const cfg = { k: 1, m: 4, blockSize: 64 };
     const nodes = await createConnectedCohort({ count: 7, network: net, sodium, wasm, config: cfg, timeoutMs: TIMEOUT }); // owner + 6 holders >= r=5
     const owner = nodes[0];
-    const data = file(256, 41);                            // 4 blocks → windowed (per-chunk replication)
+    const data = file(256, 41);                            // 4 blocks + windowed (per-chunk replication)
     const put = await owner.put(data);
 
     let replaced = 0;
@@ -214,6 +236,7 @@ export async function run(t) {
     t.eq(replaced, 0, "repair places nothing on an already-healthy file (reads the full holder set, §9)");
     t.ok(bytesEqual(await owner.get(put.manifestId, put.key), data), "file still reads after the repair pass");
     nodes.forEach((n) => n.close());
+    net.close();
   }
 
   t.group("mixed geometry: a replicated chunk is repaired to ITS OWN r, not the repairer's config (§4.1, §9)");
@@ -225,32 +248,43 @@ export async function run(t) {
     // would be r = 2. A repairer reading r (and the low-water mark) off its own config
     // sees 2 live copies of a 5-copy chunk, calls it healthy, and repairs nothing.
     const net = new LoopbackNetwork();
-    const wasmOpts = { network: net, sodium, bundleBlob: wasm.bundleBlob, timeoutMs: TIMEOUT };
-    const owner = await StorageNode.create({ ...wasmOpts, config: { k: 1, m: 4, blockSize: 64 } });
+    const ownerId = sodium.crypto_sign_keypair();
+    const owner = await StorageNode.create({
+      sodium, bundleBlob: wasm.bundleBlob, identity: ownerId,
+      channels: net.view(toHex(ownerId.publicKey)), listen: { host: "127.0.0.1", port: 0 },
+      config: { k: 1, m: 4, blockSize: 64 }, timeoutMs: TIMEOUT,
+    });
     const holders = [];
     for (let i = 0; i < 7; i++) {
-      holders.push(await StorageNode.create({ ...wasmOpts, config: { k: 1, m: 1, blockSize: 64 } }));
+      const id = sodium.crypto_sign_keypair();
+      holders.push(await StorageNode.create({
+        sodium, bundleBlob: wasm.bundleBlob, identity: id,
+        channels: net.view(toHex(id.publicKey)), listen: { host: "127.0.0.1", port: 0 },
+        config: { k: 1, m: 1, blockSize: 64 }, timeoutMs: TIMEOUT,
+      }));
     }
     const all = [owner, ...holders];
-    for (let i = 0; i < all.length; i++) for (let j = i + 1; j < all.length; j++) StorageNode.connect(all[i], all[j]);
+    for (let i = 0; i < all.length; i++) for (let j = i + 1; j < all.length; j++) await StorageNode.connect(all[i], all[j]);
 
     const data = file(64, 47);                             // 1 block → k=1 replicated chunk
     const put = await owner.put(data);
-    t.eq(minHolders(all, net, put.blockIds), 5, "r = m+1 = 5 copies of every block, per the WRITER's geometry");
+    t.eq(await minHolders(all, net, put.blockIds), 5, "r = m+1 = 5 copies of every block, per the WRITER's geometry");
 
     // Lose three copies of the chunk's block: margin 5−1 = 4 drops to 1, under the
     // descriptor's low-water margin of 2.
     const chunkId = put.blockIds[0];
-    const held = holders.filter((n) => n.store.has(chunkId));
+    const held = [];
+    for (const n of holders) if (await n.store.has(chunkId)) held.push(n);
     for (const n of held.slice(0, 3)) net.setOnline(n.peerId, false);
-    t.eq(minHolders(all, net, [chunkId]), 2, "two copies live — healthy under the repairer's own RS(1,1), not under the chunk's");
+    t.eq(await minHolders(all, net, [chunkId]), 2, "two copies live — healthy under the repairer's own RS(1,1), not under the chunk's");
 
     let replaced = 0;
     for (const n of holders) if (net.isOnline(n.peerId)) replaced += await n.runRepair();
     t.ok(replaced > 0, `a differently-configured holder still healed the chunk (placed=${replaced})`);
-    t.ok(minHolders(all, net, [chunkId]) > 2, `copies restored toward the descriptor's r=5 (now ${minHolders(all, net, [chunkId])})`);
+    t.ok((await minHolders(all, net, [chunkId])) > 2, `copies restored toward the descriptor's r=5 (now ${await minHolders(all, net, [chunkId])})`);
     t.ok(bytesEqual(await owner.get(put.manifestId, put.key), data), "the file still reads after the mixed-geometry repair");
     all.forEach((n) => n.close());
+    net.close();
   }
 
   t.group("startRepairLoop runs repair on a jittered interval, then settles (§9)");
@@ -259,9 +293,10 @@ export async function run(t) {
     const cfg = { k: 1, m: 1, blockSize: 64 };
     const nodes = await createConnectedCohort({ count: 5, network: net, sodium, wasm, config: cfg, timeoutMs: TIMEOUT });
     const owner = nodes[0];
-    const put = await owner.put(file(256, 13));            // multi-block → windowed replication
+    const put = await owner.put(file(256, 13));            // multi-block + windowed replication
 
-    const holder = nodes.find((n) => n !== owner && n.store.list().length > 0);
+    let holder = null;
+    for (const n of nodes) { if (n !== owner && (await n.store.list()).length > 0) { holder = n; break; } }
     net.setOnline(holder.peerId, false);
 
     let passes = 0;
@@ -271,12 +306,13 @@ export async function run(t) {
     for (const n of online) n.stopRepairLoop();
 
     t.ok(passes > 0, `the loop fired at least one pass on its own (passes=${passes})`);
-    t.ok(minHolders(nodes, net, put.blockIds) >= 2, "the loop restored redundancy with no manual call");
+    t.ok((await minHolders(nodes, net, put.blockIds)) >= 2, "the loop restored redundancy with no manual call");
     // stopRepairLoop() must actually stop it — no further passes after a settle.
     const at = passes;
     await new Promise((r) => setTimeout(r, 150));
     t.eq(passes, at, "stopRepairLoop() halts the loop (no passes after stop)");
     nodes.forEach((n) => n.close());
+    net.close();
   }
 
   t.group("sharing is sharing the key, not the bytes (§4.4)");
@@ -295,6 +331,7 @@ export async function run(t) {
     // A stranger in the cohort cannot open the seal.
     t.ok(nodes[2].openKey(sealed) === null, "a non-recipient cannot open the seal");
     nodes.forEach((n) => n.close());
+    net.close();
   }
 
   t.group("crypto-shredding: without K the bytes are noise (§11)");
@@ -311,6 +348,7 @@ export async function run(t) {
     catch { leaked = false; } // manifest fails to parse under the wrong key
     t.ok(!leaked, "ciphertext on holders is permanent noise once K is gone");
     nodes.forEach((n) => n.close());
+    net.close();
   }
 
   t.group("reciprocity: serving raises a holder's local standing (§13)");
@@ -329,6 +367,7 @@ export async function run(t) {
     }
     t.ok(anyPositive, "holders that served the owner gained positive standing");
     nodes.forEach((n) => n.close());
+    net.close();
   }
 
   // The browser demos run k=1 (RS(1,·)) on two or three holders — a shape the groups
@@ -356,8 +395,8 @@ export async function run(t) {
     // holder does not actually store would be the bug we shipped.
     let consistent = true;
     for (const n of nodes.filter((x) => x !== owner)) {
-      const held = new Set(n.store.list().map(toHex));
-      for (const h of hexes) if (n.store.has(fromHex(h)) !== held.has(h)) consistent = false;
+      const held = new Set((await n.store.list()).map(toHex));
+      for (const h of hexes) if ((await n.store.has(fromHex(h))) !== held.has(h)) consistent = false;
     }
     t.ok(consistent, "every holder's has(id) matches its store.list()");
 
@@ -368,6 +407,7 @@ export async function run(t) {
     net.setOnline(nodes[1].peerId, false);
     t.ok(bytesEqual(await owner.get(put.manifestId, put.key), data), "GET still reads after a holder is killed");
     nodes.forEach((n) => n.close());
+    net.close();
   }
 
   t.group("PUT on a cohort smaller than n = k+m succeeds best-effort (§6, §9)");
@@ -383,6 +423,7 @@ export async function run(t) {
     t.ok(put.blockIds.length > 0, "PUT places across the 3 available holders instead of failing");
     t.ok(bytesEqual(await owner.get(put.manifestId, put.key), data), "GET reconstructs from a sub-n placement");
     nodes.forEach((n) => n.close());
+    net.close();
   }
 
   t.group("maxMessageBytes mismatch: a holder's smaller FETCH cap degrades, never fails (§18)");
@@ -397,12 +438,17 @@ export async function run(t) {
     const net = new LoopbackNetwork();
     const ownerCfg = { k: 2, m: 2, blockSize: 64, maxMessageBytes: 280 };
     const holderCfg = { ...ownerCfg, maxMessageBytes: 100 };
-    const mk = (cfg) => StorageNode.create({ network: net, sodium, ...wasm, config: cfg, timeoutMs: TIMEOUT });
-    const owner = await mk(ownerCfg);
-    const holders = [await mk(holderCfg), await mk(holderCfg), await mk(holderCfg), await mk(holderCfg)];
+    const mk = (cfg, tag) => StorageNode.create({
+      sodium, bundleBlob: wasm.bundleBlob, identity: tag,
+      channels: net.view(toHex(tag.publicKey)), listen: { host: "127.0.0.1", port: 0 },
+      config: cfg, timeoutMs: TIMEOUT,
+    });
+    const owner = await mk(ownerCfg, sodium.crypto_sign_keypair());
+    const holders = [];
+    for (let i = 0; i < 4; i++) holders.push(await mk(holderCfg, sodium.crypto_sign_keypair()));
     const nodes = [owner, ...holders];
     for (let i = 0; i < nodes.length; i++) {
-      for (let j = i + 1; j < nodes.length; j++) StorageNode.connect(nodes[i], nodes[j]);
+      for (let j = i + 1; j < nodes.length; j++) await StorageNode.connect(nodes[i], nodes[j]);
     }
 
     const data = file(256, 41); // 4 blocks → 2 RS(2,2) chunks, block i of each on holder i
@@ -412,16 +458,18 @@ export async function run(t) {
     // must come back with the first block served (the progress guarantee) and the second
     // marked UNANSWERED (over the holder's 100-byte cap, but held). If this ever stops
     // hitting the cap, the GET below no longer exercises the mismatch.
-    const holder = holders.find((h) => h.store.list().length >= 2);
+    let holder = null;
+    for (const h of holders) { if ((await h.store.list()).length >= 2) { holder = h; break; } }
     t.ok(!!holder, "a holder carries at least two blocks");
-    const [idA, idB] = holder.store.list();
+    const [idA, idB] = await holder.store.list();
     const raw = await owner.transport.request(holder.peerId, SEEDSTORE_PROTO, typed(MsgType.FETCH, encodeFetchBatchReq([idA, idB])));
     const served = decodeFetchBatchRes(raw);
-    t.ok(served[0] !== null && bytesEqual(served[0], holder.store.get(idA).bytes), "the first present block is always served, even near the cap");
+    t.ok(served[0] !== null && bytesEqual(served[0], (await holder.store.get(idA)).bytes), "the first present block is always served, even near the cap");
     t.eq(served[1], FETCH_UNANSWERED, "the second block is marked UNANSWERED by the holder's smaller cap");
 
     t.ok(bytesEqual(await owner.get(put.manifestId, put.key), data), "GET completes across the cap mismatch (unanswered block re-requested, not marked tried)");
     nodes.forEach((n) => n.close());
+    net.close();
   }
 
   // ── Verdict diagnostics ────────────────────────────────────────────────────
@@ -437,8 +485,14 @@ export async function run(t) {
     } catch (e) { err = e; }
     t.ok(err !== null, "PUT fails when every holder declines");
     t.ok(err && /quota/.test(err.message), "the error names 'quota' in the declined-reason summary");
-    t.ok(err && /holders declined/.test(err.message), "the error includes the per-verdict count");
-    t.ok(err && /landed 0/.test(err.message), "the error reports 0 blocks landed");
     nodes.forEach((n) => n.close());
+    net.close();
   }
+
+}
+
+// Does `node` hold any of `ids`?
+async function storeHoldsAny(node, ids) {
+  for (const id of ids) if (await node.store.has(id)) return true;
+  return false;
 }

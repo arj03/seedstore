@@ -2,7 +2,7 @@
 // plus the assets they share, so there is ONE staged dir (not one per page):
 //   - the four WASM modules (kernel, signature, codec, reputation)
 //   - this project's compiled host, minified (build/host-min → host/)
-//   - seedkernel's node:fs-free browser host, minified (build/host-min → seedkernel/)
+//   - seedkernel's node:fs-free browser host, minified (build-min → seedkernel/)
 //   - the pages:
 //       index.html   — in-page loopback cohort (self-contained)
 //       p2p.html     — real P2P over RtcNetwork + relay (signaling) + STUN
@@ -27,26 +27,28 @@ const root = join(__dirname, "..");
 const build = join(root, "build");
 const out = process.env.BROWSER_DEMO_OUT ?? join(build, "browser-demo");
 const seedstoreHost = join(build, "host-min");
-const seedkernelHost = join(root, "..", "..", "seedkernel", "WASM", "build", "host-min");
+// The kernel's minified tree: build-min (host/ + core/ subdirs) — its minifier
+// moved the output there from the old build/host-min.
+const seedkernelHost = join(root, "..", "..", "seedkernel", "WASM", "build-min");
 
 if (!existsSync(join(seedstoreHost, "browser.js"))) {
   console.error("seedstore build/host-min not found — run `npm run build` first.");
   process.exit(1);
 }
-if (!existsSync(join(seedkernelHost, "browser.js"))) {
+if (!existsSync(join(seedkernelHost, "host", "shell-core.js"))) {
   console.error(`seedkernel minified host not found at ${seedkernelHost} — build seedkernel first ` +
-    "(in seedkernel/WASM:  npm run build:host && npm run build:host:min).");
+    "(in seedkernel/WASM:  npm run build).");
   process.exit(1);
 }
 
-// ── staleness guard: the browser runs the MINIFIED host, Node tests run build/host ──
+// ── staleness guard: the browser runs the MINIFIED host, Node tests run build/ ──
 // The two builds diverge silently when `build:host` (tsc) is re-run but `build:host:min`
 // (minify) is not — a real trap after switching branches: tests stay green against the
-// fresh build/host while the browser serves a stale host-min, so the demo runs old code
+// fresh build/ while the browser serves a stale min tree, so the demo runs old code
 // and fails in confusing ways (e.g. a codec/guest mismatch → "blockIds.length must equal
 // k+m"). Catch it here, the last step before the browser, for BOTH repos: if any compiled
-// build/host .js is newer than the whole host-min tree, the minify step lagged. This also
-// covers the cross-repo seam — seedkernel's host-min is trivial to leave stale from here.
+// build/ .js is newer than the whole min tree, the minify step lagged. This also
+// covers the cross-repo seam — seedkernel's min tree is trivial to leave stale from here.
 function newestJsMtime(dir) {
   let newest = 0;
   for (const name of readdirSync(dir)) {
@@ -65,9 +67,9 @@ function assertMinFresh(label, hostDir, minDir, rebuildCmd) {
   const host = newestJsMtime(hostDir), min = newestJsMtime(minDir);
   if (host > min + 1000) { // 1s slack for filesystem mtime granularity
     console.error(
-      `${label} host-min is STALE: build/host is newer than build/host-min, so the minify ` +
+      `${label} min tree is STALE: build/ is newer than build-min, so the minify ` +
       `step did not re-run after the last compile.\n` +
-      `The browser would run old code (Node tests read build/host and stay green — this only ` +
+      `The browser would run old code (Node tests read build/ and stay green — this only ` +
       `bites the browser).\n` +
       `Fix: ${rebuildCmd}`);
     process.exit(1);
@@ -75,8 +77,9 @@ function assertMinFresh(label, hostDir, minDir, rebuildCmd) {
 }
 assertMinFresh("seedstore", join(build, "host"), seedstoreHost,
   "in seedstore/WASM run `npm run build` (or at least `npm run build:host:min`).");
-assertMinFresh("seedkernel", join(root, "..", "..", "seedkernel", "WASM", "build", "host"), seedkernelHost,
-  "in seedkernel/WASM run `npm run build:host && npm run build:host:min`.");
+assertMinFresh("seedkernel", join(root, "..", "..", "seedkernel", "WASM", "build"),
+  seedkernelHost,
+  "in seedkernel/WASM run `npm run build`.");
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -113,16 +116,35 @@ for (const f of ["codec.wasm", "reputation.wasm"]) {
 // next to the wasm — browser.js feeds it to StorageNode (no node:fs in the browser).
 await copy(join(build, "host", "tier2-guest.js"), join(out, "tier2-guest.js"));
 
-// Host JS (seedstore + seedkernel). Copy only .js — the import maps resolve
-// "seedkernel-wasm/*" into ./seedkernel/ and this project's host into ./host/.
+// Host JS (seedstore + seedkernel). Copy .js recursively — the kernel's minified
+// tree now has host/ and core/ subdirs (host modules import ../core/* by relative
+// path), and the import maps resolve "seedkernel-wasm/*" into ./seedkernel/ and
+// this project's host into ./host/.
 async function copyJs(srcDir, dstDir) {
   mkdirSync(dstDir, { recursive: true });
   for (const name of readdirSync(srcDir)) {
-    if (name.endsWith(".js")) await copy(join(srcDir, name), join(dstDir, name));
+    const p = join(srcDir, name);
+    const st = statSync(p);
+    if (st.isDirectory()) await copyJs(p, join(dstDir, name));
+    else if (name.endsWith(".js")) await copy(p, join(dstDir, name));
   }
 }
 await copyJs(seedstoreHost, join(out, "host"));
 await copyJs(seedkernelHost, join(out, "seedkernel"));
+
+// ML-DSA-65 (seedkernel §12.4 manifest suite 0x02) — the same artifact Node reads and
+// the Go loader embeds. p2p.html mixes it into its sodium instance so `verifyManifest`
+// can read a hybrid cohort's author id; without it a 0x02 manifest is refused as an
+// unsupported suite and the page would silently fall back to the zero-author scope.
+{
+  const src = join(root, "..", "..", "seedkernel", "WASM", "browser", "mldsa65.wasm");
+  if (!existsSync(src)) {
+    console.error(`seedkernel mldsa65.wasm not found at ${src} — build it first ` +
+      "(in seedkernel/WASM:  npm run build:pq).");
+    process.exit(1);
+  }
+  await copy(src, join(out, "mldsa65.wasm"));
+}
 
 // ── vendor the browser-only npm deps so the demo runs OFFLINE ────────────────
 // QuickJS (quickjs-emscripten + the two quickjs-ng wasm variants) and sumo libsodium
@@ -182,6 +204,10 @@ const bundleBlob = [join(root, "bundle", "seedstore.skb"), join(build, "bundle",
   .find((p) => existsSync(p));
 let bundleManifest = false;
 if (bundleBlob) {
+  // Stage the whole signed bundle: a browser page boots a StorageNode on it (the ONE
+  // install path), so the page fetches ./seedstore.skb exactly like a Node node reads
+  // bundle/seedstore.skb.
+  await copy(bundleBlob, join(out, "seedstore.skb"));
   const files = unpackBundle(new Uint8Array(readFileSync(bundleBlob)));
   if (files[MANIFEST_FILE]) {
     const dst = join(out, MANIFEST_FILE);

@@ -45,6 +45,7 @@ import { randomBytes } from "node:crypto";
 
 import { WsNetwork } from "seedkernel-wasm/net-ws";
 import { createStorageNode, loadSodium, defaultConfig, PRODUCTION_BLOCK_SIZE, toHex } from "../build/host/node.js";
+import { DEFAULT_QUOTA_BYTES } from "../build/host/core.js";
 
 // ── args ─────────────────────────────────────────────────────────────────────
 const args = new Map();
@@ -186,25 +187,42 @@ console.log(`me: ${hex(identity.publicKey).slice(0, 16)}…`);
 // scope automatically — there is no separate --author to keep in sync any more.
 console.log("signing scope: derived from the loaded seedstore bundle author");
 
+// Base on defaultConfig so the fan-out/window defaults are all set (the §4.1 durability
+// math — r = m+1, the low-water mark — is derived from k/m and from each
+// chunk's signed descriptor, never config). The injection is total — a partial config
+// would feed the strict guest an undefined knob. realmMemoryBytes is host-only (the
+// QuickJS heap bound) — split out of the APP config, passed to the shell as the realm
+// limit; the rest merges over the bundle's signed config into the guest's APP.
+const config = { ...defaultConfig(kParam, mParam, blockSize), maxMessageBytes, fanoutWindow: windowN,
+  ...(wtargetMB > 0 ? { windowTargetBytes: Math.round(wtargetMB * 1024 * 1024) } : {}),
+  ...(heapMB > 0 ? { realmMemoryBytes: Math.round(heapMB * 1024 * 1024) } : {}) };
+const { realmMemoryBytes, ...appConfig } = config;
+
+// The transport is now a signed bundle: boot the shared shell with it admitted
+// (the node's network standing), then put the WS socket seam under the driver.
+// The wrapped sodium rides into the shell, so the record-layer AEAD costs are
+// still instrumented. The geometry rides in as operator config (the shell merges
+// it over the bundle's signed config into the guest's APP).
 const peerUp = new Set();
 let onQuorum = null;
-const net = new WsNetwork({
-  identity,
+const { bootTransportShell } = await import("../build/host/storage-node.js");
+const { shell } = await bootTransportShell({
   sodium: wrapTransportSodium(sodium),
+  identity,
+  timeoutMs,
+  config: { ...appConfig, quota: DEFAULT_QUOTA_BYTES },
+  realmMemoryBytes,
+  livePeers: () => [...peerUp],
+});
+const net = new WsNetwork({
+  driver: shell.net,
   webSocketFactory: wsFactory,
   connsPerPeer: connsN,
   onPeerUp: (pid) => { node?.addPeer(pid); peerUp.add(pid); console.log(`link up: ${pid.slice(0, 8)}…`); if (peerUp.size >= specs.length) onQuorum?.(); },
   onPeerDown: (pid) => { node?.removePeer(pid); peerUp.delete(pid); console.log(`link DOWN: ${pid.slice(0, 8)}…`); },
 });
 
-// Base on defaultConfig so the fan-out/window defaults are all set (the §4.1 durability
-// math — r = m+1, the low-water mark — is derived from k/m and from each
-// chunk's signed descriptor, never config). The injection is total — a partial config
-// would feed the strict guest an undefined knob.
-const config = { ...defaultConfig(kParam, mParam, blockSize), maxMessageBytes, fanoutWindow: windowN,
-  ...(wtargetMB > 0 ? { windowTargetBytes: Math.round(wtargetMB * 1024 * 1024) } : {}),
-  ...(heapMB > 0 ? { realmMemoryBytes: Math.round(heapMB * 1024 * 1024) } : {}) };
-let node = await createStorageNode({ network: net, identity, config, timeoutMs });
+let node = await createStorageNode({ shell, identity, config, timeoutMs });
 for (const pid of peerUp) node.addPeer(pid);
 console.log(`node ready: RS(${kParam},${mParam}), ${blockSize / 1024} KiB blocks, batch ${Math.round(maxMessageBytes / 1024)} KiB, window ${windowN}, conns/peer ${connsN}, wtarget ${wtargetMB > 0 ? wtargetMB + " MB" : "4 MiB (default)"}, heap ${heapMB > 0 ? heapMB + " MB" : "64 MiB (default)"}, timeout ${timeoutMs} ms`);
 

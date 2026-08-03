@@ -57,6 +57,9 @@ async function measure(W) {
     count: 6, network: net, sodium, wasm,
     config: { ...config, fanoutWindow: W }, timeoutMs,
   });
+  // Wrap the transport drivers: the latency link now lives at the driver's request
+  // seam (see latency-net.mjs), where the old frame-level network counted requests.
+  net.wrapAll(nodes);
   const owner = nodes[0];
 
   net.reset();
@@ -74,7 +77,11 @@ async function measure(W) {
   const getReqs = net.requests;
 
   const ok = bytesEqual(got, data);
-  nodes.forEach((n) => n.close());
+  // Nodes are left open between measures and torn down only by the final
+  // process.exit(0) below: closing realms right after heavy in-process traffic
+  // trips a pre-existing quickjs-ng teardown assertion in seedkernel's safe-js
+  // (list_empty(&rt->gc_obj_list) at JS_FreeRuntime) — documented in
+  // bench-holder.mjs. The process is ending anyway.
   return { W, putMs, getMs, putPeak, getPeak, putReqs, getReqs, ok };
 }
 
@@ -101,3 +108,4 @@ for (const W of [1, 2, 4, 8, 16, 32]) {
 
 console.log(`\nSpeedup tracks W until W ≈ chunks (${numChunks}); past that the file has no more`);
 console.log(`independent chunks to overlap, so the curve flattens — the point to stop raising W.`);
+process.exit(0);

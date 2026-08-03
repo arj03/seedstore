@@ -1,43 +1,70 @@
-// A Network (seedkernel's transport fabric, host/net.ts) that injects a fixed
-// per-send delay, plus instrumentation of how many requests are in flight at
-// once. This is the piece every benchmark in the repo was missing.
+// A LoopbackNetwork (host/loopback.ts) that injects a fixed per-request delay
+// into the transport driver, plus instrumentation of how many requests are in
+// flight at once. This is the piece every benchmark in the repo was missing.
 //
-// Why it matters: the LoopbackNetwork delivers frames on a queueMicrotask — it
-// models a link with *zero* latency. bench.mjs / bench-wasm.mjs measure only the
+// Why it matters: the LoopbackNetwork delivers channel pairs on a queueMicrotask —
+// it models a link with *zero* latency. bench.mjs / bench-wasm.mjs measure only the
 // RS codec + crypto compute, and the integration tests run on that same loopback,
 // so a PUT that issues ~1,280 *serial* round trips completes in ~0 ms in every
 // test. The cost that actually bit us on a real cross-machine cohort — wall-clock
 // = round-trip-count × RTT — was therefore invisible to the whole suite. Give the
 // link a real RTT and it shows up.
 //
-// One control request/response is two sends, so the round-trip latency a caller
-// observes is 2 × delayMs. Frame layout (host/net.ts):
-//   req = [kind|flags u8][corr u32][pidLen u8][protocolId utf8][payload…]
-//   res = [kind u8][corr u32][payload…]
-// The MsgType byte lives in payload[0]; we read it from the first payload byte.
-// We remember it keyed by (requester, corr) and recover it when the response
-// comes back — that lets us separate the disc.have/want discovery fan-out
-// (inherently concurrent, MsgType.HAVE) from the placement/fetch work whose
-// concurrency the coordinator's window controls.
+// The old LatencyNetwork sat at the wire-frame level of the old net-link transport
+// (req/res frames with a corr header). The transport is now a signed bundle running
+// in its own confined realm, so the app-level request structure is no longer
+// visible at the frame boundary — but it IS visible at the driver's request seam:
+// the storage guest's CAP_NET_SEND resolves to the TransportHost's `request()`, and
+// the payload's first byte is the app's MsgType (HAVE/OFFER/FETCH/STORE). So this
+// wrapper stands on the driver and counts/delays exactly the app requests the old
+// frame-level one did: every request an initiator issues crosses ITS driver, so
+// wrapping the nodes (or just the owner) captures the OFFER/STORE/FETCH batching.
+//
+// One request direction is delayed (the caller's outbound), which models a
+// per-request RTT well enough for the round-trip economy the tests pin; the
+// transport's own stall clock runs on the wire, unaffected.
 
-const KIND_REQ = 0, KIND_RES = 1;
+import { LoopbackNetwork } from "../build/host/loopback.js";
+
 const TYPE_HAVE = 1; // MsgType.HAVE — discovery fan-out, excluded from the "work" signal
-
-function readFrameType(frame) {
-  if ((frame[0] & 1) !== KIND_REQ || frame.length < 6) return undefined;
-  const idLen = frame[5];
-  if (frame.length < 6 + idLen + 1) return undefined;
-  return frame[6 + idLen];
-}
 
 export class LatencyNetwork {
   constructor(delayMs = 2) {
     this.delayMs = delayMs;
-    this.sinks = new Map();
-    this.offline = new Set();
-    this.framesDelivered = 0;
+    this.fabric = new LoopbackNetwork();
     this.reset();
   }
+
+  // ── LoopbackNetwork passthrough (createConnectedCohort + offline control) ──
+  view(peerId) { return this.fabric.view(peerId); }
+  setOnline(peerId, online) { this.fabric.setOnline(peerId, online); }
+  isOnline(peerId) { return this.fabric.isOnline(peerId); }
+  close() { this.fabric.close(); }
+
+  /** Wrap ONE node's transport driver (StorageNode.net) so its outbound
+   *  requests are delayed and counted by MsgType. `payload[0]` is the app's
+   *  message type (§18); the driver's request() is where the guest's NET_SEND
+   *  resolves. */
+  wrap(driver) {
+    const net = this;
+    const origRequest = driver.request.bind(driver);
+    driver.request = (to, proto, payload) => {
+      const type = payload?.[0];
+      net.track(type);
+      net.begin(type);
+      return new Promise((resolve, reject) => {
+        setTimeout(() => {
+          origRequest(to, proto, payload).then(
+            (r) => { net.end(type); resolve(r); },
+            (e) => { net.end(type); reject(e); },
+          );
+        }, this.delayMs);
+      });
+    };
+  }
+
+  /** Wrap every node's driver. */
+  wrapAll(nodes) { for (const n of nodes) this.wrap(n.net); }
 
   /** Zero the concurrency counters between measured runs. */
   reset() {
@@ -46,60 +73,27 @@ export class LatencyNetwork {
     this.inflightWork = 0;      // ditto, excluding the have/want fan-out
     this.maxInflightWork = 0;   // the concurrency the put/get window drove
     this.requests = 0;          // total control requests issued
-    this.byType = {};           // KIND_REQ count per MsgType — OFFER/FETCH batching shows up here
+    this.byType = {};           // count per MsgType — OFFER/FETCH batching shows up here
     this.inflightByType = {};   // current in-flight per MsgType
     this.maxInflightByType = {}; // peak in-flight per MsgType — isolates one path's pipeline (e.g. STORE)
-    this.pendingType = new Map(); // (requester|corr) → type, so a typeless response recovers its type
-    this.framesDelivered = 0;
   }
 
-  // A per-node endpoint (seedkernel host/net.ts): bound to `id`, so every send it
-  // makes attributes `from = id` — the Transport above never handles `from`.
-  endpoint(id) {
-    return {
-      send: (to, frame) => this.deliver(id, to, frame),
-      onFrame: (sink) => { this.sinks.set(id, sink); },
-      close: () => { this.sinks.delete(id); },
-    };
+  track(type) {
+    if (type === undefined) return;
+    this.requests++;
+    this.byType[type] = (this.byType[type] ?? 0) + 1;
   }
-  setOnline(peerId, online) { if (online) this.offline.delete(peerId); else this.offline.add(peerId); }
-  isOnline(peerId) { return this.sinks.has(peerId) && !this.offline.has(peerId); }
-
-  deliver(from, to, frame) {
-    if (this.offline.has(from) || this.offline.has(to)) return; // dropped
-    const sink = this.sinks.get(to);
-    if (!sink) return;
-    const copy = frame.slice();
-    const kind = copy[0];
-    const isReq = (kind & 1) === KIND_REQ;
-    const isRes = (kind & 1) === KIND_RES;
-    // corr (u32 BE at bytes 1..4) pairs a response with its request.
-    // The MsgType lives in payload[0]; we remember it keyed by (requester, corr)
-    // and recover it when the response comes back.
-    const corr = ((copy[1] << 24) | (copy[2] << 16) | (copy[3] << 8) | copy[4]) >>> 0;
-    let type;
-    if (isReq) {
-      type = readFrameType(copy);
-      if (type !== undefined) this.pendingType.set(`${from}|${corr}`, type);
-    } else {
-      const key = `${to}|${corr}`;
-      type = this.pendingType.get(key);
-      this.pendingType.delete(key);
-    }
-    const isWork = type !== TYPE_HAVE;
-    if (isReq) {
-      this.requests++;
-      this.byType[type] = (this.byType[type] ?? 0) + 1;
-      if (++this.inflight > this.maxInflight) this.maxInflight = this.inflight;
-      if (isWork && ++this.inflightWork > this.maxInflightWork) this.maxInflightWork = this.inflightWork;
-      const cur = this.inflightByType[type] = (this.inflightByType[type] ?? 0) + 1;
-      if (cur > (this.maxInflightByType[type] ?? 0)) this.maxInflightByType[type] = cur;
-    }
-    setTimeout(() => {
-      if (this.offline.has(from) || this.offline.has(to)) return;
-      if (isRes) { this.inflight--; if (isWork) this.inflightWork--; this.inflightByType[type]--; }
-      this.framesDelivered++;
-      sink(from, copy);
-    }, this.delayMs);
+  begin(type) {
+    if (type === undefined) return;
+    if (++this.inflight > this.maxInflight) this.maxInflight = this.inflight;
+    if (type !== TYPE_HAVE && ++this.inflightWork > this.maxInflightWork) this.maxInflightWork = this.inflightWork;
+    const cur = this.inflightByType[type] = (this.inflightByType[type] ?? 0) + 1;
+    if (cur > (this.maxInflightByType[type] ?? 0)) this.maxInflightByType[type] = cur;
+  }
+  end(type) {
+    if (type === undefined) return;
+    this.inflight--;
+    if (type !== TYPE_HAVE) this.inflightWork--;
+    this.inflightByType[type]--;
   }
 }

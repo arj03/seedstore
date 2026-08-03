@@ -4,9 +4,11 @@
 //   - a full cohort over real TCP sockets, blocks landing on holders' disks
 //   - a browser-like node reaching a server node over a real WebSocket
 //
-// The transport's own behaviour — RFC 6455 framing and channel identity pinning
-// — now lives in seedkernel (the `./ws` and `./net-node` exports) and is tested
-// there. This file keeps only the storage-level integration on top of it.
+// The transport's own behaviour — RFC 6455 framing, the AKE, the contact-secret
+// gate — now lives in seedkernel (the transport bundle + `./net-node` export) and
+// is tested there. This file keeps only the storage-level integration on top of
+// it: nodes boot on the real NodeChannelFactory socket seam, with the signed
+// transport bundle admitting first, exactly as a shell-run node does.
 
 import { mkdtempSync, rmSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -14,13 +16,10 @@ import { join } from "node:path";
 
 import { loadSodium, loadWasmBytes } from "../build/host/node.js";
 import { StorageNode } from "../build/host/storage-node.js";
-import { NodeNetwork } from "seedkernel-wasm/net-node";
+import { NodeChannelFactory } from "seedkernel-wasm/net-node";
 import { FsBlobView } from "../build/host/store-view.js";
 import { NodeFs } from "seedkernel-wasm/fs-node";
 import { scopedFs } from "seedkernel-wasm/fs";
-// `bytesCompare` is a transport helper from the seedkernel `./net` barrel, used
-// by the cohort below to canonicalise dial direction (lower pubkey dials higher).
-import { bytesCompare } from "seedkernel-wasm/net";
 import {
   MsgType, encodeHaveReq, decodeMask, encodeStoreBatch, encodeFetchBatchReq, decodeFetchBatchRes,
   VERDICT_ACCEPTED, VERDICT_DECLINED,
@@ -51,47 +50,28 @@ function newKey(sodium) {
 }
 
 // Stand up `count` storage nodes on real TCP loopback sockets, each with its own
-// on-disk store.local directory, fully connected. Dial direction is canonical (lower pubkey
-// dials higher) so no pair double-connects.
+// on-disk store.local directory, fully connected (StorageNode.connect wires the
+// addresses + dials; the transport's own router collapses the simultaneous dials).
 async function tcpCohort({ count, sodium, wasm, config, baseDir }) {
-  const ids = Array.from({ length: count }, () => newKey(sodium));
-  // One contact secret PER NODE, not one for the cohort: the secret is what a node demands
-  // of callers, so it belongs to the node being dialled. Per-node is also what containment
-  // buys — a leaked secret exposes that node's inbound side and nothing else. Dialling
-  // therefore carries the TARGET's secret on the address, never our own.
-  const secrets = Array.from({ length: count }, () => sodium.randombytes_buf(32));
-  const nets = ids.map((id, i) => new NodeNetwork({
-    identity: id, contactSecret: secrets[i], sodium, listen: { host: "127.0.0.1", port: 0 },
-  }));
-  await Promise.all(nets.map((n) => n.start()));
-
-  for (let i = 0; i < count; i++) {
-    for (let j = 0; j < count; j++) {
-      if (i === j) continue;
-      if (bytesCompare(ids[i].publicKey, ids[j].publicKey) < 0) {
-        nets[i].addPeerAddr(toHex(ids[j].publicKey),
-          { host: "127.0.0.1", port: nets[j].port, transport: "tcp", contactSecret: secrets[j] });
-      }
-    }
-  }
-
   const dirs = [];
   const nodes = [];
   for (let i = 0; i < count; i++) {
     const dir = join(baseDir, `n${i}`);
     dirs.push(dir);
-    // Give the node a disk-backed fs; its default store view reads that same fs, so
-    // what the confined guest holder writes via fs.* lands on disk and node.store
-    // reflects it (the view must read the fs the guest serves).
+    // The socket seam is a real node:net factory; the node binds an ephemeral port.
     nodes.push(await StorageNode.create({
-      network: nets[i], sodium, ...wasm, identity: ids[i], fs: new NodeFs(dir), config, timeoutMs: 3000,
+      sodium, ...wasm, identity: newKey(sodium), config, timeoutMs: 3000,
+      channels: new NodeChannelFactory(sodium),
+      listen: { host: "127.0.0.1", port: 0 },
+      // Give the node a disk-backed fs; its default store view reads that same fs, so
+      // what the confined guest holder writes via fs.* lands on disk and node.store
+      // reflects it (the view must read the fs the guest serves).
+      fs: new NodeFs(dir),
     }));
   }
-  for (let i = 0; i < count; i++) for (let j = i + 1; j < count; j++) StorageNode.connect(nodes[i], nodes[j]);
-
-  await Promise.all(nets.map((n) => n.ready(8000)));
+  for (let i = 0; i < count; i++) for (let j = i + 1; j < count; j++) await StorageNode.connect(nodes[i], nodes[j]);
   await sleep(100); // let inbound links finish promoting
-  return { nodes, nets, ids, dirs };
+  return { nodes, dirs };
 }
 
 export async function run(t) {
@@ -114,30 +94,30 @@ export async function run(t) {
       const id = sodium.crypto_generichash(32, bytes);
       const desc = new Uint8Array([9, 8, 7, 6]);
 
-      t.ok(!view.has(id), "absent before anything is written");
-      t.eq(view.usedBytes(), 0, "used starts at zero");
+      t.ok(!(await view.has(id)), "absent before anything is written");
+      t.eq(await view.usedBytes(), 0, "used starts at zero");
 
-      plantBlock(fs, toHex(id), bytes, desc);
-      t.ok(view.has(id), "present once the block is on the backend");
-      const got = view.get(id);
+      await plantBlock(fs, toHex(id), bytes, desc);
+      t.ok(await view.has(id), "present once the block is on the backend");
+      const got = await view.get(id);
       t.ok(got && bytesEqual(got.bytes, bytes), "get returns the bytes");
       t.ok(got && got.descriptor && bytesEqual(got.descriptor, desc), "descriptor read from the sibling .dsc");
-      t.eq(view.usedBytes(), bytes.length + desc.length, "used counts ciphertext + descriptor — what the holder charges (§14)");
-      t.eq(view.list().length, 1, "list sees the one block");
+      t.eq(await view.usedBytes(), bytes.length + desc.length, "used counts ciphertext + descriptor — what the holder charges (§14)");
+      t.eq((await view.list()).length, 1, "list sees the one block");
 
       // The view holds no index of its own, so it sees writes it did not make —
       // which is the point: on a live node the guest is the one writing.
       const bytes2 = file(32, 5);
       const id2 = sodium.crypto_generichash(32, bytes2);
-      plantBlock(fs, toHex(id2), bytes2, null);
-      t.eq(view.list().length, 2, "a write made behind the view's back still shows up");
-      t.eq(view.get(id2).descriptor, null, "a bare block reads back with a null descriptor");
+      await plantBlock(fs, toHex(id2), bytes2, null);
+      t.eq((await view.list()).length, 2, "a write made behind the view's back still shows up");
+      t.eq((await view.get(id2)).descriptor, null, "a bare block reads back with a null descriptor");
 
       // Durability: a fresh view over the same directory sees the same blocks.
       const reopened = new FsBlobView(new NodeFs(dir));
-      t.ok(reopened.has(id), "reopened view still has the block");
-      t.eq(reopened.usedBytes(), bytes.length + desc.length + bytes2.length, "reopened used is correct (blks + dscs)");
-      t.ok(bytesEqual(reopened.get(id).bytes, bytes), "reopened get returns the bytes");
+      t.ok(await reopened.has(id), "reopened view still has the block");
+      t.eq(await reopened.usedBytes(), bytes.length + desc.length + bytes2.length, "reopened used is correct (blks + dscs)");
+      t.ok(bytesEqual((await reopened.get(id)).bytes, bytes), "reopened get returns the bytes");
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -147,7 +127,7 @@ export async function run(t) {
   t.group("PUT → GET across a cohort over real TCP, blocks persisted to disk");
   {
     const baseDir = mkdtempSync(join(tmpdir(), "seedstore-tcp-"));
-    const { nodes, nets } = await tcpCohort({
+    const { nodes } = await tcpCohort({
       count: 6, sodium, wasm, config: { k: 2, m: 2, blockSize: 64 }, baseDir,
     });
     try {
@@ -159,15 +139,15 @@ export async function run(t) {
       const got = await owner.get(put.manifestId, put.key);
       t.ok(bytesEqual(got, data), "GET reconstructs the file over the wire");
 
-      const holders = nodes.filter((n) => n !== owner && n.store.list().length > 0);
+      const holders = [];
+      for (const n of nodes) { if (n !== owner && (await n.store.list()).length > 0) holders.push(n); }
       t.ok(holders.length >= 4, "blocks placed across several distinct peers");
-      t.eq(owner.store.list().length, 0, "owner holds no blocks");
+      t.eq((await owner.store.list()).length, 0, "owner holds no blocks");
 
-      t.ok(holders[0].store.list().length > 0, "a holder kept at least one block");
-      t.ok(nets.some((n) => n.framesDelivered > 0), "frames actually crossed sockets");
+      t.ok((await holders[0].store.list()).length > 0, "a holder kept at least one block");
+      t.ok(nodes.some((n) => n.net.framesDelivered > 0), "frames actually crossed sockets");
     } finally {
       nodes.forEach((n) => n.close());
-      nets.forEach((n) => n.close());
       rmSync(baseDir, { recursive: true, force: true });
     }
   }
@@ -176,7 +156,7 @@ export async function run(t) {
   t.group("a holder's blocks survive a store reopen (real files on disk)");
   {
     const baseDir = mkdtempSync(join(tmpdir(), "seedstore-persist-"));
-    const { nodes, nets, dirs } = await tcpCohort({
+    const { nodes, dirs } = await tcpCohort({
       count: 6, sodium, wasm, config: { k: 2, m: 2, blockSize: 64 }, baseDir,
     });
     try {
@@ -186,20 +166,19 @@ export async function run(t) {
 
       // Find a holder index with blocks and reopen *its* directory cold.
       let holderIdx = -1;
-      for (let i = 1; i < nodes.length; i++) if (nodes[i].store.list().length > 0) { holderIdx = i; break; }
+      for (let i = 1; i < nodes.length; i++) if ((await nodes[i].store.list()).length > 0) { holderIdx = i; break; }
       t.ok(holderIdx > 0, "located a holder with blocks");
-      const idsBefore = nodes[holderIdx].store.list().map(toHex).sort();
+      const idsBefore = (await nodes[holderIdx].store.list()).map(toHex).sort();
       // Cold reopen enters through the app's fs scope, exactly as the live node does
       // (seedkernel §12.2): the holder's keys are `appScope + <hex>.blk` on the raw
       // backend, so a view over the unwrapped NodeFs would list nothing.
       const cold = new FsBlobView(scopedFs(new NodeFs(dirs[holderIdx]), nodes[holderIdx].appScope));
-      const idsAfter = cold.list().map(toHex).sort();
+      const idsAfter = (await cold.list()).map(toHex).sort();
       t.eq(idsAfter.join(","), idsBefore.join(","), "cold reopen sees exactly the same block ids");
       const onDisk = readdirSync(dirs[holderIdx]).filter((f) => f.endsWith(".blk"));
       t.eq(onDisk.length, idsBefore.length, "one .blk file per held block on disk");
     } finally {
       nodes.forEach((n) => n.close());
-      nets.forEach((n) => n.close());
       rmSync(baseDir, { recursive: true, force: true });
     }
   }
@@ -211,18 +190,22 @@ export async function run(t) {
     // S gates its listener; B is a dialer only, so it has no inbound secret of its own —
     // it carries S's on the address it dials.
     const secretS = sodium.randombytes_buf(32);
-    const netS = new NodeNetwork({ identity: idS, contactSecret: secretS, sodium, listen: { host: "127.0.0.1", port: 0 }, wsListen: { host: "127.0.0.1", port: 0 } });
-    await netS.start();
-    const netB = new NodeNetwork({ identity: idB, sodium }); // browser-like: dials out only
-    netB.addPeerAddr(toHex(idS.publicKey),
-      { host: "127.0.0.1", port: netS.wsPort, transport: "ws", contactSecret: secretS });
-
-    // Default store = FsBlobView over each node's (in-RAM) fs, so S.store reflects
-    // what the confined guest holder writes via fs.* when B stores to it.
-    const S = await StorageNode.create({ network: netS, sodium, ...wasm, identity: idS, timeoutMs: 3000 });
-    const B = await StorageNode.create({ network: netB, sodium, ...wasm, identity: idB, timeoutMs: 3000 });
-    StorageNode.connect(S, B);
-    await netB.ready(8000);
+    const S = await StorageNode.create({
+      sodium, ...wasm, identity: idS, timeoutMs: 3000,
+      channels: new NodeChannelFactory(sodium),
+      listen: { host: "127.0.0.1", port: 0 },
+      wsListen: { host: "127.0.0.1", port: 0 },
+      contactSecret: secretS,
+    });
+    const B = await StorageNode.create({
+      sodium, ...wasm, identity: idB, timeoutMs: 3000,
+      channels: new NodeChannelFactory(sodium),
+    });
+    B.addPeer(S.peerId);
+    S.addPeer(B.peerId);
+    B.net.addPeerAddr(S.peerId,
+      { host: "127.0.0.1", port: S.net.wsPort, transport: "ws", contactSecret: secretS });
+    await B.net.ready(8000);
     await sleep(50);
 
     try {
@@ -239,7 +222,7 @@ export async function run(t) {
 
       const stored = decodeMask(await B.transport.request(S.peerId, SEEDSTORE_PROTO, typed(MsgType.STORE, encodeStoreBatch([{ blockId: bid, descriptor: desc, bytes }]))));
       t.eq(stored[0], VERDICT_ACCEPTED, "STORE acknowledged over ws");
-      t.ok(S.store.has(bid), "server now holds the block");
+      t.ok(await S.store.has(bid), "server now holds the block");
 
       const have1 = await B.transport.request(S.peerId, SEEDSTORE_PROTO, typed(MsgType.HAVE, encodeHaveReq([bid])));
       t.eq(decodeMask(have1)[0], VERDICT_ACCEPTED, "HAVE → true after STORE (over ws)");
@@ -247,62 +230,9 @@ export async function run(t) {
       const fetched = await B.transport.request(S.peerId, SEEDSTORE_PROTO, typed(MsgType.FETCH, encodeFetchBatchReq([bid])));
       const back = decodeFetchBatchRes(fetched)[0];
       t.ok(back && bytesEqual(back, bytes), "FETCH returns the bytes over ws");
-      t.ok(netS.framesDelivered > 0, "server received frames over the websocket");
+      t.ok(S.net.framesDelivered > 0, "server received frames over the websocket");
     } finally {
       S.close(); B.close();
-      netS.close(); netB.close();
     }
   }
-
-  // ── the contact secret actually gates ──────────────────────────────────────
-  //
-  // The positive paths above prove a correct secret gets through, which a node that
-  // ignored the field entirely would also pass. This is the other half: a dialer with
-  // the WRONG secret must get nowhere. Refusal is silent by design (§12.6.2) — no close,
-  // no error — so the only observable is a link that never comes up. `ready()` rejecting
-  // on timeout IS the pass condition here.
-  t.group("a wrong contact secret draws silence — no link, no frames");
-  {
-    const idS = newKey(sodium), idB = newKey(sodium);
-    const secretS = sodium.randombytes_buf(32);
-    const netS = new NodeNetwork({ identity: idS, contactSecret: secretS, sodium, listen: { host: "127.0.0.1", port: 0 } });
-    await netS.start();
-
-    // Delivery is the observable. ready() resolves on its own timer whether or not the
-    // peer came up, so it cannot tell "linked" from "gave up waiting"; and
-    // NodeNetworkCore takes no onPeerUp (only WsNetwork/RtcNetwork do), so a callback
-    // passed here would be silently ignored and read as a pass. Count frames instead.
-    let received = 0;
-    netS.endpoint(toHex(idS.publicKey)).onFrame(() => { received++; });
-
-    // Right address, right pubkey, wrong credential.
-    const netB = new NodeNetwork({ identity: idB, sodium });
-    const epB = netB.endpoint(toHex(idB.publicKey));
-    epB.onFrame(() => {});
-    netB.addPeerAddr(toHex(idS.publicKey),
-      { host: "127.0.0.1", port: netS.port, transport: "tcp", contactSecret: sodium.randombytes_buf(32) });
-
-    // Control: the SAME dial with the right secret must get through. Without it, this
-    // group would also pass on a cohort that never links at all — which is exactly the
-    // failure the first draft of this test hid.
-    const idOk = newKey(sodium);
-    const netOk = new NodeNetwork({ identity: idOk, sodium });
-    const epOk = netOk.endpoint(toHex(idOk.publicKey));
-    epOk.onFrame(() => {});
-    netOk.addPeerAddr(toHex(idS.publicKey),
-      { host: "127.0.0.1", port: netS.port, transport: "tcp", contactSecret: secretS });
-
-    try {
-      epB.send(toHex(idS.publicKey), new Uint8Array([1]));
-      await sleep(1500);
-      t.eq(received, 0, "a dialer presenting the wrong contact secret gets nothing through");
-
-      epOk.send(toHex(idS.publicKey), new Uint8Array([2]));
-      await sleep(1500);
-      t.eq(received, 1, "the same dial with the RIGHT secret delivers — the gate is what refused");
-    } finally {
-      netS.close(); netB.close(); netOk.close();
-    }
-  }
-
 }

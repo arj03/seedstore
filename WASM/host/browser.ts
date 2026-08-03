@@ -10,6 +10,8 @@
 
 import type { Sodium } from "./sodium.js";
 import { StorageNode, type StorageNodeOptions } from "./storage-node.js";
+import { LoopbackNetwork } from "./loopback.js";
+import { toHex } from "./util.js";
 
 export interface WasmBytes {
   bundleBlob: Uint8Array;
@@ -29,16 +31,30 @@ export async function loadWasmBytes(baseUrl: string | URL = "./"): Promise<WasmB
 
 /** Boot one storage node in the browser. Pass a readied sumo libsodium. */
 export async function createStorageNode(
-  opts: Omit<StorageNodeOptions, "bundleBlob" | "sodium"> & { sodium: Sodium; wasm?: WasmBytes; baseUrl?: string | URL },
+  opts: Omit<StorageNodeOptions, "bundleBlob" | "sodium"> & {
+    sodium: Sodium; wasm?: WasmBytes; baseUrl?: string | URL;
+    /** An in-process fabric to join: each node binds its own loopback port and
+     *  dials through it (the in-page cohort). Absent, the node has no socket
+     *  seam — a browser edge, whose links arrive via the driver's openLink. */
+    network?: LoopbackNetwork;
+  },
 ): Promise<StorageNode> {
   const sodium = opts.sodium as Sodium;
   await sodium.ready;
   const wasm = opts.wasm ?? (await loadWasmBytes(opts.baseUrl));
-  return StorageNode.create({ ...opts, bundleBlob: wasm.bundleBlob, sodium });
+  const { network, ...rest } = opts;
+  // The in-process fabric needs the identity BEFORE the node boots (its view is
+  // keyed by peer id), so mint one here when the caller left it to the node.
+  let o = rest;
+  if (network) {
+    const identity = o.identity ?? (() => { const kp = sodium.crypto_sign_keypair(); return { publicKey: kp.publicKey, privateKey: kp.privateKey }; })();
+    o = { ...o, identity, channels: network.view(toHex(identity.publicKey)), listen: { host: "127.0.0.1", port: 0 } };
+  }
+  return StorageNode.create({ ...o, bundleBlob: wasm.bundleBlob, sodium });
 }
 
 export { StorageNode } from "./storage-node.js";
-export { LoopbackNetwork } from "seedkernel-wasm/net";
+export { LoopbackNetwork } from "./loopback.js";
 export { createConnectedCohort } from "./cluster.js";
 export type { StorageNodeOptions } from "./storage-node.js";
 export type { StorageConfig, Identity } from "./core.js";

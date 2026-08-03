@@ -1,5 +1,5 @@
-// Browser entry-point test. We exercise host/browser.js — which loads the WASM
-// modules via fetch() and takes an injected libsodium — by shimming fetch over
+// Browser entry-point test. We exercise host/browser.js — which fetches the
+// bundle via fetch() and takes an injected libsodium — by shimming fetch over
 // the local build dir. This proves the same StorageNode boots and serves
 // PUT/GET through the browser code path, without node:fs (§1, §20: browser and
 // long-running nodes run the same protocol).
@@ -16,15 +16,12 @@ const buildDir = join(dirname(fileURLToPath(import.meta.url)), "..", "build");
 export async function run(t) {
   const sodium = await ensureSodium();
   const origFetch = globalThis.fetch;
-  // Shim fetch to serve the wasm + the guest program from disk, as a static file
-  // server would in a real deployment. The wasm sit at the build root; the guest
-  // program is under host/ (browser.js fetches it as text).
+  // Shim fetch to serve the bundle from disk, as a static file server would in a
+  // real deployment (browser.js fetches ./seedstore.skb).
   globalThis.fetch = async (url) => {
     const name = String(url).split("/").pop();
-    // codec.wasm/reputation.wasm live under build/; the bundle lives under bundle/
-    const path = name === "seedstore.skb"
-      ? join(buildDir, "..", "bundle", name)
-      : name === "tier2-guest.js" ? join(buildDir, "host", name) : join(buildDir, name);
+    // seedstore.skb lives under bundle/
+    const path = name === "seedstore.skb" ? join(buildDir, "..", "bundle", name) : join(buildDir, name);
     const buf = readFileSync(path);
     return {
       arrayBuffer: async () => buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength),
@@ -34,7 +31,7 @@ export async function run(t) {
   try {
     const { createStorageNode, LoopbackNetwork, StorageNode } = await import("../build/host/browser.js");
 
-    t.group("browser entry: fetch-loaded WASM + injected sodium runs a node");
+    t.group("browser entry: fetch-loaded bundle + injected sodium runs a node");
     const net = new LoopbackNetwork();
     const config = { k: 2, m: 2, blockSize: 64 };
     const nodes = [];
@@ -42,7 +39,7 @@ export async function run(t) {
       nodes.push(await createStorageNode({ network: net, sodium, baseUrl: "build/", config, timeoutMs: 40 }));
     }
     for (let i = 0; i < nodes.length; i++) {
-      for (let j = i + 1; j < nodes.length; j++) StorageNode.connect(nodes[i], nodes[j]);
+      for (let j = i + 1; j < nodes.length; j++) await StorageNode.connect(nodes[i], nodes[j]);
     }
     t.ok(nodes[0].handlersInstalled(), "node booted through the browser fetch path");
 
@@ -52,6 +49,7 @@ export async function run(t) {
     t.ok(bytesEqual(got, data), "PUT/GET round trip works through the browser entry point");
 
     nodes.forEach((n) => n.close());
+    net.close();
   } finally {
     globalThis.fetch = origFetch;
   }

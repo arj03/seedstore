@@ -51,7 +51,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { performance } from "node:perf_hooks";
 import { StorageNode, loadWasmBytes, loadSodium, PRODUCTION_BLOCK_SIZE } from "../build/host/node.js";
-import { bytesEqual } from "../build/host/util.js";
+import { LoopbackNetwork } from "../build/host/loopback.js";
+import { toHex, bytesEqual } from "../build/host/util.js";
 import { NodeFs } from "seedkernel-wasm/fs-node";
 
 const FILE_MB = Number(process.argv[2] ?? 16);
@@ -68,14 +69,17 @@ const config = { k: K, m: M, blockSize, maxMessageBytes: 1 << 20 };
 // MsgType (host/protocol.ts) — index the per-type timers.
 const HAVE = 1, OFFER = 2, FETCH = 3, STORE = 4;
 const TYPE_NAME = { [HAVE]: "HAVE", [OFFER]: "OFFER", [FETCH]: "FETCH", [STORE]: "STORE" };
-const KIND_REQ = 0;
 
-// A zero-latency loopback that times how long each node spends INSIDE its own request
-// handler. Delivery is deferred (queueMicrotask) so the sender never re-enters itself,
-// exactly as the plain LoopbackNetwork does; the timing wraps only the receiver's sink,
-// which is where the holder's synchronous work happens.
+// A zero-latency loopback (host/loopback.ts) whose drivers are wrapped at the
+// request seam: the initiator's outbound requests are timed per destination +
+// type. On the loopback the round trip is holder work + two realm hops — no wire —
+// so the per-request time is the holder's ingest cost, the same thing the old
+// frame-level sink timing measured (the transport is now a signed bundle running
+// in its own realm, so the app request structure is only visible at the driver's
+// request() boundary — see latency-net.mjs).
 class HolderTimingNetwork {
-  constructor() { this.sinks = new Map(); this.offline = new Set(); this.stats = new Map(); }
+  constructor() { this.stats = new Map(); }
+  view(peerId) { return this.fabric.view(peerId); }
   statsFor(peer) {
     let s = this.stats.get(peer);
     if (!s) this.stats.set(peer, (s = {}));
@@ -85,31 +89,19 @@ class HolderTimingNetwork {
     const s = this.statsFor(peer);
     return s[type] ?? (s[type] = { n: 0, ms: 0, payloadBytes: 0 });
   }
-  endpoint(id) {
-    return {
-      send: (to, frame) => this.deliver(id, to, frame),
-      onFrame: (sink) => { this.sinks.set(id, sink); },
-      close: () => { this.sinks.delete(id); },
-    };
-  }
-  setOnline(peerId, online) { if (online) this.offline.delete(peerId); else this.offline.add(peerId); }
-  isOnline(peerId) { return this.sinks.has(peerId) && !this.offline.has(peerId); }
-  deliver(from, to, frame) {
-    if (this.offline.has(from) || this.offline.has(to)) return;
-    if (!this.sinks.has(to)) return;
-    const copy = frame.slice();
-    queueMicrotask(() => {
-      const sink = this.sinks.get(to);
-      if (!sink) return;
-      if (copy[0] !== KIND_REQ) { sink(from, copy); return; }
-      // req = [kind u8][corr u32][type u8][payload…] — the response is sent before this
-      // returns, so the delta is the receiver's whole handling of this request.
-      const b = this.bucket(to, copy[5]);
-      b.n++; b.payloadBytes += copy.length - 6;
+  /** Wrap ONE node's transport driver so outbound requests are timed per
+   *  destination + type. The storage guest's NET_SEND resolves to the driver's
+   *  request(); payload[0] is the app's MsgType. */
+  wrap(driver) {
+    const net = this;
+    const orig = driver.request.bind(driver);
+    driver.request = (to, proto, payload) => {
+      const type = payload?.[0];
+      const b = net.bucket(to, type);
+      b.n++; b.payloadBytes += payload.length;
       const t0 = performance.now();
-      sink(from, copy);
-      b.ms += performance.now() - t0;
-    });
+      return orig(to, proto, payload).finally(() => { b.ms += performance.now() - t0; });
+    };
   }
 }
 
@@ -119,6 +111,7 @@ const rate = (bytes, ms) => (ms <= 0 ? Infinity : bytes / MB / (ms / 1000));
 const sodium = await loadSodium();
 const wasm = await loadWasmBytes();
 const net = new HolderTimingNetwork();
+net.fabric = new LoopbackNetwork();
 
 // One initiator + exactly k+m holders, so every chunk's blocks fill the cohort and each
 // holder takes one block per chunk (the §6 sibling rule) — the live shape. Built node by
@@ -136,9 +129,13 @@ for (let i = 0; i < 1 + holders; i++) {
     tmpDirs.push(dir);
     fs = new NodeFs(dir);
   }
+  const identity = (() => { const kp = sodium.crypto_sign_keypair(); return { publicKey: kp.publicKey, privateKey: kp.privateKey }; })();
   nodes.push(await StorageNode.create({
-    network: net, sodium,
+    sodium,
     bundleBlob: wasm.bundleBlob,
+    identity,
+    channels: net.view(toHex(identity.publicKey)),
+    listen: { host: "127.0.0.1", port: 0 },
     config, fs,
     // Generous: each holder takes ~fileBytes of blocks plus .dsc sidecars, and a §14-full
     // holder would silently decline instead of measuring anything.
@@ -147,9 +144,11 @@ for (let i = 0; i < 1 + holders; i++) {
   }));
 }
 for (let i = 0; i < nodes.length; i++) {
-  for (let j = i + 1; j < nodes.length; j++) StorageNode.connect(nodes[i], nodes[j]);
+  for (let j = i + 1; j < nodes.length; j++) await StorageNode.connect(nodes[i], nodes[j]);
 }
 const initiator = nodes[0];
+// The initiator's driver carries every request of the PUT/GET; wrap it for timing.
+net.wrap(initiator.net);
 const holderIds = nodes.slice(1).map((n) => n.peerId);
 
 const data = new Uint8Array(fileBytes);
@@ -260,11 +259,4 @@ console.log(margin > 3
   : `  that is only ${fmt(margin, 1)}× the live demand — holder processing is a plausible limiter.`);
 
 for (const d of tmpDirs) rmSync(d, { recursive: true, force: true });
-// Exit without disposing the guest realms. StorageNode.close() defers realm disposal onto
-// the node's in-flight chain, and doing that at the end of a standalone script aborts in
-// QuickJS with `Assertion failed: list_empty(&rt->gc_obj_list)` — a PRE-EXISTING teardown
-// bug on this path, reproducible on the untouched tests/bench-net.mjs, not something this
-// bench introduces (the test suite closes hundreds of nodes without it). The process is
-// ending anyway, so there is nothing to tear down orderly; exiting here keeps the bench's
-// exit code meaningful instead of always failing on a crash after the results are printed.
 process.exit(0);
