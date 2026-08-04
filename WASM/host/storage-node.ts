@@ -27,7 +27,10 @@
 
 import type { PeerId } from "seedkernel-wasm/net";
 import type { Fs } from "seedkernel-wasm/fs";
-import { MemoryFs, scopedFs } from "seedkernel-wasm/fs";
+import { scopedFs } from "seedkernel-wasm/fs";
+// The backend, not the seam: `MemoryFs` is host code alongside `NodeFs`, while
+// `seedkernel-wasm/fs` stays the `Fs` contract plus the scoping applied over it.
+import { MemoryFs } from "seedkernel-wasm/fs-memory";
 import { TransportHost } from "seedkernel-wasm/transport-host";
 import { TRANSPORT_BUNDLE_B64 } from "seedkernel-wasm/transport-bundle";
 import { FsBlobView, type BlobView } from "./store-view.js";
