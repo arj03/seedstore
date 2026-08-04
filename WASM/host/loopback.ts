@@ -2,8 +2,17 @@
 // demos (the successor of the old seedkernel LoopbackNetwork, which sat under a
 // hand-rolled Transport). The transport is now a signed bundle driven by the
 // shared TransportHost over the ChannelFactory seam (seedkernel §12.6): this file
-// is that seam — a LoopbackChannels fabric, one `view()` per node — plus the
+// is that seam — a loopback fabric, one `view()` per node — plus the
 // online/offline control the storage tests and the in-page demo need.
+//
+// The base fabric (LoopbackChannel/LoopbackChannels) used to ship inside
+// seedkernel's shared host bundle, exported from `seedkernel-wasm/transport-host`.
+// It is test/demo infrastructure, so seedkernel moved it out of the runtime (it
+// lives in seedkernel's own tests/ now, and is no longer an exported entry). This
+// app's tests and browser demo run on it, so the fabric is vendored here: the
+// `ChannelFactory` it implements is the same seam a real deployment's sockets
+// satisfy, and nothing about the transport changes because the bottom is
+// in-process.
 //
 // The old LoopbackNetwork had `setOnline(peerId, bool)`/`isOnline(peerId)` and
 // dropped frames to/from an offline peer. Here a node going offline is made real:
@@ -15,8 +24,6 @@
 //
 // There is no re-online in the tests (a node that returns boots a fresh
 // transport), so going back online is only a bookkeeping toggle here.
-
-import { LoopbackChannels } from "seedkernel-wasm/transport-host";
 
 /** The structural RawLink shape this file needs (socket-seam.ts is not an
  *  exported entry, so the shape is stated here rather than imported). `framing`
@@ -44,6 +51,141 @@ export interface ChannelFactoryLike {
     onAccept: (channel: RawLinkLike) => void,
   ): Promise<{ port: number; wsPort: number }>;
   close(): void;
+}
+
+/** One end of an in-process socket pair. Delivery is asynchronous (a microtask),
+ *  mirroring a real socket; closing one end fires the other's onClose — the
+ *  close semantics of BufferedChannel's fail() path, which is how a real channel
+ *  reports the far side going away. */
+class LoopbackChannel implements RawLinkLike {
+  /** A socket pair with `send` as the boundary: one send is one delivery. */
+  readonly framing = 0 as const; // FRAMING.PLATFORM — nothing for the bundle to frame
+  peer: LoopbackChannel | null = null;
+  msg: ((bytes: Uint8Array) => void) | null = null;
+  cls: (() => void) | null = null;
+  dead = false;
+  readonly remoteAddr: string;
+
+  constructor(remoteAddr: string) {
+    this.remoteAddr = remoteAddr;
+  }
+
+  static pair(remoteAddr: string): [LoopbackChannel, LoopbackChannel] {
+    const a = new LoopbackChannel(remoteAddr);
+    const b = new LoopbackChannel(remoteAddr);
+    a.peer = b;
+    b.peer = a;
+    return [a, b];
+  }
+
+  send(bytes: Uint8Array): void {
+    if (this.dead) return;
+    const p = this.peer;
+    queueMicrotask(() => { if (p && !p.dead) p.msg?.(bytes); });
+  }
+  onData(cb: (bytes: Uint8Array) => void): void { this.msg = cb; }
+  onClose(cb: () => void): void { this.cls = cb; }
+  close(): void {
+    if (this.dead) return;
+    this.dead = true;
+    const p = this.peer;
+    queueMicrotask(() => { if (p && !p.dead) p.cls?.(); });
+  }
+  /** The far end went away / this end failed: notify our own onClose (the
+   *  BufferedChannel.fail() path — how a socket reports being cut). */
+  kill(): void {
+    if (this.dead) return;
+    this.dead = true;
+    this.cls?.();
+  }
+}
+
+/** In-process socket fabric for the transport driver: `listen` registers a
+ *  listener per port and `connect` opens a microtask-delivered pipe pair into
+ *  it. The fabric is SHARED by every driver in a process (like a real network),
+ *  so closing one driver only clears the listeners — it does not poison the
+ *  fabric for the others. */
+class LoopbackChannels implements ChannelFactoryLike {
+  private listeners = new Map<number, (channel: RawLinkLike) => void>();
+  private nextPort = 10000;
+
+  /** The bound ports (set by a driver's start()). */
+  port = 0;
+  wsPort = 0;
+
+  async listen(
+    tcp: { host: string; port: number } | undefined,
+    ws: { host: string; port: number } | undefined,
+    onAccept: (channel: RawLinkLike) => void,
+  ): Promise<{ port: number; wsPort: number }> {
+    let port = 0, wsPort = 0;
+    if (tcp) { port = this.bind(tcp.port, onAccept); }
+    if (ws) { wsPort = this.bind(ws.port, onAccept); }
+    this.port = port;
+    this.wsPort = wsPort;
+    return { port, wsPort };
+  }
+
+  private bind(requested: number, onAccept: (channel: RawLinkLike) => void): number {
+    const port = requested > 0 ? requested : this.nextPort++;
+    if (this.listeners.has(port)) throw new Error("LoopbackChannels: port already bound");
+    this.listeners.set(port, onAccept);
+    return port;
+  }
+
+  connect(addr: { host: string; port: number }): RawLinkLike {
+    const onAccept = this.listeners.get(addr.port);
+    if (!onAccept) {
+      // A dial to a dead port: the channel fails immediately on the DIAL side
+      // (mirroring ECONNREFUSED → the socket's error/close events), so the
+      // transport forgets the link instead of holding it until the deadline.
+      const [dial] = LoopbackChannel.pair(addr.host);
+      queueMicrotask(() => dial.kill());
+      return dial;
+    }
+    // The address's host is the "far end" both sides see — it is what the
+    // half-open limiter buckets accepts by (the per-source cap; §12.6.1).
+    const [dial, accepted] = LoopbackChannel.pair(addr.host);
+    queueMicrotask(() => onAccept(accepted));
+    return dial;
+  }
+
+  close(): void {
+    this.listeners.clear();
+  }
+
+  /** A per-node view of this fabric: it dials and listens through the same registry,
+   *  but its `close` unbinds only the ports *it* bound.
+   *
+   *  Sharing one `LoopbackChannels` between nodes is a test convenience — in
+   *  production each shell holds its own `NodeChannelFactory` — and the whole-fabric
+   *  `close` above is right for teardown and wrong for anything else. An in-place
+   *  transport upgrade closes the outgoing driver and re-binds its port, so on the
+   *  shared object that would unbind every other node in the test. This is the shape
+   *  the file header already claimed: closing one driver clears its listeners without
+   *  poisoning the fabric for the others. */
+  view(): ChannelFactoryLike {
+    const fabric = this;
+    const mine: number[] = [];
+    return {
+      connect: (addr) => fabric.connect(addr),
+      async listen(tcp, ws, onAccept) {
+        const r = await fabric.listen(tcp, ws, onAccept);
+        if (r.port) mine.push(r.port);
+        if (r.wsPort) mine.push(r.wsPort);
+        return r;
+      },
+      close() {
+        for (const p of mine.splice(0)) fabric.unbind(p);
+      },
+    };
+  }
+
+  /** Release one bound port. The per-node `view()` is the only caller — the fabric's
+   *  own `close` drops everything. */
+  private unbind(port: number): void {
+    this.listeners.delete(port);
+  }
 }
 
 /** A channel that dies immediately — what a dial to an offline peer's port draws,

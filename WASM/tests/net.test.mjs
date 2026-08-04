@@ -19,7 +19,7 @@ import { StorageNode } from "../build/host/storage-node.js";
 import { NodeChannelFactory } from "seedkernel-wasm/net-node";
 import { FsBlobView } from "../build/host/store-view.js";
 import { NodeFs } from "seedkernel-wasm/fs-node";
-import { scopedFs } from "seedkernel-wasm/fs";
+import { scopedFs } from "seedkernel-wasm/shell-core";
 import {
   MsgType, encodeHaveReq, decodeMask, encodeStoreBatch, encodeFetchBatchReq, decodeFetchBatchRes,
   VERDICT_ACCEPTED, VERDICT_DECLINED,

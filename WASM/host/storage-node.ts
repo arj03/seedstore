@@ -27,9 +27,9 @@
 
 import type { PeerId } from "seedkernel-wasm/net";
 import type { Fs } from "seedkernel-wasm/fs";
-import { scopedFs } from "seedkernel-wasm/fs";
 // The backend, not the seam: `MemoryFs` is host code alongside `NodeFs`, while
-// `seedkernel-wasm/fs` stays the `Fs` contract plus the scoping applied over it.
+// `seedkernel-wasm/fs` stays the `Fs` contract plus the key rule. The scoping
+// wrapper (`scopedFs`) is shell logic now and lives in `shell-core` below.
 import { MemoryFs } from "seedkernel-wasm/fs-memory";
 import { TransportHost } from "seedkernel-wasm/transport-host";
 import { TRANSPORT_BUNDLE_B64 } from "seedkernel-wasm/transport-bundle";
@@ -42,7 +42,7 @@ import { STORAGE_APP, storageSignScope } from "./manifest.js";
 import { encodeScoreReq } from "./reputation-core.js";
 import { toHex, readU32BE, readU64BE, concatBytes } from "./util.js";
 import {
-  createShell, KernelHost, type Shell, type KernelTable, type RealmFactory,
+  createShell, KernelHost, scopedFs, type Shell, type KernelTable, type RealmFactory,
 } from "seedkernel-wasm/shell-core";
 import { FreshnessMarks, kernelNameFor, appScopeFor, verifyBundle, type LoadedBundle } from "seedkernel-wasm/bundle";
 import type { HostTransport } from "seedkernel-wasm/transport-host";
