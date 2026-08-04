@@ -261,20 +261,31 @@ export class StorageNode {
     // fs wins; a pre-built shell brings its own (bootTransportShell created it).
     const fs = opts.fs ?? (opts.shell?.fs ?? built!.fs) ?? new MemoryFs();
 
-    const loaded = await shell.loadBundleBlob(opts.bundleBlob);
-    await shell.serve();
+    // Everything from here on can fail — a blob that does not verify, a config the
+    // constructor refuses — and a factory that throws must not leave what it built
+    // running. Without this, each failure stranded a whole shell: a listening socket, a
+    // transport realm, and (past loadBundleBlob) the storage realm, live for the
+    // process's life with nothing holding a reference to close them. Only a shell we
+    // stood up ourselves; a caller's shell is the caller's to close.
+    try {
+      const loaded = await shell.loadBundleBlob(opts.bundleBlob);
+      await shell.serve();
 
-    // The guest does NOT reach the backend directly: the shell hands it
-    // `scopedFs(fs, appScopeFor(author, app))`, so every key the holder writes lands
-    // under this app's opaque prefix (seedkernel §12.2). The host's read view has to
-    // enter through the same door, or `store.list()` walks past the guest's writes and
-    // reads back scope-prefixed keys as if they were block ids. One keyspace per app,
-    // one handle to it — the scope is derived here rather than passed in because it
-    // depends on the *verified* bundle author, which only exists after the load above.
-    const appFs = scopedFs(fs, appScopeFor(opts.sodium, loaded.author, STORAGE_APP));
-    const withFs = { ...opts, fs: appFs }; // share the one fs instance with the constructor below
+      // The guest does NOT reach the backend directly: the shell hands it
+      // `scopedFs(fs, appScopeFor(author, app))`, so every key the holder writes lands
+      // under this app's opaque prefix (seedkernel §12.2). The host's read view has to
+      // enter through the same door, or `store.list()` walks past the guest's writes and
+      // reads back scope-prefixed keys as if they were block ids. One keyspace per app,
+      // one handle to it — the scope is derived here rather than passed in because it
+      // depends on the *verified* bundle author, which only exists after the load above.
+      const appFs = scopedFs(fs, appScopeFor(opts.sodium, loaded.author, STORAGE_APP));
+      const withFs = { ...opts, fs: appFs }; // share the one fs instance with the constructor below
 
-    return new StorageNode(withFs, shell, identity, loaded, cohort, ownsShell);
+      return new StorageNode(withFs, shell, identity, loaded, cohort, ownsShell);
+    } catch (err) {
+      if (ownsShell) shell.close();
+      throw err;
+    }
   }
 
   // ── cohort membership (§5.1) ───────────────────────────────────────────

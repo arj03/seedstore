@@ -18,24 +18,30 @@
 
 import { LoopbackChannels } from "seedkernel-wasm/transport-host";
 
-/** The structural RawChannel shape this file needs (socket-seam.ts is not an
- *  exported entry, so the shape is stated here rather than imported). */
-export interface RawChannelLike {
+/** The structural RawLink shape this file needs (socket-seam.ts is not an
+ *  exported entry, so the shape is stated here rather than imported). `framing`
+ *  says which wire codec the transport bundle runs over the link — the closed set
+ *  of socket-seam.ts's `FRAMING` (0 PLATFORM, 1 LENGTH, 2 WS_CLIENT, 3 WS_SERVER),
+ *  restated as the literal union so it still assigns to the kernel's `Framing`.
+ *  The fabric's channels are `PLATFORM`: one `send` is one delivery, so there is
+ *  nothing for the bundle to frame. */
+export interface RawLinkLike {
   send(bytes: Uint8Array): void;
-  onMessage(cb: (bytes: Uint8Array) => void): void;
+  onData(cb: (bytes: Uint8Array) => void): void;
   onClose(cb: () => void): void;
   close(graceful: boolean): void;
-  allowLargeFrames?(): void;
+  readonly framing: 0 | 1 | 2 | 3;
+  readonly authority?: string;
   readonly remoteAddr?: string;
 }
 
 /** The structural ChannelFactory shape (socket-seam.ts `ChannelFactory`). */
 export interface ChannelFactoryLike {
-  connect(addr: { host: string; port: number; transport: "tcp" | "ws"; contactSecret?: Uint8Array }): RawChannelLike;
+  connect(addr: { host: string; port: number; transport: "tcp" | "ws"; contactSecret?: Uint8Array }): RawLinkLike;
   listen(
     tcp: { host: string; port: number } | undefined,
     ws: { host: string; port: number } | undefined,
-    onAccept: (channel: RawChannelLike) => void,
+    onAccept: (channel: RawLinkLike) => void,
   ): Promise<{ port: number; wsPort: number }>;
   close(): void;
 }
@@ -43,15 +49,15 @@ export interface ChannelFactoryLike {
 /** A channel that dies immediately — what a dial to an offline peer's port draws,
  *  mirroring the fabric's own dead-port dial (the dial side's onClose fires and
  *  the transport forgets the link before it ever authenticates). */
-function deadChannel(): RawChannelLike {
+function deadChannel(): RawLinkLike {
   const cbHolder: { cb?: () => void } = {};
   queueMicrotask(() => cbHolder.cb?.());
   return {
     send: () => {},
-    onMessage: () => {},
+    onData: () => {},
     onClose: (cb) => { cbHolder.cb = cb; },
     close: () => {},
-    allowLargeFrames: () => {},
+    framing: 0, // FRAMING.PLATFORM — it dies before a byte crosses either way
     remoteAddr: "offline",
   };
 }
@@ -62,7 +68,7 @@ export class LoopbackNetwork {
   private readonly portOf = new Map<number, string>();
   private readonly offline = new Set<string>();
   /** Every live channel of a peer (dialed and accepted) — killed on offline. */
-  private readonly links = new Map<string, RawChannelLike[]>();
+  private readonly links = new Map<string, RawLinkLike[]>();
 
   /** The peers' bound ports, for dial wiring. A node binds at most one tcp and
    *  one ws port on the fabric. */
@@ -126,7 +132,7 @@ export class LoopbackNetwork {
     return owner !== undefined && this.offline.has(owner);
   }
 
-  private track(peerId: string, ch: RawChannelLike): void {
+  private track(peerId: string, ch: RawLinkLike): void {
     let list = this.links.get(peerId);
     if (!list) this.links.set(peerId, (list = []));
     list.push(ch);

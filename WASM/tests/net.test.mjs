@@ -61,7 +61,7 @@ async function tcpCohort({ count, sodium, wasm, config, baseDir }) {
     // The socket seam is a real node:net factory; the node binds an ephemeral port.
     nodes.push(await StorageNode.create({
       sodium, ...wasm, identity: newKey(sodium), config, timeoutMs: 3000,
-      channels: new NodeChannelFactory(sodium),
+      channels: new NodeChannelFactory(),
       listen: { host: "127.0.0.1", port: 0 },
       // Give the node a disk-backed fs; its default store view reads that same fs, so
       // what the confined guest holder writes via fs.* lands on disk and node.store
@@ -192,14 +192,14 @@ export async function run(t) {
     const secretS = sodium.randombytes_buf(32);
     const S = await StorageNode.create({
       sodium, ...wasm, identity: idS, timeoutMs: 3000,
-      channels: new NodeChannelFactory(sodium),
+      channels: new NodeChannelFactory(),
       listen: { host: "127.0.0.1", port: 0 },
       wsListen: { host: "127.0.0.1", port: 0 },
       contactSecret: secretS,
     });
     const B = await StorageNode.create({
       sodium, ...wasm, identity: idB, timeoutMs: 3000,
-      channels: new NodeChannelFactory(sodium),
+      channels: new NodeChannelFactory(),
     });
     B.addPeer(S.peerId);
     S.addPeer(B.peerId);
