@@ -21,8 +21,8 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { loadSodium } from "seedkernel-wasm";
-import { verifyBundle } from "seedkernel-wasm/bundle";
-import { writeStorageBundle } from "./storage-bundle.mjs";
+import { verifyBundle, hybridAuthorId } from "seedkernel-wasm/bundle";
+import { writeStorageBundle, authorKeysFor } from "./storage-bundle.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = join(__dirname, "..");
@@ -89,6 +89,9 @@ const manifest = writeStorageBundle({ path: bundlePath, sodium, sk, pk, build, v
 // even if bundle/ is wiped.
 writeFileSync(versionPath, `${manifest.version}\n`);
 
-console.log(`  author ${toHex(pk)}`);
+// The pinned id is the HYBRID author id (the key-set hash, §12.4) — the bundle is
+// signed under suite 0x02, so the Ed25519 key is no longer what policy lists.
+const authKeys = authorKeysFor(sodium, sk);
+console.log(`  author ${toHex(hybridAuthorId(sodium, authKeys.ed.publicKey, authKeys.mlDsa.publicKey))} (hybrid 0x02)`);
 console.log(`  wrote ${bundlePath} (app ${manifest.app} v${manifest.version}, ${manifest.modules.length} modules, `
   + `caps ${manifest.guest.caps.join("+")})`);

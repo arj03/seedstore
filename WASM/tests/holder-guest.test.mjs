@@ -58,12 +58,14 @@ export async function run(t) {
   const author = generateKeyPair(sodium);
   const bundleDir = mkdtempSync(join(tmpdir(), "seedstore-bundle-"));
   const bundlePath = join(bundleDir, "seedstore.skb");
-  await buildBundle(bundlePath, author, sodium, build);
+  // The hybrid author id (key-set hash) is what the policy pins — the bundle is
+  // signed under suite 0x02 (§12.4), not the bare Ed25519 key.
+  const authorId = await buildBundle(bundlePath, author, sodium, build);
   // The StorageNode cohort loads the SAME signed bundle the shells load, so every node
   // derives the one author signing scope and a descriptor one signs verifies on another.
   const bundleBlob = new Uint8Array(readFileSync(bundlePath));
   const policyJson = JSON.stringify({
-    authors: [toHex(author.publicKey)],
+    authors: [toHex(authorId)],
     roles: { transport: [transportHex] },
   });
   const tmpDirs = [bundleDir];

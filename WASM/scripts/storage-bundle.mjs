@@ -29,7 +29,7 @@
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 
-import { signManifest, packBundle, genesisHash, MANIFEST_FILE, GUEST_FILE, moduleFile }
+import { signManifestHybrid, packBundle, genesisHash, MANIFEST_FILE, GUEST_FILE, moduleFile }
   from "seedkernel-wasm/bundle";
 import { GUEST_ABI_VERSION } from "seedkernel-wasm/cap-bridge";
 import { defaultConfig, PRODUCTION_BLOCK_SIZE } from "../build/host/core.js";
@@ -39,6 +39,35 @@ import { toHex } from "../build/host/util.js";
 // (README §16). The shell scopes the guest's SIGN op to (author, app); build here the
 // byte-identical scope so the guest's injected verify prefix agrees with it.
 const APP_NAME = "seedstore";
+
+// The label the ML-DSA half of the author's key set is derived from (seedkernel
+// §12.4): the author key is signed with the hybrid suite 0x02, whose author id is a
+// key-set hash over BOTH public keys, so the PQ half must be deterministic from the
+// one seed an operator stores. Same label and construction as the runtime's own
+// transport author and the seedchat demo — one derivation, one pinned id per seed.
+const AUTHOR_PQ_SEED_LABEL = "seedkernel-author-mldsa-v1";
+
+/**
+ * The author's full key set for hybrid signing: the Ed25519 half from `edSk` and
+ * the ML-DSA-65 half derived from its seed, so one stored key is the whole
+ * identity and the pinned id (seedkernel `hybridAuthorId`) is stable across
+ * rebuilds of the same key.
+ * @param {any}    sodium  loaded libsodium, with the ML-DSA-65 signer mixed in
+ *                         (seedkernel `loadSodium` supplies it; `signManifestHybrid`
+ *                         throws without it, so a build that cannot sign PQ fails loud)
+ * @param {Uint8Array} edSk  the author's 64-byte Ed25519 secret key (seed‖pk)
+ */
+export function authorKeysFor(sodium, edSk) {
+  const label = new TextEncoder().encode(AUTHOR_PQ_SEED_LABEL);
+  const seed = edSk.slice(0, 32);
+  const seedIn = new Uint8Array(seed.length + label.length);
+  seedIn.set(seed, 0);
+  seedIn.set(label, seed.length);
+  return {
+    ed: { publicKey: edSk.slice(32), privateKey: edSk },
+    mlDsa: sodium.ml_dsa65_keypair_from_seed(sodium.crypto_generichash(32, seedIn)),
+  };
+}
 
 // The capability domains the storage guest reaches (cap-bridge CAP_DOMAINS keys).
 // Storage uses all of them; declaring them is exactly what the shell enforces.
@@ -54,10 +83,13 @@ const STORAGE_CAPS = ["crypto", "net", "fs", "module", "clock"];
 
 /**
  * Write a complete signed seedstore bundle to `path` (one blob, seedkernel §12.4).
+ * The manifest is signed under suite `0x02` (hybrid Ed25519 + ML-DSA-65): the
+ * author's PQ half is derived from the same seed (see `authorKeysFor`), so the
+ * pinned author id is the key-set hash and the bundle is post-quantum by default.
  * @param {object} o
  * @param {string} o.path     output bundle file (e.g. ./bundle/seedstore.skb)
  * @param {any}    o.sodium   loaded libsodium (hashes the module bytes; signs the manifest)
- * @param {Uint8Array} o.sk   author secret key (signs the manifest)
+ * @param {Uint8Array} o.sk   author secret key — the Ed25519 half (signs the manifest)
  * @param {Uint8Array} o.pk   author public key
  * @param {string} o.build    seedstore build/ dir (holds the codec wasm + staged guest)
  * @param {number} [o.version] monotonic-per-(author,app) freshness mark (README §12.4);
@@ -148,7 +180,7 @@ export function writeStorageBundle({ path, sodium, sk, pk, build, version = 1, l
     },
   };
 
-  files[MANIFEST_FILE] = signManifest(sodium, sk, pk, manifest);
+  files[MANIFEST_FILE] = signManifestHybrid(sodium, authorKeysFor(sodium, sk), manifest);
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, packBundle(files));
   return manifest;

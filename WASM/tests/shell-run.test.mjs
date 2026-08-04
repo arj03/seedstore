@@ -70,13 +70,15 @@ export async function run(t) {
     const author = generateKeyPair(sodium);
     const net = new LoopbackNetwork();
 
-    const bundleDir = mkdtempSync(join(tmpdir(), "seedstore-bundle-"));
-    const bundlePath = join(bundleDir, "seedstore.skb");
-    const shellDir = mkdtempSync(join(tmpdir(), "seedstore-shell-"));
-    let shell, holders = [];
-    try {
-      await buildBundle(bundlePath, author, sodium, build);
-      const bundleBlob = new Uint8Array(readFileSync(bundlePath));
+      const bundleDir = mkdtempSync(join(tmpdir(), "seedstore-bundle-"));
+      const bundlePath = join(bundleDir, "seedstore.skb");
+      const shellDir = mkdtempSync(join(tmpdir(), "seedstore-shell-"));
+      let shell, holders = [];
+      try {
+        // The hybrid author id (key-set hash) is what policy and kernel names pin —
+        // the bundle is signed under suite 0x02 (§12.4), not the bare Ed25519 key.
+        const authorId = await buildBundle(bundlePath, author, sodium, build);
+        const bundleBlob = new Uint8Array(readFileSync(bundlePath));
       holders = await createConnectedCohort({
         // Match the shell's test-scale geometry so this tiny file spreads across the
         // cohort (the signed bundle ships PRODUCTION 256 KiB blocks).
@@ -94,7 +96,7 @@ export async function run(t) {
       for (const h of holders) h.addPeer(toHex(shellIdentity.publicKey));
       shell = await boot({
         policyJson: JSON.stringify({
-          authors: [toHex(author.publicKey)],
+          authors: [toHex(authorId)],
           roles: { transport: [transportHex] },
         }),
         dir: shellDir, identity: shellIdentity,
@@ -111,7 +113,7 @@ export async function run(t) {
       for (const h of holders) await link(shell, toHex(shellIdentity.publicKey), h, new Set());
       const loaded = await shell.loadBundle(bundlePath);
       for (const m of loaded.manifest.modules) {
-        t.ok(shell.host.isBound(kernelNameFor(author.publicKey, loaded.manifest.app, m.name)),
+        t.ok(shell.host.isBound(kernelNameFor(authorId, loaded.manifest.app, m.name)),
           `module ${m.name} installed`);
       }
 
@@ -170,12 +172,12 @@ export async function run(t) {
     let shell;
     try {
       const hiPath = join(hiDir, "seedstore.skb"), loPath = join(loDir, "seedstore.skb");
-      await buildBundle(hiPath, author, sodium, build, 5);
+      const authorId = await buildBundle(hiPath, author, sodium, build, 5);
       await buildBundle(loPath, author, sodium, build, 3);
       const shellId = generateKeyPair(sodium);
       shell = await boot({
         policyJson: JSON.stringify({
-          authors: [toHex(author.publicKey)],
+          authors: [toHex(authorId)],
           roles: { transport: [transportHex] },
         }),
         dir: shellDir, identity: shellId, channels: net.view(toHex(shellId.publicKey)),
