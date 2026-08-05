@@ -22,7 +22,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { boot } from "seedkernel-wasm/shell";
-import { kernelNameFor, verifyBundle } from "seedkernel-wasm/bundle";
+import { appKeyFor, verifyBundle } from "seedkernel-wasm/bundle";
 import { TRANSPORT_BUNDLE_B64 } from "seedkernel-wasm/transport-bundle";
 import {
   loadSodium, generateKeyPair, LoopbackNetwork, createConnectedCohort,
@@ -113,7 +113,7 @@ export async function run(t) {
       for (const h of holders) await link(shell, toHex(shellIdentity.publicKey), h, new Set());
       const loaded = await shell.loadBundle(bundlePath);
       for (const m of loaded.manifest.modules) {
-        t.ok(shell.host.isBound(kernelNameFor(authorId, loaded.manifest.app, m.name)),
+        t.ok(shell.host.isBound(appKeyFor(authorId, loaded.manifest.app), m.name),
           `module ${m.name} installed`);
       }
 

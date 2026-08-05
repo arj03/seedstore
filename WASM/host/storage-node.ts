@@ -44,7 +44,7 @@ import { toHex, readU32BE, readU64BE, concatBytes } from "./util.js";
 import {
   createShell, KernelHost, scopedFs, type Shell, type KernelTable, type RealmFactory,
 } from "seedkernel-wasm/shell-core";
-import { FreshnessMarks, kernelNameFor, appScopeFor, verifyBundle, type LoadedBundle } from "seedkernel-wasm/bundle";
+import { FreshnessMarks, appKeyFor, appScopeFor, verifyBundle, type LoadedBundle } from "seedkernel-wasm/bundle";
 import type { HostTransport } from "seedkernel-wasm/transport-host";
 import type { ChannelFactoryLike } from "./loopback.js";
 import type { Sodium } from "./sodium.js";
@@ -158,7 +158,7 @@ export class StorageNode {
   readonly crypto: Crypto;
   readonly sodium: Sodium;
   readonly config: StorageConfig;
-  /** The handler table, exposed through KernelTable (callHandler + isBound)
+  /** The handler table, exposed through KernelTable (callModule + isBound)
    *   without installWasmHandler — the bind is solely the bundle loader's job. */
   readonly host: KernelTable;
 
@@ -177,7 +177,10 @@ export class StorageNode {
    *   read view finds nothing at all: FsBlobView drops any key whose hex is not 64
    *   chars, so a prefixed key is skipped rather than misread. */
   readonly appScope: string;
-  private readonly modules: { codec: string; reputation: string };
+  /** This app's table key (§5.1). Its modules live in a map under it, at the logical
+   *   names the manifest declares ("codec", "reputation"), so there is no per-module
+   *   name to derive or hold. */
+  private readonly appKey: string;
   /** Durable cohort roster: the set of peers this node has a storage relationship
    *   with. The network owns connectivity; the cohort is app state — independent
    *   of who is currently online — and feeds the guest's NET_PEERS cap. */
@@ -214,15 +217,12 @@ export class StorageNode {
     // Derive signing scope and kernel names from the verified bundle author —
     // the same derivation a shell-run node uses. `signAuthor` lets a caller join
     // a cohort whose holders run a DIFFERENT bundle's author (descriptors are
-    // scoped to the deployment, §16); the fs keyspace and kernel names stay the
+    // scoped to the deployment, §16); the fs keyspace and app key stay the
     // loaded bundle's.
     this.signAuthor = opts.signAuthor ?? loaded.author;
     this.signScope = storageSignScope(this.signAuthor);
     this.appScope = appScopeFor(opts.sodium, loaded.author, STORAGE_APP);
-    this.modules = {
-      codec: kernelNameFor(loaded.author, STORAGE_APP, "codec"),
-      reputation: kernelNameFor(loaded.author, STORAGE_APP, "reputation"),
-    };
+    this.appKey = appKeyFor(loaded.author, STORAGE_APP);
 
     // `this.config` is the geometry a caller can inspect (p2p-cli reads config.k/.m for
     // its wire estimate), so it must equal what the guest ACTUALLY runs: the bundle's
@@ -364,7 +364,7 @@ export class StorageNode {
 
   /** Decayed reciprocity score this node holds for a peer (§13). */
   score(peerPk: Uint8Array): number {
-    const res = this.host.callHandler(this.modules.reputation, encodeScoreReq(peerPk, this.now()));
+    const res = this.host.callModule(this.appKey, "reputation", encodeScoreReq(peerPk, this.now()));
     if (!res || res.length < 8) return 0;
     return new DataView(res.buffer, res.byteOffset, 8).getFloat64(0, true);
   }
@@ -415,7 +415,7 @@ export class StorageNode {
 
   /** True if both pure handlers are installed on the kernel (§19). */
   handlersInstalled(): boolean {
-    return this.host.isBound(this.modules.codec) && this.host.isBound(this.modules.reputation);
+    return this.host.isBound(this.appKey, "codec") && this.host.isBound(this.appKey, "reputation");
   }
 }
 
