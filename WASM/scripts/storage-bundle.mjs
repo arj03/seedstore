@@ -8,12 +8,12 @@
 // declares no bind name (seedkernel §12.4, §5.1).
 //
 // Three deliberate choices live here, once:
-//   • `caps` declares capability *domains* (cap-bridge CAP_DOMAINS keys), not op
-//     numbers. The shell expands them to the enforced op set + wires only the
-//     matching backends. Storage reaches all six. (There is no `ops` catalog in
-//     the manifest — the guest's ABI is the injected CAP_* preamble, not signed
-//     content; the grant is `caps`.) It lives inside `guest`, where the authority it
-//     grants does.
+//   • `caps` declares capability *domains* (cap-bridge CAP_DOMAINS keys), not name
+//     prefixes. The shell enforces them as the prefixes a guest's host.call may
+//     use, and wires only the matching backends. Storage reaches all six. (There
+//     is no `ops` catalog in the manifest — the guest's ABI is the shared
+//     name-addressed preamble, not signed content; the grant is `caps`.) It lives
+//     inside `guest`, where the authority it grants does.
 //   • `abi` names the guest seam this program was written against (seedkernel §12.2).
 //     Not a version of the bundle or of storage — of the HOST contract the guest calls
 //     through — so it is the constant the runtime exports, never a literal here: a seam
@@ -72,14 +72,12 @@ export function authorKeysFor(sodium, edSk) {
 // The capability domains the storage guest reaches (cap-bridge CAP_DOMAINS keys).
 // Storage uses all of them; declaring them is exactly what the shell enforces.
 //
-// `crypto` is the authority half (SIGN, IDENTITY, RANDOM — under the node identity).
-// The pure transforms — BLAKE2b, XChaCha20, Ed25519 verify — are not grants at all:
-// the runtime retired the old `crypto`/`transform` split because the primitive
-// catalog (CAP_CRYPTO, host.crypto("name", …)) is ungated by construction — a
-// function of a guest's own arguments grants nothing, so asking for a domain to
-// hash a byte string would describe an authority that does not exist. One domain
-// remains, and storage declares it for the signing oracle.
-const STORAGE_CAPS = ["crypto", "net", "fs", "module", "clock"];
+// `node` is the authority (node/sign, node/identity, node/random — under the node
+// identity). The pure transforms — BLAKE2b, XChaCha20, Ed25519 verify — are not
+// grants at all: they live under the ungated `crypto/` prefix, because a function
+// of a guest's own arguments grants nothing, so asking for a domain to hash a byte
+// string would describe an authority that does not exist.
+const STORAGE_CAPS = ["node", "net", "fs", "module", "clock"];
 
 /**
  * Write a complete signed seedstore bundle to `path` (one blob, seedkernel §12.4).
@@ -154,8 +152,8 @@ export function writeStorageBundle({ path, sodium, sk, pk, build, version = 1, l
       // runtime rather than written as a literal, so a seam change breaks the build here
       // instead of surfacing as a wrong answer at the first `host.call`.
       abi: GUEST_ABI_VERSION,
-      // The enforced capability grant (domains, not op numbers). The guest's op ABI
-      // is the CAP_* preamble the shell injects at load, not a signed catalog.
+      // The enforced capability grant (domains, not names). The guest's ABI is the
+      // shared name-addressed preamble the shell injects at load, not a signed catalog.
       caps: [...STORAGE_CAPS],
       // App constants the shell injects as `const APP = …`: the storage geometry.
       // NB: no `quota` — that is operator policy supplied at boot, not author-signed

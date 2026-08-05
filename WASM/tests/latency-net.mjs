@@ -14,7 +14,7 @@
 // (req/res frames with a corr header). The transport is now a signed bundle running
 // in its own confined realm, so the app-level request structure is no longer
 // visible at the frame boundary — but it IS visible at the driver's request seam:
-// the storage guest's CAP_NET_SEND resolves to the TransportHost's `request()`, and
+// the storage guest's net/send resolves to the TransportHost's `request()`, and
 // the payload's first byte is the app's MsgType (HAVE/OFFER/FETCH/STORE). So this
 // wrapper stands on the driver and counts/delays exactly the app requests the old
 // frame-level one did: every request an initiator issues crosses ITS driver, so

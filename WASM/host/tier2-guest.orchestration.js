@@ -2,12 +2,12 @@
 // JS that runs *inside* the QuickJS realm (§2.1). This is the single
 // implementation of placement, k-of-n, admission, the wire format, and repair: the
 // host (host/storage-node.ts) only boots the kernel and runs this guest in one
-// realm. Every capability is reached through the one `host.call(op, bytes)` seam.
-// The seam is genuinely async where the world behind it is: a net op
-// (`CAP_NET_SEND`) and every `FS_*` op resolve to a real Promise the guest
+// realm. Every capability is reached through the one `host.call(name, bytes)` seam.
+// The seam is genuinely async where the world behind it is: a net name
+// (`net/send`) and every `fs/*` name resolve to a real Promise the guest
 // `await`s — so a fan-out is just `await Promise.all(peers.map(...))`, and the
 // holder's own store reads await like the initiator's round trips — while the pure
-// crypto (the `host.crypto(name, args)` primitive catalog), clock and module-call
+// crypto (the `crypto/*` primitive catalog), clock and module-call
 // resolve synchronously to their bytes.
 //
 // Two roles share this one program and this one realm. The *initiator* entrypoints
@@ -25,13 +25,14 @@
 //
 // This is a plain script, not a module: it has no imports/exports and no ambient
 // authority. It is loaded as source by the host (host/storage-node.ts, or the
-// seedkernel shell) which prepends two constant blocks — the generic
-// `const CAP_* = n;` op catalog (seedkernel's host/cap-bridge.ts) and an `APP`
-// object carrying the storage config + the codec/reputation kernel names — and
-// runs it after the safe-js PREAMBLE that defines `host.call`, `host.crypto` and
-// `register`. Every capability the guest reaches is an application-neutral
-// primitive; all storage *structure* is right here. The same file is hosted by JSC
-// on Bun today and by WAMR in the native node later — one artifact, both runtimes.
+// seedkernel shell) which prepends the bundle facts (`BUNDLE`) and an `APP`
+// object carrying the storage config + the codec/reputation kernel names, and
+// runs it after the safe-js PREAMBLE that defines `host.call` and `register`.
+// The seam is name-addressed (seedkernel §12.2): the guest writes "fs/get",
+// "net/send", "crypto/blake2b-256" — never a number. Every capability the guest
+// reaches is an application-neutral primitive; all storage *structure* is right
+// here. The same file is hosted by JSC on Bun today and by WAMR in the native
+// node later — one artifact, both runtimes.
 
 "use strict";
 
@@ -70,19 +71,20 @@ function strBytes(s) { const o = new Uint8Array(s.length); for (let i = 0; i < s
 function bytesToStr(b) { let s = ""; for (let i = 0; i < b.length; i++) s += String.fromCharCode(b[i]); return s; }
 
 // ── the capability seam: storage policy over GENERIC kernel caps ─────────────
-// Every wrapper is built from the application-neutral CAP_* ops — crypto
-// primitives, net, fs, module-call, clock, identity (host/cap-bridge.ts in
+// Every wrapper is built from the application-neutral names of the one seam —
+// crypto primitives, net, fs, module-call, clock, identity (host/cap-bridge.ts in
 // seedkernel). All *structure* lives here in the guest, never in the kernel:
 // the nonce convention, the signed-descriptor envelope, the HAVE/OFFER/FETCH/
 // STORE wire format (host/protocol.ts), the codec & reputation module ABIs, and
 // the <hex>.blk/.dsc store layout (read back host-side by host/store-view.ts, which
 // implements none of the policy — see there). Config + the codec and
 // reputation kernel names arrive as the injected `APP` constant (prepended by
-// the driver), not as kernel ops. The pure crypto primitives go through the
-// name-based catalog (`host.crypto("blake2b-256", …)` etc.) and resolve to their
-// bytes directly; the net and fs wrappers are `async` and `await` their one
-// round-trip op (the fs seam is asynchronous on every backend, so the holder
-// awaits its store ops exactly as the initiator awaits its round trips).
+// the driver), not as kernel names. The pure crypto primitives go through the
+// `crypto/` prefix of the catalog (`host.call("crypto/blake2b-256", …)` etc.) and
+// resolve to their bytes directly; the net and fs wrappers are `async` and
+// `await` their one round-trip name (the fs seam is asynchronous on every backend,
+// so the holder awaits its store ops exactly as the initiator awaits its round
+// trips).
 
 // The op bytes of the codec handler (the guest owns its ABI). The reputation handler's
 // op bytes + request framing (REP_OBSERVE/REP_SCORE, encodeScoreReq/encodeObserveReq)
@@ -91,7 +93,7 @@ function bytesToStr(b) { let s = ""; for (let i = 0; i < b.length; i++) s += Str
 const CODEC_ENCODE = 1, CODEC_DECODE = 2;     // assembly/codec/index.ts
 // Control-plane message types carried over net.send (host/protocol.ts §18).
 const MSG_HAVE = 1, MSG_OFFER = 2, MSG_FETCH = 3, MSG_STORE = 4;
-// The protocol id this app speaks on the wire (§12.10) — placed in every NET_SEND frame
+// The protocol id this app speaks on the wire (§12.10) — placed in every net/send frame
 // so the receiving host routes it to this app. The app name from the manifest ("seedstore")
 // is the default protocol id. strBytes encodes ASCII without TextEncoder (QuickJS has none).
 const NET_PROTO = strBytes("seedstore");
@@ -104,9 +106,9 @@ const STORE_BLK = ".blk", STORE_DSC = ".dsc";
 // strBytes encodes.
 const CODEC_NAME = strBytes("codec");
 const REP_NAME = strBytes("reputation");
-// The scoped-signature prefix `DOMAIN_guest ‖ scope` (README §16): the CAP_SIGN op signs
+// The scoped-signature prefix `DOMAIN_guest ‖ scope` (README §16): `node/sign` signs
 // `prefix ‖ msg`, never the raw msg, so a descriptor signature verifies only in this app's
-// scope. The "ed25519/verify" primitive stays raw, so verifyEnv rebuilds `prefix ‖ core`
+// scope. The `crypto/ed25519/verify` primitive stays raw, so verifyEnv rebuilds `prefix ‖ core`
 // before checking. The runtime derives these bytes from the admitted manifest's
 // (author, app) and injects them
 // as BUNDLE — the guest treats them as an opaque prefix, never reconstructing the kernel's
@@ -123,38 +125,38 @@ const SIGN_PREFIX = fromHex(BUNDLE.signPrefix);
 //
 
 // ── crypto primitives + storage framing ──
-// The pure transforms reach the host through the primitive catalog
-// (host.crypto("name", args), the cap-bridge CAP_CRYPTO seam — seedkernel §12.2):
-// BLAKE2b-256 for block-ids, XChaCha20 stream XOR for the §4.4 keystream, and raw
-// Ed25519 verify for the descriptor envelope (which rebuilds the scoped preimage
-// itself, since SIGN scopes but VERIFY stays raw). The authorities — SIGN,
-// IDENTITY, RANDOM — stay ordinary host.call ops, as does the clock and the
-// module call.
-function hash(bytes) { return host.crypto("blake2b-256", bytes); }
-function randomKey() { const n = new Uint8Array(4); wU32(n, 0, 32); return host.call(CAP_RANDOM, n); }
-function identity() { return host.call(CAP_IDENTITY, EMPTY); }
+// The pure transforms reach the host under the `crypto/` prefix of the one seam
+// (host.call("crypto/<name>", args) — seedkernel §12.2): BLAKE2b-256 for
+// block-ids, XChaCha20 stream XOR for the §4.4 keystream, and raw Ed25519 verify
+// for the descriptor envelope (which rebuilds the scoped preimage itself, since
+// node/sign scopes but crypto/ed25519/verify stays raw). The authorities —
+// node/sign, node/identity, node/random — are host.call names like anything else,
+// as are the clock and the module call.
+function hash(bytes) { return host.call("crypto/blake2b-256", bytes); }
+function randomKey() { const n = new Uint8Array(4); wU32(n, 0, 32); return host.call("node/random", n); }
+function identity() { return host.call("node/identity", EMPTY); }
 let myPeerCache = null;
 function myPeer() { if (myPeerCache === null) myPeerCache = toHex(identity()); return myPeerCache; }
 // 24-byte nonce = [level u8][chunk index u32 BE][0…] (§4.4) — the guest's convention.
 function nonce(level, index) { const n = new Uint8Array(24); n[0] = level & 255; wU32(n, 1, index >>> 0); return n; }
-// host.crypto takes [nonce 24][key 32][message ..] for the xchacha20/xor primitive.
-function streamXor(K, non, msg) { return host.crypto("xchacha20/xor", concat([non, K, msg])); }
+// crypto/xchacha20/xor takes [nonce 24][key 32][message ..] for the xchacha20/xor primitive.
+function streamXor(K, non, msg) { return host.call("crypto/xchacha20/xor", concat([non, K, msg])); }
 function encrypt(K, level, index, msg) { return streamXor(K, nonce(level, index), msg); }
 function decrypt(K, level, index, ct) { return streamXor(K, nonce(level, index), ct); }
 // Signed chunk descriptor envelope: [authorPk 32][sig 64][core] (§4.3, §16). The
-// prefix rides both paths: CAP_SIGN prepends `DOMAIN_guest ‖ scope` for us (so signCore
+// prefix rides both paths: `node/sign` prepends `DOMAIN_guest ‖ scope` for us (so signCore
 // passes the bare core and gets back a scoped signature), and verifyEnv rebuilds the same
-// preimage for the raw "ed25519/verify" primitive. The stored envelope still holds only
+// preimage for the raw `crypto/ed25519/verify` primitive. The stored envelope still holds only
 // [pk][sig][core] — the prefix is preimage-only, never transmitted.
-function signCore(core) { return concat([identity(), host.call(CAP_SIGN, core), core]); }
+function signCore(core) { return concat([identity(), host.call("node/sign", core), core]); }
 function verifyEnv(env) {
-  return host.crypto("ed25519/verify", concat([env.slice(0, 32), env.slice(32, 96), SIGN_PREFIX, env.slice(96)]))[0] === 1;
+  return host.call("crypto/ed25519/verify", concat([env.slice(0, 32), env.slice(32, 96), SIGN_PREFIX, env.slice(96)]))[0] === 1;
 }
 
 // ── codec + reputation via the generic module-call ──
 function moduleCall(name, req) {
   const head = new Uint8Array(1 + name.length); head[0] = name.length; head.set(name, 1);
-  return host.call(CAP_MODULE_CALL, concat([head, req]));
+  return host.call("module/call", concat([head, req]));
 }
 // Like moduleCall but takes the request already split into parts, so the name
 // header and the request body fold into a single concat. The RS request is large
@@ -165,7 +167,7 @@ function moduleCall(name, req) {
 // instance could do isn't available here, but folding the two concats is.)
 function moduleCallParts(name, parts) {
   const head = new Uint8Array(1 + name.length); head[0] = name.length; head.set(name, 1);
-  return host.call(CAP_MODULE_CALL, concat([head, ...parts]));
+  return host.call("module/call", concat([head, ...parts]));
 }
 function rsEncode(k, m, blockSize, dataBlocks) {
   const head = new Uint8Array(7);
@@ -193,7 +195,7 @@ function rsDecode(k, m, blockSize, present) {
   for (let i = 0; i < use.length; i++) idx[i] = use[i].index;
   return splitBlocks(moduleCallParts(CODEC_NAME, [head, idx, ...use.map((p) => p.bytes)]), blockSize);
 }
-function clockNow() { const b = host.call(CAP_CLOCK, EMPTY); return rU32(b, 0) * 0x100000000 + rU32(b, 4); }
+function clockNow() { const b = host.call("clock/now", EMPTY); return rU32(b, 0) * 0x100000000 + rU32(b, 4); }
 function repScore(peerPk, t) {
   return readF64LE(moduleCall(REP_NAME, encodeScoreReq(peerPk, t)));
 }
@@ -202,27 +204,27 @@ function repObserve(peerPk, t, pass) {
 }
 
 // ── local store over fs.* (the <hex>.blk / <hex>.dsc layout) ─────────────────
-// Every FS_* op round-trips now (the seam is async — seedkernel core/fs.ts), so
+// Every fs/* name round-trips now (the seam is async — seedkernel core/fs.ts), so
 // the whole store layer is async and every caller awaits it. Existence is
-// `size ≥ 0` (there is no CAP_FS_HAS): the raw CAP_FS_SIZE is 0xFFFFFFFF
-// (fs.size → -1) only for an absent key, so a present-but-empty value still reads as held.
+// `size ≥ 0` (there is no fs/has): the raw fs/size is 0xFFFFFFFF
+// (−1 over the bridge) only for an absent key, so a present-but-empty value still reads as held.
 async function storeHas(id) { return (await fsSizeRaw(toHex(id) + STORE_BLK)) !== 0xffffffff; }
 async function storeGet(id) {
   const hex = toHex(id);
-  const blk = await host.call(CAP_FS_GET, strBytes(hex + STORE_BLK));
+  const blk = await host.call("fs/get", strBytes(hex + STORE_BLK));
   if (blk[0] !== 1) return null;
-  const dsc = await host.call(CAP_FS_GET, strBytes(hex + STORE_DSC));
+  const dsc = await host.call("fs/get", strBytes(hex + STORE_DSC));
   return { bytes: blk.slice(1), descriptor: dsc[0] === 1 ? dsc.slice(1) : null };
 }
 // Just the <hex>.dsc sidecar, without dragging the block ciphertext across the
 // bridge — repair audits chunk shape from the descriptor and never needs the .blk
 // bytes (it re-fetches those from holders only where healing actually places).
 async function storeGetDescriptor(id) {
-  const dsc = await host.call(CAP_FS_GET, strBytes(toHex(id) + STORE_DSC));
+  const dsc = await host.call("fs/get", strBytes(toHex(id) + STORE_DSC));
   return dsc[0] === 1 ? dsc.slice(1) : null;
 }
 async function storeList() {
-  const r = await host.call(CAP_FS_LIST, EMPTY), out = [];
+  const r = await host.call("fs/list", EMPTY), out = [];
   let o = 0; const n = rU32(r, o); o += 4;
   for (let i = 0; i < n; i++) {
     const klen = rU32(r, o); o += 4;
@@ -238,7 +240,7 @@ function decodePeers(r) {
   for (let i = 0; i < n; i++) out.push(toHex(r.slice(4 + i * 32, 4 + (i + 1) * 32)));
   return out;
 }
-function cohortPeers() { return decodePeers(host.call(CAP_NET_PEERS, EMPTY)); }
+function cohortPeers() { return decodePeers(host.call("net/peers", EMPTY)); }
 // A reciprocity ranker (§13): orders peers best-score-first. Scoring one peer costs a
 // reputation MODULE_CALL across the bridge, so `makeRanker` reads the clock once and
 // memoizes each DISTINCT peer's decayed score for its lifetime — reuse one across a
@@ -255,7 +257,7 @@ function makeRanker() {
 function rank(peers) { return makeRanker()(peers); }
 
 // ── net (request/response over the generic transport; wire format here) ──
-// The one genuinely-async cap: CAP_NET_SEND resolves to a Promise the initiator
+// The one genuinely-async name: net/send resolves to a Promise the initiator
 // awaits (the host round-trips it). An unreachable peer resolves to `[0]` (never a
 // reject), so this maps it to null within the request window.
 // Wire format: [peer 32][pidLen u8][protocolId][type u8][payload] (§12.10).
@@ -265,7 +267,7 @@ async function netSend(peer, type, payload) {
   head[32] = NET_PROTO.length;
   head.set(NET_PROTO, 33);
   head[33 + NET_PROTO.length] = type;
-  const r = await host.call(CAP_NET_SEND, concat([head, payload]));
+  const r = await host.call("net/send", concat([head, payload]));
   return r[0] === 1 ? r.slice(1) : null; // null = peer unreachable within the window
 }
 // Per-peer fan-out (§6/§7): a DISTINCT request per peer, all issued CONCURRENTLY.
@@ -339,7 +341,7 @@ async function fetchBatch(peer, ids) {
 // encode/decodeDescriptorList, descriptorContains, copyTargets, BLOCK_ID_LEN — come
 // from the SHARED host/manifest-core.ts, stitched in ahead of this body (one
 // definition). What stays here is only the part that needs a capability: verify/sign
-// over the "ed25519/verify" primitive / CAP_SIGN seam, composed with the shared
+// over the `crypto/ed25519/verify` primitive / `node/sign` seam, composed with the shared
 // parser/encoder.
 //
 // verifyDescriptor checks the author signature AND structurally validates the core
@@ -1171,11 +1173,11 @@ let bytesUsed = -1;
 // no default of its own), fall to 0 and FAIL CLOSED, so the holder admits nothing rather
 // than becoming an unbounded sink. Reads (FETCH) never check quota, so serving still works.
 function quota() { return APP.quota != null ? APP.quota : 0; }
-// CAP_FS_SIZE returns 0xffffffff for an absent key (fs.size → -1 over the bridge).
+// fs/size returns 0xffffffff for an absent key (−1 over the bridge).
 // fsSizeRaw preserves that sentinel — it is how existence is asked (storeHas), since
-// there is no CAP_FS_HAS. fsSize maps the sentinel to 0 so sizing a bare block's missing
+// there is no fs/has. fsSize maps the sentinel to 0 so sizing a bare block's missing
 // .dsc adds nothing to the quota total, not ~4 GiB.
-async function fsSizeRaw(keyStr) { return rU32(await host.call(CAP_FS_SIZE, strBytes(keyStr)), 0); }
+async function fsSizeRaw(keyStr) { return rU32(await host.call("fs/size", strBytes(keyStr)), 0); }
 async function fsSize(keyStr) { const v = await fsSizeRaw(keyStr); return v === 0xffffffff ? 0 : v; }
 async function ensureUsed() {
   if (bytesUsed >= 0) return;
@@ -1190,7 +1192,7 @@ async function quotaFree() { await ensureUsed(); return Math.max(0, quota() - by
 async function fsPut(keyStr, bytes) {
   const kb = strBytes(keyStr);
   const head = new Uint8Array(4); wU32(head, 0, kb.length);
-  await host.call(CAP_FS_PUT, concat([head, kb, bytes]));
+  await host.call("fs/put", concat([head, kb, bytes]));
 }
 // The one write path into store.local: the <hex>.blk ciphertext + its sibling
 // <hex>.dsc descriptor, under the quota budget. Throws past quota so admission

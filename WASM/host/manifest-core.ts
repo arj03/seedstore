@@ -12,9 +12,10 @@
 // body (§4.3), so the only list format is the self-delimiting one at the bottom of
 // this file.
 //
-// Signing/verifying lives in manifest.ts (host) and the guest's CAP_SIGN/CAP_VERIFY
-// seam, NOT here — the author signature is checked from the author's *public* key
-// alone, never the read key, which is what preserves keyless repair (§9).
+// Signing/verifying lives in manifest.ts (host) and the guest's node/sign +
+// crypto/ed25519/verify seam, NOT here — the author signature is checked from the
+// author's *public* key alone, never the read key, which is what preserves keyless
+// repair (§9).
 
 import { bytesEqual, toHex, writeU32BE, readU32BE, concatBytes } from "./util.js";
 

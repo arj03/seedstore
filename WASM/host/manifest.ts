@@ -65,7 +65,7 @@ function signPreimage(scope: Uint8Array, core: Uint8Array): Uint8Array {
 
 /** A signed chunk descriptor as stored alongside every block and listed in the
  *  manifest (§4.3): [authorPk 32][sig 64][core ...]. Signing stays sender-side
- *  in the host (§16) — this mirrors what the guest's scoped CAP_SIGN seam does
+ *  in the host (§16) — this mirrors what the guest's scoped `node/sign` seam does
  *  (Ed25519 over `DOMAIN_guest ‖ scope ‖ core`). `scope` must be the cohort's
  *  signing scope, derived from the bundle author via `storageSignScope(author)`. */
 export function signDescriptor(
