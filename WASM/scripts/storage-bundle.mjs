@@ -10,7 +10,7 @@
 // Three deliberate choices live here, once:
 //   • `caps` declares capability *domains* (cap-bridge CAP_DOMAINS keys), not name
 //     prefixes. The shell enforces them as the prefixes a guest's host.call may
-//     use, and wires only the matching backends. Storage reaches all six. (There
+//     use, and wires only the matching backends. Storage reaches all four. (There
 //     is no `ops` catalog in the manifest — the guest's ABI is the shared
 //     name-addressed preamble, not signed content; the grant is `caps`.) It lives
 //     inside `guest`, where the authority it grants does.
@@ -76,8 +76,11 @@ export function authorKeysFor(sodium, edSk) {
 // identity). The pure transforms — BLAKE2b, XChaCha20, Ed25519 verify — are not
 // grants at all: they live under the ungated `crypto/` prefix, because a function
 // of a guest's own arguments grants nothing, so asking for a domain to hash a byte
-// string would describe an authority that does not exist.
-const STORAGE_CAPS = ["node", "net", "fs", "module", "clock"];
+// string would describe an authority that does not exist. `module` is the same
+// story: `module/call` reaches this bundle's own `codec`/`reputation` modules,
+// installed and verified with it, so it is ungated like `crypto` (seedkernel
+// §12.1) and no domain names it.
+const STORAGE_CAPS = ["node", "net", "fs", "clock"];
 
 /**
  * Write a complete signed seedstore bundle to `path` (one blob, seedkernel §12.4).
