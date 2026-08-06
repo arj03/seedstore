@@ -144,8 +144,8 @@ export function writeStorageBundle({ path, sodium, sk, pk, build, version = 1, l
     version,
     modules,
     // Everything about the guest — its content hash, its authority, and its config — in
-    // one place (seedkernel §12.4). A bundle with no `guest` is a bundle with no
-    // authority; storage has one, so it declares both.
+    // one place (seedkernel §12.4). The guest is required by the format — every app is
+    // a guest — and storage's holds the whole authority the bundle has.
     guest: {
       hash: toHex(genesisHash(sodium, files[GUEST_FILE])),
       // Which host seam this guest was written against (seedkernel §12.2). Read from the
