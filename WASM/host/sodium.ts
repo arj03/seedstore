@@ -56,8 +56,8 @@ let cached: Sodium | null = null;
  *  reuses the kernel's (README §16). Safe to call repeatedly. */
 export async function loadSodium(): Promise<Sodium> {
   if (cached) return cached;
-  const { loadSodium: kernelLoadSodium } = await import("seedkernel-wasm");
-  cached = (await kernelLoadSodium()) as unknown as Sodium;
+  const { loadCrypto: kernelLoadCrypto } = await import("seedkernel-wasm");
+  cached = (await kernelLoadCrypto()) as unknown as Sodium;
   return cached;
 }
 

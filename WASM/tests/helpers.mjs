@@ -7,10 +7,10 @@
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { ModuleTable, loadSodium } from "seedkernel-wasm";
+import { ModuleTable, loadCrypto } from "seedkernel-wasm";
 
 // One libsodium for the whole stack: the sumo instance the host bundles (§16).
-const sodium = await loadSodium();
+const sodium = await loadCrypto();
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 export const root = join(__dirname, "..");

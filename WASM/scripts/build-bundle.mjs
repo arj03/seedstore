@@ -20,7 +20,7 @@ import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { loadSodium } from "seedkernel-wasm";
+import { loadCrypto } from "seedkernel-wasm";
 import { verifyBundle, hybridAuthorId } from "seedkernel-wasm/bundle";
 import { writeStorageBundle, authorKeysFor } from "./storage-bundle.mjs";
 
@@ -32,7 +32,7 @@ const bundlePath = join(out, "seedstore.skb");
 
 const { toHex, fromHex } = await import(new URL("../build/host/util.js", import.meta.url));
 
-const sodium = await loadSodium();
+const sodium = await loadCrypto();
 // Bundle *content* is assembled below from sodium alone: it hashes the module bytes
 // (genesisHash) the manifest commits to and signs the manifest. No kernel host is needed —
 // hashing is a free `genesisHash(sodium, …)` in the bundle module now, and a module's kernel

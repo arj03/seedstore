@@ -9,9 +9,9 @@ import { readFileSync } from "node:fs";
 import { performance } from "node:perf_hooks";
 import { Crypto, LEVEL_BODY } from "../build/host/crypto.js";
 import { CodecClient } from "./codec-client.mjs";
-import { loadSodium } from "seedkernel-wasm";
+import { loadCrypto } from "seedkernel-wasm";
 
-const sodium = await loadSodium();
+const sodium = await loadCrypto();
 const crypto = new Crypto(sodium);
 const codec = await CodecClient.load(new Uint8Array(readFileSync("build/codec.wasm")));
 
