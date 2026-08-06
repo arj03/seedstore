@@ -42,7 +42,7 @@ import { STORAGE_APP, storageSignScope } from "./manifest.js";
 import { encodeScoreReq } from "./reputation-core.js";
 import { toHex, readU32BE, readU64BE, concatBytes } from "./util.js";
 import {
-  createShell, KernelHost, scopedFs, type Shell, type KernelTable, type RealmFactory,
+  createShell, ModuleTable, scopedFs, type Shell, type ModuleLookup, type RealmFactory,
 } from "seedkernel-wasm/shell-core";
 import { FreshnessMarks, appKeyFor, appScopeFor, verifyBundle, type LoadedBundle } from "seedkernel-wasm/bundle";
 import type { HostTransport } from "seedkernel-wasm/transport-host";
@@ -158,9 +158,9 @@ export class StorageNode {
   readonly crypto: Crypto;
   readonly sodium: Sodium;
   readonly config: StorageConfig;
-  /** The handler table, exposed through KernelTable (callModule + isBound)
-   *   without installWasmHandler — the bind is solely the bundle loader's job. */
-  readonly host: KernelTable;
+  /** The module table, exposed through ModuleLookup (callModule + isBound)
+   *   without any install path — the bind is solely the bundle loader's job. */
+  readonly host: ModuleLookup;
 
   private readonly shell: Shell;
   private readonly clockFn: () => number;
@@ -458,7 +458,7 @@ export async function bootTransportShell(
     platform: {
       sodium: opts.sodium,
       identity: opts.identity,
-      kernel: new KernelHost(),
+      table: new ModuleTable(),
       fs,
       freshnessStore: new FreshnessMarks(),
       channels: opts.channels,

@@ -444,7 +444,7 @@ cores and the guest — it never loads a line of the host-side TypeScript:
 | `reputation.wasm` | 6.7 KB | — |
 | `guest.js` — the confined guest, shipped minified in the bundle | 29 KB | **7.6 KB** |
 
-riding on the seedkernel shell it shares with any app — the `KernelHost` JS
+riding on the seedkernel shell it shares with any app — the `ModuleTable` JS
 (28 KB / **5 KB gz**, handler table included: the kernel is host code, not a
 module) and the sumo libsodium (278 KB, reused not bundled). So **seedstore's own runtime
 footprint is ~15 KB of WASM + ~8 KB of gzipped JS (the guest)** (§2, §16: "logic +
@@ -455,8 +455,8 @@ The host-side TypeScript (`build/host`, minified to `build/host-min`) is a
 guest in-process) that the browser demo and the `createConnectedCohort` tests load
 *instead* of the shell+bundle. Minified it is **21 KB gz** (14 KB gz without its own
 copy of the guest), debug 42 KB gz — so a browser-demo node carries ~26 KB gz of JS
-(host + the shared `KernelHost`) against a bundle node's ~13 KB (the 8 KB guest +
-the 5 KB `KernelHost`).
+(host + the shared `ModuleTable`) against a bundle node's ~13 KB (the 8 KB guest +
+the 5 KB `ModuleTable`).
 
 `npm run build` emits the host **twice**: the readable `build/host` (doc comments
 intact, for debugging) and a comment-stripped `build/host-min` (for the in-process

@@ -1,6 +1,6 @@
 // The reputation handler's request framing (assembly/reputation/index.ts ABI), in one
 // place. A reputation module/call is [op u8][peerPk 32][t u64 BE] (+ a pass byte for
-// OBSERVE). Both sides frame it: the host (StorageNode.score, via KernelHost.callModule)
+// OBSERVE). Both sides frame it: the host (StorageNode.score, via ModuleTable.callModule)
 // and the confined guest (repScore/repObserve, via module/call). This module is
 // imported by the host AND stitched into the Tier-2 guest (scripts/build-guest.mjs), so
 // the two agree on the wire layout by construction, not by a hand-kept mirror.
