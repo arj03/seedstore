@@ -66,7 +66,7 @@ export async function run(t) {
   const bundleBlob = new Uint8Array(readFileSync(bundlePath));
   const policyJson = JSON.stringify({
     authors: [toHex(authorId)],
-    roles: { transport: [transportHex] },
+    transportAuthors: [transportHex],
   });
   const tmpDirs = [bundleDir];
 

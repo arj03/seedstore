@@ -97,7 +97,7 @@ export async function run(t) {
       shell = await boot({
         policyJson: JSON.stringify({
           authors: [toHex(authorId)],
-          roles: { transport: [transportHex] },
+          transportAuthors: [transportHex],
         }),
         dir: shellDir, identity: shellIdentity,
         channels: net.view(toHex(shellIdentity.publicKey)),
@@ -136,7 +136,7 @@ export async function run(t) {
       const shell2 = await boot({
         policyJson: JSON.stringify({
           authors: [toHex(generateKeyPair(sodium).publicKey)],
-          roles: { transport: [transportHex] },
+          transportAuthors: [transportHex],
         }),
         dir: shell2Dir, identity: shell2Id, channels: net.view(toHex(shell2Id.publicKey)),
       });
@@ -178,7 +178,7 @@ export async function run(t) {
       shell = await boot({
         policyJson: JSON.stringify({
           authors: [toHex(authorId)],
-          roles: { transport: [transportHex] },
+          transportAuthors: [transportHex],
         }),
         dir: shellDir, identity: shellId, channels: net.view(toHex(shellId.publicKey)),
         timeoutMs: 40,

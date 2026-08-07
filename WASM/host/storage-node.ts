@@ -484,13 +484,14 @@ export async function bootTransportShell(
       // so only an external embedder — browser/p2p.html — ever hit it.
       ...(opts.livePeers ? { livePeers: opts.livePeers } : {}),
     },
-    // The transport bundle is admitted by author pin; an app bundle is admitted
-    // because its operator handed it to us — the choice of bundle is the trust
-    // decision, so there is no author allow-list to clear (the manifest signature
-    // + module hashes are still verified by loadBundleBlob).
-    admit: (v) => (v.manifest.role === "transport"
-      ? toHex(v.author) === transportAuthorHex
-      : true),
+    // The two admission classes (§12.5): the transport bundle is admitted by
+    // author pin — the operator handing us the storage bundle is the trust
+    // decision for THAT; an app bundle is admitted because its operator handed
+    // it to us — the choice of bundle is the trust decision, so there is no
+    // author allow-list to clear (the manifest signature + module hashes are
+    // still verified by loadBundleBlob).
+    admit: () => true,
+    admitTransport: (v) => toHex(v.author) === transportAuthorHex,
     requestDeadlineMs: opts.timeoutMs,
     config: { ...(opts.config ?? {}), ...(opts.quota != null ? { quota: opts.quota } : {}) },
     realmMemoryBytes: opts.realmMemoryBytes,
