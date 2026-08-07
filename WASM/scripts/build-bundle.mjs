@@ -94,4 +94,4 @@ writeFileSync(versionPath, `${manifest.version}\n`);
 const authKeys = authorKeysFor(sodium, sk);
 console.log(`  author ${toHex(hybridAuthorId(sodium, authKeys.ed.publicKey, authKeys.mlDsa.publicKey))} (hybrid 0x02)`);
 console.log(`  wrote ${bundlePath} (app ${manifest.app} v${manifest.version}, ${manifest.modules.length} modules, `
-  + `caps ${manifest.guest.caps.join("+")})`);
+  + `requires ${manifest.guest.requires.join("+")})`);
