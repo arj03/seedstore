@@ -62,4 +62,4 @@ export { defaultConfig } from "./core.js";
 // A browser node joining a cohort of bundle-running holders must verify
 // descriptors under that bundle's author scope. Re-export the scope derivation
 // so the page can compute `storageSignScope(bundleAuthor)`.
-export { STORAGE_APP, storageSignScope } from "./manifest.js";
+export { STORAGE_APP, STORAGE_PROTO, storageSignScope } from "./manifest.js";

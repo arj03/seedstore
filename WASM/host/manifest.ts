@@ -48,6 +48,14 @@ export type { Descriptor, SignedDescriptor } from "./manifest-core.js";
  *  scope when they share a bundle author). */
 export const STORAGE_APP = "seedstore";
 
+/** The wire protocol id storage speaks (seedkernel §12.10) — placed in every
+ *  net/send frame so the receiving host routes it to this app. NOT derived from
+ *  the manifest: install is inert, and a host routes only what its operator bound
+ *  explicitly. This constant is the deployment's operator decision, stated once
+ *  host-side (`StorageNode.create` binds it) and matched guest-side (NET_PROTO),
+ *  so the two cannot drift. */
+export const STORAGE_PROTO = "seedstore";
+
 /** The signing scope `author_pk ‖ app_len u8 ‖ app` for a storage deployment
  *  (seedkernel `guestSignScope`). The bundle path scopes to the admitted manifest's
  *  `(author, app)`; a host-side StorageNode with no bundle scopes to `(zero, app)`. */

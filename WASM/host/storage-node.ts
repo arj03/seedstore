@@ -19,7 +19,8 @@
 //   - calls createShell() + loadBundleBlob() to wire the shared shell
 //   - runs the guest's *initiator* entrypoints (put / get / repair) via
 //     shell.runGuest()
-//   - serves the guest's *holder* entrypoint via shell.serve()
+//   - binds the storage protocol to the loaded app explicitly (install is
+//     inert — §12.10) and serves the guest's *holder* entrypoint via shell.serve()
 //
 // A caller that already stands a shell up (a WebRTC/WS node, whose socket seam is
 // a host-managed transport handing channels to the driver's openLink) passes that
@@ -38,7 +39,7 @@ import { Crypto } from "./crypto.js";
 import {
   type Identity, type StorageConfig, defaultConfig, assertStorageConfig, normaliseConfig, DEFAULT_QUOTA_BYTES,
 } from "./core.js";
-import { STORAGE_APP } from "./manifest.js";
+import { STORAGE_APP, STORAGE_PROTO } from "./manifest.js";
 import { encodeScoreReq } from "./reputation-core.js";
 import { toHex, readU32BE, readU64BE, concatBytes } from "./util.js";
 import {
@@ -270,6 +271,11 @@ export class StorageNode {
     // stood up ourselves; a caller's shell is the caller's to close.
     try {
       const loaded = await shell.loadBundleBlob(opts.bundleBlob);
+      // Install is inert (seedkernel §12.10): the load above landed code and nothing
+      // else. The storage protocol gains its destination HERE, by this operator code,
+      // bound explicitly to the loaded bundle's app key — the one act that gives
+      // inbound storage frames a host to route them to.
+      shell.bind(STORAGE_PROTO, appKeyFor(loaded.author, loaded.manifest.app));
       await shell.serve();
 
       // The guest does NOT reach the backend directly: the shell hands it
