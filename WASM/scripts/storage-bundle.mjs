@@ -22,10 +22,10 @@
 //     change must fail this build, not this node's first request.
 //   • `quota` is absent from the signed config. It is OPERATOR policy, supplied at
 //     boot (seedkernel ShellOptions.config), never baked into author-signed content.
-//   • Nothing the RUNTIME derives is in the config. The codec/reputation kernel names
-//     and the guest signing prefix all reach the guest as `BUNDLE` (seedkernel
-//     cap-bridge bundlePreamble), derived at admission from the manifest this script
-//     signs. Baking them here would be a build-time copy of a load-time fact, and a
+//   • Nothing the RUNTIME derives is in the config, and nothing runtime-derived is
+//     injected at all (seedkernel §12.4): the signing scope in particular is not a
+//     fact the guest ever holds — `node/sign`/`node/verify` apply it host-side.
+//     Baking it here would be a build-time copy of a load-time fact, and a
 //     copy that drifts fails as signatures that verify nowhere.
 
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
@@ -38,8 +38,8 @@ import { defaultConfig, PRODUCTION_BLOCK_SIZE } from "../build/host/core.js";
 import { toHex } from "../build/host/util.js";
 
 // The app name — the manifest `app` and the `app` component of the signing scope
-// (README §16). The shell scopes the guest's SIGN op to (author, app); build here the
-// byte-identical scope so the guest's injected verify prefix agrees with it.
+// (README §16). The shell scopes the guest's SIGN/VERIFY ops to (author, app);
+// the host-side mirror derives the byte-identical scope from the same app name.
 const APP_NAME = "seedstore";
 
 // The label the ML-DSA half of the author's key set is derived from (seedkernel
@@ -76,15 +76,17 @@ export function authorKeysFor(sodium, edSk) {
 // what the shell enforces: a `host.call` naming an authority outside this list is
 // refused at the bridge, name by name.
 //
-// `node/sign` + `node/identity` + `node/random` — signing (scoped to this
-// bundle's (author, app)), the node identity, and entropy. The pure transforms —
-// BLAKE2b, XChaCha20, Ed25519 verify — are not grants at all: they live under the
+// `node/sign` + `node/verify` (signing AND verification, both scoped to this
+// bundle's (author, app) — the guest checks a peer's descriptor signature without
+// ever reconstructing the host-owned prefix), `node/identity` and `node/random`
+// (identity and entropy). The pure transforms —
+// BLAKE2b, XChaCha20 — are not grants at all: they live under the
 // ungated `crypto/` prefix, because a function of a guest's own arguments grants
 // nothing. `module/call` is the same story: it reaches this bundle's own
 // `codec`/`reputation` modules, installed and verified with it, so it is ungated
 // like `crypto` (seedkernel §12.1) and never appears in `requires`.
 const STORAGE_REQUIRES = [
-  "node/sign", "node/identity", "node/random",
+  "node/sign", "node/verify", "node/identity", "node/random",
   "net/send", "net/peers",
   "fs/get", "fs/put", "fs/list", "fs/size",
   "clock/now",
@@ -170,8 +172,8 @@ export function writeStorageBundle({ path, sodium, sk, pk, build, version = 1, l
       requires: [...STORAGE_REQUIRES],
       // App constants the shell injects as `const APP = …`: the storage geometry.
       // NB: no `quota` — that is operator policy supplied at boot, not author-signed
-      // content — and nothing the runtime derives (see the header note): the kernel
-      // names and the signing prefix arrive as `BUNDLE`.
+      // content — and nothing the runtime derives (see the header note): the signing
+      // scope is not injected at all, `node/sign`/`node/verify` apply it host-side.
       config: {
         k: cfg.k, m: cfg.m, blockSize: cfg.blockSize,
         // The APP injection is TOTAL: the guest reads APP and never guesses a default, so

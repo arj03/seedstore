@@ -38,7 +38,7 @@ import { Crypto } from "./crypto.js";
 import {
   type Identity, type StorageConfig, defaultConfig, assertStorageConfig, normaliseConfig, DEFAULT_QUOTA_BYTES,
 } from "./core.js";
-import { STORAGE_APP, storageSignScope } from "./manifest.js";
+import { STORAGE_APP } from "./manifest.js";
 import { encodeScoreReq } from "./reputation-core.js";
 import { toHex, readU32BE, readU64BE, concatBytes } from "./util.js";
 import {
@@ -164,12 +164,11 @@ export class StorageNode {
 
   private readonly shell: Shell;
   private readonly clockFn: () => number;
-  private readonly signAuthor: Uint8Array;
-  /** The cohort's signing scope (§16), derived from the verified bundle author.
+  /** The cohort's signing-scope author (§16), derived from the verified bundle author.
    *   Exposed so host-side callers can produce descriptors that the guest's
-   *   holder path will verify — signDescriptor() with this scope as the 5th
-   *   argument matches what the guest's verifyPrefix checks. */
-  readonly signScope: Uint8Array;
+   *   holder path will verify — signDescriptor() with this key as the 5th argument
+   *   derives the byte-identical scope the guest's node/verify checks. */
+  readonly signAuthor: Uint8Array;
   /** This app's fs keyspace prefix (seedkernel §12.2). Every key the holder writes is
    *   `appScope + key` on the raw backend, so tooling that opens a node's directory
    *   *cold* — outside a running node, where `this.fs` is already scoped — has to wrap
@@ -220,7 +219,6 @@ export class StorageNode {
     // scoped to the deployment, §16); the fs keyspace and app key stay the
     // loaded bundle's.
     this.signAuthor = opts.signAuthor ?? loaded.author;
-    this.signScope = storageSignScope(this.signAuthor);
     this.appScope = appScopeFor(opts.sodium, loaded.author, STORAGE_APP);
     this.appKey = appKeyFor(loaded.author, STORAGE_APP);
 

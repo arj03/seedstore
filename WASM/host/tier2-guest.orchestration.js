@@ -25,7 +25,7 @@
 //
 // This is a plain script, not a module: it has no imports/exports and no ambient
 // authority. It is loaded as source by the host (host/storage-node.ts, or the
-// seedkernel shell) which prepends the bundle facts (`BUNDLE`) and an `APP`
+// seedkernel shell) which prepends an `APP`
 // object carrying the storage config + the codec/reputation kernel names, and
 // runs it after the safe-js PREAMBLE that defines `host.call` and `register`.
 // The seam is name-addressed (seedkernel §12.2): the guest writes "fs/get",
@@ -106,32 +106,23 @@ const STORE_BLK = ".blk", STORE_DSC = ".dsc";
 // strBytes encodes.
 const CODEC_NAME = strBytes("codec");
 const REP_NAME = strBytes("reputation");
-// The scoped-signature prefix `DOMAIN_guest ‖ scope` (README §16): `node/sign` signs
-// `prefix ‖ msg`, never the raw msg, so a descriptor signature verifies only in this app's
-// scope. The `crypto/ed25519/verify` primitive stays raw, so verifyEnv rebuilds `prefix ‖ core`
-// before checking. The runtime derives these bytes from the admitted manifest's
-// (author, app) and injects them
-// as BUNDLE — the guest treats them as an opaque prefix, never reconstructing the kernel's
-// domain string itself, and no build step ever restates them.
-const SIGN_PREFIX = fromHex(BUNDLE.signPrefix);
 
-// Two injected constants, with a hard split (seedkernel §12.4):
-//   BUNDLE  facts the RUNTIME derived from the admitted manifest — author, app, the
-//           signing prefix. Not operator-writable.
-//   APP     the author's signed config, with operator policy merged over it
-//           (storage-node.ts appPreamble builds it host-side; the shell merges
-//           --app-config over the bundle's). Read directly as `APP.*`.
-// read them from the chunk in hand and consults no config at all (§4.1, §9).
-//
+// The injected constant is just `APP` (seedkernel §12.4): the author's signed config
+// with operator policy merged over it (storage-node.ts appPreamble builds it host-side;
+// the shell merges --app-config over the bundle's). Read directly as `APP.*`.
+// Nothing the RUNTIME derives is injected anymore — the signing scope in particular
+// lives on the host side of the seam: node/sign applies it when signing, node/verify
+// when checking, so the guest never holds (or reconstructs) the prefix bytes.
 
 // ── crypto primitives + storage framing ──
 // The pure transforms reach the host under the `crypto/` prefix of the one seam
 // (host.call("crypto/<name>", args) — seedkernel §12.2): BLAKE2b-256 for
-// block-ids, XChaCha20 stream XOR for the §4.4 keystream, and raw Ed25519 verify
-// for the descriptor envelope (which rebuilds the scoped preimage itself, since
-// node/sign scopes but crypto/ed25519/verify stays raw). The authorities —
-// node/sign, node/identity, node/random — are host.call names like anything else,
-// as are the clock and the module call.
+// block-ids and XChaCha20 stream XOR for the §4.4 keystream. The authorities —
+// node/sign, node/verify, node/identity, node/random — are host.call names like
+// anything else, as are the clock and the module call. Signing AND verification are
+// scoped, never raw: the host applies `DOMAIN_guest ‖ scope` to the message on both
+// sides (seedkernel §12.2), so this guest names the key it signs with / checks under
+// and never reconstructs host-owned prefix bytes.
 function hash(bytes) { return host.call("crypto/blake2b-256", bytes); }
 function randomKey() { const n = new Uint8Array(4); wU32(n, 0, 32); return host.call("node/random", n); }
 function identity() { return host.call("node/identity", EMPTY); }
@@ -144,13 +135,13 @@ function streamXor(K, non, msg) { return host.call("crypto/xchacha20/xor", conca
 function encrypt(K, level, index, msg) { return streamXor(K, nonce(level, index), msg); }
 function decrypt(K, level, index, ct) { return streamXor(K, nonce(level, index), ct); }
 // Signed chunk descriptor envelope: [authorPk 32][sig 64][core] (§4.3, §16). The
-// prefix rides both paths: `node/sign` prepends `DOMAIN_guest ‖ scope` for us (so signCore
-// passes the bare core and gets back a scoped signature), and verifyEnv rebuilds the same
-// preimage for the raw `crypto/ed25519/verify` primitive. The stored envelope still holds only
-// [pk][sig][core] — the prefix is preimage-only, never transmitted.
+// scope rides the seam: `node/sign` signs `DOMAIN_guest ‖ scope ‖ core` for us (so
+// signCore passes the bare core and gets back a scoped signature), and node/verify
+// checks the same preimage for the author key in the envelope. The stored envelope
+// holds only [pk][sig][core] — the prefix is preimage-only, never transmitted.
 function signCore(core) { return concat([identity(), host.call("node/sign", core), core]); }
 function verifyEnv(env) {
-  return host.call("crypto/ed25519/verify", concat([env.slice(0, 32), env.slice(32, 96), SIGN_PREFIX, env.slice(96)]))[0] === 1;
+  return host.call("node/verify", concat([env.slice(0, 32), env.slice(32, 96), env.slice(96)]))[0] === 1;
 }
 
 // ── codec + reputation via the generic module-call ──
@@ -341,7 +332,7 @@ async function fetchBatch(peer, ids) {
 // encode/decodeDescriptorList, descriptorContains, copyTargets, BLOCK_ID_LEN — come
 // from the SHARED host/manifest-core.ts, stitched in ahead of this body (one
 // definition). What stays here is only the part that needs a capability: verify/sign
-// over the `crypto/ed25519/verify` primitive / `node/sign` seam, composed with the shared
+// over the scoped `node/verify` / `node/sign` seam, composed with the shared
 // parser/encoder.
 //
 // verifyDescriptor checks the author signature AND structurally validates the core

@@ -540,7 +540,7 @@ export async function run(t) {
       const bid = a.crypto.hash(bytes);
       const desc = (id, sk) => signDescriptor(
         sodium, { level: 0, k: 1, m: 0, blockSize: config.blockSize, tailBytes: config.blockSize, blockIds: [bid] },
-        id.publicKey, id.privateKey, a.signScope,
+        id.publicKey, id.privateKey, a.signAuthor,
       );
 
       // Signed by a real cohort peer (a, which b knows): admitted.
@@ -555,7 +555,7 @@ export async function run(t) {
       const bid2 = a.crypto.hash(bytes2);
       const forged = signDescriptor(
         sodium, { level: 0, k: 1, m: 0, blockSize: config.blockSize, tailBytes: config.blockSize, blockIds: [bid2] },
-        stranger.publicKey, stranger.privateKey, a.signScope,
+        stranger.publicKey, stranger.privateKey, a.signAuthor,
       );
       const unknown = decodeMask(await a.transport.request(b.peerId, SEEDSTORE_PROTO,
         typed(MsgType.STORE, encodeStoreBatch([{ blockId: bid2, descriptor: forged, bytes: bytes2 }]))));
@@ -577,7 +577,7 @@ export async function run(t) {
       const bid = a.crypto.hash(bytes);
       const env = signDescriptor(
         sodium, { level: 0, k: 1, m: 2, blockSize: config.blockSize, tailBytes: config.blockSize, blockIds: [bid, bid, bid] },
-        a.identity.publicKey, a.identity.privateKey, a.signScope,
+        a.identity.publicKey, a.identity.privateKey, a.signAuthor,
       );
       const first = decodeMask(await a.transport.request(b.peerId, SEEDSTORE_PROTO,
         typed(MsgType.STORE, encodeStoreBatch([{ blockId: bid, descriptor: env, bytes }]))));
@@ -604,7 +604,7 @@ export async function run(t) {
     const [owner] = nodes;
     try {
       const K = owner.crypto.randomKey();
-      const sign = (d) => signDescriptor(sodium, d, owner.identity.publicKey, owner.identity.privateKey, owner.signScope);
+      const sign = (d) => signDescriptor(sodium, d, owner.identity.publicKey, owner.identity.privateKey, owner.signAuthor);
       const at = (level, ct, tailBytes) => {
         const id = owner.crypto.hash(ct);
         return { id, env: sign({ level, k: 1, m: 1, blockSize: cfg.blockSize, tailBytes, blockIds: [id, id] }) };

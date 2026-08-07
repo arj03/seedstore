@@ -92,16 +92,15 @@ mirror, and the bundle producer:
 1. **Signatures are scoped on both paths**
    (`host/tier2-guest.orchestration.js`). The descriptor envelope stays
    `[authorPk 32][sig 64][core ..]` — the prefix is preimage-only, never stored
-   — but `signCore` passes the bare core to the scoped `CAP_SIGN`, which signs
-   `DOMAIN_guest ‖ scope ‖ core`, and `verifyEnv` reconstructs that same preimage
-   for the raw `"ed25519/verify"` primitive. The host mirror
-   (`signDescriptor`/`verifyDescriptor` in `host/manifest.ts`) produces and
-   checks byte-identical preimages, so the `tier2-port`/`holder-guest` parity
-   tests hold. The guest gets the scope bytes host-derived, and never from
-   author-written config: both drivers inject them through seedkernel's shared
-   `bundlePreamble` as `BUNDLE.signPrefix` — the shell from the admitted
-   manifest's `(author, app)`, a `StorageNode` from the loaded bundle's verified
-   author. One derivation, so the two cannot disagree; a
+   — and BOTH sides of the signature ride the kernel's scoped seam:
+   `signCore` passes the bare core to `node/sign`, which signs
+   `DOMAIN_guest ‖ scope ‖ core`, and `verifyEnv` checks the same preimage
+   through `node/verify` for the author key in the envelope. The host mirror
+   (`signDescriptor`/`verifyDescriptor` in `host/manifest.ts`) signs and verifies
+   through the same two names on a scoped cap-bridge, so the `tier2-port`/`holder-guest`
+   parity tests hold. Neither path ever reconstructs the prefix: the scope is the
+   kernel's to apply, derived from the admitted manifest's `(author, app)` — one
+   derivation, so the two cannot disagree; a
    hand-baked copy in the signed config could, and would fail as signatures that
    verify nowhere.
 2. **The descriptor's leading byte is the signed-format tag** (spec §16). The
