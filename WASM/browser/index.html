@@ -18,7 +18,7 @@
      its real ./seedkernel/*.js file (a folder-prefix map would resolve to an
      extensionless path a static server 404s). The minified kernel tree ships as
      host/ + core/ (host modules import ../core/* by relative path); the seedstore
-     host needs shell-core, the bundle loader, the cap-bridge, the transport driver +
+     host needs shell-core, the bundle loader, the guest seam, the transport driver +
      the artifact transport bundle (the signed program that IS the node's network),
      and safe-js. safe-js is the QuickJS sandbox the storage node runs the guest in;
      its quickjs-emscripten + quickjs-ng wasm variants, plus sumo libsodium, are
@@ -30,7 +30,7 @@
   "imports": {
     "seedkernel-wasm/shell-core":     "./seedkernel/host/shell-core.js",
     "seedkernel-wasm/bundle":         "./seedkernel/host/bundle.js",
-    "seedkernel-wasm/cap-bridge":     "./seedkernel/host/cap-bridge.js",
+    "seedkernel-wasm/guest-seam":     "./seedkernel/host/guest-seam.js",
     "seedkernel-wasm/fs":             "./seedkernel/core/fs.js",
     "seedkernel-wasm/transport-host": "./seedkernel/host/transport-host.js",
     "seedkernel-wasm/transport-bundle": "./seedkernel/host/transport-bundle.js",
