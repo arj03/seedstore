@@ -49,11 +49,12 @@ export type { Descriptor, SignedDescriptor } from "./manifest-core.js";
 export const STORAGE_APP = "seedstore";
 
 /** The wire protocol id storage speaks (seedkernel §12.10) — placed in every
- *  net/send frame so the receiving host routes it to this app. NOT derived from
- *  the manifest: install is inert, and a host routes only what its operator bound
- *  explicitly. This constant is the deployment's operator decision, stated once
- *  host-side (`StorageNode.create` binds it) and matched guest-side (NET_PROTO),
- *  so the two cannot drift. */
+ *  net/send frame so the receiving host routes it to this app, and CLAIMED by the
+ *  bundle's signed manifest (`protocols`, scripts/storage-bundle.mjs), which is what
+ *  gives the id a destination on the receiving node: the load that admits this code
+ *  claims it, with no operator step in between. The id an app speaks is the app's own
+ *  fact, so it is stated once here and read by the two places that need it — the
+ *  bundle build and the guest's NET_PROTO — rather than retyped per deployment. */
 export const STORAGE_PROTO = "seedstore";
 
 /** The signing scope `author_pk ‖ app_len u8 ‖ app` for a storage deployment

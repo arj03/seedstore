@@ -35,6 +35,7 @@ import { signManifestHybrid, packBundle, genesisHash, MANIFEST_FILE, GUEST_FILE,
   from "seedkernel-wasm/bundle";
 import { GUEST_ABI_VERSION } from "seedkernel-wasm/cap-bridge";
 import { defaultConfig, PRODUCTION_BLOCK_SIZE } from "../build/host/core.js";
+import { STORAGE_PROTO } from "../build/host/manifest.js";
 import { toHex } from "../build/host/util.js";
 
 // The app name — the manifest `app` and the `app` component of the signing scope
@@ -155,6 +156,13 @@ export function writeStorageBundle({ path, sodium, sk, pk, build, version = 1, l
     // A monotonic integer freshness mark per (author, app): the shell enforces it as a
     // high-water mark and refuses a downgrade (README §12.4). Bump it on every publish.
     version,
+    // The wire protocol this app serves (seedkernel §12.10) — the claim, signed with
+    // everything else here. The load that admits this bundle routes the id to it, so a
+    // node that installed storage IS a storage node; there is no second operator act
+    // between landing the code and answering a peer. Read from STORAGE_PROTO, the same
+    // constant the guest frames its net/send with (NET_PROTO), so the id a sender writes
+    // and the id a receiver routes by cannot drift.
+    protocols: [STORAGE_PROTO],
     modules,
     // Everything about the guest — its content hash, its authority, and its config — in
     // one place (seedkernel §12.4). The guest is required by the format — every app is

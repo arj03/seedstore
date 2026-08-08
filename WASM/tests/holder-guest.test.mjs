@@ -24,12 +24,11 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { boot } from "seedkernel-wasm/shell";
-import { appKeyFor, verifyBundle } from "seedkernel-wasm/bundle";
+import { verifyBundle } from "seedkernel-wasm/bundle";
 import { TRANSPORT_BUNDLE_B64 } from "seedkernel-wasm/transport-bundle";
 import {
   loadSodium, generateKeyPair, LoopbackNetwork, createConnectedCohort,
 } from "../build/host/node.js";
-import { STORAGE_PROTO } from "../build/host/manifest.js";
 import { toHex, bytesEqual, concatBytes, readU32BE } from "../build/host/util.js";
 import { buildBundle } from "./bundle-fixture.mjs";
 import { makeT } from "./harness.mjs";
@@ -102,10 +101,10 @@ export async function run(t) {
       config: { quota: 64 * 1024 * 1024, blockSize: 1024 },
     });
     await shell.net.start(); // bind the loopback port the cohort dials
-    const loaded = await shell.loadBundle(bundlePath);
-    // Install is inert (§12.10): this generic shell serves the storage protocol
-    // only because the operator code here bound it explicitly to the loaded app.
-    shell.bind(STORAGE_PROTO, appKeyFor(loaded.author, loaded.manifest.app));
+    // A generic shell + the signed storage bundle is a storage node: the manifest
+    // claims STORAGE_PROTO and the load routes it (§12.10), so nothing here points
+    // the protocol anywhere — `serve()` is the only step between loading and answering.
+    await shell.loadBundle(bundlePath);
     await shell.serve();
     return { shell, peerId: toHex(identity.publicKey), net: shell.net };
   }

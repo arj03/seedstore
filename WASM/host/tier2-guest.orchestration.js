@@ -94,10 +94,11 @@ const CODEC_ENCODE = 1, CODEC_DECODE = 2;     // assembly/codec/index.ts
 // Control-plane message types carried over net.send (host/protocol.ts §18).
 const MSG_HAVE = 1, MSG_OFFER = 2, MSG_FETCH = 3, MSG_STORE = 4;
 // The protocol id this app speaks on the wire (§12.10) — placed in every net/send frame
-// so the receiving host routes it to this app. NOT derived from the manifest: install is
-// inert, and a host routes only what its operator bound explicitly — the operator's host
-// code binds this id to the app key at boot (StorageNode.create → shell.bind). The
-// constant lives host-side too (STORAGE_PROTO, manifest.ts), so the two cannot drift.
+// so the receiving host routes it to this app, and the SAME id this bundle's manifest
+// claims (`protocols`, scripts/storage-bundle.mjs). That is what makes the frame arrive:
+// the load that admitted this code claimed the id, so what a sender writes here and what
+// a receiver routes by are one fact. The constant lives host-side (STORAGE_PROTO,
+// manifest.ts) and both the manifest and this line come from it.
 // strBytes encodes ASCII without TextEncoder (QuickJS has none).
 const NET_PROTO = strBytes("seedstore");
 const HAVE_ID_LEN = 32;      // a HAVE/FETCH request names 32-byte block_ids (§18)
