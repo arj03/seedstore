@@ -104,12 +104,12 @@ const NET_PROTO = strBytes("seedstore");
 const HAVE_ID_LEN = 32;      // a HAVE/FETCH request names 32-byte block_ids (§18)
 const FETCH_FRAME = 5;       // a present block costs [found u8][len u32] in a FETCH response (§18)
 const STORE_BLK = ".blk", STORE_DSC = ".dsc";
-// The logical names this app's own modules are installed under. The guest calls
-// its own modules by the logical name from its manifest — the cap-bridge resolves
-// to the kernel name so kernel names never leave the host. Both are ASCII, so
-// strBytes encodes.
-const CODEC_NAME = strBytes("codec");
-const REP_NAME = strBytes("reputation");
+// The logical names this app's own modules are installed under. The guest calls them
+// by the logical name from its manifest, straight through `host.call` — a bare name
+// (no `/`) is what makes it a module rather than a host name (seedkernel §12.2), and
+// the cap-bridge resolves it against this app's map, so app keys never leave the host.
+const CODEC_NAME = "codec";
+const REP_NAME = "reputation";
 
 // The injected constant is just `APP` (seedkernel §12.4): the author's signed config
 // with operator policy merged over it (storage-node.ts appPreamble builds it host-side;
@@ -148,26 +148,17 @@ function verifyEnv(env) {
   return host.call("node/verify", concat([env.slice(0, 32), env.slice(32, 96), env.slice(96)]))[0] === 1;
 }
 
-// ── codec + reputation via the generic module-call ──
-function moduleCall(name, req) {
-  const head = new Uint8Array(1 + name.length); head[0] = name.length; head.set(name, 1);
-  return host.call("module/call", concat([head, req]));
-}
-// Like moduleCall but takes the request already split into parts, so the name
-// header and the request body fold into a single concat. The RS request is large
-// (k data blocks ≈ 640 KB); the old `moduleCall(name, concat([head, ...blocks]))`
-// built that buffer and then copied the whole of it again to prepend the name —
-// two passes over the blocks. One concat copies them once. (The guest reaches the
-// codec only through host.call, so the in-place scratch staging a host-owned
-// instance could do isn't available here, but folding the two concats is.)
-function moduleCallParts(name, parts) {
-  const head = new Uint8Array(1 + name.length); head[0] = name.length; head.set(name, 1);
-  return host.call("module/call", concat([head, ...parts]));
-}
+// ── codec + reputation ──
+// Both are ordinary `host.call`s: the module name IS the seam's name argument, so
+// there is no header to build and the request body crosses as itself. The RS request
+// is large (k data blocks ≈ 640 KB) and this is the one place that matters — the old
+// framing prepended a length-prefixed name, so every encode copied the blocks into a
+// request buffer and then copied that whole buffer again. Now the single `concat`
+// below is the only pass over them.
 function rsEncode(k, m, blockSize, dataBlocks) {
   const head = new Uint8Array(7);
   head[0] = CODEC_ENCODE; head[1] = k; head[2] = m; wU32(head, 3, blockSize);
-  const parity = splitBlocks(moduleCallParts(CODEC_NAME, [head, ...dataBlocks]), blockSize);
+  const parity = splitBlocks(host.call(CODEC_NAME, concat([head, ...dataBlocks])), blockSize);
   // A codec that returns no/short parity (its handler scratch too small for a
   // k·blockSize request, or the module missing) would otherwise surface far away as
   // the descriptor's "blockIds.length must be k (replicated) or k+m (coded)" — or, worse,
@@ -188,14 +179,14 @@ function rsDecode(k, m, blockSize, present) {
   head[0] = CODEC_DECODE; head[1] = k; head[2] = m; wU32(head, 3, blockSize); head[7] = use.length;
   const idx = new Uint8Array(use.length);
   for (let i = 0; i < use.length; i++) idx[i] = use[i].index;
-  return splitBlocks(moduleCallParts(CODEC_NAME, [head, idx, ...use.map((p) => p.bytes)]), blockSize);
+  return splitBlocks(host.call(CODEC_NAME, concat([head, idx, ...use.map((p) => p.bytes)])), blockSize);
 }
 function clockNow() { const b = host.call("clock/now", EMPTY); return rU32(b, 0) * 0x100000000 + rU32(b, 4); }
 function repScore(peerPk, t) {
-  return readF64LE(moduleCall(REP_NAME, encodeScoreReq(peerPk, t)));
+  return readF64LE(host.call(REP_NAME, encodeScoreReq(peerPk, t)));
 }
 function repObserve(peerPk, t, pass) {
-  moduleCall(REP_NAME, encodeObserveReq(peerPk, t, pass)); // returns the new score; the guest doesn't need it
+  host.call(REP_NAME, encodeObserveReq(peerPk, t, pass)); // returns the new score; the guest doesn't need it
 }
 
 // ── local store over fs.* (the <hex>.blk / <hex>.dsc layout) ─────────────────

@@ -83,9 +83,10 @@ export function authorKeysFor(sodium, edSk) {
 // (identity and entropy). The pure transforms —
 // BLAKE2b, XChaCha20 — are not grants at all: they live under the
 // ungated `crypto/` prefix, because a function of a guest's own arguments grants
-// nothing. `module/call` is the same story: it reaches this bundle's own
-// `codec`/`reputation` modules, installed and verified with it, so it is ungated
-// like `crypto` (seedkernel §12.1) and never appears in `requires`.
+// nothing. This bundle's own `codec`/`reputation` module names are the same story:
+// bare names on the same seam, reaching modules installed and verified with this
+// bundle, so they are ungated like `crypto` (seedkernel §12.1) and never appear
+// in `requires`.
 const STORAGE_REQUIRES = [
   "node/sign", "node/verify", "node/identity", "node/random",
   "net/send", "net/peers",

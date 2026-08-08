@@ -89,6 +89,7 @@ function scopedBridge(sodium: Sodium, authorPk: Uint8Array, authorSk: Uint8Array
       identity: key,
       signScope: appSignScope(key, scopeAuthor, STORAGE_APP),
       callModule: () => null,
+      hasModule: () => false,
       peers: () => [],
       allowedNames: UNRESTRICTED_NAMES,
     });
