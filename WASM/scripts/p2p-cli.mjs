@@ -37,7 +37,8 @@
 //     [--puts 1] [--gets 1] [--author hex|none] [--block 256] [--batch 1024] [--window 64]
 //
 // The optional `.secret` is THAT PEER's 32-byte hex contact secret — what it demands of
-// anyone dialing it (`seedloader --contact-secret <hex>`). It is the peer's credential,
+// anyone dialing it (`seedloader --contact-secret <file of 64 hex chars>`, so the secret
+// itself never appears in an argument list). It is the peer's credential,
 // not ours: we are a dialer only, we never listen, so we have no inbound secret of our
 // own. Omit it for an open peer. Get it wrong and the dial draws SILENCE rather than an
 // error — a gated node refuses without answering, by design — so a peer that never

@@ -44,7 +44,7 @@ import { STORAGE_APP } from "./manifest.js";
 import { encodeScoreReq } from "./reputation-core.js";
 import { toHex, readU32BE, readU64BE, concatBytes } from "./util.js";
 import {
-  createShell, ModuleTable, scopedFs, byRole, type Shell, type ModuleLookup, type RealmFactory,
+  createShell, ModuleTable, scopedFs, byPrivilege, type Shell, type ModuleLookup, type RealmFactory,
 } from "seedkernel-wasm/shell-core";
 import { FreshnessMarks, appKeyFor, appScopeFor, verifyBundle, type LoadedBundle } from "seedkernel-wasm/bundle";
 import type { HostTransport } from "seedkernel-wasm/transport-host";
@@ -487,17 +487,18 @@ export async function bootTransportShell(
       // so only an external embedder — browser/p2p.html — ever hit it.
       ...(opts.livePeers ? { livePeers: opts.livePeers } : {}),
     },
-    // ONE admission predicate (§12.5), with the two classes as a `byRole`
-    // combinator over it: the transport bundle is admitted by author pin — the
-    // operator handing us the storage bundle is the trust decision for THAT; an
-    // app bundle is admitted because its operator handed it to us — the choice
-    // of bundle is the trust decision, so there is no author allow-list to clear
-    // (the manifest signature + module hashes are still verified by
-    // loadBundleBlob, and revocation + the downgrade guard are composed by the
-    // shell around whatever we pass here).
-    admit: byRole({
-      app: () => true,
-      mount: (v) => toHex(v.author) === transportAuthorHex,
+    // ONE admission predicate (§12.5), keyed on the privileges the manifest's
+    // `requires` reach, said with `byPrivilege`: the `base` branch admits an
+    // app that reaches no privilege, the `mount` grant admits the transport
+    // bundle by author pin — the operator handing us the storage bundle is the
+    // trust decision for THAT; an app bundle is admitted because its operator
+    // handed it to us — the choice of bundle is the trust decision, so there is
+    // no author allow-list to clear (the manifest signature + module hashes are
+    // still verified by loadBundleBlob, and revocation + the downgrade guard are
+    // composed by the shell around whatever we pass here).
+    admit: byPrivilege({
+      base: () => true,
+      grants: { mount: (v) => toHex(v.author) === transportAuthorHex },
     }),
     requestDeadlineMs: opts.timeoutMs,
     config: { ...(opts.config ?? {}), ...(opts.quota != null ? { quota: opts.quota } : {}) },

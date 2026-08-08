@@ -86,8 +86,8 @@ export async function run(t) {
       });
 
       // The shell knows only its policy + the kernel; storage arrives as content. The
-      // policy admits the bundle author for apps AND the transport bundle's author for
-      // the transport role — the latter is what stands the shell's network up.
+      // policy admits the bundle author for apps AND grants the transport bundle's
+      // author the `mount` privilege — the latter is what stands the shell's network up.
       //
       // A cohort is MUTUAL: the holders must know the shell too, because a holder now
       // anchors a descriptor's author to a peer it knows (§4.3) — a valid signature from
@@ -97,7 +97,7 @@ export async function run(t) {
       shell = await boot({
         policyJson: JSON.stringify({
           authors: [toHex(authorId)],
-          transportAuthors: [transportHex],
+          grants: { mount: [transportHex] },
         }),
         dir: shellDir, identity: shellIdentity,
         channels: net.view(toHex(shellIdentity.publicKey)),
@@ -136,7 +136,7 @@ export async function run(t) {
       const shell2 = await boot({
         policyJson: JSON.stringify({
           authors: [toHex(generateKeyPair(sodium).publicKey)],
-          transportAuthors: [transportHex],
+          grants: { mount: [transportHex] },
         }),
         dir: shell2Dir, identity: shell2Id, channels: net.view(toHex(shell2Id.publicKey)),
       });
@@ -178,7 +178,7 @@ export async function run(t) {
       shell = await boot({
         policyJson: JSON.stringify({
           authors: [toHex(authorId)],
-          transportAuthors: [transportHex],
+          grants: { mount: [transportHex] },
         }),
         dir: shellDir, identity: shellId, channels: net.view(toHex(shellId.publicKey)),
         timeoutMs: 40,
