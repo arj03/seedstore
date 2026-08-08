@@ -33,7 +33,7 @@ import { dirname, join } from "node:path";
 
 import { signManifestHybrid, packBundle, genesisHash, MANIFEST_FILE, GUEST_FILE, moduleFile }
   from "seedkernel-wasm/bundle";
-import { GUEST_ABI_VERSION } from "seedkernel-wasm/cap-bridge";
+import { GUEST_ABI_VERSION } from "seedkernel-wasm/guest-seam";
 import { defaultConfig, PRODUCTION_BLOCK_SIZE } from "../build/host/core.js";
 import { STORAGE_PROTO } from "../build/host/manifest.js";
 import { toHex } from "../build/host/util.js";

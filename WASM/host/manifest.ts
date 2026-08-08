@@ -20,7 +20,7 @@ import {
   encodeDescriptorCore, parseSignedDescriptor, type Descriptor, type SignedDescriptor,
 } from "./manifest-core.js";
 import { concatBytes, toHex } from "./util.js";
-import { createCapBridge, appSignScope, guestSignScope, UNRESTRICTED_NAMES } from "seedkernel-wasm/cap-bridge";
+import { createGuestSeam, appSignScope, guestSignScope, UNRESTRICTED_NAMES } from "seedkernel-wasm/guest-seam";
 
 // The scoped signing namespace is the KERNEL's to state, and this package's
 // sign/verify go through the kernel's scoped seam: `node/sign` applies
@@ -84,14 +84,13 @@ function scopedBridge(sodium: Sodium, authorPk: Uint8Array, authorSk: Uint8Array
   let bridge = byKey.get(cacheKey);
   if (!bridge) {
     const key = { publicKey: authorPk, privateKey: authorSk };
-    bridge = createCapBridge({
-      sodium,
-      identity: key,
-      signScope: appSignScope(key, scopeAuthor, STORAGE_APP),
-      callModule: () => null,
-      hasModule: () => false,
-      peers: () => [],
-      allowedNames: UNRESTRICTED_NAMES,
+    bridge = createGuestSeam({
+      platform: { sodium, identity: key, peers: () => [] },
+      grants: {
+        names: UNRESTRICTED_NAMES,
+        signScope: appSignScope(key, scopeAuthor, STORAGE_APP),
+      },
+      modules: { call: () => null, has: () => false },
     });
     byKey.set(cacheKey, bridge);
   }

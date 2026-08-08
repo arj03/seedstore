@@ -29,7 +29,7 @@ export interface Sodium {
   crypto_sign_detached(message: Uint8Array, sk: Uint8Array): Uint8Array;
   crypto_sign_verify_detached(sig: Uint8Array, message: Uint8Array, pk: Uint8Array): boolean;
   randombytes_buf(length: number): Uint8Array;
-  // The rest of the sumo surface the shared shell needs — the cap-bridge crypto
+  // The rest of the sumo surface the shared shell needs — the guest seam's crypto
   // catalog (CapSodium: the AEAD + X25519 + ML-KEM primitives) and the bundle
   // manifest checks. One libsodium instance serves the kernel, the shell and the
   // storage host (README §2, §16), so the type is the union, not the seedstore

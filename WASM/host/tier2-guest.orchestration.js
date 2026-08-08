@@ -72,7 +72,7 @@ function bytesToStr(b) { let s = ""; for (let i = 0; i < b.length; i++) s += Str
 
 // ── the capability seam: storage policy over GENERIC kernel caps ─────────────
 // Every wrapper is built from the application-neutral names of the one seam —
-// crypto primitives, net, fs, module-call, clock, identity (host/cap-bridge.ts in
+// crypto primitives, net, fs, module-call, clock, identity (host/guest-seam.ts in
 // seedkernel). All *structure* lives here in the guest, never in the kernel:
 // the nonce convention, the signed-descriptor envelope, the HAVE/OFFER/FETCH/
 // STORE wire format (host/protocol.ts), the codec & reputation module ABIs, and
@@ -107,7 +107,7 @@ const STORE_BLK = ".blk", STORE_DSC = ".dsc";
 // The logical names this app's own modules are installed under. The guest calls them
 // by the logical name from its manifest, straight through `host.call` — a bare name
 // (no `/`) is what makes it a module rather than a host name (seedkernel §12.2), and
-// the cap-bridge resolves it against this app's map, so app keys never leave the host.
+// the guest seam resolves it against this app's map, so app keys never leave the host.
 const CODEC_NAME = "codec";
 const REP_NAME = "reputation";
 
