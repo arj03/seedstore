@@ -11,8 +11,9 @@
 //   npx http-server build/browser-demo -p 3000   (then open /index.html, /p2p.html)
 //
 // The pages' import maps resolve "seedkernel-wasm/*" → ./seedkernel/* and this
-// project's host → ./host/, and pull sumo libsodium from a CDN (vendor an ESM build
-// there to run offline). Needs both builds' minified host: seedstore `npm run build`
+// project's host → ./host/. Nothing is fetched at runtime: QuickJS is vendored under
+// ./vendor/ and libsodium comes from the kernel (its "./libsodium" export), so the
+// staged dir runs offline. Needs both builds' minified host: seedstore `npm run build`
 // and seedkernel `npm run build:host && npm run build:host:min`.
 
 import { mkdirSync, copyFileSync, existsSync, readdirSync, statSync, rmSync,
@@ -120,13 +121,27 @@ await copy(join(build, "host", "tier2-guest.js"), join(out, "tier2-guest.js"));
 // tree now has host/ and core/ subdirs (host modules import ../core/* by relative
 // path), and the import maps resolve "seedkernel-wasm/*" into ./seedkernel/ and
 // this project's host into ./host/.
+//
+// Node-only modules do NOT ship. Both minified trees carry modules that exist for the
+// Node host (the kernel's crypto-node/fs-node/net-node/main*, this project's node.js)
+// and reach for `node:` builtins and bare npm specifiers no browser can resolve. No
+// page imports them, so today they are only dead weight — but dead weight that makes
+// the served tree look like it depends on packages it does not (crypto-node's bare
+// `libsodium-wrappers-sumo` is why the import map used to carry a sumo entry it never
+// needed). Skip them on the property that makes them node-only, a `node:` import, and
+// assert below that nothing staged imports one — so the rule can never silently drop a
+// module a page actually needs.
+const skippedNodeOnly = new Set(); // dest paths deliberately NOT staged
+const isNodeOnly = (src) => /["']node:[\w/.-]+["']/.test(readFileSync(src, "utf8"));
 async function copyJs(srcDir, dstDir) {
   mkdirSync(dstDir, { recursive: true });
   for (const name of readdirSync(srcDir)) {
     const p = join(srcDir, name);
     const st = statSync(p);
     if (st.isDirectory()) await copyJs(p, join(dstDir, name));
-    else if (name.endsWith(".js")) await copy(p, join(dstDir, name));
+    else if (!name.endsWith(".js")) continue;
+    else if (isNodeOnly(p)) skippedNodeOnly.add(resolve(join(dstDir, name)));
+    else await copy(p, join(dstDir, name));
   }
 }
 await copyJs(seedstoreHost, join(out, "host"));
@@ -146,15 +161,36 @@ await copyJs(seedkernelHost, join(out, "seedkernel"));
   await copy(src, join(out, "mldsa65.wasm"));
 }
 
+// ── sumo libsodium: the kernel's, not a second copy ──────────────────────────
+// The pages import "seedkernel-wasm/libsodium" — the kernel's published browser entry
+// — rather than the upstream npm package, so the browser, the Node host and the Go
+// loader all run the SAME crypto binary. (They used to vendor libsodium-wrappers-sumo
+// out of node_modules below, which is the same library but not the same artifact, and
+// it needed a dev install of the kernel to stage.) These three files are checked in and
+// must land in ONE directory: the wrapper resolves the core and the .wasm relative to
+// its own import.meta.url, and its wasm is a sibling fetch rather than a base64 blob.
+{
+  const srcDir = join(root, "..", "..", "seedkernel", "WASM", "browser");
+  for (const f of ["libsodium-wrappers.mjs", "libsodium-core.mjs", "libsodium.wasm"]) {
+    const src = join(srcDir, f);
+    if (!existsSync(src)) {
+      console.error(`seedkernel ${f} not found at ${src} — build it first ` +
+        "(in seedkernel/WASM:  npm run build:browser-sodium).");
+      process.exit(1);
+    }
+    await copy(src, join(out, "seedkernel", f));
+  }
+}
+
 // ── vendor the browser-only npm deps so the demo runs OFFLINE ────────────────
-// QuickJS (quickjs-emscripten + the two quickjs-ng wasm variants) and sumo libsodium
-// are multi-file ESM packages with their own bare-specifier imports and a .wasm each;
-// the pages used to pull them from esm.sh. Copy the exact runtime files into ./vendor/
-// and let the pages' import map name every bare specifier in their graph (…-core,
-// quickjs-ffi-types, the /emscripten-module subpaths, libsodium-sumo). Each emscripten
-// module finds its wasm via `new URL("emscripten-module.wasm", import.meta.url)`, so the
-// .wasm rides in the same dir; libsodium embeds its wasm as base64 (no sibling). Source
-// from seedkernel's node_modules (where safe-js pulls QuickJS), falling back to seedstore's.
+// QuickJS (quickjs-emscripten + the two quickjs-ng wasm variants) is a set of multi-file
+// ESM packages with their own bare-specifier imports and a .wasm each; the pages used to
+// pull them from esm.sh. Copy the exact runtime files into ./vendor/ and let the pages'
+// import map name every bare specifier in their graph (…-core, quickjs-ffi-types, the
+// /emscripten-module subpaths). Each emscripten module finds its wasm via
+// `new URL("emscripten-module.wasm", import.meta.url)`, so the .wasm rides in the same
+// dir. Source from seedkernel's node_modules (where safe-js pulls QuickJS), falling back
+// to seedstore's. libsodium is NOT here — it is staged from the kernel above.
 const nodeModulesDirs = [
   join(root, "..", "..", "seedkernel", "WASM", "node_modules"),
   join(root, "node_modules"),
@@ -178,8 +214,6 @@ const VENDOR = [
     ["index.mjs", "ffi.mjs", "emscripten-module.browser.mjs", "emscripten-module.wasm"], false],
   ["@jitl/quickjs-ng-wasmfile-release-sync", "dist", "qjs-sync",
     ["index.mjs", "ffi.mjs", "emscripten-module.browser.mjs", "emscripten-module.wasm"], false],
-  ["libsodium-wrappers-sumo", "dist/modules-sumo-esm", "libsodium-wrappers-sumo", ["libsodium-wrappers.mjs"], false],
-  ["libsodium-sumo",          "dist/modules-sumo-esm", "libsodium-sumo",          ["libsodium-sumo.mjs"], false],
 ];
 for (const [pkg, sub, dest, files, allMjs] of VENDOR) {
   const src = pkgDist(pkg, sub);
@@ -221,6 +255,62 @@ if (bundleBlob) {
 for (const page of ["index.html", "p2p.html"]) {
   await copy(join(root, "browser", page), join(out, page));
 }
+
+// ── resolve each page's module graph, exactly as the browser will ────────────
+// Two ways this stage ships a dir the browser refuses, both of which used to surface
+// only as a console error on load: a bare "seedkernel-wasm/*" specifier the page's
+// import map has no entry for (the map is hand-maintained, the imports are not), and a
+// relative import of a module that is not staged — including the `node:`-importing ones
+// copyJs deliberately left out. Walk the real graph from each page: follow relative
+// imports through the staged files, resolve bare ones through that page's own map, and
+// fail here with the file that named the specifier. Only what a page can actually reach
+// is checked, so a module staged for the OTHER page (net-rtc) needs no entry in this one.
+// A specifier is `from "x"`, `import("x")`, or a bare side-effect `import "x"` at the
+// start of a statement. Kept deliberately tight — no newline inside the quotes and no
+// newline before them — so prose in a comment ("…the import kind…") followed by an
+// unrelated string literal cannot read as an import.
+const SPEC = /(?:\bfrom[ \t]*|\bimport[ \t]*\([ \t]*|(?:^|[;}])[ \t]*import[ \t]*)["']([^"'\n]+)["']/gm;
+function importMapOf(html) {
+  const m = html.match(/<script type="importmap">([\s\S]*?)<\/script>/);
+  if (!m) throw new Error("page has no import map");
+  return JSON.parse(m[1]).imports ?? {};
+}
+function checkPage(page) {
+  const pagePath = join(out, page);
+  const map = importMapOf(readFileSync(pagePath, "utf8"));
+  const seen = new Set();
+  const fail = (from, spec, why) => {
+    console.error(`${page}: ${relative(out, from)} imports "${spec}" — ${why}`);
+    process.exit(1);
+  };
+  (function walk(file) {
+    if (seen.has(file)) return;
+    seen.add(file);
+    for (const [, spec] of readFileSync(file, "utf8").matchAll(SPEC)) {
+      let target;
+      if (spec.startsWith(".")) {
+        target = resolve(dirname(file), spec);
+      } else if (map[spec]) {
+        target = resolve(out, map[spec]);
+      } else if (spec.startsWith("node:")) {
+        fail(file, spec, "a Node builtin: this module should not be in the browser graph.");
+      } else {
+        fail(file, spec, `no import map entry on this page. Add one, or stop importing it.\n` +
+          `  (bare specifiers only resolve in a browser through the map — the Node build ` +
+          `resolves them through node_modules, so tests stay green while the page breaks.)`);
+      }
+      if (!existsSync(target)) {
+        fail(file, spec, skippedNodeOnly.has(target)
+          ? `NOT staged: it imports a \`node:\` builtin, so it is a Node-host module the ` +
+            `browser cannot load. Either it stopped being Node-only, or the browser code ` +
+            `should not reach for it.`
+          : `not staged at ${relative(out, target)}.`);
+      }
+      walk(target);
+    }
+  })(pagePath);
+}
+for (const page of ["index.html", "p2p.html"]) checkPage(page);
 
 // ── prune: remove anything in `out` we did NOT just stage ────────────────────
 // We overwrite in place rather than wiping `out` up front (a wipe-then-recopy races

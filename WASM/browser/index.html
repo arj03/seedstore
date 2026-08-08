@@ -21,10 +21,13 @@
      host needs shell-core, the bundle loader, the guest seam, the transport driver +
      the artifact transport bundle (the signed program that IS the node's network),
      and safe-js. safe-js is the QuickJS sandbox the storage node runs the guest in;
-     its quickjs-emscripten + quickjs-ng wasm variants, plus sumo libsodium, are
-     VENDORED into ./vendor/ by scripts/build-browser-demo.mjs (runtime files + each
-     package's .wasm, with a map entry per bare specifier in their graph) so the demo
-     runs fully offline. -->
+     its quickjs-emscripten + quickjs-ng wasm variants are VENDORED into ./vendor/ by
+     scripts/build-browser-demo.mjs (runtime files + each package's .wasm, with a map
+     entry per bare specifier in their graph) so the demo runs fully offline. Sumo
+     libsodium is NOT vendored: it comes from the kernel like everything else, as the
+     "seedkernel-wasm/libsodium" export — the prebuilt wrapper staged into
+     ./seedkernel/ next to its core and its libsodium.wasm, which is the same crypto
+     binary the Go loader embeds. -->
 <script type="importmap">
 {
   "imports": {
@@ -32,9 +35,11 @@
     "seedkernel-wasm/bundle":         "./seedkernel/host/bundle.js",
     "seedkernel-wasm/guest-seam":     "./seedkernel/host/guest-seam.js",
     "seedkernel-wasm/fs":             "./seedkernel/core/fs.js",
+    "seedkernel-wasm/fs-memory":      "./seedkernel/host/fs-memory.js",
     "seedkernel-wasm/transport-host": "./seedkernel/host/transport-host.js",
     "seedkernel-wasm/transport-bundle": "./seedkernel/host/transport-bundle.js",
     "seedkernel-wasm/safe-js":        "./seedkernel/host/safe-js.js",
+    "seedkernel-wasm/libsodium":      "./seedkernel/libsodium-wrappers.mjs",
     "quickjs-emscripten":                         "./vendor/quickjs-emscripten/index.mjs",
     "quickjs-emscripten-core":                    "./vendor/quickjs-emscripten-core/index.mjs",
     "@jitl/quickjs-ffi-types":                    "./vendor/quickjs-ffi-types/index.mjs",
@@ -45,9 +50,7 @@
     "@jitl/quickjs-wasmfile-release-asyncify": "./vendor/qjs-async/index.mjs",
     "@jitl/quickjs-wasmfile-debug-asyncify":   "./vendor/qjs-async/index.mjs",
     "@jitl/quickjs-wasmfile-release-sync":     "./vendor/qjs-sync/index.mjs",
-    "@jitl/quickjs-wasmfile-debug-sync":       "./vendor/qjs-sync/index.mjs",
-    "libsodium-wrappers-sumo":   "./vendor/libsodium-wrappers-sumo/libsodium-wrappers.mjs",
-    "libsodium-sumo":            "./vendor/libsodium-sumo/libsodium-sumo.mjs"
+    "@jitl/quickjs-wasmfile-debug-sync":       "./vendor/qjs-sync/index.mjs"
   }
 }
 </script>
@@ -74,7 +77,7 @@
 <div id="log"></div>
 
 <script type="module">
-import sodium from "libsodium-wrappers-sumo";
+import sodium from "seedkernel-wasm/libsodium";
 import { loadWasmBytes, createConnectedCohort, LoopbackNetwork } from "./host/browser.js";
 
 const logEl = document.getElementById("log");

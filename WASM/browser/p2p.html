@@ -27,11 +27,14 @@
      404s. The minified kernel tree ships as host/ + core/ (host modules import
      ../core/* by relative path). safe-js is the QuickJS sandbox the storage node runs
      the guest in; it imports quickjs-emscripten + the two quickjs-ng wasm variants.
-     Those, plus sumo libsodium, are VENDORED into ./vendor/ by
-     scripts/build-browser-demo.mjs so the demo runs fully offline — each package's
-     runtime files + its .wasm are copied and every bare specifier in their graph
-     (…-core, quickjs-ffi-types, the /emscripten-module subpaths, libsodium-sumo)
-     gets a map entry. The umbrella statically references the four default Bellard
+     Those are VENDORED into ./vendor/ by scripts/build-browser-demo.mjs so the demo
+     runs fully offline — each package's runtime files + its .wasm are copied and every
+     bare specifier in their graph (…-core, quickjs-ffi-types, the /emscripten-module
+     subpaths) gets a map entry. Sumo libsodium is NOT vendored: it comes from the
+     kernel like everything else, as the "seedkernel-wasm/libsodium" export — the
+     prebuilt wrapper staged into ./seedkernel/ next to its core and its
+     libsodium.wasm, which is the same crypto binary the Go loader embeds.
+     The umbrella statically references the four default Bellard
      variants (quickjs-wasmfile-{release,debug}-{sync,asyncify}) that we never select
      (safe-js always passes the -ng variants), so those alias to the vendored -ng
      builds — they resolve without pulling four unused wasm packages. This project's
@@ -44,11 +47,13 @@
     "seedkernel-wasm/pq":             "./seedkernel/host/pq.js",
     "seedkernel-wasm/guest-seam":     "./seedkernel/host/guest-seam.js",
     "seedkernel-wasm/fs":             "./seedkernel/core/fs.js",
+    "seedkernel-wasm/fs-memory":      "./seedkernel/host/fs-memory.js",
     "seedkernel-wasm/transport-host": "./seedkernel/host/transport-host.js",
     "seedkernel-wasm/transport-bundle": "./seedkernel/host/transport-bundle.js",
     "seedkernel-wasm/net-rtc":        "./seedkernel/host/net-rtc.js",
     "seedkernel-wasm/net-ws":         "./seedkernel/host/net-ws.js",
     "seedkernel-wasm/safe-js":        "./seedkernel/host/safe-js.js",
+    "seedkernel-wasm/libsodium":      "./seedkernel/libsodium-wrappers.mjs",
     "quickjs-emscripten":                         "./vendor/quickjs-emscripten/index.mjs",
     "quickjs-emscripten-core":                    "./vendor/quickjs-emscripten-core/index.mjs",
     "@jitl/quickjs-ffi-types":                    "./vendor/quickjs-ffi-types/index.mjs",
@@ -59,9 +64,7 @@
     "@jitl/quickjs-wasmfile-release-asyncify": "./vendor/qjs-async/index.mjs",
     "@jitl/quickjs-wasmfile-debug-asyncify":   "./vendor/qjs-async/index.mjs",
     "@jitl/quickjs-wasmfile-release-sync":     "./vendor/qjs-sync/index.mjs",
-    "@jitl/quickjs-wasmfile-debug-sync":       "./vendor/qjs-sync/index.mjs",
-    "libsodium-wrappers-sumo":   "./vendor/libsodium-wrappers-sumo/libsodium-wrappers.mjs",
-    "libsodium-sumo":            "./vendor/libsodium-sumo/libsodium-sumo.mjs"
+    "@jitl/quickjs-wasmfile-debug-sync":       "./vendor/qjs-sync/index.mjs"
   }
 }
 </script>
@@ -155,7 +158,7 @@
 <div id="log"></div>
 
 <script type="module">
-import sodium from "libsodium-wrappers-sumo";
+import sodium from "seedkernel-wasm/libsodium";
 import { createStorageNode } from "./host/browser.js";
 import { bootTransportShell } from "./host/storage-node.js";
 import { RtcNetwork, relaySignaling } from "seedkernel-wasm/net-rtc";
