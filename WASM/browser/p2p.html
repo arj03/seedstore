@@ -392,14 +392,14 @@ async function boot() {
     });
     if (mode === "ws") {
       net = new WsNetwork({
-        driver: shell.net,
+        driver: shell.transport,
         webSocketFactory: (u) => new WebSocket(u),
         connsPerPeer: connsPerPeerFor(mode),
         onPeerUp, onPeerDown,
       });
     } else {
       net = new RtcNetwork({
-        driver: shell.net,
+        driver: shell.transport,
         rtcConfig: RTC_CONFIG, signaling: relaySignaling(relayUrl),
         peerContactFor: () => contactSecret,
         onPeerUp, onPeerDown,

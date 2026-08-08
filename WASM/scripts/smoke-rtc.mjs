@@ -104,7 +104,7 @@ async function makeNode(contact = CONTACT) {
     livePeers: () => entry.node ? entry.node.cohortPeers() : [],
   })).shell;
   entry.net = new RtcNetwork({
-    driver: entry.shell.net,
+    driver: entry.shell.transport,
     signaling: join(), peerConnectionFactory: pcFactory,
     peerContactFor: () => contact,
     onPeerUp: (pid) => entry.node?.addPeer(pid),

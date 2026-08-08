@@ -83,7 +83,7 @@ const { shell } = await bootTransportShell({
 
 let node = null;
 const net = new RtcNetwork({
-  driver: shell.net,
+  driver: shell.transport,
   rtcConfig: RTC_CONFIG,
   signaling: relaySignaling(url),
   // Symmetric room: the accepting side gate is the driver's contactSecret (above);

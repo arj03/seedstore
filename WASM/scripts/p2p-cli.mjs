@@ -230,7 +230,7 @@ const { shell } = await bootTransportShell({
   livePeers: () => [...peerUp],
 });
 const net = new WsNetwork({
-  driver: shell.net,
+  driver: shell.transport,
   webSocketFactory: wsFactory,
   connsPerPeer: connsN,
   onPeerUp: (pid) => { node?.addPeer(pid); peerUp.add(pid); console.log(`link up: ${pid.slice(0, 8)}…`); if (peerUp.size >= specs.length) onQuorum?.(); },
