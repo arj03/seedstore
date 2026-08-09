@@ -52,10 +52,10 @@ function transportAuthorHex(sodium) {
 /** Wire one shell's driver to one storage node's driver (addresses + dial) and
  *  add the node to the shell's cohort view. */
 async function link(shell, shellPeerId, node, cohortSet) {
-  node.net.addPeerAddr(shellPeerId, { host: "127.0.0.1", port: shell.net.port, transport: "tcp" });
-  shell.net.addPeerAddr(node.peerId, { host: "127.0.0.1", port: node.net.port, transport: "tcp" });
+  node.net.addPeerAddr(shellPeerId, { host: "127.0.0.1", port: shell.transport.port, transport: "tcp" });
+  shell.transport.addPeerAddr(node.peerId, { host: "127.0.0.1", port: node.net.port, transport: "tcp" });
   cohortSet.add(node.peerId);
-  await Promise.all([shell.net.ready(), node.net.ready()]);
+  await Promise.all([shell.transport.ready(), node.net.ready()]);
 }
 
 export async function run(t) {
@@ -109,7 +109,7 @@ export async function run(t) {
         // this tiny test file single-block/replicated instead of RS across the cohort).
         config: { blockSize: 1024 },
       });
-      await shell.net.start();
+      await shell.transport.start();
       for (const h of holders) await link(shell, toHex(shellIdentity.publicKey), h, new Set());
       const loaded = await shell.loadBundle(bundlePath);
       for (const m of loaded.manifest.modules) {
@@ -183,7 +183,7 @@ export async function run(t) {
         dir: shellDir, identity: shellId, channels: net.view(toHex(shellId.publicKey)),
         timeoutMs: 40,
       });
-      await shell.net.start();
+      await shell.transport.start();
       await shell.loadBundle(hiPath); // advances the (author, app) high-water mark to 5
       let refused = false;
       try { await shell.loadBundle(loPath); } catch { refused = true; }

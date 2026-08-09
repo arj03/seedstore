@@ -44,7 +44,7 @@ import { STORAGE_APP } from "./manifest.js";
 import { encodeScoreReq } from "./reputation-core.js";
 import { toHex, readU32BE, readU64BE, concatBytes } from "./util.js";
 import {
-  createShell, ModuleTable, scopedFs, byPrivilege, type Shell, type ModuleLookup, type RealmFactory,
+  createShell, ModuleTable, scopedFs, byPrivilege, requireTransport, type Shell, type ModuleLookup, type RealmFactory,
 } from "seedkernel-wasm/shell-core";
 import { FreshnessMarks, appKeyFor, appScopeFor, verifyBundle, type LoadedBundle } from "seedkernel-wasm/bundle";
 import type { HostTransport } from "seedkernel-wasm/transport-host";
@@ -149,7 +149,7 @@ export interface StorageNodeOptions {
 export class StorageNode {
   readonly peerId: PeerId;
   readonly identity: Identity;
-  /** The transport driver — the node's Network (shell.net). The transport is a
+  /** The transport driver — the node's Network (shell.transport). The transport is a
    *  signed bundle; this is its host-side face. */
   readonly net: TransportHost;
   /** The request/response face of the same driver. */
@@ -210,8 +210,12 @@ export class StorageNode {
     this.store = opts.store ?? new FsBlobView(this.fs);
     this.clockFn = opts.clock ?? (() => Date.now());
     this.crypto = new Crypto(opts.sodium);
-    this.net = shell.net as unknown as TransportHost;
-    this.transport = shell.transport;
+    // A shell passed in must already have its transport admitted and standing (the
+    // doc on `shell`): the driver is both faces of the same object — `net` as the
+    // full TransportHost, `transport` as its request/response half.
+    const driver = requireTransport(shell, "a StorageNode shell must have the transport bundle mounted");
+    this.net = driver;
+    this.transport = driver;
     this.cohort = cohort;
     this.ownsShell = ownsShell;
 
@@ -508,7 +512,7 @@ export async function bootTransportShell(
   // Load the transport bundle: the node's network (phase 3). This stands the
   // driver up over the socket seam; the listeners bind below.
   await shell.loadBundleBlob(blob);
-  const driver = shell.net as unknown as TransportHost;
+  const driver = requireTransport(shell, "the loaded transport bundle did not stand a driver");
   await driver.start();
 
   return { shell, fs };

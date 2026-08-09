@@ -100,13 +100,13 @@ export async function run(t) {
       // files single-block/replicated instead of exercising the RS path.
       config: { quota: 64 * 1024 * 1024, blockSize: 1024 },
     });
-    await shell.net.start(); // bind the loopback port the cohort dials
+    await shell.transport.start(); // bind the loopback port the cohort dials
     // A generic shell + the signed storage bundle is a storage node: the manifest
     // claims STORAGE_PROTO and the load routes it (§12.10), so nothing here points
     // the protocol anywhere — `serve()` is the only step between loading and answering.
     await shell.loadBundle(bundlePath);
     await shell.serve();
-    return { shell, peerId: toHex(identity.publicKey), net: shell.net };
+    return { shell, peerId: toHex(identity.publicKey), net: shell.transport };
   }
   // Dial every pair (addresses + ready), and mirror the memberships into the shared
   // cohort set so every shell's NET_PEERS sees the whole cohort. A StorageNode's
