@@ -89,8 +89,8 @@ const manifest = writeStorageBundle({ path: bundlePath, sodium, sk, pk, build, v
 // even if bundle/ is wiped.
 writeFileSync(versionPath, `${manifest.version}\n`);
 
-// The pinned id is the HYBRID author id (the key-set hash, §12.4) — the bundle is
-// signed under suite 0x02, so the Ed25519 key is no longer what policy lists.
+// The pinned id is the derived author id (the key-set hash, §12.4) — a manifest is
+// signed by both halves of the key set, so the Ed25519 key is not what policy lists.
 const authKeys = authorKeysFor(sodium, sk);
 console.log(`  author ${toHex(hybridAuthorId(sodium, authKeys.ed.publicKey, authKeys.mlDsa.publicKey))} (hybrid 0x02)`);
 console.log(`  wrote ${bundlePath} (app ${manifest.app} v${manifest.version}, ${manifest.modules.length} modules, `

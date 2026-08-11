@@ -1,7 +1,7 @@
 // libsodium access for the storage layer. Seed store reuses the kernel's
 // cryptography rather than shipping its own (README §2, §16): hashing, the
 // length-preserving stream cipher, and key-sealing are all libsodium calls
-// exposed as no-cap host services. The kernel's genesis suite only needs the
+// exposed as no-cap host services. The kernel's own crypto only needs the
 // standard build, but the §4.4 stream cipher (crypto_stream_xchacha20_xor) is
 // a "sumo" symbol, so the storage host loads the sumo build and shares that one
 // instance with the kernel host as well.
@@ -46,7 +46,10 @@ export interface Sodium {
   ml_kem768_keypair_from_seed(seed: Uint8Array): { publicKey: Uint8Array; privateKey: Uint8Array };
   ml_kem768_encaps(pk: Uint8Array, coins: Uint8Array): { ciphertext: Uint8Array; sharedSecret: Uint8Array } | null;
   ml_kem768_decaps(sk: Uint8Array, ct: Uint8Array): Uint8Array | null;
-  ml_dsa65_verify_detached?(sig: Uint8Array, message: Uint8Array, pk: Uint8Array): boolean;
+  /** The PQ half of seedkernel's one manifest suite (§12.4). Not optional: a manifest
+   *  is signed by both an Ed25519 and an ML-DSA-65 key and requires both to verify, so
+   *  an instance without this verifies no bundle at all. `loadSodium` mixes it in. */
+  ml_dsa65_verify_detached(sig: Uint8Array, message: Uint8Array, pk: Uint8Array): boolean;
 }
 
 let cached: Sodium | null = null;

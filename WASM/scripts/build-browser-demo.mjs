@@ -147,10 +147,10 @@ async function copyJs(srcDir, dstDir) {
 await copyJs(seedstoreHost, join(out, "host"));
 await copyJs(seedkernelHost, join(out, "seedkernel"));
 
-// ML-DSA-65 (seedkernel §12.4 manifest suite 0x02) — the same artifact Node reads and
-// the Go loader embeds. p2p.html mixes it into its sodium instance so `verifyManifest`
-// can read a hybrid cohort's author id; without it a 0x02 manifest is refused as an
-// unsupported suite and the page would silently fall back to the zero-author scope.
+// ML-DSA-65, the PQ half of seedkernel's one manifest suite (§12.4) — the same artifact
+// Node reads and the Go loader embeds. p2p.html mixes it into its sodium instance so
+// `verifyManifest` can read the cohort's author id; without it no manifest verifies at
+// all and the page would silently fall back to the zero-author scope.
 {
   const src = join(root, "..", "..", "seedkernel", "WASM", "browser", "mldsa65.wasm");
   if (!existsSync(src)) {

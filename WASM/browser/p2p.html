@@ -268,11 +268,11 @@ const fromHex = (s) => new Uint8Array(s.match(/.{1,2}/g)?.map((h) => parseInt(h,
 // author so a browser joining a seedloader cohort matches the holders' scope
 // automatically. Absent (no bundle staged) → null → zero-author default.
 //
-// `verifyManifest` rather than a slice off the front: an author id is a per-suite
-// derivation, not a fixed offset (seedkernel §12.4). Under `0x01` it is the Ed25519 key
-// at byte 1; under the hybrid `0x02` it is a hash over BOTH public keys, which no
-// amount of slicing produces. Verifying also means the scope this page adopts came from
-// a manifest whose signature checked, not from bytes a static server happened to serve.
+// `verifyManifest` rather than a slice off the front: an author id is a derivation, not
+// a fixed offset (seedkernel §12.4) — a hash over BOTH of the author's public keys,
+// which no amount of slicing produces. Verifying also means the scope this page adopts
+// came from a manifest whose signature checked, not from bytes a static server happened
+// to serve.
 let pqReady = null;
 async function detectCohortAuthor() {
   try {
@@ -280,10 +280,10 @@ async function detectCohortAuthor() {
     if (!r.ok) return null;
     const env = new Uint8Array(await r.arrayBuffer());
     await sodium.ready;
-    // ML-DSA-65 for suite 0x02, mixed onto the same sodium instance the node uses
-    // (seedkernel host/pq.ts). Loaded once, here, because this page's only use of a
-    // manifest is this read — a cohort on 0x01 pays a fetch it does not need, which is
-    // cheaper than a browser that quietly cannot read a hybrid cohort's author.
+    // ML-DSA-65, the PQ half of the one manifest suite, mixed onto the same sodium
+    // instance the node uses (seedkernel host/pq.ts). Loaded once, here, because this
+    // page's only use of a manifest is this read — and unconditionally, since without it
+    // no manifest verifies at all.
     pqReady ??= fetch("./mldsa65.wasm").then((res) => res.arrayBuffer())
       .then(loadMlDsa65).then((m) => withMlDsa65(sodium, m));
     await pqReady;
@@ -415,8 +415,7 @@ async function boot() {
     let authorHex = $("author").value.trim() || (await detectCohortAuthor()) || "";
     let signAuthor;
     if (authorHex) {
-      // 32 bytes either way: an Ed25519 pubkey under manifest suite 0x01, a derived
-      // key-set id under the hybrid 0x02 (seedkernel §12.4) — the scope does not care.
+      // 32 bytes: the derived key-set id a manifest author is (seedkernel §12.4).
       if (!/^[0-9a-f]{64}$/i.test(authorHex)) throw new Error("cohort bundle author must be a 64-hex (32-byte) author id");
       signAuthor = fromHex(authorHex);
       $("author").value = authorHex; // reflect the auto-detected scope in the UI
