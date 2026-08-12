@@ -197,23 +197,35 @@ across the cohort:
 ```sh
 node "$SHELL" --policy allowed-keys.json --bundle ./bundle/seedstore.skb --dir ./client \
      --peers "<pkA>@127.0.0.1:7401,<pkB>@127.0.0.1:7402,<pkC>@127.0.0.1:7403,<pkD>@127.0.0.1:7404" \
-     --put ./notes.txt
-#   PUT ok: 8 chunk(s)                 ← a ~4 KB file at the default RS(2,2)/256 B blocks
-#     --get 0155a2…:74a32f…            ← root descriptor : content-key K
+     --op put < ./notes.txt > ./receipt.bin
+#   receipt.bin is the PutResult envelope, the handle a GET takes:
+#   [K 32][chunkCount u32][placed u32][intended u32][rootLen u32][root …][idCount u32]…
 
 node "$SHELL" --policy allowed-keys.json --bundle ./bundle/seedstore.skb --dir ./client \
      --peers "<pkA>@…,<pkB>@…,<pkC>@…,<pkD>@…" \
-     --get bdbc41…:74a32f… --out ./restored.txt
-#   GET ok: 4000 B → ./restored.txt
+     --op get < ./getarg.bin > ./restored.txt
 ```
 
-`--get` is `<root-descriptor>:<key>` — the pair PUT printed; without `--out` the bytes
-go to stdout. The root descriptor locates the file; the key `K` decrypts it (lose `K`
-and the holders keep only permanent noise, §11). The shell flags themselves
-(`--listen`/`--ws-listen`/`--peers`/`--dir`/`--key`/`--timeout`) are the generic
-ones (seedkernel §12.8); `--put`, `--get`, and the storage bundle are what this
-node adds. A node with no listener is a pure client; one with
-`--listen`/`--ws-listen` keeps serving until Ctrl-C.
+`--op` is the runtime's ONE app-facing flag (seedkernel §12.8): it names an op on the
+app's `handle`, hands it **stdin** and writes its answer to **stdout**, and knows nothing
+else — no argument shape, no response format, no storage word anywhere in the kernel.
+A GET's argument is `[K 32][root …]`, so it is cut out of the receipt here, with whatever
+tool you like:
+
+```sh
+# getarg = K ‖ root. The root is a signed DESCRIPTOR of variable length (§4.3), not a
+# fixed-width id, so its length is read from the envelope rather than assumed.
+node -e 'const b=require("fs").readFileSync("receipt.bin"), n=b.readUInt32BE(44);
+process.stdout.write(Buffer.concat([b.subarray(0,32), b.subarray(48,48+n)]))' > getarg.bin
+```
+
+The root descriptor locates the file; the key `K` decrypts it (lose `K` and the holders
+keep only permanent noise, §11). Operator lines go to stderr on both targets, so a
+redirect carries only the app's bytes. The shell flags themselves
+(`--listen`/`--ws-listen`/`--peers`/`--dir`/`--key`/`--timeout`) and `--op` are all
+generic; only the storage bundle and the byte formats above are this node's. A node with
+no listener is a pure client; one with `--listen`/`--ws-listen` keeps serving until
+Ctrl-C.
 
 > A self-contained single-file binary is `bun build --compile` of the shell
 > (`seedkernel/WASM/host/main-bun.ts`) with kernel + signature embedded; it loads

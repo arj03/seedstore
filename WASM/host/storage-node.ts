@@ -17,8 +17,8 @@
 //   - creates the platform seam (fs, channels/socket seam, freshnessStore,
 //     identity, sodium) and loads the transport bundle through the shared shell
 //   - calls createShell() + loadBundleBlob() to wire the shared shell
-//   - runs the guest's *initiator* entrypoints (put / get / repair) via
-//     shell.runGuest()
+//   - runs the guest's *initiator* ops (put / get / repair) via
+//     shell.invoke() — a loopback into the app's one `handle`
 //   - serves the guest's *holder* entrypoint via shell.serve() — the storage
 //     protocol needs no wiring here: the bundle's manifest claims it and the load
 //     is what routes it (§12.10)
@@ -40,6 +40,7 @@ import {
   type Identity, type PeerId, type StorageConfig, defaultConfig, assertStorageConfig, normaliseConfig, DEFAULT_QUOTA_BYTES,
 } from "./core.js";
 import { STORAGE_APP } from "./manifest.js";
+import { Op } from "./protocol.js";
 import { encodeScoreReq } from "./reputation-core.js";
 import { toHex, fromHex, readU32BE, readU64BE, concatBytes } from "./util.js";
 import {
@@ -336,17 +337,24 @@ export class StorageNode {
     await Promise.all([a.net.ready(), b.net.ready()]);
   }
 
-  // ── PUT / GET / repair / share — all run through shell.runGuest() ──────
+  // ── PUT / GET / repair / share — all local ops through shell.invoke() ──────
 
-  /** One of THIS app's guest entrypoints, by name.
+  /** One LOCAL op into this app's one entrypoint, `handle` (seedkernel §12.2): name the
+   *  op and loop back through the shell's `invoke`, which writes the host's caller id and
+   *  the op envelope — so storage has one op vocabulary, not an entrypoint per initiator
+   *  operation.
+   *
+   *  It frames nothing itself. The envelope is the guest ABI's, written by `opCall` and
+   *  read by the preamble's `readOp` (seedkernel `host/guest-seam.ts`); a copy here would
+   *  be the same layout maintained on both sides of a seam this file is only a caller of.
    *
    *  The app key is not optional any more. A node with a network has at least two apps
    *  loaded — the storage bundle and the transport, which is an ordinary app that claims the
    *  reserved id `_net` (seedkernel §12.10) — so "the only loaded app" is not something a
    *  StorageNode can mean, and omitting the key is an ambiguity error rather than a
    *  default. One place says which app we are, instead of six call sites repeating it. */
-  private run(entry: string, payload: Uint8Array): Promise<Uint8Array> {
-    return this.shell.runGuest(entry, payload, this.appKey);
+  private invoke(op: string, payload: Uint8Array): Promise<Uint8Array> {
+    return this.shell.invoke(op, payload, this.appKey);
   }
 
   private runExclusive<T>(body: () => Promise<T>): Promise<T> {
@@ -359,13 +367,13 @@ export class StorageNode {
   /** PUT a file (§6), orchestrated in the guest, STREAMED. */
   async put(plaintext: Uint8Array): Promise<PutResult> {
     return this.runExclusive(async () => {
-      const meta = await this.run("putStart", NO_ARG);
+      const meta = await this.invoke(Op.PUT_START, NO_ARG);
       const windowBytes = readU32BE(meta, 0);
       for (let off = 0; ; off += windowBytes) {
-        await this.run("putWindow", plaintext.subarray(off, Math.min(off + windowBytes, plaintext.length)));
+        await this.invoke(Op.PUT_WINDOW, plaintext.subarray(off, Math.min(off + windowBytes, plaintext.length)));
         if (off + windowBytes >= plaintext.length) break;
       }
-      return decodePutResult(await this.run("putFinish", NO_ARG));
+      return decodePutResult(await this.invoke(Op.PUT_FINISH, NO_ARG));
     });
   }
 
@@ -374,11 +382,11 @@ export class StorageNode {
    *  variable-length root can be its tail. */
   async get(root: Uint8Array, key: Uint8Array): Promise<Uint8Array> {
     return this.runExclusive(async () => {
-      const fileSize = readU64BE(await this.run("getStart", concatBytes([key, root])), 0);
+      const fileSize = readU64BE(await this.invoke(Op.GET_START, concatBytes([key, root])), 0);
       const out = new Uint8Array(fileSize);
       let written = 0;
       while (written < fileSize) {
-        const part = await this.run("getNext", NO_ARG);
+        const part = await this.invoke(Op.GET_NEXT, NO_ARG);
         if (part.length === 0) throw new Error(`get: stream ended ${written}/${fileSize} bytes in`);
         out.set(part, written); written += part.length;
       }
@@ -398,19 +406,19 @@ export class StorageNode {
    *  Throws if the peer was unreachable within the request window; a peer that answered,
    *  including a decline, comes back as its response bytes. */
   async request(peer: PeerId, body: Uint8Array): Promise<Uint8Array> {
-    const r = await this.runExclusive(() => this.run("request", concatBytes([fromHex(peer), body])));
+    const r = await this.runExclusive(() => this.invoke(Op.REQUEST, concatBytes([fromHex(peer), body])));
     if (r[0] !== 1) throw new Error(`request: peer ${peer.slice(0, 8)}… unreachable within the request window`);
     return r.slice(1);
   }
 
   /** Pre-warm the realm's codec + crypto caps. */
   async warm(): Promise<void> {
-    await this.runExclusive(() => this.run("warm", NO_ARG));
+    await this.runExclusive(() => this.invoke(Op.WARM, NO_ARG));
   }
 
   /** Run one repair pass over every chunk this node holds a block of (§9). */
   async runRepair(): Promise<number> {
-    return readU32BE(await this.runExclusive(() => this.run("repair", NO_ARG)), 0);
+    return readU32BE(await this.runExclusive(() => this.invoke(Op.REPAIR, NO_ARG)), 0);
   }
 
   /** Decayed reciprocity score this node holds for a peer (§13). */

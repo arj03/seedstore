@@ -10,18 +10,19 @@
 // crypto (the `crypto/*` primitive catalog), clock and module-call
 // resolve synchronously to their bytes.
 //
-// Two roles share this one program and this one realm. The *initiator* entrypoints
-// (`put`/`get`/`repair`) are async — they fan out over net and park mid-`await`
-// while their round trips settle. The *holder* entrypoint (`handle`: HAVE/OFFER/
-// STORE/FETCH, admission, content-addressing, quota, fs writes) is async too, for
-// the same reason the fs seam is: a holder answers from local storage, and storage
-// does not answer in the same turn on a target whose backend is asynchronous
-// (seedkernel core/fs.ts). What once kept the two roles from interleaving — a
-// synchronous second entry that never pumped the job queue — is now the realm's
-// explicit per-realm FIFO (seedkernel realm-queue.ts): one entrypoint runs to
-// completion before the next begins, so an inbound request queues behind a parked
-// initiator and is served when the queue drains (the serialization cost the
-// runtime documents; a node that must serve while initiating runs two realms).
+// Two roles share this one program, this one realm, and this ONE entrypoint. `handle`
+// is reached two ways (seedkernel §12.2): a peer's inbound frame carries
+// `[peer 32][MsgType u8][payload]` (HAVE/OFFER/STORE/FETCH — admission,
+// content-addressing, quota, fs writes), and the host's own `invoke` loopback carries
+// `[zero 32][opLen u8][opName][payload]` (put/get/repair/request/warm) — both split by
+// the guest ABI's own `callerOf`/`readOp`. Both may `await` — the
+// initiator fans out over net and parks mid-round-trip, the holder answers from local
+// storage, and the fs seam is asynchronous on every backend (seedkernel core/fs.ts) —
+// so what keeps the two roles from interleaving is the realm's explicit per-realm FIFO
+// (seedkernel realm-queue.ts): one invocation runs to completion before the next
+// begins, an inbound request queues behind a parked initiator and is served when the
+// queue drains (the serialization cost the runtime documents; a node that must serve
+// while initiating runs two realms).
 //
 // This is a plain script, not a module: it has no imports/exports and no ambient
 // authority. It is loaded as source by the host (host/storage-node.ts, or the
@@ -242,11 +243,10 @@ async function storeList() {
 const NET_ID = "_net";
 function netBlob(b) { const h = new Uint8Array(4); wU32(h, 0, b.length); return concat([h, b]); }
 function netOp(op, args) {
-  const name = strBytes(op);
-  const out = new Uint8Array(1 + name.length + args.length);
-  out[0] = name.length;
-  out.set(name, 1);
-  out.set(args, 1 + name.length);
+  // Framed by the preamble's `writeOp` (seedkernel `host/guest-seam.ts`) — the same
+  // envelope this app's own `handle` is called with, written by the one function that
+  // defines it rather than open-coded per caller.
+  const out = writeOp(op, args);
   // A cross-realm call REJECTS for the two cases that are not about a peer at all: no
   // realm claims `_net` (a node whose transport bundle was never loaded or was replaced)
   // and a transport that is being torn down under us. Neither is an error this app can act on
@@ -1373,8 +1373,32 @@ async function serveFetch(ids) {
 // seeing the pre-batch budget and both passing). A HAVE batch is independent reads
 // and may fan out.
 async function doHandle(arg) {
-  const sender = arg.slice(0, 32);
-  const type = arg[32], payload = arg.slice(33);
+  // The call envelope is the guest ABI's, read with the preamble's own two functions
+  // (seedkernel `host/guest-seam.ts`) rather than open-coded here — the same shape the
+  // transport's `handle` reads, and the same one `shell.invoke` writes.
+  const { fromHost, body } = callerOf(arg);
+  // The host's loopback (caller = 32 zero bytes) drives the initiator ops, so `handle`
+  // serves a peer's wire frame and the host's own local call alike. The op is a NAME;
+  // a peer's frame is a MsgType BYTE, and the caller id is what tells the two framings
+  // apart — the wire keeps a compact tag because it is a protocol with peers, while the
+  // local vocabulary is an API and names itself.
+  if (fromHost) {
+    const { op, args: payload } = readOp(body);
+    switch (op) {
+      case Op.PUT: return doPut(payload);
+      case Op.PUT_START: return doPutStart();
+      case Op.PUT_WINDOW: return doPutWindow(payload);
+      case Op.PUT_FINISH: return doPutFinish();
+      case Op.GET: return doGet(payload);
+      case Op.GET_START: return doGetStart(payload);
+      case Op.GET_NEXT: return doGetNext();
+      case Op.REPAIR: return doRepair();
+      case Op.REQUEST: return doRequest(payload);
+      case Op.WARM: return doWarm();
+      default: return EMPTY;
+    }
+  }
+  const type = body[0], payload = body.slice(1);
   if (type === MSG_HAVE) return encodeMask((await Promise.all(decodeHaveReq(payload).map((id) => storeHas(id)))));
   if (type === MSG_OFFER) return encodeMask(await admitBatch(decodeOfferBatch(payload)));
   if (type === MSG_STORE) {
@@ -1393,8 +1417,8 @@ async function doHandle(arg) {
 // around: an app's send is a call to the id the transport claims (§12.10), so it leaves from
 // in here or not at all, and a console line that wants to probe a holder asks this app to
 // ask. It grants nothing new — the same netSend the placement engine drives unprompted,
-// on this app's own protocol id — which is why it can be an ordinary entrypoint rather
-// than a second seam.
+// on this app's own protocol id — which is why it is a local op (Op.REQUEST) on the one
+// `handle` rather than a second entrypoint.
 //
 // Answers `[ok u8][response]`: an unreachable peer is `[0]`, exactly as netSend reads it,
 // so a caller distinguishes "declined" from "never arrived" without a rejection.
@@ -1433,14 +1457,4 @@ function doWarm() {
   return EMPTY;
 }
 
-register("put", doPut);
-register("putStart", doPutStart);
-register("putWindow", doPutWindow);
-register("putFinish", doPutFinish);
-register("get", doGet);
-register("getStart", doGetStart);
-register("getNext", doGetNext);
-register("repair", doRepair);
 register("handle", doHandle);
-register("request", doRequest);
-register("warm", doWarm);

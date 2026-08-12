@@ -25,6 +25,35 @@ export const MsgType = {
              // (§22) is the throughput upgrade.
 } as const;
 
+// ── the initiator's LOCAL op names (the host's loopback vocabulary) ──────────
+// The storage protocol has one entrypoint, `handle`, reached two ways (seedkernel
+// §12.2): a peer's inbound frame carries `[peer 32][MsgType u8][payload]`, and the
+// host's own `invoke` loopback carries `[zero 32][opLen u8][opName][payload]` — the
+// 32-byte caller id tells the two framings apart, and both are split by the guest ABI's
+// own `callerOf`/`readOp` (seedkernel `host/guest-seam.ts`) rather than by a parse
+// written here. Two framings under one entrypoint is deliberate and is not two
+// vocabularies: the wire keeps a compact `MsgType` byte because it is a protocol with
+// PEERS, versioned by the protocol id, while the local ops are an API for the host and
+// name themselves. The op is therefore a NAME, not a number — the same convention the
+// transport's `handle` uses — so a generic caller (the seedkernel CLI's `--op`, which
+// knows no storage word at all) and StorageNode both address an op without agreeing on
+// a tag byte. `Op` is the
+// initiator side the whole-file `put`/`get` used to be reached by entrypoint name;
+// folded into `handle`, an app has one op vocabulary rather than a per-entrypoint one
+// (StorageNode.invoke).
+export const Op = {
+  PUT: "put",               // whole-file: [plaintext ..] → the PutResult envelope
+  PUT_START: "putStart",    // open the stream → [windowBytes u32]
+  PUT_WINDOW: "putWindow",  // feed one window of plaintext
+  PUT_FINISH: "putFinish",  // seal the stream → the PutResult envelope
+  GET: "get",               // whole-file: [K 32][root ..] → plaintext
+  GET_START: "getStart",    // open the stream: [K 32][root ..] → [fileSize u64]
+  GET_NEXT: "getNext",      // the next window of plaintext
+  REPAIR: "repair",         // one repair pass → [replaced u32]
+  REQUEST: "request",       // one control-plane message: [peer 32][type u8][payload] → [ok u8][resp]
+  WARM: "warm",             // JIT warm-up, no result
+} as const;
+
 // ── the response mask shared by HAVE, OFFER, and STORE ──────────────────────
 // All three replies are the same shape: one byte per batch entry. HAVE's is
 // "held" (1/0), OFFER's is a VERDICT_* code, STORE's is a VERDICT_* code —

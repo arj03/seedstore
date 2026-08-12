@@ -11,9 +11,10 @@
 //   npx http-server build/browser-demo -p 3000   (then open /index.html, /p2p.html)
 //
 // The pages' import maps resolve "seedkernel-wasm/*" → ./seedkernel/* and this
-// project's host → ./host/. Nothing is fetched at runtime: QuickJS is vendored under
-// ./vendor/ and libsodium comes from the kernel (its "./libsodium" export), so the
-// staged dir runs offline. Needs both builds' minified host: seedstore `npm run build`
+// project's host → ./host/. Nothing is fetched at runtime: the QuickJS engine and
+// libsodium both come from the kernel (its "./quickjs" and "./libsodium" exports) and
+// the JS layer over the engine is vendored under ./vendor/, so the staged dir runs
+// offline. Needs both builds' minified host: seedstore `npm run build`
 // and seedkernel `npm run build:host && npm run build:host:min`.
 
 import { mkdirSync, copyFileSync, existsSync, readdirSync, statSync, rmSync,
@@ -60,27 +61,36 @@ function newestJsMtime(dir) {
   }
   return newest;
 }
-function assertMinFresh(label, hostDir, minDir, rebuildCmd) {
-  // Need both trees to compare mtimes: no compiled host (a min-only checkout) or no min
-  // dir at all → nothing to assert. (The min dirs are also checked earlier before staging,
-  // so a missing min here is only reachable if this guard is reused in another order.)
-  if (!existsSync(hostDir) || !existsSync(minDir)) return;
-  const host = newestJsMtime(hostDir), min = newestJsMtime(minDir);
-  if (host > min + 1000) { // 1s slack for filesystem mtime granularity
-    console.error(
-      `${label} min tree is STALE: build/ is newer than build-min, so the minify ` +
-      `step did not re-run after the last compile.\n` +
-      `The browser would run old code (Node tests read build/ and stay green — this only ` +
-      `bites the browser).\n` +
-      `Fix: ${rebuildCmd}`);
-    process.exit(1);
+function assertMinFresh(label, hostDir, minDir, rebuildCmd, subs = [""]) {
+  // `subs` narrows the comparison to the subtrees the minify step actually covers. It
+  // matters for the kernel: its build/ ALSO holds AssemblyScript fixture output
+  // (forwarder.*) that no tsc↔minify cycle touches, and `npm test` compiles those
+  // fixtures *after* minifying — so a whole-tree compare reports a stale min tree
+  // every time the kernel's suite has been run, which is a false alarm that teaches
+  // people to ignore a guard worth heeding. Same scoping seedchat's vendor.mjs uses.
+  for (const sub of subs) {
+    const host = join(hostDir, sub), min = join(minDir, sub);
+    // Need both trees to compare mtimes: no compiled host (a min-only checkout) or no min
+    // dir at all → nothing to assert. (The min dirs are also checked earlier before staging,
+    // so a missing min here is only reachable if this guard is reused in another order.)
+    if (!existsSync(host) || !existsSync(min)) continue;
+    if (newestJsMtime(host) > newestJsMtime(min) + 1000) { // 1s slack for mtime granularity
+      console.error(
+        `${label} min tree is STALE: build/${sub} is newer than build-min, so the minify ` +
+        `step did not re-run after the last compile.\n` +
+        `The browser would run old code (Node tests read build/ and stay green — this only ` +
+        `bites the browser).\n` +
+        `Fix: ${rebuildCmd}`);
+      process.exit(1);
+    }
   }
 }
 assertMinFresh("seedstore", join(build, "host"), seedstoreHost,
   "in seedstore/WASM run `npm run build` (or at least `npm run build:host:min`).");
 assertMinFresh("seedkernel", join(root, "..", "..", "seedkernel", "WASM", "build"),
   seedkernelHost,
-  "in seedkernel/WASM run `npm run build`.");
+  "in seedkernel/WASM run `npm run build`.",
+  ["host", "core"]);
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -182,15 +192,39 @@ await copyJs(seedkernelHost, join(out, "seedkernel"));
   }
 }
 
+// ── the QuickJS engine: the kernel's own build, like everything else ─────────
+// safe-js runs its realms on seedkernel's in-repo quickjs-ng 0.16.1 build (its
+// WASM/quickjs/dist, reached as the package export "seedkernel-wasm/quickjs") — the
+// same engine its Node tests use and, at the same source pin, the Go loader. So it is
+// staged from the kernel checkout beside libsodium above, not vendored from npm, and
+// it needs no install there: dist/ is checked in. Its glue is built for `web,node` and
+// picks the browser's fetch path at runtime; the four files must land in ONE dir, since
+// variant.mjs imports its siblings relatively and the glue fetches
+// `new URL("emscripten-module.wasm", import.meta.url)`.
+{
+  const src = join(root, "..", "..", "seedkernel", "WASM", "quickjs", "dist");
+  mkdirSync(join(out, "seedkernel", "quickjs"), { recursive: true });
+  for (const f of ["variant.mjs", "ffi.mjs", "emscripten-module.mjs", "emscripten-module.wasm"]) {
+    if (!existsSync(join(src, f))) {
+      console.error(`seedkernel quickjs/dist/${f} not found at ${src} — see ` +
+        "seedkernel/WASM/quickjs/README.md.");
+      process.exit(1);
+    }
+    await copy(join(src, f), join(out, "seedkernel", "quickjs", f));
+  }
+}
+
 // ── vendor the browser-only npm deps so the demo runs OFFLINE ────────────────
-// QuickJS (quickjs-emscripten + the two quickjs-ng wasm variants) is a set of multi-file
-// ESM packages with their own bare-specifier imports and a .wasm each; the pages used to
-// pull them from esm.sh. Copy the exact runtime files into ./vendor/ and let the pages'
-// import map name every bare specifier in their graph (…-core, quickjs-ffi-types, the
-// /emscripten-module subpaths). Each emscripten module finds its wasm via
-// `new URL("emscripten-module.wasm", import.meta.url)`, so the .wasm rides in the same
-// dir. Source from seedkernel's node_modules (where safe-js pulls QuickJS), falling back
-// to seedstore's. libsodium is NOT here — it is staged from the kernel above.
+// What is left from npm is the JS API layer over that engine: quickjs-emscripten-core
+// plus the @jitl/quickjs-ffi-types it imports by name — multi-file ESM packages with
+// their own bare-specifier imports, which the pages used to pull from esm.sh. Copy the
+// exact runtime files into ./vendor/ and let the pages' import map name every bare
+// specifier in their graph. NOT the `quickjs-emscripten` umbrella: safe-js passes its
+// own variant, and the umbrella's only job is bundling defaults — which it does by
+// statically importing four Bellard engines nothing here runs, the reason this map used
+// to alias them to the -ng builds. Source from seedkernel's node_modules (where safe-js
+// pulls them), falling back to seedstore's. libsodium is NOT here — it is staged from
+// the kernel above.
 const nodeModulesDirs = [
   join(root, "..", "..", "seedkernel", "WASM", "node_modules"),
   join(root, "node_modules"),
@@ -203,17 +237,12 @@ function pkgDist(pkg, sub) {
   throw new Error(`vendor: ${pkg}/${sub} not found — run npm install (looked in ${nodeModulesDirs.join(", ")}).`);
 }
 // [package, dist subdir, dest under vendor/, explicit files, copy EVERY .mjs in the dir?]
-// The umbrella + core packages are chunked/code-split with hashed names (chunk-*.mjs,
-// module-*.mjs), so copy every .mjs from their dist rather than chase hashes; the leaf
-// packages need only their named entry (+ the emscripten .wasm sibling).
+// quickjs-emscripten-core is chunked/code-split with hashed names (chunk-*.mjs,
+// module-*.mjs), so copy every .mjs from its dist rather than chase hashes; the leaf
+// package needs only its named entry.
 const VENDOR = [
-  ["quickjs-emscripten",      "dist", "quickjs-emscripten",      ["index.mjs"], true],
   ["quickjs-emscripten-core", "dist", "quickjs-emscripten-core", ["index.mjs"], true],
   ["@jitl/quickjs-ffi-types", "dist", "quickjs-ffi-types",       ["index.mjs"], false],
-  ["@jitl/quickjs-ng-wasmfile-release-asyncify", "dist", "qjs-async",
-    ["index.mjs", "ffi.mjs", "emscripten-module.browser.mjs", "emscripten-module.wasm"], false],
-  ["@jitl/quickjs-ng-wasmfile-release-sync", "dist", "qjs-sync",
-    ["index.mjs", "ffi.mjs", "emscripten-module.browser.mjs", "emscripten-module.wasm"], false],
 ];
 for (const [pkg, sub, dest, files, allMjs] of VENDOR) {
   const src = pkgDist(pkg, sub);
@@ -268,8 +297,10 @@ for (const page of ["index.html", "p2p.html"]) {
 // A specifier is `from "x"`, `import("x")`, or a bare side-effect `import "x"` at the
 // start of a statement. Kept deliberately tight — no newline inside the quotes and no
 // newline before them — so prose in a comment ("…the import kind…") followed by an
-// unrelated string literal cannot read as an import.
-const SPEC = /(?:\bfrom[ \t]*|\bimport[ \t]*\([ \t]*|(?:^|[;}])[ \t]*import[ \t]*)["']([^"'\n]+)["']/gm;
+// unrelated string literal cannot read as an import. The `import(` form is captured
+// separately because static and dynamic differ in what they PROVE about a `node:`
+// specifier — see the node: case in the walk below.
+const SPEC = /(?:\bfrom[ \t]*|(\bimport[ \t]*\([ \t]*)|(?:^|[;}])[ \t]*import[ \t]*)["']([^"'\n]+)["']/gm;
 function importMapOf(html) {
   const m = html.match(/<script type="importmap">([\s\S]*?)<\/script>/);
   if (!m) throw new Error("page has no import map");
@@ -286,13 +317,23 @@ function checkPage(page) {
   (function walk(file) {
     if (seen.has(file)) return;
     seen.add(file);
-    for (const [, spec] of readFileSync(file, "utf8").matchAll(SPEC)) {
+    for (const [, dynamic, spec] of readFileSync(file, "utf8").matchAll(SPEC)) {
       let target;
       if (spec.startsWith(".")) {
         target = resolve(dirname(file), spec);
       } else if (map[spec]) {
         target = resolve(out, map[spec]);
       } else if (spec.startsWith("node:")) {
+        // A STATIC `node:` import is fatal wherever it appears: the browser rejects the
+        // module before a line of it runs, so its presence in the graph is the bug (this
+        // is what catches a Node-host module that slipped past copyJs).
+        //
+        // A DYNAMIC one is a branch, not a dependency — evaluated only if taken. The
+        // kernel's QuickJS glue is built for `web,node` and reaches for `node:module`
+        // inside its `ENVIRONMENT_IS_NODE` test, which is exactly how one engine artifact
+        // serves both targets. Failing it here would ban the shared build over a line the
+        // browser never reaches. Nothing to resolve either way, so this specifier ends here.
+        if (dynamic) continue;
         fail(file, spec, "a Node builtin: this module should not be in the browser graph.");
       } else {
         fail(file, spec, `no import map entry on this page. Add one, or stop importing it.\n` +

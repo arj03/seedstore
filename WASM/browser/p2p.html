@@ -26,19 +26,16 @@
      can't be used because it would resolve to an extensionless path a static server
      404s. The minified kernel tree ships as host/ + core/ (host modules import
      ../core/* by relative path). safe-js is the QuickJS sandbox the storage node runs
-     the guest in; it imports quickjs-emscripten + the two quickjs-ng wasm variants.
-     Those are VENDORED into ./vendor/ by scripts/build-browser-demo.mjs so the demo
-     runs fully offline — each package's runtime files + its .wasm are copied and every
-     bare specifier in their graph (…-core, quickjs-ffi-types, the /emscripten-module
-     subpaths) gets a map entry. Sumo libsodium is NOT vendored: it comes from the
-     kernel like everything else, as the "seedkernel-wasm/libsodium" export — the
+     the guest in. Its engine is the kernel's own quickjs-ng build, staged into
+     ./seedkernel/quickjs/ with its .wasm beside it — the same engine the kernel's Node
+     tests run and, at the same source pin, the Go loader; the JS layer over it
+     (quickjs-emscripten-core and the quickjs-ffi-types it names) is VENDORED into
+     ./vendor/ by scripts/build-browser-demo.mjs, so the demo runs fully offline and
+     every bare specifier in that graph has a map entry. Sumo libsodium is likewise NOT
+     vendored: it comes from the kernel as the "seedkernel-wasm/libsodium" export — the
      prebuilt wrapper staged into ./seedkernel/ next to its core and its
-     libsodium.wasm, which is the same crypto binary the Go loader embeds.
-     The umbrella statically references the four default Bellard
-     variants (quickjs-wasmfile-{release,debug}-{sync,asyncify}) that we never select
-     (safe-js always passes the -ng variants), so those alias to the vendored -ng
-     builds — they resolve without pulling four unused wasm packages. This project's
-     host is relative (./host/). -->
+     libsodium.wasm, which is the same crypto binary the Go loader embeds. This
+     project's host is relative (./host/). -->
 <script type="importmap">
 {
   "imports": {
@@ -54,17 +51,9 @@
     "seedkernel-wasm/net-ws":         "./seedkernel/host/net-ws.js",
     "seedkernel-wasm/safe-js":        "./seedkernel/host/safe-js.js",
     "seedkernel-wasm/libsodium":      "./seedkernel/libsodium-wrappers.mjs",
-    "quickjs-emscripten":                         "./vendor/quickjs-emscripten/index.mjs",
-    "quickjs-emscripten-core":                    "./vendor/quickjs-emscripten-core/index.mjs",
-    "@jitl/quickjs-ffi-types":                    "./vendor/quickjs-ffi-types/index.mjs",
-    "@jitl/quickjs-ng-wasmfile-release-asyncify":                  "./vendor/qjs-async/index.mjs",
-    "@jitl/quickjs-ng-wasmfile-release-asyncify/emscripten-module": "./vendor/qjs-async/emscripten-module.browser.mjs",
-    "@jitl/quickjs-ng-wasmfile-release-sync":                      "./vendor/qjs-sync/index.mjs",
-    "@jitl/quickjs-ng-wasmfile-release-sync/emscripten-module":    "./vendor/qjs-sync/emscripten-module.browser.mjs",
-    "@jitl/quickjs-wasmfile-release-asyncify": "./vendor/qjs-async/index.mjs",
-    "@jitl/quickjs-wasmfile-debug-asyncify":   "./vendor/qjs-async/index.mjs",
-    "@jitl/quickjs-wasmfile-release-sync":     "./vendor/qjs-sync/index.mjs",
-    "@jitl/quickjs-wasmfile-debug-sync":       "./vendor/qjs-sync/index.mjs"
+    "seedkernel-wasm/quickjs":        "./seedkernel/quickjs/variant.mjs",
+    "quickjs-emscripten-core":        "./vendor/quickjs-emscripten-core/index.mjs",
+    "@jitl/quickjs-ffi-types":        "./vendor/quickjs-ffi-types/index.mjs"
   }
 }
 </script>

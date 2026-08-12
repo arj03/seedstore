@@ -20,11 +20,13 @@
      host/ + core/ (host modules import ../core/* by relative path); the seedstore
      host needs shell-core, the bundle loader, the guest seam, the transport driver +
      the artifact transport bundle (the signed program that IS the node's network),
-     and safe-js. safe-js is the QuickJS sandbox the storage node runs the guest in;
-     its quickjs-emscripten + quickjs-ng wasm variants are VENDORED into ./vendor/ by
-     scripts/build-browser-demo.mjs (runtime files + each package's .wasm, with a map
-     entry per bare specifier in their graph) so the demo runs fully offline. Sumo
-     libsodium is NOT vendored: it comes from the kernel like everything else, as the
+     and safe-js. safe-js is the QuickJS sandbox the storage node runs the guest in.
+     Its engine is the kernel's own quickjs-ng build, staged into ./seedkernel/quickjs/
+     with its .wasm beside it; the JS layer over it (quickjs-emscripten-core and the
+     quickjs-ffi-types it names) is VENDORED into ./vendor/ by
+     scripts/build-browser-demo.mjs, with a map entry per bare specifier in that graph,
+     so the demo runs fully offline. Sumo
+     libsodium is likewise NOT vendored: it comes from the kernel, as the
      "seedkernel-wasm/libsodium" export — the prebuilt wrapper staged into
      ./seedkernel/ next to its core and its libsodium.wasm, which is the same crypto
      binary the Go loader embeds. -->
@@ -40,17 +42,9 @@
     "seedkernel-wasm/transport-bundle": "./seedkernel/host/transport-bundle.js",
     "seedkernel-wasm/safe-js":        "./seedkernel/host/safe-js.js",
     "seedkernel-wasm/libsodium":      "./seedkernel/libsodium-wrappers.mjs",
-    "quickjs-emscripten":                         "./vendor/quickjs-emscripten/index.mjs",
-    "quickjs-emscripten-core":                    "./vendor/quickjs-emscripten-core/index.mjs",
-    "@jitl/quickjs-ffi-types":                    "./vendor/quickjs-ffi-types/index.mjs",
-    "@jitl/quickjs-ng-wasmfile-release-asyncify":                  "./vendor/qjs-async/index.mjs",
-    "@jitl/quickjs-ng-wasmfile-release-asyncify/emscripten-module": "./vendor/qjs-async/emscripten-module.browser.mjs",
-    "@jitl/quickjs-ng-wasmfile-release-sync":                      "./vendor/qjs-sync/index.mjs",
-    "@jitl/quickjs-ng-wasmfile-release-sync/emscripten-module":    "./vendor/qjs-sync/emscripten-module.browser.mjs",
-    "@jitl/quickjs-wasmfile-release-asyncify": "./vendor/qjs-async/index.mjs",
-    "@jitl/quickjs-wasmfile-debug-asyncify":   "./vendor/qjs-async/index.mjs",
-    "@jitl/quickjs-wasmfile-release-sync":     "./vendor/qjs-sync/index.mjs",
-    "@jitl/quickjs-wasmfile-debug-sync":       "./vendor/qjs-sync/index.mjs"
+    "seedkernel-wasm/quickjs":        "./seedkernel/quickjs/variant.mjs",
+    "quickjs-emscripten-core":        "./vendor/quickjs-emscripten-core/index.mjs",
+    "@jitl/quickjs-ffi-types":        "./vendor/quickjs-ffi-types/index.mjs"
   }
 }
 </script>
