@@ -567,8 +567,13 @@ $("store").onclick = async () => {
       // No verdict came back from anyone, so nothing was refused. Either the OFFERs never
       // went out (the guest's cohort is empty) or they drew silence. The two are
       // distinguishable from here: `linkedPeers()` is the transport's authenticated set,
-      // which is exactly what the guest's NET_PEERS cap reports.
-      const links = net?.linkedPeers?.().length ?? 0;
+      // which is exactly the set the guest fans its OFFERs out over.
+      //
+      // It is a QUESTION now, not a field — the set lives in the transport guest, so this
+      // is a round trip through the realm and has to be awaited. A node with no transport
+      // standing has nothing to ask, and that is a diagnosis too: read it as 0 links
+      // rather than letting a rejection replace the report we are in the middle of.
+      const links = net ? (await net.linkedPeers().catch(() => [])).length : 0;
       $("status").textContent = "no holder answered"; $("status").className = "pill warn";
       log("  ⚠ NOT a decline: no holder returned a verdict, so nothing was refused —");
       log(`    quota and signing scope are both unproven here. Transport reports ${links} authenticated link(s).`);

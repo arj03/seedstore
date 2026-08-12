@@ -166,5 +166,13 @@ export function normaliseConfig(raw: Partial<Record<string, unknown>>): Partial<
   return c;
 }
 
-/** peer_id is the hex of a peer's kernel public key (§2). */
-export { type PeerId } from "seedkernel-wasm/net";
+/** peer_id is the hex of a peer's channel public key (§2) — WHO a peer is, and the one
+ *  identity the address book is keyed on.
+ *
+ *  Stated here rather than imported. It used to come from `seedkernel-wasm/net`, the
+ *  `Network`/`Endpoint` pair the host implemented; that pair is gone (the transport is a
+ *  guest claiming `_net`, so a fabric interface the host implements would describe an
+ *  object nobody holds), and the alias moved to the kernel's `core/socket-seam.ts`, which
+ *  is not an exported entry. It is a string either way — the same shape the loopback
+ *  fabric's structural `RawLink` is stated for, and for the same reason. */
+export type PeerId = string;

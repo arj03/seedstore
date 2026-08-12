@@ -76,9 +76,6 @@ const { shell } = await bootTransportShell({
   // signed config into the guest's APP (a shared shell cannot be re-configured after
   // boot, so the operator config must be here, not on StorageNode.create).
   config: { ...config, quota: 64 * 1024 * 1024 },
-  // The guest's NET_PEERS (cohortPeers — repair fans out over it) reads this; the
-  // node's cohort set is populated by onPeerUp below.
-  livePeers: () => node ? node.cohortPeers() : [],
 });
 
 let node = null;

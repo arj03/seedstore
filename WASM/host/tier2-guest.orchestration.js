@@ -3,8 +3,8 @@
 // implementation of placement, k-of-n, admission, the wire format, and repair: the
 // host (host/storage-node.ts) only boots the kernel and runs this guest in one
 // realm. Every capability is reached through the one `host.call(name, bytes)` seam.
-// The seam is genuinely async where the world behind it is: a net name
-// (`net/send`) and every `fs/*` name resolve to a real Promise the guest
+// The seam is genuinely async where the world behind it is: the network (a call
+// to the reserved id `_net`) and every `fs/*` name resolve to a real Promise the guest
 // `await`s — so a fan-out is just `await Promise.all(peers.map(...))`, and the
 // holder's own store reads await like the initiator's round trips — while the pure
 // crypto (the `crypto/*` primitive catalog), clock and module-call
@@ -29,7 +29,7 @@
 // object carrying the storage config + the codec/reputation kernel names, and
 // runs it after the safe-js PREAMBLE that defines `host.call` and `register`.
 // The seam is name-addressed (seedkernel §12.2): the guest writes "fs/get",
-// "net/send", "crypto/blake2b-256" — never a number. Every capability the guest
+// "_net", "crypto/blake2b-256" — never a number. Every capability the guest
 // reaches is an application-neutral primitive; all storage *structure* is right
 // here. The same file is hosted by JSC on Bun today and by WAMR in the native
 // node later — one artifact, both runtimes.
@@ -72,8 +72,9 @@ function bytesToStr(b) { let s = ""; for (let i = 0; i < b.length; i++) s += Str
 
 // ── the capability seam: storage policy over GENERIC kernel caps ─────────────
 // Every wrapper is built from the application-neutral names of the one seam —
-// crypto primitives, net, fs, module-call, clock, identity (host/guest-seam.ts in
-// seedkernel). All *structure* lives here in the guest, never in the kernel:
+// crypto primitives, fs, module-call, clock, identity (host/guest-seam.ts in
+// seedkernel) plus the one cross-realm call that reaches the transport. All *structure*
+// lives here in the guest, never in the kernel:
 // the nonce convention, the signed-descriptor envelope, the HAVE/OFFER/FETCH/
 // STORE wire format (host/protocol.ts), the codec & reputation module ABIs, and
 // the <hex>.blk/.dsc store layout (read back host-side by host/store-view.ts, which
@@ -91,10 +92,10 @@ function bytesToStr(b) { let s = ""; for (let i = 0; i < b.length; i++) s += Str
 // come from the SHARED host/reputation-core.ts, stitched in ahead of this body — the same
 // framing StorageNode.score uses host-side, so the two agree by construction.
 const CODEC_ENCODE = 1, CODEC_DECODE = 2;     // assembly/codec/index.ts
-// Control-plane message types carried over net.send (host/protocol.ts §18).
+// Control-plane message types carried over netSend (host/protocol.ts §18).
 const MSG_HAVE = 1, MSG_OFFER = 2, MSG_FETCH = 3, MSG_STORE = 4;
-// The protocol id this app speaks on the wire (§12.10) — placed in every net/send frame
-// so the receiving host routes it to this app, and the SAME id this bundle's manifest
+// The protocol id this app speaks on the wire (§12.10) — named in every request this
+// guest sends so the receiving host routes it to this app, and the SAME id this bundle's manifest
 // claims (`protocols`, scripts/storage-bundle.mjs). That is what makes the frame arrive:
 // the load that admitted this code claimed the id, so what a sender writes here and what
 // a receiver routes by are one fact. The constant lives host-side (STORAGE_PROTO,
@@ -220,13 +221,51 @@ async function storeList() {
   return out;
 }
 
+// ── the network: one reserved id, two ops ────────────────────────────────────
+// The network is not a host capability any more (seedkernel §12.10): it is a bundle —
+// the transport — that claims the reserved protocol id `_net`, and an app reaches it with
+// the ONE cross-realm call, `host.call("_net", …)`. The host's whole contribution is
+// attribution: it prepends this app's 32-byte key as the caller, exactly as it prepends
+// a sender's key on an inbound frame, so the transport can tell an app's request from the
+// platform's own events without a second seam.
+//
+// What crosses is the transport's op wire: `[opLen u8][op][args]`, where the op is a NAME
+// (never a number two sides must agree on) and `args` is a fixed field order the op
+// declares — a u8, a u32 BE, or a `[len u32][bytes]` blob. Two ops are an app's to
+// name, and they are the two that were app-facing host names before the transport
+// became a bundle: `send` (was `net/send`) and `peers` (was `net/peers`). Anything
+// else the transport refuses, because the platform's events are not an app's to fake.
+//
+// Both answer on a LATER turn — the callee never runs inside this guest's frame — so
+// both are awaited, `peers` included. That is the one shape change from the old host
+// names, and it is why the roster reads flow through `await` here.
+const NET_ID = "_net";
+function netBlob(b) { const h = new Uint8Array(4); wU32(h, 0, b.length); return concat([h, b]); }
+function netOp(op, args) {
+  const name = strBytes(op);
+  const out = new Uint8Array(1 + name.length + args.length);
+  out[0] = name.length;
+  out.set(name, 1);
+  out.set(args, 1 + name.length);
+  // A cross-realm call REJECTS for the two cases that are not about a peer at all: no
+  // realm claims `_net` (a node whose transport bundle was never loaded or was replaced)
+  // and a transport that is being torn down under us. Neither is an error this app can act on
+  // — both mean "the network is not there" — and both read here as the empty answer,
+  // which is exactly how an unreachable peer already reads: `send` answers no `[1]`, so
+  // netSend returns null, and `peers` answers an empty roster. A PUT then reports "no
+  // holder answered" instead of a stack trace out of a fan-out.
+  return host.call(NET_ID, out).then((r) => r, () => EMPTY);
+}
+
 // ── peers + ranking by reciprocity (§13) ──
+// The `peers` answer is the raw 32-byte keys back to back — the peers the transport holds at
+// least one AUTHENTICATED link to. There is no count header: the length says how many.
 function decodePeers(r) {
-  const n = rU32(r, 0), out = [];
-  for (let i = 0; i < n; i++) out.push(toHex(r.slice(4 + i * 32, 4 + (i + 1) * 32)));
+  const out = [];
+  for (let o = 0; o + 32 <= r.length; o += 32) out.push(toHex(r.slice(o, o + 32)));
   return out;
 }
-function cohortPeers() { return decodePeers(host.call("net/peers", EMPTY)); }
+async function cohortPeers() { return decodePeers(await netOp("peers", EMPTY)); }
 // A reciprocity ranker (§13): orders peers best-score-first. Scoring one peer costs a
 // reputation MODULE_CALL across the bridge, so `makeRanker` reads the clock once and
 // memoizes each DISTINCT peer's decayed score for its lifetime — reuse one across a
@@ -242,18 +281,23 @@ function makeRanker() {
 // One-shot ranker for callers that rank a single list (its own fresh cache).
 function rank(peers) { return makeRanker()(peers); }
 
-// ── net (request/response over the generic transport; wire format here) ──
-// The one genuinely-async name: net/send resolves to a Promise the initiator
-// awaits (the host round-trips it). An unreachable peer resolves to `[0]` (never a
-// reject), so this maps it to null within the request window.
-// Wire format: [peer 32][pidLen u8][protocolId][type u8][payload] (§12.10).
+// ── net (request/response over the transport; wire format here) ──
+// One round trip to one peer, as the transport's `send` op:
+//   [noReply u8][deadlineMs u32][to blob][proto blob][payload blob]
+// A zero deadline means the node's own default (the host's `requestDeadlineMs`), which
+// is where that number belongs — one place, not mirrored on both sides of the seam.
+// The answer is `[ok u8][response]`: an unreachable peer comes back `[0]` rather than a
+// rejection, so this maps it to null within the request window.
+//
+// `proto` is the routing (§12.10) — the id the receiving host resolves to the app that
+// claims it — and the storage message type leads the payload, which is this app's own
+// framing and opaque to everything in between.
 async function netSend(peer, type, payload) {
-  const head = new Uint8Array(33 + 1 + NET_PROTO.length); // peer(32) + pidLen(1) + proto + type(1)
-  head.set(fromHex(peer), 0);
-  head[32] = NET_PROTO.length;
-  head.set(NET_PROTO, 33);
-  head[33 + NET_PROTO.length] = type;
-  const r = await host.call("net/send", concat([head, payload]));
+  const head = new Uint8Array(5); // noReply=0, deadline=0 (the node's default)
+  const body = new Uint8Array(1 + payload.length);
+  body[0] = type;
+  body.set(payload, 1);
+  const r = await netOp("send", concat([head, netBlob(fromHex(peer)), netBlob(NET_PROTO), netBlob(body)]));
   return r[0] === 1 ? r.slice(1) : null; // null = peer unreachable within the window
 }
 // Per-peer fan-out (§6/§7): a DISTINCT request per peer, all issued CONCURRENTLY.
@@ -276,7 +320,7 @@ async function haveWant(ids) {
   const holders = new Map();
   for (const id of ids) holders.set(toHex(id), new Set());
   for (const id of ids) if (await storeHas(id)) holders.get(toHex(id)).add(myPeer());
-  const peers = cohortPeers();
+  const peers = await cohortPeers();
   // Split the id list so one HAVE request stays under the frame cap, exactly as
   // OFFER/STORE/FETCH do (§18). A HAVE request is 32 bytes/id (the reply is a 1-byte
   // mask, so the request is the binding side): on a tight transport (WebRTC's ~48 KB
@@ -351,7 +395,7 @@ function verifyDescriptor(env) {
 // truncated sibling list and concentrate a chunk on itself (§6, §10). So the author must
 // also be an identity this node's cohort knows (§5.1). Forgery then costs a known peer
 // its standing instead of nothing, which is §13's job, not new machinery.
-function knownAuthors() { const s = new Set(cohortPeers()); s.add(myPeer()); return s; }
+async function knownAuthors() { const s = new Set(await cohortPeers()); s.add(myPeer()); return s; }
 function signChunk(d) { return signCore(encodeDescriptorCore(d)); }
 
 // ── placement + fetch (coordinator §6/§7) ────────────────────────────────────
@@ -457,7 +501,7 @@ function encodeChunk(source, localCi, globalCi, K, level) {
 // the cohort will take and the next pass retries the rest), which cannot raise it and so
 // passes no name.
 async function placeChunksBatched(jobs, what) {
-  const ranked = rank(cohortPeers());
+  const ranked = rank(await cohortPeers());
   // Each job draws from the ranked cohort minus the peers it must avoid. PUT excludes
   // nothing (a fresh chunk is nowhere yet); repair excludes the peers already holding
   // part of the chunk, so a restored copy lands somewhere new instead of being pushed at
@@ -785,7 +829,7 @@ async function placeStream(s, bytes, level, base) {
   const wb = putWindowBytes();
   for (let off = 0; off === 0 || off < bytes.length; off += wb) {   // an empty file is still one chunk
     const chunks = await placeWindow(bytes.subarray(off, Math.min(off + wb, bytes.length)), base + off, s.K, level);
-    recordPlacements(s, chunks);
+    await recordPlacements(s, chunks);
     for (const ch of chunks) out.push(ch.descriptor);
   }
   return out;
@@ -830,8 +874,8 @@ function putStart() {
 // because the §6/§10 sibling rule puts at most one of a chunk's blocks on any one peer —
 // so a genuinely small cohort is not flagged, while a reachable-but-declining (full)
 // holder makes placed < intended.
-function recordPlacements(s, chunks) {
-  const peerCount = cohortPeers().length;
+async function recordPlacements(s, chunks) {
+  const peerCount = (await cohortPeers()).length;
   for (const ch of chunks) {
     for (const id of ch.placedIds) s.placedIds.push(id);
     for (const p of ch.placedPeer) if (p) s.placed++;
@@ -1232,7 +1276,7 @@ async function admit(descriptor, blockId, size) {
 async function admitBatch(offers) {
   let free = await quotaFree();
   const provisional = new Set();
-  const known = knownAuthors();                              // read the roster once per batch
+  const known = await knownAuthors();                        // read the roster once per batch
   const verdicts = [];
   for (const o of offers) {
     const sd = verifyDescriptor(o.descriptor);
@@ -1343,6 +1387,22 @@ async function doHandle(arg) {
   return EMPTY;
 }
 
+// ── one control message, on the host's behalf ────────────────────────────────
+// arg = [to 32][type u8][payload] — the mirror image of `handle`, and the ONLY way a
+// host-side caller reaches a peer now. There is no host request facade left to route
+// around: an app's send is a call to the id the transport claims (§12.10), so it leaves from
+// in here or not at all, and a console line that wants to probe a holder asks this app to
+// ask. It grants nothing new — the same netSend the placement engine drives unprompted,
+// on this app's own protocol id — which is why it can be an ordinary entrypoint rather
+// than a second seam.
+//
+// Answers `[ok u8][response]`: an unreachable peer is `[0]`, exactly as netSend reads it,
+// so a caller distinguishes "declined" from "never arrived" without a rejection.
+async function doRequest(arg) {
+  const resp = await netSend(toHex(arg.slice(0, 32)), arg[32], arg.slice(33));
+  return resp === null ? Uint8Array.from([0]) : concat([Uint8Array.from([1]), resp]);
+}
+
 // ── warm (boot-time JIT warmup) ──────────────────────────────────────────────
 // One throwaway RS encode + decode + verify under a random key, with NO network
 // and NO store, run once at boot. It pays V8's cold-JIT tax on the codec (RS) and
@@ -1382,4 +1442,5 @@ register("getStart", doGetStart);
 register("getNext", doGetNext);
 register("repair", doRepair);
 register("handle", doHandle);
+register("request", doRequest);
 register("warm", doWarm);

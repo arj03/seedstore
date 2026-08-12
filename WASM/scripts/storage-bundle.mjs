@@ -62,15 +62,22 @@ export function authorKeysFor(sodium, edSk) {
   return hybridAuthorKeysFromSeed(sodium, edSk.slice(0, 32));
 }
 
-// The authorities the storage guest reaches, EXACTLY (seedkernel AUTHORITY_CALLS
-// keys — `guest.requires`, the fine-grained cap list). Declaring them is exactly
-// what the shell enforces: a `host.call` naming an authority outside this list is
-// refused at the bridge, name by name.
+// The grants the storage guest reaches, EXACTLY (`guest.requires`, the fine-grained
+// list). Declaring them is exactly what the shell enforces: a `host.call` naming a
+// grant outside this list is refused at the bridge, name by name.
 //
-// `node/sign` + `node/verify` (signing AND verification, both scoped to this
-// bundle's (author, app) — the guest checks a peer's descriptor signature without
-// ever reconstructing the host-owned prefix), `node/identity` and `node/random`
-// (identity and entropy). The pure transforms —
+// Two kinds, because there are two kinds of thing a guest cannot reach on its own
+// (seedkernel §12.2). The host's own AUTHORITIES: `node/sign` + `node/verify`
+// (signing AND verification, both scoped to this bundle's (author, app) — the guest
+// checks a peer's descriptor signature without ever reconstructing the host-owned
+// prefix), `node/identity` and `node/random` (identity and entropy), `fs/*` and the
+// clock. And the one RESERVED PROTOCOL ID, `_net`: the network is not a host
+// capability but a bundle — the transport — that claims that id, and an app reaches it
+// with the one cross-realm call (§12.10). It is the only place a manifest says "this
+// app talks to peers", and it carries no privilege: what an operator is asked about
+// is who may *be* the network (`link/*`), which this bundle never names.
+//
+// The pure transforms —
 // BLAKE2b, XChaCha20 — are not grants at all: they live under the
 // ungated `crypto/` prefix, because a function of a guest's own arguments grants
 // nothing. This bundle's own `codec`/`reputation` module names are the same story:
@@ -79,7 +86,7 @@ export function authorKeysFor(sodium, edSk) {
 // in `requires`.
 const STORAGE_REQUIRES = [
   "node/sign", "node/verify", "node/identity", "node/random",
-  "net/send", "net/peers",
+  "_net",
   "fs/get", "fs/put", "fs/list", "fs/size",
   "clock/now",
 ];
@@ -151,8 +158,8 @@ export function writeStorageBundle({ path, sodium, sk, pk, build, version = 1, l
     // everything else here. The load that admits this bundle routes the id to it, so a
     // node that installed storage IS a storage node; there is no second operator act
     // between landing the code and answering a peer. Read from STORAGE_PROTO, the same
-    // constant the guest frames its net/send with (NET_PROTO), so the id a sender writes
-    // and the id a receiver routes by cannot drift.
+    // constant the guest names in every request it sends (NET_PROTO), so the id a sender
+    // writes and the id a receiver routes by cannot drift.
     protocols: [STORAGE_PROTO],
     modules,
     // Everything about the guest — its content hash, its authority, and its config — in

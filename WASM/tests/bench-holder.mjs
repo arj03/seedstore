@@ -70,15 +70,27 @@ const config = { k: K, m: M, blockSize, maxMessageBytes: 1 << 20 };
 const HAVE = 1, OFFER = 2, FETCH = 3, STORE = 4;
 const TYPE_NAME = { [HAVE]: "HAVE", [OFFER]: "OFFER", [FETCH]: "FETCH", [STORE]: "STORE" };
 
-// A zero-latency loopback (host/loopback.ts) whose drivers are wrapped at the
-// request seam: the initiator's outbound requests are timed per destination +
-// type. On the loopback the round trip is holder work + two realm hops — no wire —
-// so the per-request time is the holder's ingest cost, the same thing the old
-// frame-level sink timing measured (the transport is now a signed bundle running
-// in its own realm, so the app request structure is only visible at the driver's
-// request() boundary — see latency-net.mjs).
+const EMPTY = new Uint8Array(0);
+
+// A zero-latency loopback (host/loopback.ts) where each HOLDER is timed at its own
+// inbound seam: `createShell({ answer })`, consulted on every arriving frame before the
+// routing table (seedkernel §12.10). There the request is plaintext and attributed —
+// `payload[0]` is the app's MsgType (§18) — and the hook dispatches it itself, so what is
+// timed is the holder's own `handle` and nothing else.
+//
+// WHERE IT STANDS HAS MOVED, and this is the third place. It began at the initiator's
+// outbound `driver.request()` seam, inferring holder cost from a loopback round trip —
+// holder work plus two realm hops. That seam is gone: an app's send now leaves from
+// inside the guest as a call to the id the transport claims, and the driver has no
+// request face at all. The receiving shell's `answer` is what is left, and it is the
+// better place anyway: the old number included the initiator's own hops in a figure
+// printed as "time spent inside the confined guest's handle", and this one does not.
 class HolderTimingNetwork {
-  constructor() { this.stats = new Map(); }
+  constructor() {
+    this.stats = new Map();
+    /** peerId → the shell whose inbound frames this harness times. */
+    this.shells = new Map();
+  }
   view(peerId) { return this.fabric.view(peerId); }
   statsFor(peer) {
     let s = this.stats.get(peer);
@@ -89,20 +101,27 @@ class HolderTimingNetwork {
     const s = this.statsFor(peer);
     return s[type] ?? (s[type] = { n: 0, ms: 0, payloadBytes: 0 });
   }
-  /** Wrap ONE node's transport driver so outbound requests are timed per
-   *  destination + type. The storage guest's NET_SEND resolves to the driver's
-   *  request(); payload[0] is the app's MsgType. */
-  wrap(driver) {
+  /** The `answer` hook for ONE holder, handed to its shell at construction because that
+   *  is when a shell's inbound seam is fixed.
+   *
+   *  It cannot dispatch until `track` has told it which shell it belongs to — the node
+   *  does not exist yet at this point — so until then it answers `null` and the frame
+   *  takes the ordinary route, untimed. That window covers the cohort's own wiring (the
+   *  handshakes), which is not app traffic and was never counted. */
+  answerFor(peerId) {
     const net = this;
-    const orig = driver.request.bind(driver);
-    driver.request = (to, proto, payload) => {
-      const type = payload?.[0];
-      const b = net.bucket(to, type);
+    return (from, proto, payload) => {
+      const shell = net.shells.get(peerId);
+      if (!shell) return null;
+      const b = net.bucket(peerId, payload?.[0]);
       b.n++; b.payloadBytes += payload.length;
       const t0 = performance.now();
-      return orig(to, proto, payload).finally(() => { b.ms += performance.now() - t0; });
+      return Promise.resolve(shell.dispatch(from, proto, payload) ?? EMPTY)
+        .finally(() => { b.ms += performance.now() - t0; });
     };
   }
+  /** Start timing this node: register the shell its `answer` hook dispatches through. */
+  track(node) { this.shells.set(node.peerId, node.shell); }
 }
 
 const fmt = (n, d = 1) => n.toFixed(d);
@@ -130,13 +149,17 @@ for (let i = 0; i < 1 + holders; i++) {
     fs = new NodeFs(dir);
   }
   const identity = (() => { const kp = sodium.crypto_sign_keypair(); return { publicKey: kp.publicKey, privateKey: kp.privateKey }; })();
+  const peerId = toHex(identity.publicKey);
   nodes.push(await StorageNode.create({
     sodium,
     bundleBlob: wasm.bundleBlob,
     identity,
-    channels: net.view(toHex(identity.publicKey)),
+    channels: net.view(peerId),
     listen: { host: "127.0.0.1", port: 0 },
     config, fs,
+    // The holders are what this bench prices, so only they carry the timing seam — the
+    // initiator's inbound traffic is responses, which is not work anyone is measuring.
+    answer: i > 0 ? net.answerFor(peerId) : undefined,
     // Generous: each holder takes ~fileBytes of blocks plus .dsc sidecars, and a §14-full
     // holder would silently decline instead of measuring anything.
     quota: Math.max(64 * MB, fileBytes * 4),
@@ -147,9 +170,10 @@ for (let i = 0; i < nodes.length; i++) {
   for (let j = i + 1; j < nodes.length; j++) await StorageNode.connect(nodes[i], nodes[j]);
 }
 const initiator = nodes[0];
-// The initiator's driver carries every request of the PUT/GET; wrap it for timing.
-net.wrap(initiator.net);
 const holderIds = nodes.slice(1).map((n) => n.peerId);
+// Arm the timing seams AFTER the cohort is wired, so the handshake traffic that built it
+// is not counted as app requests.
+for (const n of nodes.slice(1)) net.track(n);
 
 const data = new Uint8Array(fileBytes);
 for (let i = 0; i < fileBytes; i++) data[i] = (i * 1103515245 + 12345) & 255;
