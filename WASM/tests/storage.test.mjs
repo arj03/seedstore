@@ -18,8 +18,6 @@ import { toHex, fromHex, bytesEqual } from "../build/host/util.js";
 import { liveBlockCount, newKey, plantBlock } from "./helpers.mjs";
 
 const TIMEOUT = 40; // ms — keep offline-peer timeouts snappy in tests
-const enc = new TextEncoder();
-const SEEDSTORE_PROTO = enc.encode("seedstore");
 
 function typed(type, data) {
   const out = new Uint8Array(1 + data.length);
@@ -463,7 +461,7 @@ export async function run(t) {
     for (const h of holders) { if ((await h.store.list()).length >= 2) { holder = h; break; } }
     t.ok(!!holder, "a holder carries at least two blocks");
     const [idA, idB] = await holder.store.list();
-    const raw = await owner.transport.request(holder.peerId, SEEDSTORE_PROTO, typed(MsgType.FETCH, encodeFetchBatchReq([idA, idB])));
+    const raw = await owner.request(holder.peerId, typed(MsgType.FETCH, encodeFetchBatchReq([idA, idB])));
     const served = decodeFetchBatchRes(raw);
     t.ok(served[0] !== null && bytesEqual(served[0], (await holder.store.get(idA)).bytes), "the first present block is always served, even near the cap");
     t.eq(served[1], FETCH_UNANSWERED, "the second block is marked UNANSWERED by the holder's smaller cap");
@@ -544,8 +542,7 @@ export async function run(t) {
       );
 
       // Signed by a real cohort peer (a, which b knows): admitted.
-      const known = decodeMask(await a.transport.request(b.peerId, SEEDSTORE_PROTO,
-        typed(MsgType.STORE, encodeStoreBatch([{ blockId: bid, descriptor: desc(a.identity), bytes }]))));
+      const known = decodeMask(await a.request(b.peerId, typed(MsgType.STORE, encodeStoreBatch([{ blockId: bid, descriptor: desc(a.identity), bytes }]))));
       t.eq(known[0], VERDICT_ACCEPTED, "a descriptor signed by a peer the holder knows is admitted");
 
       // Byte-for-byte the same descriptor, signed under a FRESH keypair in the same
@@ -557,8 +554,7 @@ export async function run(t) {
         sodium, { level: 0, k: 1, m: 0, blockSize: config.blockSize, tailBytes: config.blockSize, blockIds: [bid2] },
         stranger.publicKey, stranger.privateKey, a.signAuthor,
       );
-      const unknown = decodeMask(await a.transport.request(b.peerId, SEEDSTORE_PROTO,
-        typed(MsgType.STORE, encodeStoreBatch([{ blockId: bid2, descriptor: forged, bytes: bytes2 }]))));
+      const unknown = decodeMask(await a.request(b.peerId, typed(MsgType.STORE, encodeStoreBatch([{ blockId: bid2, descriptor: forged, bytes: bytes2 }]))));
       t.eq(unknown[0], VERDICT_DESCRIPTOR, "a self-signed descriptor from a fresh keypair is declined — the signature is not anchored");
       t.ok(!(await b.store.has(bid2)), "nothing committed for the unanchored descriptor");
     } finally { [a, b].forEach((n) => n.close()); }
@@ -579,11 +575,9 @@ export async function run(t) {
         sodium, { level: 0, k: 1, m: 2, blockSize: config.blockSize, tailBytes: config.blockSize, blockIds: [bid, bid, bid] },
         a.identity.publicKey, a.identity.privateKey, a.signAuthor,
       );
-      const first = decodeMask(await a.transport.request(b.peerId, SEEDSTORE_PROTO,
-        typed(MsgType.STORE, encodeStoreBatch([{ blockId: bid, descriptor: env, bytes }]))));
+      const first = decodeMask(await a.request(b.peerId, typed(MsgType.STORE, encodeStoreBatch([{ blockId: bid, descriptor: env, bytes }]))));
       t.eq(first[0], VERDICT_ACCEPTED, "the first copy is admitted");
-      const second = decodeMask(await a.transport.request(b.peerId, SEEDSTORE_PROTO,
-        typed(MsgType.STORE, encodeStoreBatch([{ blockId: bid, descriptor: env, bytes }]))));
+      const second = decodeMask(await a.request(b.peerId, typed(MsgType.STORE, encodeStoreBatch([{ blockId: bid, descriptor: env, bytes }]))));
       t.eq(second[0], VERDICT_SIBLING, "a second copy of the SAME id on the same holder is declined");
     } finally { [a, b].forEach((n) => n.close()); }
   }

@@ -227,7 +227,6 @@ const { shell } = await bootTransportShell({
   timeoutMs,
   config: { ...appConfig, quota: DEFAULT_QUOTA_BYTES },
   realmMemoryBytes,
-  livePeers: () => [...peerUp],
 });
 const net = new WsNetwork({
   driver: shell.transport,

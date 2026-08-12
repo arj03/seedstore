@@ -29,8 +29,6 @@ import { toHex, fromHex, bytesEqual } from "../build/host/util.js";
 import { plantBlock } from "./helpers.mjs";
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const enc = new TextEncoder();
-const SEEDSTORE_PROTO = enc.encode("seedstore");
 
 function typed(type, data) {
   const out = new Uint8Array(1 + data.length);
@@ -145,7 +143,12 @@ export async function run(t) {
       t.eq((await owner.store.list()).length, 0, "owner holds no blocks");
 
       t.ok((await holders[0].store.list()).length > 0, "a holder kept at least one block");
-      t.ok(nodes.some((n) => n.net.framesDelivered > 0), "frames actually crossed sockets");
+      // The driver's `framesDelivered` mirror is gone with the request facade it counted:
+      // frames are the transport's now, and the host holds only sockets. What proves the same
+      // thing — that this ran over real sockets rather than in-process — is the transport's
+      // own authenticated set, which only a completed AKE over a live channel fills.
+      const linked = await Promise.all(nodes.map((n) => n.net.linkedPeers()));
+      t.ok(linked.some((peers) => peers.length > 0), "links authenticated over real sockets");
     } finally {
       nodes.forEach((n) => n.close());
       rmSync(baseDir, { recursive: true, force: true });
@@ -212,7 +215,7 @@ export async function run(t) {
       const bytes = file(64, 21);
       const bid = S.crypto.hash(bytes);
 
-      const have0 = await B.transport.request(S.peerId, SEEDSTORE_PROTO, typed(MsgType.HAVE, encodeHaveReq([bid])));
+      const have0 = await B.request(S.peerId, typed(MsgType.HAVE, encodeHaveReq([bid])));
       t.eq(decodeMask(have0)[0], VERDICT_DECLINED, "HAVE → false before the block exists (over ws)");
 
       // The block travels with its author-signed chunk descriptor (§4.3) — the holder
@@ -220,17 +223,17 @@ export async function run(t) {
       // same bundle, so they share one signing scope (author).
       const desc = signDescriptor(sodium, { level: 0, k: 1, m: 0, blockSize: bytes.length, tailBytes: bytes.length, blockIds: [bid] }, idB.publicKey, idB.privateKey, S.signAuthor);
 
-      const stored = decodeMask(await B.transport.request(S.peerId, SEEDSTORE_PROTO, typed(MsgType.STORE, encodeStoreBatch([{ blockId: bid, descriptor: desc, bytes }]))));
+      const stored = decodeMask(await B.request(S.peerId, typed(MsgType.STORE, encodeStoreBatch([{ blockId: bid, descriptor: desc, bytes }]))));
       t.eq(stored[0], VERDICT_ACCEPTED, "STORE acknowledged over ws");
       t.ok(await S.store.has(bid), "server now holds the block");
 
-      const have1 = await B.transport.request(S.peerId, SEEDSTORE_PROTO, typed(MsgType.HAVE, encodeHaveReq([bid])));
+      const have1 = await B.request(S.peerId, typed(MsgType.HAVE, encodeHaveReq([bid])));
       t.eq(decodeMask(have1)[0], VERDICT_ACCEPTED, "HAVE → true after STORE (over ws)");
 
-      const fetched = await B.transport.request(S.peerId, SEEDSTORE_PROTO, typed(MsgType.FETCH, encodeFetchBatchReq([bid])));
+      const fetched = await B.request(S.peerId, typed(MsgType.FETCH, encodeFetchBatchReq([bid])));
       const back = decodeFetchBatchRes(fetched)[0];
       t.ok(back && bytesEqual(back, bytes), "FETCH returns the bytes over ws");
-      t.ok(S.net.framesDelivered > 0, "server received frames over the websocket");
+      t.ok((await S.net.linkedPeers()).length > 0, "the server holds an authenticated link over the websocket");
     } finally {
       S.close(); B.close();
     }

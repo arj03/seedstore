@@ -18,8 +18,6 @@ import { RtcNetwork, relaySignaling } from "seedkernel-wasm/net-rtc";
 import { weriftPeerConnectionFactory } from "seedkernel-wasm/net-rtc-node";
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const enc = new TextEncoder();
-const SEEDSTORE_PROTO = enc.encode("seedstore");
 
 function typed(type, data) {
   const out = new Uint8Array(1 + data.length);
@@ -99,9 +97,6 @@ async function makeNode(contact = CONTACT) {
   entry.shell = (await bootTransportShell({
     sodium, identity, timeoutMs: 8000, contactSecret: contact,
     config: { ...config, quota: 64 * 1024 * 1024 },
-    // The guest's NET_PEERS (cohortPeers) reads this; the node's cohort set is
-    // populated by onPeerUp before any PUT/repair runs.
-    livePeers: () => entry.node ? entry.node.cohortPeers() : [],
   })).shell;
   entry.net = new RtcNetwork({
     driver: entry.shell.transport,
@@ -140,7 +135,7 @@ try {
 
   let onAll = true;
   for (const p of owner.node.cohortPeers()) {
-    const res = await owner.node.transport.request(p, SEEDSTORE_PROTO, typed(MsgType.HAVE, encodeHaveReq(r.blockIds)));
+    const res = await owner.node.request(p, typed(MsgType.HAVE, encodeHaveReq(r.blockIds)));
     const held = decodeMask(res).filter((v) => v === 1).length;
     console.log(`  ${p.slice(0, 8)}…  ${held}/${r.blockIds.length} blocks`);
     if (held < r.blockIds.length) onAll = false;

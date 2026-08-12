@@ -24,12 +24,13 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { boot } from "seedkernel-wasm/shell";
-import { verifyBundle } from "seedkernel-wasm/bundle";
+import { appKeyFor, verifyBundle } from "seedkernel-wasm/bundle";
 import { TRANSPORT_BUNDLE_B64 } from "seedkernel-wasm/transport-bundle";
 import {
   loadSodium, generateKeyPair, LoopbackNetwork, createConnectedCohort,
 } from "../build/host/node.js";
 import { toHex, bytesEqual, concatBytes, readU32BE } from "../build/host/util.js";
+import { Op } from "../build/host/protocol.js";
 import { buildBundle } from "./bundle-fixture.mjs";
 import { makeT } from "./harness.mjs";
 
@@ -66,14 +67,9 @@ export async function run(t) {
   const bundleBlob = new Uint8Array(readFileSync(bundlePath));
   const policyJson = JSON.stringify({
     authors: [toHex(authorId)],
-    grants: { mount: [transportHex] },
+    grants: { link: [transportHex] },
   });
   const tmpDirs = [bundleDir];
-
-  // Durable cohort set shared by all shells in the group — the network owns
-  // connectivity, the cohort is app state. All shells reference this set via
-  // their livePeers closure so NET_PEERS is consistent.
-  let cohortSet = new Set();
 
   // Boot a generic shell that both initiates and holds: it loads the bundle and
   // serves the confined holder side. Knows nothing about storage; storage is
@@ -87,7 +83,6 @@ export async function run(t) {
       channels: net.view(toHex(identity.publicKey)),
       listen: { host: "127.0.0.1", port: 0 },
       timeoutMs: TIMEOUT,
-      livePeers: () => [...cohortSet],
       // Quota is operator policy (not signed into the bundle): the operator supplies it
       // at boot, merged over the bundle's guest config into the guest's APP. NB this is
       // the SHELL's config — opaque operator input the shell merges wholesale. A
@@ -104,16 +99,19 @@ export async function run(t) {
     // A generic shell + the signed storage bundle is a storage node: the manifest
     // claims STORAGE_PROTO and the load routes it (§12.10), so nothing here points
     // the protocol anywhere — `serve()` is the only step between loading and answering.
-    await shell.loadBundle(bundlePath);
+    const loaded = await shell.loadBundle(bundlePath);
     await shell.serve();
-    return { shell, peerId: toHex(identity.publicKey), net: shell.transport };
+    // The app key rides along: a node with a network has at least two apps loaded — the
+    // storage bundle and the transport, which is an ordinary app claiming `_net` (§12.10) — so
+    // "the only loaded app" is not something an `invoke` caller can mean any more.
+    return { shell, peerId: toHex(identity.publicKey), net: shell.transport, appKey: appKeyFor(loaded.author, loaded.manifest.app) };
   }
-  // Dial every pair (addresses + ready), and mirror the memberships into the shared
-  // cohort set so every shell's NET_PEERS sees the whole cohort. A StorageNode's
-  // livePeers reads its OWN cohort set (StorageNode.addPeer), so those get the
-  // memberships too — a StorageNode whose cohort set is empty would PUT nowhere.
+  // Dial every pair (addresses + ready). The cohort each guest sees is the TRANSPORT's
+  // authenticated set — it asks `_net` for its peers — so linking the nodes is the whole
+  // of the wiring: there is no host-side roster to mirror into a closure any more, and no
+  // way for one to disagree with the links. `addPeer` stays for a StorageNode, whose
+  // cohort is its own durable app state (and what `connect` teaches an address for).
   const connectAll = async (net, entries) => {
-    cohortSet = new Set(entries.map((e) => e.peerId));
     for (const e of entries) {
       for (const o of entries) {
         if (e === o) continue;
@@ -134,7 +132,7 @@ export async function run(t) {
       await connectAll(net, shells);
       try {
         const data = file(12800, 7); // several blocks → the RS path, placed across the cohort
-        const r = await shells[0].shell.runGuest("put", data);
+        const r = await shells[0].shell.invoke(Op.PUT, data, shells[0].appKey);
         const key = r.slice(0, 32), root = r.slice(48, 48 + readU32BE(r, 44));
 
         let holding = 0;
@@ -142,7 +140,7 @@ export async function run(t) {
         t.ok(holding >= 4, "the confined holders admitted + stored blocks (fs writes via the guest)");
         t.eq((await shells[0].shell.fs.list()).length, 0, "the initiator holds nothing — durability is the cohort's");
 
-        const got = await shells[0].shell.runGuest("get", concatBytes([key, root]));
+        const got = await shells[0].shell.invoke(Op.GET, concatBytes([key, root]), shells[0].appKey);
         t.ok(bytesEqual(got, data), "PUT → GET round-trips: a generic shell served the holder side from the confined guest");
       } finally {
         shells.forEach((e) => e.shell.close());
@@ -174,13 +172,13 @@ export async function run(t) {
         // the StorageNode places STOREs on that same shell — the shell's holder path
         // must answer (queued behind the parked initiator, served as it drains).
         const [rA, putB] = await Promise.all([
-          shells[0].shell.runGuest("put", dataA),
+          shells[0].shell.invoke(Op.PUT, dataA, shells[0].appKey),
           sn.put(dataB),
         ]);
         const keyA = rA.slice(0, 32), rootA = rA.slice(48, 48 + readU32BE(rA, 44));
 
         const [gotA, gotB] = await Promise.all([
-          shells[0].shell.runGuest("get", concatBytes([keyA, rootA])),
+          shells[0].shell.invoke(Op.GET, concatBytes([keyA, rootA]), shells[0].appKey),
           sn.get(putB.root, putB.key),
         ]);
         t.ok(bytesEqual(gotA, dataA), "the shell's own file round-trips despite serving holder requests mid-PUT");
@@ -198,10 +196,10 @@ export async function run(t) {
     t.group("holder: a confined shell holder is byte-compatible with the host-side initiator (cross-path parity)");
     {
       const net = new LoopbackNetwork();
-      cohortSet = new Set();
-      // Pure holders — they never initiate. They still need the WRITER in their roster,
-      // because a holder anchors a descriptor's author to a peer it knows (§4.3): a
-      // signature that verifies against a key nobody knows binds authority to nothing.
+      // Pure holders — they never initiate. They still need the WRITER among the peers
+      // they are LINKED to, because a holder anchors a descriptor's author to a peer it
+      // knows (§4.3) and "knows" is now the transport's authenticated set: a signature that
+      // verifies against a key nobody has a link to binds authority to nothing.
       const shells = [];
       for (let i = 0; i < 5; i++) shells.push(await bootShell(net));
       const [sn] = await createConnectedCohort({
@@ -211,7 +209,6 @@ export async function run(t) {
       });
       for (const e of shells) {
         sn.addPeer(e.peerId);
-        cohortSet.add(sn.peerId);
         sn.net.addPeerAddr(e.peerId, { host: "127.0.0.1", port: e.net.port, transport: "tcp" });
         e.net.addPeerAddr(sn.peerId, { host: "127.0.0.1", port: sn.net.port, transport: "tcp" });
       }

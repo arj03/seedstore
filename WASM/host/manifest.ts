@@ -48,8 +48,8 @@ export type { Descriptor, SignedDescriptor } from "./manifest-core.js";
  *  scope when they share a bundle author). */
 export const STORAGE_APP = "seedstore";
 
-/** The wire protocol id storage speaks (seedkernel §12.10) — placed in every
- *  net/send frame so the receiving host routes it to this app, and CLAIMED by the
+/** The wire protocol id storage speaks (seedkernel §12.10) — named in every request the
+ *  guest sends so the receiving host routes it to this app, and CLAIMED by the
  *  bundle's signed manifest (`protocols`, scripts/storage-bundle.mjs), which is what
  *  gives the id a destination on the receiving node: the load that admits this code
  *  claims it, with no operator step in between. The id an app speaks is the app's own
@@ -85,7 +85,7 @@ function scopedBridge(sodium: Sodium, authorPk: Uint8Array, authorSk: Uint8Array
   if (!bridge) {
     const key = { publicKey: authorPk, privateKey: authorSk };
     bridge = createGuestSeam({
-      platform: { sodium, identity: key, peers: () => [] },
+      platform: { sodium, identity: key },
       grants: {
         names: UNRESTRICTED_NAMES,
         signScope: appSignScope(key, scopeAuthor, STORAGE_APP),

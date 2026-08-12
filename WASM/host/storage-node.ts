@@ -17,8 +17,8 @@
 //   - creates the platform seam (fs, channels/socket seam, freshnessStore,
 //     identity, sodium) and loads the transport bundle through the shared shell
 //   - calls createShell() + loadBundleBlob() to wire the shared shell
-//   - runs the guest's *initiator* entrypoints (put / get / repair) via
-//     shell.runGuest()
+//   - runs the guest's *initiator* ops (put / get / repair) via
+//     shell.invoke() — a loopback into the app's one `handle`
 //   - serves the guest's *holder* entrypoint via shell.serve() — the storage
 //     protocol needs no wiring here: the bundle's manifest claims it and the load
 //     is what routes it (§12.10)
@@ -27,7 +27,6 @@
 // a host-managed transport handing channels to the driver's openLink) passes that
 // shell in with `shell`; StorageNode then loads only the seedstore bundle on it.
 
-import type { PeerId } from "seedkernel-wasm/net";
 import type { Fs } from "seedkernel-wasm/fs";
 // The backend, not the seam: `MemoryFs` is host code alongside `NodeFs`, while
 // `seedkernel-wasm/fs` stays the `Fs` contract plus the key rule. The scoping
@@ -38,16 +37,16 @@ import { TRANSPORT_BUNDLE_B64 } from "seedkernel-wasm/transport-bundle";
 import { FsBlobView, type BlobView } from "./store-view.js";
 import { Crypto } from "./crypto.js";
 import {
-  type Identity, type StorageConfig, defaultConfig, assertStorageConfig, normaliseConfig, DEFAULT_QUOTA_BYTES,
+  type Identity, type PeerId, type StorageConfig, defaultConfig, assertStorageConfig, normaliseConfig, DEFAULT_QUOTA_BYTES,
 } from "./core.js";
 import { STORAGE_APP } from "./manifest.js";
+import { Op } from "./protocol.js";
 import { encodeScoreReq } from "./reputation-core.js";
-import { toHex, readU32BE, readU64BE, concatBytes } from "./util.js";
+import { toHex, fromHex, readU32BE, readU64BE, concatBytes } from "./util.js";
 import {
   createShell, ModuleTable, scopedFs, byPrivilege, requireTransport, type Shell, type ModuleLookup, type RealmFactory,
 } from "seedkernel-wasm/shell-core";
 import { FreshnessMarks, appKeyFor, appScopeFor, verifyBundle, type LoadedBundle } from "seedkernel-wasm/bundle";
-import type { HostTransport } from "seedkernel-wasm/transport-host";
 import type { ChannelFactoryLike } from "./loopback.js";
 import type { Sodium } from "./sodium.js";
 
@@ -130,9 +129,12 @@ export interface StorageNodeOptions {
   /** Optional network key — which network this node belongs to (an isolation
    *  boundary, not a gate; §12.6). Absent ⇒ the public network. */
   networkKey?: Uint8Array;
-  /** Optional whitelist gate for the transport slot, called with a
-   *  signature-verified peer key during the handshake. Absent ⇒ admit all. */
-  admitPeer?: (pk: Uint8Array) => boolean;
+  /** Optional peer whitelist — the 32-byte channel keys this node will talk to,
+   *  shipped to the transport at init and applied there (seedkernel §12.6.3). A LINT, not a
+   *  gate: a list is what a config can carry to a confined occupant, where a host-side
+   *  predicate over the attribution the occupant reported was only ever checking a key
+   *  the occupant supplied. Absent ⇒ admit every peer that completes the handshake. */
+  admitPeers?: Uint8Array[];
   /** Parallel connections per dialed peer (default 1) — the transport's dial
    *  fan-out. */
   connsPerPeer?: number;
@@ -140,6 +142,12 @@ export interface StorageNodeOptions {
    *  seedkernel artifact; an operator who pins a different transport author
    *  builds their own. Only read when StorageNode builds its own shell. */
   transportBlob?: Uint8Array;
+  /** The shell's own inbound seam (seedkernel §12.10), consulted on each arriving frame
+   *  before the routing table; `null` falls through to the app that claims the protocol.
+   *  A node serving no protocol of its own needs none — the storage tests use it to see
+   *  and delay inbound requests, which is the one place an app-level request is visible
+   *  host-side now that the wire is the record layer's. */
+  answer?: (from: PeerId, proto: string, payload: Uint8Array) => Promise<Uint8Array> | null;
   /** Override the cohort's signing scope author: sign descriptors under this
    *  author instead of the loaded bundle's (used when joining a cohort whose
    *  holders run a DIFFERENT bundle's author — the browser demo's override). */
@@ -149,11 +157,12 @@ export interface StorageNodeOptions {
 export class StorageNode {
   readonly peerId: PeerId;
   readonly identity: Identity;
-  /** The transport driver — the node's Network (shell.transport). The transport is a
-   *  signed bundle; this is its host-side face. */
+  /** The socket driver (shell.transport) — sockets, addresses, listeners, and nothing
+   *  else. The transport itself is a signed bundle; this is the host side that hands it
+   *  descriptors. There is no request face here any more: an app's send is a call to the
+   *  id the transport claims, so requests leave from the GUEST (see `netSend` in
+   *  host/tier2-guest.orchestration.js) and never through this object. */
   readonly net: TransportHost;
-  /** The request/response face of the same driver. */
-  readonly transport: HostTransport;
   readonly fs: Fs;
   readonly store: BlobView;
   readonly quota: number;
@@ -164,7 +173,11 @@ export class StorageNode {
    *   without any install path — the bind is solely the bundle loader's job. */
   readonly host: ModuleLookup;
 
-  private readonly shell: Shell;
+  /** The shell this node runs on: the module table, the bundle loader, the routing and
+   *  the guest realms. Public because a driver sometimes has to reach the runtime
+   *  directly — the latency harness dispatches an inbound frame itself to time it — and
+   *  because a caller that PASSED a shell in already holds this object. */
+  readonly shell: Shell;
   private readonly clockFn: () => number;
   /** The cohort's signing-scope author (§16), derived from the verified bundle author.
    *   Exposed so host-side callers can produce descriptors that the guest's
@@ -183,8 +196,14 @@ export class StorageNode {
    *   name to derive or hold. */
   private readonly appKey: string;
   /** Durable cohort roster: the set of peers this node has a storage relationship
-   *   with. The network owns connectivity; the cohort is app state — independent
-   *   of who is currently online — and feeds the guest's NET_PEERS cap. */
+   *   with. The network owns connectivity; the cohort is app state — independent of who
+   *   is currently online — and it is what `connect` teaches each driver an address for.
+   *
+   *   It no longer feeds the guest. The guest asks the TRANSPORT who it is linked to (the
+   *   `peers` op behind `_net`), which is the authenticated set — a fact about links, and
+   *   links are the transport's. Handing the guest a host-side roster instead was two copies
+   *   of one fact, and the copy that could be wrong was this one: a peer on the roster
+   *   with no link is a peer every OFFER to it times out against. */
   readonly cohort: Set<PeerId>;
   private repairLoopOn = false;
   private repairTimer: ReturnType<typeof setTimeout> | null = null;
@@ -211,11 +230,8 @@ export class StorageNode {
     this.clockFn = opts.clock ?? (() => Date.now());
     this.crypto = new Crypto(opts.sodium);
     // A shell passed in must already have its transport admitted and standing (the
-    // doc on `shell`): the driver is both faces of the same object — `net` as the
-    // full TransportHost, `transport` as its request/response half.
-    const driver = requireTransport(shell, "a StorageNode shell must have the transport bundle mounted");
-    this.net = driver;
-    this.transport = driver;
+    // doc on `shell`).
+    this.net = requireTransport(shell, "a StorageNode shell must have the transport bundle standing");
     this.cohort = cohort;
     this.ownsShell = ownsShell;
 
@@ -262,7 +278,7 @@ export class StorageNode {
     // built with comes back too, so the host read view and the guest's writes
     // share ONE backend.
     const ownsShell = opts.shell === undefined;
-    const built = opts.shell ? null : await buildShell(opts, identity, cohort);
+    const built = opts.shell ? null : await buildShell(opts, identity);
     const shell = opts.shell ?? built!.shell;
     // The fs the shell was built with — the guest's writes land there. A caller's own
     // fs wins; a pre-built shell brings its own (bootTransportShell created it).
@@ -321,7 +337,26 @@ export class StorageNode {
     await Promise.all([a.net.ready(), b.net.ready()]);
   }
 
-  // ── PUT / GET / repair / share — all run through shell.runGuest() ──────
+  // ── PUT / GET / repair / share — all local ops through shell.invoke() ──────
+
+  /** One LOCAL op into this app's one entrypoint, `handle` (seedkernel §12.2): name the
+   *  op and loop back through the shell's `invoke`, which writes the host's caller id and
+   *  the op envelope — so storage has one op vocabulary, not an entrypoint per initiator
+   *  operation.
+   *
+   *  It frames nothing itself. The envelope is the guest ABI's, written by `opCall` and
+   *  read by the preamble's `readOp` (seedkernel `host/guest-seam.ts`); a copy here would
+   *  be the same layout maintained on both sides of a seam this file is only a caller of.
+   *
+   *  The app key is not optional any more. A node with a network has at least two apps
+   *  loaded — the storage bundle and the transport, which is an ordinary app that claims the
+   *  reserved id `_net` (seedkernel §12.10) — so "the only loaded app" is not something a
+   *  StorageNode can mean, and omitting the key is an ambiguity error rather than a
+   *  default. One place says which app we are, instead of six call sites repeating it. */
+  private invoke(op: string, payload: Uint8Array): Promise<Uint8Array> {
+    return this.shell.invoke(op, payload, this.appKey);
+  }
+
   private runExclusive<T>(body: () => Promise<T>): Promise<T> {
     if (this.closed) return Promise.reject(new Error("storage node closed"));
     const p = this.inFlight.then(body);
@@ -332,13 +367,13 @@ export class StorageNode {
   /** PUT a file (§6), orchestrated in the guest, STREAMED. */
   async put(plaintext: Uint8Array): Promise<PutResult> {
     return this.runExclusive(async () => {
-      const meta = await this.shell.runGuest("putStart", NO_ARG);
+      const meta = await this.invoke(Op.PUT_START, NO_ARG);
       const windowBytes = readU32BE(meta, 0);
       for (let off = 0; ; off += windowBytes) {
-        await this.shell.runGuest("putWindow", plaintext.subarray(off, Math.min(off + windowBytes, plaintext.length)));
+        await this.invoke(Op.PUT_WINDOW, plaintext.subarray(off, Math.min(off + windowBytes, plaintext.length)));
         if (off + windowBytes >= plaintext.length) break;
       }
-      return decodePutResult(await this.shell.runGuest("putFinish", NO_ARG));
+      return decodePutResult(await this.invoke(Op.PUT_FINISH, NO_ARG));
     });
   }
 
@@ -347,11 +382,11 @@ export class StorageNode {
    *  variable-length root can be its tail. */
   async get(root: Uint8Array, key: Uint8Array): Promise<Uint8Array> {
     return this.runExclusive(async () => {
-      const fileSize = readU64BE(await this.shell.runGuest("getStart", concatBytes([key, root])), 0);
+      const fileSize = readU64BE(await this.invoke(Op.GET_START, concatBytes([key, root])), 0);
       const out = new Uint8Array(fileSize);
       let written = 0;
       while (written < fileSize) {
-        const part = await this.shell.runGuest("getNext", NO_ARG);
+        const part = await this.invoke(Op.GET_NEXT, NO_ARG);
         if (part.length === 0) throw new Error(`get: stream ended ${written}/${fileSize} bytes in`);
         out.set(part, written); written += part.length;
       }
@@ -359,14 +394,31 @@ export class StorageNode {
     });
   }
 
+  /** Issue ONE control-plane message to a peer and answer with its reply (§18).
+   *  `body` is `[type u8][payload]` — the same bytes a holder's `handle` decodes.
+   *
+   *  It runs through this node's own guest (`request`), because that is where a send
+   *  lives now: the driver holds sockets and nothing else, and an app reaches the network
+   *  by calling the id the transport claims. So a console probe or a wire-level test asks the
+   *  app to ask, which is also what makes it exact — the frame it puts on the wire is the
+   *  one the placement engine puts there.
+   *
+   *  Throws if the peer was unreachable within the request window; a peer that answered,
+   *  including a decline, comes back as its response bytes. */
+  async request(peer: PeerId, body: Uint8Array): Promise<Uint8Array> {
+    const r = await this.runExclusive(() => this.invoke(Op.REQUEST, concatBytes([fromHex(peer), body])));
+    if (r[0] !== 1) throw new Error(`request: peer ${peer.slice(0, 8)}… unreachable within the request window`);
+    return r.slice(1);
+  }
+
   /** Pre-warm the realm's codec + crypto caps. */
   async warm(): Promise<void> {
-    await this.runExclusive(() => this.shell.runGuest("warm", NO_ARG));
+    await this.runExclusive(() => this.invoke(Op.WARM, NO_ARG));
   }
 
   /** Run one repair pass over every chunk this node holds a block of (§9). */
   async runRepair(): Promise<number> {
-    return readU32BE(await this.runExclusive(() => this.shell.runGuest("repair", NO_ARG)), 0);
+    return readU32BE(await this.runExclusive(() => this.invoke(Op.REPAIR, NO_ARG)), 0);
   }
 
   /** Decayed reciprocity score this node holds for a peer (§13). */
@@ -438,10 +490,11 @@ export async function bootTransportShell(
     listen?: { host: string; port: number };
     wsListen?: { host: string; port: number };
     networkKey?: Uint8Array; contactSecret?: Uint8Array;
-    admitPeer?: (pk: Uint8Array) => boolean; connsPerPeer?: number;
+    admitPeers?: Uint8Array[]; connsPerPeer?: number;
     timeoutMs?: number; transportBlob?: Uint8Array;
-    livePeers?: () => PeerId[];
     createRealm?: RealmFactory;
+    /** The shell's own inbound seam — see `StorageNodeOptions.answer`. */
+    answer?: (from: PeerId, proto: string, payload: Uint8Array) => Promise<Uint8Array> | null;
     /** Operator app config (quota, geometry overrides) merged over the bundle's
      *  signed guest.config into the guest's APP — opaque to the shell. */
     config?: Record<string, string | number>;
@@ -473,27 +526,14 @@ export async function bootTransportShell(
       wsListen: opts.wsListen,
       networkKey: opts.networkKey,
       contactSecret: opts.contactSecret,
-      admitPeer: opts.admitPeer,
+      admitPeers: opts.admitPeers,
       connsPerPeer: opts.connsPerPeer,
       createRealm: opts.createRealm ?? createRealm,
       now: opts.now,
-      // LEAVE IT UNSET when the caller has none: `livePeers` feeds the guest's
-      // NET_PEERS cap, and the shell's own default for an absent one is the
-      // transport's `linkedPeers()` — the authenticated links, which is what a
-      // caller that tracks no roster of its own means. Defaulting to `() => []`
-      // here instead spelled "this node never has peers", and because it is a
-      // *present* closure it shadowed the shell's fallback rather than deferring
-      // to it. That is silent and total: the guest sees an empty cohort, PUT
-      // sends no OFFER at all, and the failure surfaces as "landed 0/N distinct
-      // blocks — holders declined" with no holder verdict behind it, pointing at
-      // quota or §16 scope on peers that were never contacted. Every in-repo
-      // caller passed one (buildShell passes the cohort, p2p-cli its link set),
-      // so only an external embedder — browser/p2p.html — ever hit it.
-      ...(opts.livePeers ? { livePeers: opts.livePeers } : {}),
     },
     // ONE admission predicate (§12.5), keyed on the privileges the manifest's
     // `requires` reach, said with `byPrivilege`: the `base` branch admits an
-    // app that reaches no privilege, the `mount` grant admits the transport
+    // app that reaches no privilege, the `link` grant admits the transport
     // bundle by author pin — the operator handing us the storage bundle is the
     // trust decision for THAT; an app bundle is admitted because its operator
     // handed it to us — the choice of bundle is the trust decision, so there is
@@ -502,8 +542,9 @@ export async function bootTransportShell(
     // composed by the shell around whatever we pass here).
     admit: byPrivilege({
       base: () => true,
-      grants: { mount: (v) => toHex(v.author) === transportAuthorHex },
+      grants: { link: (v) => toHex(v.author) === transportAuthorHex },
     }),
+    answer: opts.answer,
     requestDeadlineMs: opts.timeoutMs,
     config: { ...(opts.config ?? {}), ...(opts.quota != null ? { quota: opts.quota } : {}) },
     realmMemoryBytes: opts.realmMemoryBytes,
@@ -522,7 +563,7 @@ export async function bootTransportShell(
  *  the realm factory, the transport bundle admitted first — with the driver's
  *  listeners started. Returns the shell AND the fs instance it was built with
  *  (a caller with no fs of its own must read the same backend the guest writes). */
-async function buildShell(opts: StorageNodeOptions, identity: Identity, cohort: Set<PeerId>): Promise<{ shell: Shell; fs: Fs }> {
+async function buildShell(opts: StorageNodeOptions, identity: Identity): Promise<{ shell: Shell; fs: Fs }> {
   // Normalise the operator override: derive windowTargetBytes from realmMemoryBytes
   // when not explicitly set (§3). realmMemoryBytes is host-only (the QuickJS heap
   // bound) — split it out of the config that becomes the guest's APP, and pass it to
@@ -535,9 +576,9 @@ async function buildShell(opts: StorageNodeOptions, identity: Identity, cohort: 
   return bootTransportShell({
     sodium: opts.sodium, identity, fs: opts.fs, channels: opts.channels,
     listen: opts.listen, wsListen: opts.wsListen, networkKey: opts.networkKey,
-    contactSecret: opts.contactSecret, admitPeer: opts.admitPeer,
+    contactSecret: opts.contactSecret, admitPeers: opts.admitPeers,
     connsPerPeer: opts.connsPerPeer, timeoutMs: opts.timeoutMs,
-    transportBlob: opts.transportBlob, livePeers: () => [...cohort],
+    transportBlob: opts.transportBlob, answer: opts.answer,
     now: opts.clock,
     config: { ...guestOverride, quota: opts.quota ?? DEFAULT_QUOTA_BYTES },
     realmMemoryBytes,

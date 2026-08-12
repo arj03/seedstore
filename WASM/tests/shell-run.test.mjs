@@ -8,7 +8,7 @@
 // binary never learns it is running storage.
 //
 // The shell's network is itself a signed bundle: `boot()` admits the kernel's
-// transport bundle (its author must clear the policy's `roles.transport` entry),
+// transport bundle (its author must clear the policy's `grants: { link: [...] }` entry),
 // standing the TransportHost driver up over the socket seam — here a per-node
 // view of the shared LoopbackNetwork fabric, exactly as a shell-run node on real
 // sockets would.
@@ -28,11 +28,17 @@ import {
   loadSodium, generateKeyPair, LoopbackNetwork, createConnectedCohort,
 } from "../build/host/node.js";
 import { toHex, bytesEqual, concatBytes, readU32BE } from "../build/host/util.js";
+import { Op } from "../build/host/protocol.js";
 import { buildBundle } from "./bundle-fixture.mjs";
 import { makeT } from "./harness.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const build = join(__dirname, "..", "build");
+// The per-request deadline. Generous, and it has to be: a request now crosses two
+// confined realms on each side — the app's guest calls the transport, the transport answers the
+// far end's `_host`, and the far end's shell dispatches into its own app's realm — where
+// it used to cross a host-side facade. 40 ms was a wire budget, not a realm budget.
+const TIMEOUT = 200;
 
 function file(n, seed = 1) {
   const out = new Uint8Array(n);
@@ -82,12 +88,12 @@ export async function run(t) {
       holders = await createConnectedCohort({
         // Match the shell's test-scale geometry so this tiny file spreads across the
         // cohort (the signed bundle ships PRODUCTION 256 KiB blocks).
-        count: 6, network: net, sodium, wasm: { bundleBlob }, config: { blockSize: 1024 }, timeoutMs: 40,
+        count: 6, network: net, sodium, wasm: { bundleBlob }, config: { blockSize: 1024 }, timeoutMs: TIMEOUT,
       });
 
       // The shell knows only its policy + the kernel; storage arrives as content. The
       // policy admits the bundle author for apps AND grants the transport bundle's
-      // author the `mount` privilege — the latter is what stands the shell's network up.
+      // author the `link` privilege — the latter is what stands the shell's network up.
       //
       // A cohort is MUTUAL: the holders must know the shell too, because a holder now
       // anchors a descriptor's author to a peer it knows (§4.3) — a valid signature from
@@ -97,13 +103,12 @@ export async function run(t) {
       shell = await boot({
         policyJson: JSON.stringify({
           authors: [toHex(authorId)],
-          grants: { mount: [transportHex] },
+          grants: { link: [transportHex] },
         }),
         dir: shellDir, identity: shellIdentity,
         channels: net.view(toHex(shellIdentity.publicKey)),
         listen: { host: "127.0.0.1", port: 0 },
-        timeoutMs: 40,
-        livePeers: () => holders.map((h) => h.peerId),
+        timeoutMs: TIMEOUT,
         // Operator config merges over the signed bundle config: bring blockSize back
         // to test scale (the bundle ships the PRODUCTION 256 KiB, which would make
         // this tiny test file single-block/replicated instead of RS across the cohort).
@@ -112,14 +117,17 @@ export async function run(t) {
       await shell.transport.start();
       for (const h of holders) await link(shell, toHex(shellIdentity.publicKey), h, new Set());
       const loaded = await shell.loadBundle(bundlePath);
+      // The app key is not optional: a node with a network has at least two apps loaded — the
+      // storage bundle and the transport, which is an ordinary app that claims `_net` (§12.10).
+      const appKey = appKeyFor(authorId, loaded.manifest.app);
       for (const m of loaded.manifest.modules) {
-        t.ok(shell.host.isBound(appKeyFor(authorId, loaded.manifest.app), m.name),
+        t.ok(shell.host.isBound(appKey, m.name),
           `module ${m.name} installed`);
       }
 
       // PUT, orchestrated by the confined guest the shell loaded.
       const data = file(9600, 7); // > k blocks → multi-chunk RS path
-      const r = await shell.runGuest("put", data);
+      const r = await shell.invoke(Op.PUT, data, appKey);
       const key = r.slice(0, 32), root = r.slice(48, 48 + readU32BE(r, 44));
       let holding = 0;
       for (const h of holders) if ((await h.store.list()).length > 0) holding++;
@@ -127,7 +135,7 @@ export async function run(t) {
       t.eq((await shell.fs.list()).length, 0, "the shell itself holds nothing — durability is the cohort's");
 
       // GET, same confined guest, reconstructing from the holders.
-      const got = await shell.runGuest("get", concatBytes([key, root]));
+      const got = await shell.invoke(Op.GET, concatBytes([key, root]), appKey);
       t.ok(bytesEqual(got, data), "PUT → GET round-trips: the generic shell ran storage over primitive caps");
 
       // A shell whose policy does not allow the bundle author refuses to load it.
@@ -136,7 +144,7 @@ export async function run(t) {
       const shell2 = await boot({
         policyJson: JSON.stringify({
           authors: [toHex(generateKeyPair(sodium).publicKey)],
-          grants: { mount: [transportHex] },
+          grants: { link: [transportHex] },
         }),
         dir: shell2Dir, identity: shell2Id, channels: net.view(toHex(shell2Id.publicKey)),
       });
@@ -178,10 +186,10 @@ export async function run(t) {
       shell = await boot({
         policyJson: JSON.stringify({
           authors: [toHex(authorId)],
-          grants: { mount: [transportHex] },
+          grants: { link: [transportHex] },
         }),
         dir: shellDir, identity: shellId, channels: net.view(toHex(shellId.publicKey)),
-        timeoutMs: 40,
+        timeoutMs: TIMEOUT,
       });
       await shell.transport.start();
       await shell.loadBundle(hiPath); // advances the (author, app) high-water mark to 5
