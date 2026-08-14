@@ -362,7 +362,7 @@ export async function run(t) {
       if (n === owner) continue;
       // Reputation now lives in the installed reputation handler the guest scores
       // through; the owner reads a holder's standing the same way (§13).
-      if (owner.score(n.identity.publicKey) > 0) anyPositive = true;
+      if (await owner.score(n.identity.publicKey) > 0) anyPositive = true;
     }
     t.ok(anyPositive, "holders that served the owner gained positive standing");
     nodes.forEach((n) => n.close());

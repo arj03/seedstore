@@ -421,9 +421,11 @@ export class StorageNode {
     return readU32BE(await this.runExclusive(() => this.invoke(Op.REPAIR, NO_ARG)), 0);
   }
 
-  /** Decayed reciprocity score this node holds for a peer (§13). */
-  score(peerPk: Uint8Array): number {
-    const res = this.host.callModule(this.appKey, "reputation", encodeScoreReq(peerPk, this.now()));
+  /** Decayed reciprocity score this node holds for a peer (§13). The reputation
+   *  module is the installed one, reached through the module table — async since the
+   *  table runs modules in their own worker (guest ABI 6). */
+  async score(peerPk: Uint8Array): Promise<number> {
+    const res = await this.host.callModule(this.appKey, "reputation", encodeScoreReq(peerPk, this.now()));
     if (!res || res.length < 8) return 0;
     return new DataView(res.buffer, res.byteOffset, 8).getFloat64(0, true);
   }

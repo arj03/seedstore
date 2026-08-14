@@ -4,11 +4,13 @@
 // host (host/storage-node.ts) only boots the kernel and runs this guest in one
 // realm. Every capability is reached through the one `host.call(name, bytes)` seam.
 // The seam is genuinely async where the world behind it is: the network (a call
-// to the reserved id `_net`) and every `fs/*` name resolve to a real Promise the guest
+// to the reserved id `_net`), every `fs/*` name, and since guest ABI 6 every bare
+// module call (the codec and reputation modules run in their own worker on the JS
+// targets, so their answers cross an isolate) resolve to a real Promise the guest
 // `await`s — so a fan-out is just `await Promise.all(peers.map(...))`, and the
 // holder's own store reads await like the initiator's round trips — while the pure
-// crypto (the `crypto/*` primitive catalog), clock and module-call
-// resolve synchronously to their bytes.
+// crypto (the `crypto/*` primitive catalog) and clock resolve synchronously to
+// their bytes.
 //
 // Two roles share this one program, this one realm, and this ONE entrypoint. `handle`
 // is reached two ways (seedkernel §12.2): a peer's inbound frame carries
@@ -83,10 +85,11 @@ function bytesToStr(b) { let s = ""; for (let i = 0; i < b.length; i++) s += Str
 // reputation kernel names arrive as the injected `APP` constant (prepended by
 // the driver), not as kernel names. The pure crypto primitives go through the
 // `crypto/` prefix of the catalog (`host.call("crypto/blake2b-256", …)` etc.) and
-// resolve to their bytes directly; the net and fs wrappers are `async` and
-// `await` their one round-trip name (the fs seam is asynchronous on every backend,
-// so the holder awaits its store ops exactly as the initiator awaits its round
-// trips).
+// resolve to their bytes directly; the net, fs and module-call wrappers are `async`
+// and `await` their one round-trip name (the fs seam is asynchronous on every
+// backend, so the holder awaits its store ops exactly as the initiator awaits its
+// round trips — and since guest ABI 6 a bare module call round-trips like an `fs/`
+// name, so the codec and reputation calls await too).
 
 // The op bytes of the codec handler (the guest owns its ABI). The reputation handler's
 // op bytes + request framing (REP_OBSERVE/REP_SCORE, encodeScoreReq/encodeObserveReq)
@@ -157,10 +160,16 @@ function verifyEnv(env) {
 // framing prepended a length-prefixed name, so every encode copied the blocks into a
 // request buffer and then copied that whole buffer again. Now the single `concat`
 // below is the only pass over them.
-function rsEncode(k, m, blockSize, dataBlocks) {
+//
+// Since guest ABI 6 a module call is ASYNC — the module runs in its own worker on the
+// JS targets, so its answer crosses an isolate — so every module call here is awaited
+// like an `fs/*` call, and the transforms built on them (encodeChunk, assembleChunk,
+// the ranker) are async in turn. The call still runs under the calling guest's
+// remaining execution budget (§4.3), which is what keeps the module interruptible.
+async function rsEncode(k, m, blockSize, dataBlocks) {
   const head = new Uint8Array(7);
   head[0] = CODEC_ENCODE; head[1] = k; head[2] = m; wU32(head, 3, blockSize);
-  const parity = splitBlocks(host.call(CODEC_NAME, concat([head, ...dataBlocks])), blockSize);
+  const parity = splitBlocks(await host.call(CODEC_NAME, concat([head, ...dataBlocks])), blockSize);
   // A codec that returns no/short parity (its handler scratch too small for a
   // k·blockSize request, or the module missing) would otherwise surface far away as
   // the descriptor's "blockIds.length must be k (replicated) or k+m (coded)" — or, worse,
@@ -171,7 +180,7 @@ function rsEncode(k, m, blockSize, dataBlocks) {
   }
   return parity;
 }
-function rsDecode(k, m, blockSize, present) {
+async function rsDecode(k, m, blockSize, present) {
   // Callers (assembleChunk, healCoded) already gate on present.length >= k, but
   // guard the codec seam itself so a short set is a clean throw, never a silently
   // truncated decode request (head[7] = use.length under k → garbage out).
@@ -181,14 +190,17 @@ function rsDecode(k, m, blockSize, present) {
   head[0] = CODEC_DECODE; head[1] = k; head[2] = m; wU32(head, 3, blockSize); head[7] = use.length;
   const idx = new Uint8Array(use.length);
   for (let i = 0; i < use.length; i++) idx[i] = use[i].index;
-  return splitBlocks(host.call(CODEC_NAME, concat([head, idx, ...use.map((p) => p.bytes)])), blockSize);
+  return splitBlocks(await host.call(CODEC_NAME, concat([head, idx, ...use.map((p) => p.bytes)])), blockSize);
 }
 function clockNow() { const b = host.call("clock/now", EMPTY); return rU32(b, 0) * 0x100000000 + rU32(b, 4); }
-function repScore(peerPk, t) {
-  return readF64LE(host.call(REP_NAME, encodeScoreReq(peerPk, t)));
+async function repScore(peerPk, t) {
+  return readF64LE(await host.call(REP_NAME, encodeScoreReq(peerPk, t)));
 }
 function repObserve(peerPk, t, pass) {
-  host.call(REP_NAME, encodeObserveReq(peerPk, t, pass)); // returns the new score; the guest doesn't need it
+  // Returns the new score; the guest doesn't need it. Fire-and-forget — the promise is
+  // dropped on purpose, and the catch is hygiene: a module call resolves (never
+  // rejects) but an unhandled rejection in the realm would surface as a job failure.
+  void host.call(REP_NAME, encodeObserveReq(peerPk, t, pass)).catch(() => {});
 }
 
 // ── local store over fs.* (the <hex>.blk / <hex>.dsc layout) ─────────────────
@@ -271,12 +283,20 @@ async function cohortPeers() { return decodePeers(await netOp("peers", EMPTY)); 
 // memoizes each DISTINCT peer's decayed score for its lifetime — reuse one across a
 // round and ranking many overlapping holder subsets (a large GET ranks the same
 // holders for thousands of ids) costs one crossing per peer, not one per (peer, id).
-// Scores decay negligibly within a round, so a shared `t` is fine.
+// Scores decay negligibly within a round, so a shared `t` is fine. The module call is
+// async since guest ABI 6, so the ranker's per-peer scores resolve in a Promise.all
+// before the sort — and what is memoized is the PROMISE, not the settled score, so two
+// scorings of one peer in the same fan-out share the one crossing the cache exists for
+// rather than both missing it while the first is still in flight.
 function makeRanker() {
   const t = clockNow();
-  const cache = new Map(); // peerHex → decayed score
-  const scoreOf = (p) => { let s = cache.get(p); if (s === undefined) { s = repScore(fromHex(p), t); cache.set(p, s); } return s; };
-  return (peers) => peers.length === 0 ? [] : peers.map((p) => ({ p, s: scoreOf(p) })).sort((a, b) => b.s - a.s).map((x) => x.p);
+  const cache = new Map(); // peerHex → Promise<decayed score>
+  const scoreOf = (p) => { let s = cache.get(p); if (s === undefined) cache.set(p, s = repScore(fromHex(p), t)); return s; };
+  return async (peers) => {
+    if (peers.length === 0) return [];
+    const scored = await Promise.all(peers.map(async (p) => ({ p, s: await scoreOf(p) })));
+    return scored.sort((a, b) => b.s - a.s).map((x) => x.p);
+  };
 }
 // One-shot ranker for callers that rank a single list (its own fresh cache).
 function rank(peers) { return makeRanker()(peers); }
@@ -473,14 +493,14 @@ function makeChunk(d, blocks, descriptor) {
 // that level) (§4.4), so a windowed encode is byte-identical to a whole-level one, and an
 // index chunk can never collide with a body chunk. `tailBytes` records how much of the
 // chunk is real, which is what a reader trims by instead of a manifest-wide file_size.
-function encodeChunk(source, localCi, globalCi, K, level) {
+async function encodeChunk(source, localCi, globalCi, K, level) {
   const c = APP;
   const plain = source.slice(localCi * c.k * c.blockSize, (localCi + 1) * c.k * c.blockSize);
   const kc = Math.max(1, Math.ceil(plain.length / c.blockSize));
   const ct = encrypt(K, level, globalCi, padTo(plain, kc * c.blockSize));
   const dataBlocks = splitBlocks(ct, c.blockSize);
   const blocks = kc === 1 ? new Array(c.m + 1).fill(dataBlocks[0])
-                          : [...dataBlocks, ...rsEncode(kc, c.m, c.blockSize, dataBlocks)];
+                          : [...dataBlocks, ...await rsEncode(kc, c.m, c.blockSize, dataBlocks)];
   const ids = kc === 1 ? new Array(c.m + 1).fill(hash(dataBlocks[0])) : blocks.map(hash);
   const d = { level, k: kc, m: c.m, blockSize: c.blockSize, tailBytes: plain.length, blockIds: ids };
   return makeChunk(d, blocks, signChunk(d));
@@ -501,7 +521,7 @@ function encodeChunk(source, localCi, globalCi, K, level) {
 // the cohort will take and the next pass retries the rest), which cannot raise it and so
 // passes no name.
 async function placeChunksBatched(jobs, what) {
-  const ranked = rank(await cohortPeers());
+  const ranked = await rank(await cohortPeers());
   // Each job draws from the ranked cohort minus the peers it must avoid. PUT excludes
   // nothing (a fresh chunk is nowhere yet); repair excludes the peers already holding
   // part of the chunk, so a restored copy lands somewhere new instead of being pushed at
@@ -717,7 +737,7 @@ async function gatherBlocks(descriptors, holders) {
         if (need === 0) break;
         const h = toHex(id);
         if (got.has(h) || queued.has(h)) continue;
-        const cands = rankRound([...(holders.get(h) || new Set())].filter((p) => !triedOf(h).has(p)));
+        const cands = await rankRound([...(holders.get(h) || new Set())].filter((p) => !triedOf(h).has(p)));
         if (cands.length === 0) continue;
         let list = byPeer.get(cands[0]); if (!list) byPeer.set(cands[0], (list = []));
         list.push(h);
@@ -758,7 +778,7 @@ async function gatherBlocks(descriptors, holders) {
 // concatenate them (systematic RS — the common case, and the only case at k = 1, whose
 // one listed block is data). Anything else decodes. Distinct matters because a k = 1
 // descriptor lists its block m+1 times, so the same bytes must not fill two rows.
-function assembleChunk(d, got) {
+async function assembleChunk(d, got) {
   const k = d.k;
   const present = [], seen = new Set();
   for (let i = 0; i < d.blockIds.length && present.length < k; i++) {
@@ -773,7 +793,7 @@ function assembleChunk(d, got) {
     const ordered = present.filter((p) => p.index < k).sort((a, b) => a.index - b.index).slice(0, k);
     if (ordered.length === k && ordered.every((p, i) => p.index === i)) return concat(ordered.map((p) => p.bytes));
   }
-  return concat(rsDecode(k, d.m, d.blockSize, present));
+  return concat(await rsDecode(k, d.m, d.blockSize, present));
 }
 
 // ── PUT (§6) ─────────────────────────────────────────────────────────────────
@@ -815,7 +835,7 @@ async function placeWindow(slice, baseByteOffset, K, level) {
   const baseCi = Math.floor(baseByteOffset / chunkData);
   const numChunks = Math.max(1, Math.ceil(slice.length / chunkData));
   const chunks = [];
-  for (let lc = 0; lc < numChunks; lc++) chunks.push(encodeChunk(slice, lc, baseCi + lc, K, level));
+  for (let lc = 0; lc < numChunks; lc++) chunks.push(await encodeChunk(slice, lc, baseCi + lc, K, level));
   await placeChunksBatched(chunks, "chunk");
   return chunks;
 }
@@ -972,7 +992,7 @@ async function reconstructChunks(ds, K, chunkStart) {
     // Nonce = (this chunk's own level, its index within that level) (§4.4), matching
     // encodeChunk; tailBytes trims this chunk's zero padding, whether it is the file's
     // last chunk or an index level's.
-    const plain = decrypt(K, d.level, chunkStart + i, assembleChunk(d, got));
+    const plain = decrypt(K, d.level, chunkStart + i, await assembleChunk(d, got));
     parts.push(plain.length === d.tailBytes ? plain : plain.subarray(0, d.tailBytes));
   }
   return concat(parts);
@@ -1114,8 +1134,8 @@ async function heal(d, descEnv, holders, verified) {
       if (b) present.push({ index: idx, bytes: b });
     }
     if (present.length >= d.k) {
-      const data = rsDecode(d.k, d.m, d.blockSize, present);
-      const all = [...data, ...rsEncode(d.k, d.m, d.blockSize, data)];
+      const data = await rsDecode(d.k, d.m, d.blockSize, present);
+      const all = [...data, ...await rsEncode(d.k, d.m, d.blockSize, data)];
       for (let i = 0; i < all.length; i++) {
         // Re-certify against the already-signed id (§9): a mismatch means a bad
         // input/decode — drop it, never propagate (a poisoned descriptor can't mint).
@@ -1434,7 +1454,7 @@ async function doRequest(arg) {
 // path: the first real PUT encodes the WHOLE file before the first byte reaches
 // the wire, so on a cold realm that tax (~0.25 s for a 10 MB PUT) lands entirely
 // in front of the transfer. Self-contained and idempotent; the result is discarded.
-function doWarm() {
+async function doWarm() {
   const c = APP;
   const K = randomKey();
   const perRound = Math.max(1, c.k) * c.blockSize;
@@ -1445,13 +1465,13 @@ function doWarm() {
   // tier up), capped at 64 rounds so a tiny test-scale blockSize can't spin forever.
   const rounds = Math.min(64, Math.max(1, Math.ceil((4 * 1024 * 1024) / perRound)));
   for (let r = 0; r < rounds; r++) {
-    const chunk = encodeChunk(buf, 0, 0, K, LEVEL_BODY);                        // encrypt + RS-encode + hash + sign
+    const chunk = await encodeChunk(buf, 0, 0, K, LEVEL_BODY);                       // encrypt + RS-encode + hash + sign
     const sd = verifyDescriptor(chunk.descriptor);                               // Ed25519 verify (+ §16 scope preimage)
     // Reconstruct from the k data blocks to warm the GET-side decode seam too — at k ≥ 2
     // only, the same test the real path makes: a k = 1 deployment never reaches the codec
     // on PUT, GET, or repair, so there is no cold-JIT tax there to pay down.
     if (sd && sd.descriptor.k > 1) {
-      rsDecode(c.k, c.m, c.blockSize, chunk.slotBlocks.slice(0, c.k).map((bytes, index) => ({ index, bytes })));
+      await rsDecode(c.k, c.m, c.blockSize, chunk.slotBlocks.slice(0, c.k).map((bytes, index) => ({ index, bytes })));
     }
   }
   return EMPTY;
