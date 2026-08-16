@@ -17,18 +17,38 @@
 // two 16-byte multiply tables depend only on the input row, not on which output
 // column we are filling, so the inner loop computes a whole STRIP of 8 output
 // vectors (128 bytes) per coefficient-table load. That amortizes the table
-// loads, the coefficient fetch and the zero-skip branch over 8 columns, and
-// gives the core 8 independent accumulator chains to overlap (the XOR-accumulate
-// across the k inputs is otherwise a latency-bound dependency). A 16-byte SIMD
-// step and then a scalar tail (the same MUL table, one indexed load per byte)
-// finish a block whose size is not a multiple of 128. Encoding stays fully
-// deterministic — same (k, m, bytes) → byte-identical parity — which is what
-// lets a repairer regenerate a block keylessly (§9).
+// loads and the coefficient fetch over 8 columns, and gives the core 8
+// independent accumulator chains to overlap (the XOR-accumulate across the k
+// inputs is otherwise a latency-bound dependency). A 16-byte SIMD step and then
+// a scalar tail (the same MUL table, one indexed load per byte) finish a block
+// whose size is not a multiple of 128. Encoding stays fully deterministic —
+// same (k, m, bytes) → byte-identical parity — which is what lets a repairer
+// regenerate a block keylessly (§9).
+//
+// A DECODE row's zero coefficients are dropped once, into a compacted term list,
+// rather than skipped by a branch on every strip. Arithmetically the two are the
+// same — a zero coefficient contributes nothing to an XOR accumulation, so the
+// sum is byte-identical either way and §9's keyless repair still holds — but not
+// in cost: a skipped term still costs a loop iteration, and the rows this codec
+// decodes are mostly zeros (see rsDecode). Dropping them also cuts what the
+// loader's module-call bound charges, since its termination check is billed per
+// loop back-edge (seedkernel SECURITY §14.1).
+//
+// Encode rows are dense, so they get none of that and must not pay for it. The
+// inner loop below is on a codegen cliff — measured on the loader's wazero, a
+// 64 KiB RS(10,6) encode costs ~8% MORE if the zero test is removed from it, and
+// another ~8% if the source address is loaded rather than computed, even though
+// both changes only ever remove work. Neither shape is worth defending on its
+// merits; what is worth defending is that the encode path compiles to what it
+// compiled to before. Hence `dense` below, and hence the zero test staying in a
+// loop whose terms are all non-zero. Re-measure before touching either.
 
 import { gfMul, gfInv, mulBase, mulHiBase } from "./gf256";
 
-// Scratch for the per-row coefficient vector (k ≤ 32 in the codec).
+// Scratch for one output row's compacted term list (k ≤ 32 in the codec): the
+// non-zero coefficients, and the source block each one multiplies.
 const COEF = new Uint8Array(64);
+const SRC = new Int32Array(64);
 
 // Cauchy coefficient for parity row p (0..m) and data column j (0..k):
 //   C[p][j] = 1 / (x_p XOR y_j),  x_p = k + p,  y_j = j.
@@ -49,33 +69,64 @@ function gfMulSimd(d: v128, lowT: v128, highT: v128, mask: v128): v128 {
 
 const STRIDE: i32 = 128; // 8 v128 lanes per register-blocked step
 
-// One output block = Σ_j coef[j] · src[j·bs ..] over GF(2^8). `srcPtr` holds k
-// contiguous blocks of `bs` bytes; `coefPtr` holds the k coefficients. Shared by
-// encode (parity rows) and decode (recovered data rows): both are the same MDS
-// linear combination, only the source blocks and coefficients differ.
+// Drop the zero coefficients of one generator/inverse row into the term list:
+// COEF[t] is a non-zero coefficient and SRC[t] the base of the block it
+// multiplies. Returns the term count. Called once per output block, outside the
+// strip loop, so the zeros cost one pass over k rather than one iteration of the
+// inner loop per strip.
+@inline
+function compactRow(
+  k: i32, bs: i32, rowPtr: i32, srcPtr: i32, coefPtr: i32, srcOffPtr: i32,
+): i32 {
+  let nz = 0;
+  for (let j = 0; j < k; j++) {
+    const c = load<u8>(rowPtr + j) as i32;
+    if (c == 0) continue;
+    store<u8>(coefPtr + nz, c as u8);
+    store<i32>(srcOffPtr + (nz << 2), srcPtr + j * bs);
+    nz++;
+  }
+  return nz;
+}
+
+// One output block = Σ_t COEF[t] · src(t) over GF(2^8), for the `nz` terms of a
+// row. Shared by encode (parity rows) and decode (recovered data rows): both are
+// the same MDS linear combination, only the source blocks and coefficients
+// differ. nz == 0 is a legal row and writes zeros.
+//
+// `dense` picks how src(t) is found. It is a compile-time argument — this is
+// @inline, so each caller compiles its own copy and the branch folds away:
+//
+//   dense  — term t reads block t, at srcPtr + t·bs: encode's k terms are its k
+//            data blocks in order, so the address is arithmetic on the loop
+//            counter and nothing waits on memory for it.
+//   sparse — term t reads the block at SRC[t], wherever compactRow found it.
+//
+// The zero test is dead in both (compactRow already removed the zeros, and encode
+// has none) but stays for the codegen reason in the header comment.
 @inline
 function gfMacBlock(
-  k: i32, bs: i32, srcPtr: i32, coefPtr: i32, outPtr: i32,
-  mbase: i32, mhbase: i32, mask: v128,
+  nz: i32, bs: i32, coefPtr: i32, srcOffPtr: i32, outPtr: i32,
+  mbase: i32, mhbase: i32, mask: v128, dense: bool, srcPtr: i32,
 ): void {
   const blocked = bs & ~(STRIDE - 1);
   let p = 0;
 
   // Register-blocked body: 8 output vectors per coefficient-table load. The 8
-  // multiplies within a j are independent (same tables, different data) and the
-  // 8 accumulator chains across j are independent, so the core keeps many ops in
-  // flight instead of stalling on the XOR-accumulate latency.
+  // multiplies within a term are independent (same tables, different data) and
+  // the 8 accumulator chains across terms are independent, so the core keeps
+  // many ops in flight instead of stalling on the XOR-accumulate latency.
   for (; p < blocked; p += STRIDE) {
     let a0 = i8x16.splat(0); let a1 = i8x16.splat(0);
     let a2 = i8x16.splat(0); let a3 = i8x16.splat(0);
     let a4 = i8x16.splat(0); let a5 = i8x16.splat(0);
     let a6 = i8x16.splat(0); let a7 = i8x16.splat(0);
-    for (let j = 0; j < k; j++) {
-      const c = load<u8>(coefPtr + j) as i32;
+    for (let t = 0; t < nz; t++) {
+      const c = load<u8>(coefPtr + t) as i32;
       if (c == 0) continue;
       const lowT = v128.load(mbase + (c << 8));
       const highT = v128.load(mhbase + (c << 4));
-      const b = srcPtr + j * bs + p;
+      const b = (dense ? srcPtr + t * bs : load<i32>(srcOffPtr + (t << 2))) + p;
       a0 = v128.xor(a0, gfMulSimd(v128.load(b),       lowT, highT, mask));
       a1 = v128.xor(a1, gfMulSimd(v128.load(b, 16),   lowT, highT, mask));
       a2 = v128.xor(a2, gfMulSimd(v128.load(b, 32),   lowT, highT, mask));
@@ -95,22 +146,22 @@ function gfMacBlock(
   const simdLen = bs & ~15;
   for (; p < simdLen; p += 16) {
     let acc = i8x16.splat(0);
-    for (let j = 0; j < k; j++) {
-      const c = load<u8>(coefPtr + j) as i32;
-      if (c == 0) continue;
+    for (let t = 0; t < nz; t++) {
+      const c = load<u8>(coefPtr + t) as i32;
       const lowT = v128.load(mbase + (c << 8));
       const highT = v128.load(mhbase + (c << 4));
-      acc = v128.xor(acc, gfMulSimd(v128.load(srcPtr + j * bs + p), lowT, highT, mask));
+      const b = (dense ? srcPtr + t * bs : load<i32>(srcOffPtr + (t << 2))) + p;
+      acc = v128.xor(acc, gfMulSimd(v128.load(b), lowT, highT, mask));
     }
     v128.store(outPtr + p, acc);
   }
   // Scalar tail.
   for (; p < bs; p++) {
     let acc: i32 = 0;
-    for (let j = 0; j < k; j++) {
-      const c = load<u8>(coefPtr + j) as i32;
-      if (c == 0) continue;
-      acc ^= load<u8>(mbase + (c << 8) + (load<u8>(srcPtr + j * bs + p) as i32)) as i32;
+    for (let t = 0; t < nz; t++) {
+      const c = load<u8>(coefPtr + t) as i32;
+      const b = dense ? srcPtr + t * bs : load<i32>(srcOffPtr + (t << 2));
+      acc ^= load<u8>(mbase + (c << 8) + (load<u8>(b + p) as i32)) as i32;
     }
     store<u8>(outPtr + p, acc as u8);
   }
@@ -123,9 +174,13 @@ export function rsEncode(k: i32, m: i32, bs: i32, dataPtr: i32, outPtr: i32): vo
   const coefPtr = COEF.dataStart as i32;
   const mask = i8x16.splat(0x0f);
 
+  // Every term is present on an encode: a Cauchy coefficient is 1/(x_p ⊕ y_j)
+  // with x_p = k + p ≥ k > j = y_j, so the operand is never zero and neither is
+  // its inverse. There is nothing for compactRow to drop, and the k source blocks
+  // are the k data blocks in order — the dense form.
   for (let i = 0; i < m; i++) {
     for (let j = 0; j < k; j++) store<u8>(coefPtr + j, cauchy(k, i, j));
-    gfMacBlock(k, bs, dataPtr, coefPtr, outPtr + i * bs, mbase, mhbase, mask);
+    gfMacBlock(k, bs, coefPtr, 0, outPtr + i * bs, mbase, mhbase, mask, true, dataPtr);
   }
 }
 
@@ -199,17 +254,26 @@ export function rsDecode(
   if (!gfInvertMatrix(k, mPtr, invPtr, augPtr)) return false;
 
   // data[j] = Σ_r inv[j][r] · present[r] — same SIMD multiply-accumulate as
-  // encode. When all k present blocks are data rows the inverse is a permutation
-  // (each row has a single 1), so the zero-skip leaves one swizzle per output —
-  // the common single-loss read stays cheap (§4.1, §21).
+  // encode, over the terms that are actually there.
   const mbase = mulBase();
   const mhbase = mulHiBase();
   const coefPtr = COEF.dataStart as i32;
+  const srcOffPtr = SRC.dataStart as i32;
   const mask = i8x16.splat(0x0f);
 
   for (let j = 0; j < k; j++) {
-    for (let r = 0; r < k; r++) store<u8>(coefPtr + r, load<u8>(invPtr + j * k + r));
-    gfMacBlock(k, bs, blocksPtr, coefPtr, outPtr + j * bs, mbase, mhbase, mask);
+    const nz = compactRow(k, bs, invPtr + j * k, blocksPtr, coefPtr, srcOffPtr);
+    // A row that is a single 1 says this data block is one we still hold. That
+    // is the ordinary case rather than a corner: the matrix inverted above has
+    // an identity row for every surviving data block, and so does its inverse,
+    // so a read that lost one block reconstructs one block and copies k-1 of
+    // them (§4.1, §21). Copying is not an approximation — the linear
+    // combination it replaces would reproduce those bytes exactly.
+    if (nz == 1 && (load<u8>(coefPtr) as i32) == 1) {
+      memory.copy(outPtr + j * bs, load<i32>(srcOffPtr), bs);
+      continue;
+    }
+    gfMacBlock(nz, bs, coefPtr, srcOffPtr, outPtr + j * bs, mbase, mhbase, mask, false, 0);
   }
   return true;
 }
