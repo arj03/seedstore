@@ -190,7 +190,20 @@ async function rsDecode(k, m, blockSize, present) {
   head[0] = CODEC_DECODE; head[1] = k; head[2] = m; wU32(head, 3, blockSize); head[7] = use.length;
   const idx = new Uint8Array(use.length);
   for (let i = 0; i < use.length; i++) idx[i] = use[i].index;
-  return splitBlocks(await host.call(CODEC_NAME, concat([head, idx, ...use.map((p) => p.bytes)])), blockSize);
+  const data = splitBlocks(await host.call(CODEC_NAME, concat([head, idx, ...use.map((p) => p.bytes)])), blockSize);
+  // The seam check rsEncode makes above, on the side where a miss costs more. The
+  // geometry is the DESCRIPTOR's, never this node's config (§4.1), so a chunk written
+  // under a k·blockSize past this codec handler's scratch reaches here on an ordinary
+  // GET — and the module answers short or empty rather than throwing. Unchecked, that
+  // is a chunk silently reassembled from fewer blocks than it has: content addressing
+  // verified the INPUT blocks (§4.2) and nothing on the read path re-verifies the
+  // codec's OUTPUT (heal re-certifies its own against the signed ids, §9, which is why
+  // repair degrades where a read would corrupt). A short decode must be an error.
+  if (data.length !== k) {
+    throw new Error("rsDecode: codec returned " + data.length + " blocks, expected " + k +
+      " — chunk (k=" + k + " × blockSize=" + blockSize + ") likely exceeds the codec handler's scratch");
+  }
+  return data;
 }
 function clockNow() { const b = host.call("clock/now", EMPTY); return rU32(b, 0) * 0x100000000 + rU32(b, 4); }
 async function repScore(peerPk, t) {
@@ -664,7 +677,9 @@ async function placeChunksBatched(jobs, what) {
 // unanswered blocks as a fresh task; report present/absent as final verdicts, so `apply`
 // (and the tried/§8-miss bookkeeping on it) only ever sees decided blocks. serveFetch
 // always serves the first present block, so each re-request round resolves ≥1 block, which
-// terminates. A genuine miss is ABSENT even past the cap, so it is ruled a miss in one
+// terminates — an honest holder's property, so the loop CHECKS it (a round that decides
+// nothing is ruled a miss, below) instead of taking the answering peer's word for its own
+// termination. A genuine miss is ABSENT even past the cap, so it is ruled a miss in one
 // round trip.
 async function runFetchTasks(byPeer, maxIds, apply) {
   const me = myPeer();
@@ -694,6 +709,19 @@ async function runFetchTasks(byPeer, maxIds, apply) {
       for (let i = 0; i < slice.length; i++) {
         if (decoded[i] === FETCH_UNANSWERED) { reSlice.push(slice[i]); reIds.push(ids[i]); }
         else { aSlice.push(slice[i]); aIds.push(ids[i]); aBlocks.push(decoded[i] || null); }
+      }
+      // Re-queue the unanswered ids only if this round DECIDED something — the
+      // strictly-smaller-slice invariant, checked rather than assumed. Every round
+      // resolving ≥1 block is a property of an honest serveFetch, not of the wire: a peer
+      // that answers UNANSWERED for every id it was asked has resolved nothing, and
+      // re-queueing it would append a same-size task forever — an unbounded loop, and
+      // unbounded `tasks` growth in this realm, that ONE holder could hang any GET or
+      // repair pass with. No progress therefore rules those ids absent for this peer,
+      // which is what a claimed-but-never-served block is: a §8 miss that scores the
+      // holder down and sends the reader to the next holder of the block.
+      if (reSlice.length && aSlice.length === 0) {
+        for (let i = 0; i < reSlice.length; i++) { aSlice.push(reSlice[i]); aIds.push(reIds[i]); aBlocks.push(null); }
+        reSlice.length = 0;
       }
       if (reSlice.length) tasks.push({ peer, slice: reSlice, ids: reIds });
       if (aSlice.length) apply(results[ri].peer, aSlice, aIds, aBlocks);
@@ -1465,7 +1493,13 @@ async function doWarm() {
   // tier up), capped at 64 rounds so a tiny test-scale blockSize can't spin forever.
   const rounds = Math.min(64, Math.max(1, Math.ceil((4 * 1024 * 1024) / perRound)));
   for (let r = 0; r < rounds; r++) {
-    const chunk = await encodeChunk(buf, 0, 0, K, LEVEL_BODY);                       // encrypt + RS-encode + hash + sign
+    // `r` is the chunk index, which is the NONCE counter (encrypt(K, level, globalCi, …)):
+    // one key with a fixed counter would reuse one keystream every round, which is the
+    // shape of a two-time pad. Nothing here leaves the realm and the plaintext is a
+    // constant buffer, so there is nothing to leak — but this loop is the compact example
+    // of "encrypt a sequence of chunks" in the file, and it should not be the one someone
+    // copies. The counter advances, exactly as the real PUT path advances it.
+    const chunk = await encodeChunk(buf, 0, r, K, LEVEL_BODY);                       // encrypt + RS-encode + hash + sign
     const sd = verifyDescriptor(chunk.descriptor);                               // Ed25519 verify (+ §16 scope preimage)
     // Reconstruct from the k data blocks to warm the GET-side decode seam too — at k ≥ 2
     // only, the same test the real path makes: a k = 1 deployment never reaches the codec

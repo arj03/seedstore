@@ -11,7 +11,7 @@
 import {
   LoopbackNetwork, loadWasmBytes, loadSodium, createConnectedCohort, StorageNode,
 } from "../build/host/node.js";
-import { encodeFetchBatchReq, decodeFetchBatchRes, encodeStoreBatch, decodeMask, FETCH_UNANSWERED, VERDICT_ACCEPTED, VERDICT_DECLINED, VERDICT_QUOTA, VERDICT_SIBLING, VERDICT_DESCRIPTOR, MsgType } from "../build/host/protocol.js";
+import { encodeFetchBatchReq, decodeFetchBatchReq, decodeFetchBatchRes, encodeFetchBatchRes, encodeStoreBatch, decodeMask, FETCH_UNANSWERED, VERDICT_ACCEPTED, VERDICT_DECLINED, VERDICT_QUOTA, VERDICT_SIBLING, VERDICT_DESCRIPTOR, MsgType } from "../build/host/protocol.js";
 import { parseSignedDescriptor, signDescriptor, encodeDescriptorList } from "../build/host/manifest.js";
 import { MemoryFs } from "seedkernel-wasm/fs-memory";
 import { toHex, fromHex, bytesEqual } from "../build/host/util.js";
@@ -467,6 +467,64 @@ export async function run(t) {
     t.eq(served[1], FETCH_UNANSWERED, "the second block is marked UNANSWERED by the holder's smaller cap");
 
     t.ok(bytesEqual(await owner.get(put.root, put.key), data), "GET completes across the cap mismatch (unanswered block re-requested, not marked tried)");
+    nodes.forEach((n) => n.close());
+    net.close();
+  }
+
+  t.group("a holder that answers UNANSWERED forever cannot hang a GET (§18)");
+  {
+    // The mismatch above is the honest use of UNANSWERED, and its re-request loop
+    // terminates because serveFetch always serves the first present block — so each round
+    // decides ≥1 id and the re-asked slice strictly shrinks. That is an honest HOLDER's
+    // property, not a property of the wire: a peer that tags EVERY id UNANSWERED decides
+    // nothing, and a reader that took its word would re-ask the same slice forever, one
+    // peer hanging any GET (and growing the reader's task list without bound). The reader
+    // checks the invariant instead — a round that decides nothing rules those ids absent
+    // for that peer, a §8 miss — so the GET ends by its own verdict. Both holders lying is
+    // the case with no honest fallback left: the GET must FAIL, and failing is the point.
+    const net = new LoopbackNetwork();
+    const cfg = { k: 1, m: 1, blockSize: 1024 };  // one block per chunk, m+1 = 2 copies → both holders
+    // Honest on HAVE/OFFER/STORE, so these holders genuinely admit the blocks and
+    // advertise them; only the serving is a lie.
+    const stallFetch = (_from, _proto, payload) => {
+      if (payload[0] !== MsgType.FETCH) return null;
+      const ids = decodeFetchBatchReq(payload.slice(1));
+      return Promise.resolve(encodeFetchBatchRes(ids.map(() => FETCH_UNANSWERED)));
+    };
+    const mk = (answer) => {
+      const identity = sodium.crypto_sign_keypair();
+      return StorageNode.create({
+        sodium, bundleBlob: wasm.bundleBlob, identity,
+        channels: net.view(toHex(identity.publicKey)), listen: { host: "127.0.0.1", port: 0 },
+        config: cfg, timeoutMs: TIMEOUT, answer,
+      });
+    };
+    const owner = await mk(undefined);
+    const nodes = [owner, await mk(stallFetch), await mk(stallFetch)];
+    for (let i = 0; i < nodes.length; i++) {
+      for (let j = i + 1; j < nodes.length; j++) await StorageNode.connect(nodes[i], nodes[j]);
+    }
+
+    const data = file(2048, 53);                  // 2 chunks, each block on both holders
+    const put = await owner.put(data);            // PUT is unaffected — the lie is on the read side
+
+    // Race a deadline so a REGRESSION fails this test loudly instead of hanging the suite
+    // (the unbounded loop never returns). Closing the nodes afterwards is what frees a
+    // regressed loop: its next round trip finds every peer unreachable.
+    let timer = null;
+    const deadline = new Promise((_, rej) => {
+      timer = setTimeout(() => rej(new Error("deadline: the GET never returned")), 10_000);
+    });
+    let err = null;
+    try { await Promise.race([owner.get(put.root, put.key), deadline]); } catch (e) { err = e; }
+    clearTimeout(timer);
+    t.ok(!!err, "the GET ends instead of reconstructing bytes no holder will serve");
+    // Ending is not enough — it must end with the COHORT's verdict. An unguarded re-ask
+    // loop does eventually die, on the realm's execution budget, but only after burning
+    // that whole budget on one peer's lie and after reporting an internal seam error in
+    // place of the §8 miss the cohort actually has. So the message is the assertion.
+    t.ok(err && /fewer than k blocks/.test(err.message),
+      `it ends on its own §8 verdict, not the realm's execution budget (${err && err.message.slice(0, 70)})`);
     nodes.forEach((n) => n.close());
     net.close();
   }
