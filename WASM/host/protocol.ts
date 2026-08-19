@@ -51,6 +51,7 @@ export const Op = {
   GET_NEXT: "getNext",      // the next window of plaintext
   REPAIR: "repair",         // one repair pass → [replaced u32]
   REQUEST: "request",       // one control-plane message: [peer 32][type u8][payload] → [ok u8][resp]
+  SCORE: "score",           // this node's decayed standing for a peer: [peer 32] → [score f64 LE]
   WARM: "warm",             // JIT warm-up, no result
 } as const;
 

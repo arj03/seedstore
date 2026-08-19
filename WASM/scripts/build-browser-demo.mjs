@@ -138,11 +138,30 @@ await copy(join(build, "host", "tier2-guest.js"), join(out, "tier2-guest.js"));
 // page imports them, so today they are only dead weight — but dead weight that makes
 // the served tree look like it depends on packages it does not (crypto-node's bare
 // `libsodium-wrappers-sumo` is why the import map used to carry a sumo entry it never
-// needed). Skip them on the property that makes them node-only, a `node:` import, and
-// assert below that nothing staged imports one — so the rule can never silently drop a
+// needed). Skip them on the property that makes them node-only, a STATIC `node:` import,
+// and assert below that nothing staged imports one — so the rule can never silently drop a
 // module a page actually needs.
+//
+// Static is the whole test, for the same reason the walk below applies it: a static
+// `node:` import is rejected by the browser before a line of the module runs, so it IS a
+// Node-host module. A DYNAMIC one is a branch — the kernel's module table spawns a DOM
+// `Worker` when there is one and only reaches for `node:worker_threads` when there is
+// not, which is one implementation serving both targets. Skipping it would drop the
+// module every page's shell needs to stand its WASM modules up.
+// A specifier is `from "x"`, `import("x")`, or a bare side-effect `import "x"` at the
+// start of a statement. Kept deliberately tight — no newline inside the quotes and no
+// newline before them — so prose in a comment ("…the import kind…") followed by an
+// unrelated string literal cannot read as an import. The `import(` form is captured
+// separately because static and dynamic differ in what they PROVE about a `node:`
+// specifier — see `isNodeOnly` just below and the node: case in the walk further down.
+const SPEC = /(?:\bfrom[ \t]*|(\bimport[ \t]*\([ \t]*)|(?:^|[;}])[ \t]*import[ \t]*)["']([^"'\n]+)["']/gm;
 const skippedNodeOnly = new Set(); // dest paths deliberately NOT staged
-const isNodeOnly = (src) => /["']node:[\w/.-]+["']/.test(readFileSync(src, "utf8"));
+const isNodeOnly = (src) => {
+  for (const [, dynamic, spec] of readFileSync(src, "utf8").matchAll(SPEC)) {
+    if (spec.startsWith("node:") && !dynamic) return true;
+  }
+  return false;
+};
 async function copyJs(srcDir, dstDir) {
   mkdirSync(dstDir, { recursive: true });
   for (const name of readdirSync(srcDir)) {
@@ -294,13 +313,6 @@ for (const page of ["index.html", "p2p.html"]) {
 // imports through the staged files, resolve bare ones through that page's own map, and
 // fail here with the file that named the specifier. Only what a page can actually reach
 // is checked, so a module staged for the OTHER page (net-rtc) needs no entry in this one.
-// A specifier is `from "x"`, `import("x")`, or a bare side-effect `import "x"` at the
-// start of a statement. Kept deliberately tight — no newline inside the quotes and no
-// newline before them — so prose in a comment ("…the import kind…") followed by an
-// unrelated string literal cannot read as an import. The `import(` form is captured
-// separately because static and dynamic differ in what they PROVE about a `node:`
-// specifier — see the node: case in the walk below.
-const SPEC = /(?:\bfrom[ \t]*|(\bimport[ \t]*\([ \t]*)|(?:^|[;}])[ \t]*import[ \t]*)["']([^"'\n]+)["']/gm;
 function importMapOf(html) {
   const m = html.match(/<script type="importmap">([\s\S]*?)<\/script>/);
   if (!m) throw new Error("page has no import map");

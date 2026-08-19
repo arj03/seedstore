@@ -90,7 +90,7 @@ function scopedBridge(sodium: Sodium, authorPk: Uint8Array, authorSk: Uint8Array
         names: UNRESTRICTED_NAMES,
         signScope: appSignScope(key, scopeAuthor, STORAGE_APP),
       },
-      modules: { call: () => null, has: () => false },
+      modules: { names: new Set(), call: () => null },
     });
     byKey.set(cacheKey, bridge);
   }

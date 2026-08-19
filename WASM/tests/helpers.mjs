@@ -1,13 +1,13 @@
-// Shared test scaffolding: stand up a ModuleTable with the loader's admission
-// policy wired, plus install helpers. Mirrors
-// seedkernel's tests/run.mjs makeHost. There is no signature wrapper any more —
-// authenticity is the transport's job (the AKE channel), so the host carries
-// no per-message signing (seedkernel "Drop the whole envelope + signing").
+// Shared test scaffolding: the one libsodium, the wasm paths, and the store helpers
+// a test reaches around the protocol with. There is no module-table helper any more —
+// a bundle's modules are private to its slot (seedkernel §4), so nothing outside the
+// guest can hold or call them, and no signature wrapper either: authenticity is the
+// transport's job (the AKE channel).
 
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { ModuleTable, loadCrypto } from "seedkernel-wasm";
+import { loadCrypto } from "seedkernel-wasm";
 
 // One libsodium for the whole stack: the sumo instance the host bundles (§16).
 const sodium = await loadCrypto();
@@ -28,16 +28,6 @@ export async function ensureSodium() {
 export function newKey() {
   const kp = sodium.crypto_sign_keypair();
   return { publicKey: kp.publicKey, privateKey: kp.privateKey };
-}
-
-/** A bare ModuleTable — just the module table (§3). It touches no crypto and holds no
- *  admission policy any more (admission is the bundle loader's job, §12.4); a reference
- *  node authors its own modules and binds them directly. No signature wrapper either:
- *  authenticity is the transport's job now. */
-export async function loadHost() {
-  await sodium.ready;
-  const host = new ModuleTable();
-  return { host };
 }
 
 /** Count block-ids with ≥1 *live* holder — an online cohort node whose store

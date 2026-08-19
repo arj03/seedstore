@@ -42,11 +42,14 @@ import {
 } from "./core.js";
 import { STORAGE_APP } from "./manifest.js";
 import { Op } from "./protocol.js";
-import { encodeScoreReq } from "./reputation-core.js";
 import { toHex, fromHex, readU32BE, readU64BE, concatBytes } from "./util.js";
 import {
-  createShell, ModuleTable, scopedFs, byPrivilege, type Shell, type ModuleLookup, type RealmFactory,
+  createShell, scopedFs, byPrivilege, type Shell, type RealmFactory,
 } from "seedkernel-wasm/shell-core";
+// The JS target's builder for a bundle's private pure modules (seedkernel §4): a slot's
+// modules are its own now, so the host hands the shell a builder rather than a table it
+// could call into.
+import { ModuleTable } from "seedkernel-wasm/module-table";
 import { FreshnessMarks, appKeyFor, appScopeFor, verifyBundle, type LoadedBundle } from "seedkernel-wasm/bundle";
 import type { ChannelFactoryLike } from "./loopback.js";
 import type { Sodium } from "./sodium.js";
@@ -176,11 +179,12 @@ export class StorageNode {
   readonly crypto: Crypto;
   readonly sodium: Sodium;
   readonly config: StorageConfig;
-  /** The module table, exposed through ModuleLookup (callModule + isBound)
-   *   without any install path — the bind is solely the bundle loader's job. */
-  readonly host: ModuleLookup;
+  /** The logical names of the modules this deployment's bundle installs — read off the
+   *  verified manifest, which is the whole of what a host may know about them now: a
+   *  slot's modules are private to its guest, so there is no table to ask. */
+  readonly moduleNames: ReadonlySet<string>;
 
-  /** The shell this node runs on: the module table, the bundle loader, the routing and
+  /** The shell this node runs on: the bundle loader, the routing and
    *  the guest realms. Public because a driver sometimes has to reach the runtime
    *  directly — the latency harness dispatches an inbound frame itself to time it — and
    *  because a caller that PASSED a shell in already holds this object. */
@@ -229,7 +233,7 @@ export class StorageNode {
   ) {
     this.sodium = opts.sodium;
     this.shell = shell;
-    this.host = shell.host;
+    this.moduleNames = new Set(loaded.manifest.modules.map((m) => m.name));
     this.identity = identity;
     this.peerId = toHex(identity.publicKey);
     this.fs = opts.fs ?? new MemoryFs();
@@ -434,11 +438,14 @@ export class StorageNode {
     return readU32BE(await this.runExclusive(() => this.invoke(Op.REPAIR, NO_ARG)), 0);
   }
 
-  /** Decayed reciprocity score this node holds for a peer (§13). The reputation
-   *  module is the installed one, reached through the module table — async since the
-   *  table runs modules in their own worker (guest ABI 6). */
+  /** Decayed reciprocity score this node holds for a peer (§13). The reputation module
+   *  is the app's own — private to its slot since the kernel collapsed an app into one
+   *  bundle slot — so the reading comes from the guest that holds it, through the same
+   *  loopback op vocabulary every other initiator call uses. It is the same module
+   *  instance the placement ranker scores against, which a second host-side one would
+   *  not have been. */
   async score(peerPk: Uint8Array): Promise<number> {
-    const res = await this.host.callModule(this.appKey, "reputation", encodeScoreReq(peerPk, this.now()));
+    const res = await this.invoke(Op.SCORE, peerPk);
     if (!res || res.length < 8) return 0;
     return new DataView(res.buffer, res.byteOffset, 8).getFloat64(0, true);
   }
@@ -487,9 +494,11 @@ export class StorageNode {
     this.shell.close();
   }
 
-  /** True if both pure handlers are installed on the kernel (§19). */
+  /** True if both pure handlers are installed on the kernel (§19). Read off the verified
+   *  manifest: a bundle load builds every module or none (seedkernel §12.4), so the
+   *  names the loaded manifest declares ARE the modules the guest holds. */
   handlersInstalled(): boolean {
-    return this.host.isBound(this.appKey, "codec") && this.host.isBound(this.appKey, "reputation");
+    return this.moduleNames.has("codec") && this.moduleNames.has("reputation");
   }
 }
 
@@ -552,7 +561,7 @@ export async function bootTransportShell(
     platform: {
       sodium: opts.sodium,
       identity: opts.identity,
-      table: new ModuleTable(),
+      modules: new ModuleTable(),
       fs,
       freshnessStore: new FreshnessMarks(),
       networkKey: opts.networkKey,

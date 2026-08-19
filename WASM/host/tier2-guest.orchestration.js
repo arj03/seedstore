@@ -207,8 +207,14 @@ async function rsDecode(k, m, blockSize, present) {
 }
 function clockNow() { const b = host.call("clock/now", EMPTY); return rU32(b, 0) * 0x100000000 + rU32(b, 4); }
 async function repScore(peerPk, t) {
-  return readF64LE(await host.call(REP_NAME, encodeScoreReq(peerPk, t)));
+  return readF64LE(await repScoreBytes(peerPk, t));
 }
+// The module's answer as it stands — [score f64 LE] — for the one caller that wants the
+// bytes rather than the number: Op.SCORE, the host asking this guest what standing it
+// holds for a peer. The reputation module is this slot's private one, so the host cannot
+// call it itself, and re-encoding a float it will only decode again would be two framings
+// of one fact.
+function repScoreBytes(peerPk, t) { return host.call(REP_NAME, encodeScoreReq(peerPk, t)); }
 function repObserve(peerPk, t, pass) {
   // Returns the new score; the guest doesn't need it. Fire-and-forget — the promise is
   // dropped on purpose, and the catch is hygiene: a module call resolves (never
@@ -1443,6 +1449,7 @@ async function doHandle(arg) {
       case Op.REPAIR: return doRepair();
       case Op.REQUEST: return doRequest(payload);
       case Op.WARM: return doWarm();
+      case Op.SCORE: return repScoreBytes(payload, clockNow());
       default: return EMPTY;
     }
   }

@@ -125,9 +125,12 @@ export async function run(t) {
       // The app key is not optional: a node with a network has at least two apps loaded — the
       // storage bundle and the transport, which is an ordinary app that claims `_net` (§12.10).
       const appKey = appKeyFor(authorId, loaded.manifest.app);
-      for (const m of loaded.manifest.modules) {
-        t.ok(shell.host.isBound(appKey, m.name),
-          `module ${m.name} installed`);
+      // A slot's modules are private to its guest now, so there is no table to ask what
+      // landed: the load is all-or-none (seedkernel §12.4), so what proves the modules
+      // stood up is the app answering on the claim it made — and, below, a PUT that
+      // cannot complete without the codec.
+      for (const proto of loaded.manifest.protocols ?? []) {
+        t.eq(shell.resolve(proto), appKey, `the loaded app claims ${proto}`);
       }
 
       // PUT, orchestrated by the confined guest the shell loaded.
