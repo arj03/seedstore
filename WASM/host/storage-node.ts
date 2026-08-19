@@ -254,13 +254,10 @@ export class StorageNode {
     this.appScope = appScopeFor(opts.sodium, loaded.author, STORAGE_APP);
     this.appKey = appKeyFor(loaded.author, STORAGE_APP);
 
-    // `this.config` is the geometry a caller can inspect (p2p-cli reads config.k/.m for
-    // its wire estimate), so it must equal what the guest ACTUALLY runs: the bundle's
-    // signed guest.config with the operator override merged OVER it — the same precedence
-    // shell-core applies when it builds the guest APP. Reconstructing from defaultConfig()
-    // alone would only agree when the override happened to name every field. guest.config
-    // is untyped JSON (Record<string,string|number>), so coerce it to the config shape at
-    // this boundary — the bundle producer writes the numeric geometry.
+    // `this.config` is the geometry a caller can inspect (p2p-cli reads config.k/.m), so
+    // it must equal what the guest runs. The guest decides that now, so this MIRRORS its
+    // `CFG` rule and must not drift from it. guest.config is untyped JSON, so coerce it
+    // here — the bundle producer writes the numeric geometry.
     const override = normaliseConfig(opts.config ?? {});
     assertStorageConfig(override);
     const signed = (loaded.manifest.guest?.config ?? {}) as unknown as Partial<StorageConfig>;
@@ -312,7 +309,10 @@ export class StorageNode {
       // it. Nothing here routes anything — a node that installed storage serves storage.
       // The load stands the guest, so there is nothing to arm afterwards: the node has
       // been answerable for STORAGE_PROTO since this line returned.
-      const loaded = await shell.loadBundleBlob(opts.bundleBlob);
+      // The operator's settings ride WITH this load as its `LOCAL` (seedkernel §12.4),
+      // not on the shell, which also hosts the transport. This is also what makes them
+      // reach a CALLER's shell (the browser/RTC nodes), which a shell-wide config missed.
+      const loaded = await shell.loadBundleBlob(opts.bundleBlob, { localConfig: localConfigFor(opts) });
 
       // The guest does NOT reach the backend directly: the shell hands it
       // `scopedFs(fs, appScopeFor(author, app))`, so every key the holder writes lands
@@ -522,11 +522,6 @@ export async function bootTransportShell(
     createRealm?: RealmFactory;
     /** The shell's own inbound seam — see `StorageNodeOptions.answer`. */
     answer?: (from: PeerId, proto: string, payload: Uint8Array) => Promise<Uint8Array> | null;
-    /** Operator app config (quota, geometry overrides) merged over the bundle's
-     *  signed guest.config into the guest's APP — opaque to the shell. */
-    config?: Record<string, string | number>;
-    /** Operator quota — injected into the guest APP, never author-signed. */
-    quota?: number;
     /** QuickJS heap limit for the guest realm, in bytes. */
     realmMemoryBytes?: number;
     now?: () => number;
@@ -583,7 +578,9 @@ export async function bootTransportShell(
       grants: { link: (v) => toHex(v.author) === transportAuthorHex },
     }),
     answer: opts.answer,
-    config: { ...(opts.config ?? {}), ...(opts.quota != null ? { quota: opts.quota } : {}) },
+    // No app config here: this loads ONE bundle, the transport. App config travels with
+    // the load that wants it (§12.4 `localConfig`) — passing it shell-wide put a storage
+    // node's settings in the transport guest's APP too.
     realmMemoryBytes: opts.realmMemoryBytes,
   });
 
@@ -601,15 +598,8 @@ export async function bootTransportShell(
  *  built with (a caller with no fs of its own must read the same backend the guest
  *  writes). */
 async function buildShell(opts: StorageNodeOptions, identity: Identity): Promise<{ shell: Shell; transport: TransportHost; fs: Fs }> {
-  // Normalise the operator override: derive windowTargetBytes from realmMemoryBytes
-  // when not explicitly set (§3). realmMemoryBytes is host-only (the QuickJS heap
-  // bound) — split it out of the config that becomes the guest's APP, and pass it to
-  // the shell as the realm limit. The rest of opts.config is the operator override
-  // merged OVER the bundle's signed guest.config; quota is operator policy (§14),
-  // never author-signed, added here.
-  const norm = normaliseConfig(opts.config ?? {});
-  const { realmMemoryBytes, ...guestOverride } = norm;
-
+  // realmMemoryBytes is the only thing from `config` a SHELL takes — host-owned resource
+  // policy, shell-wide by nature. The rest is the app's; see localConfigFor.
   return bootTransportShell({
     sodium: opts.sodium, identity, fs: opts.fs, channels: opts.channels,
     listen: opts.listen, wsListen: opts.wsListen, networkKey: opts.networkKey,
@@ -617,7 +607,21 @@ async function buildShell(opts: StorageNodeOptions, identity: Identity): Promise
     connsPerPeer: opts.connsPerPeer, timeoutMs: opts.timeoutMs,
     transportBlob: opts.transportBlob, answer: opts.answer,
     now: opts.clock,
-    config: { ...guestOverride, quota: opts.quota ?? DEFAULT_QUOTA_BYTES },
-    realmMemoryBytes,
+    realmMemoryBytes: normaliseConfig(opts.config ?? {}).realmMemoryBytes,
   });
+}
+
+/** This installation's settings for the storage bundle, as the `LOCAL` the guest reads
+ *  (seedkernel §12.4); the guest picks precedence against signed `APP` — see `CFG` there.
+ *
+ *  `realmMemoryBytes` is split back out (the realm's bound, not the guest's), but the
+ *  `windowTargetBytes` normaliseConfig derives from it stays — the guest reads that.
+ *  `quota` can never be signed, so this is its only door; a node naming none gets the
+ *  default rather than leaving the holder to fail closed at 0. */
+function localConfigFor(opts: StorageNodeOptions): Record<string, string | number> {
+  const { realmMemoryBytes, ...guestOverride } = normaliseConfig(opts.config ?? {});
+  return {
+    ...(guestOverride as Record<string, string | number>),
+    quota: opts.quota ?? DEFAULT_QUOTA_BYTES,
+  };
 }

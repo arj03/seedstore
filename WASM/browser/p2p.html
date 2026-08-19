@@ -350,8 +350,8 @@ async function boot() {
     // (the node's network standing), then put the WS/WebRTC socket seam under the
     // driver. The room's contact secret gates the ACCEPTING side, so it is the
     // driver's (the shell's platform); `peerContactFor` presents it when dialing.
-    // The geometry rides in as operator config — a shared shell's APP is fixed at
-    // boot, so the config must be here, not on createStorageNode.
+    // The geometry does NOT ride in here: app config travels with the bundle load that
+    // wants it, so it goes on createStorageNode below.
     let contactSecret;
     let relayUrl = "";
     if (mode === "rtc") {
@@ -370,14 +370,14 @@ async function boot() {
     // The WS/TCP path carries far larger frames than WebRTC, so it gets bigger
     // blocks (fewer chunks → fewer round trips) and a bigger per-message batch cap;
     // WebRTC stays under the werift ~64 KiB channel on both. realmMemoryBytes is
-    // host-only — split out of the APP config, passed as the realm limit.
+    // host-only — read out here because the SHELL takes it directly; the rest of this
+    // object is the storage bundle's LOCAL, handed over at its load.
     const config = { ...CONFIG, blockSize: blockSizeFor(mode), maxMessageBytes: maxMessageBytesFor(mode),
       windowTargetBytes: windowTargetBytesFor(mode), realmMemoryBytes: realmMemoryBytesFor() };
-    const { realmMemoryBytes, ...appConfig } = config;
+    const { realmMemoryBytes } = config;
     const { shell, transport: transportHost } = await bootTransportShell({
       sodium, identity, timeoutMs,
       contactSecret,
-      config: { ...appConfig, quota: 64 * 1024 * 1024 },
       realmMemoryBytes,
     });
     if (mode === "ws") {
@@ -411,7 +411,8 @@ async function boot() {
       $("author").value = authorHex; // reflect the auto-detected scope in the UI
     }
     node = await createStorageNode({
-      shell, transport: transportHost, sodium, identity, baseUrl: "./", config, timeoutMs, signAuthor,
+      shell, transport: transportHost, sodium, identity, baseUrl: "./", config,
+      quota: 64 * 1024 * 1024, timeoutMs, signAuthor,
     });
     // Log the LIVE config the coordinator actually uses (after defaultConfig
     // merge), so a stale/cached build that lost maxMessageBytes is visible here.

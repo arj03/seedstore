@@ -88,15 +88,14 @@ const CONTACT = process.env.CONTACT
 
 // The transport is a signed bundle: each node boots a shared shell with it admitted
 // (the node's network standing — no TCP/WS listeners, a WebRTC-edge node), then the
-// RtcNetwork puts the WebRTC socket seam under the driver. The geometry rides in as
-// operator config — a shared shell's APP is fixed at boot, so the operator config
-// must be here, not on StorageNode.create.
+// RtcNetwork puts the WebRTC socket seam under the driver. The geometry does not ride in
+// here — app config travels with the load that wants it, so it goes on
+// StorageNode.create and the transport guest never sees it.
 async function makeNode(contact = CONTACT) {
   const identity = (() => { const kp = sodium.crypto_sign_keypair(); return { publicKey: kp.publicKey, privateKey: kp.privateKey }; })();
   const entry = { identity, node: null, shell: null, transport: null };
   const built = await bootTransportShell({
     sodium, identity, timeoutMs: 8000, contactSecret: contact,
-    config: { ...config, quota: 64 * 1024 * 1024 },
   });
   entry.shell = built.shell;
   entry.transport = built.transport;
@@ -115,7 +114,7 @@ let ok = false;
 try {
   for (let i = 0; i < HOLDERS + 1; i++) {
     const e = await makeNode();
-    e.node = await StorageNode.create({ shell: e.shell, transport: e.transport, sodium, ...wasm, identity: e.identity, config, timeoutMs: 8000 });
+    e.node = await StorageNode.create({ shell: e.shell, transport: e.transport, sodium, ...wasm, identity: e.identity, config, quota: 64 * 1024 * 1024, timeoutMs: 8000 });
     nodes.push(e);
   }
   const owner = nodes[0];

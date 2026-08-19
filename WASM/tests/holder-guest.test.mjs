@@ -83,23 +83,21 @@ export async function run(t) {
       channels: net.view(toHex(identity.publicKey)),
       listen: { host: "127.0.0.1", port: 0 },
       timeoutMs: TIMEOUT,
-      // Quota is operator policy (not signed into the bundle): the operator supplies it
-      // at boot, merged over the bundle's guest config into the guest's APP. NB this is
-      // the SHELL's config — opaque operator input the shell merges wholesale. A
-      // StorageNode's `config` is the typed StorageConfig instead, and takes quota as a
-      // sibling option (`StorageNode.create({ quota })`); the same spelling used there is
-      // rejected rather than ignored. Both drivers run in this file, so the two are easy
-      // to confuse.
-      // blockSize is overridden back to test scale — the signed bundle carries the
-      // PRODUCTION 256 KiB (storage-bundle.mjs), which would make these tiny test
-      // files single-block/replicated instead of exercising the RS path.
-      config: { quota: 64 * 1024 * 1024, blockSize: 1024 },
     });
     await transport.start(); // bind the loopback port the cohort dials
     // A generic shell + the signed storage bundle is a storage node: the manifest
     // claims STORAGE_PROTO and the load routes it (§12.10), so nothing here points the
     // protocol anywhere — and nothing arms it either, the load stands the guest.
-    const loaded = await shell.loadBundle(bundlePath);
+    //
+    // The operator's settings go on THIS LOAD, not on the shell (seedkernel §12.4), and
+    // reach the guest as `LOCAL`. NB this is the SHELL's spelling: a StorageNode takes
+    // quota as a sibling option instead (`StorageNode.create({ quota })`) and rejects it
+    // inside `config`. Both drivers run in this file, so the two are easy to confuse.
+    // blockSize goes back to test scale — the bundle ships PRODUCTION 256 KiB, which
+    // would make these tiny files single-block/replicated instead of exercising RS.
+    const loaded = await shell.loadBundle(bundlePath, {
+      localConfig: { quota: 64 * 1024 * 1024, blockSize: 1024 },
+    });
     // The app key rides along: a node with a network has at least two apps loaded — the
     // storage bundle and the transport, which is an ordinary app claiming `_net` (§12.10) — so
     // "the only loaded app" is not something an `invoke` caller can mean any more.

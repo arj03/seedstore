@@ -5,11 +5,11 @@
 //
 // The guest is loaded as plain QuickJS *source* (not an ESM module) by the host
 // (host/storage-node.ts) or the seedkernel shell, which prepends the bundle facts
-// + the APP config block. So this stitch must emit a FLAT script: strip the
+// + the `APP`/`LOCAL` config blocks. So this stitch must emit a FLAT script: strip the
 // ESM import/export scaffolding off the compiled core (every imported name is
 // defined by another file included here), then append the orchestration body
 // verbatim. Unlike seedkernel's bundle-loader.mjs there is NO IIFE and NO globalThis
-// assignment — the orchestration reads `APP`/`host`/`register` as ambient
+// assignment — the orchestration reads `APP`/`LOCAL`/`host`/`register` as ambient
 // names the runtime injects (the seam is name-addressed; the guest writes
 // "fs/get", "node/sign", "crypto/blake2b-256").
 //

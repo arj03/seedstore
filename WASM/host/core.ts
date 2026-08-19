@@ -125,8 +125,8 @@ const CONFIG_KEYS: ReadonlySet<string> = new Set([
  *  a tuning knob must not be (a wrong fanoutWindow reads as a perf result, not a bug).
  *
  *  `quota` is called out by name because it is not a typo but a genuine collision: it IS
- *  operator policy, spelled inside the opaque boot `config` a seedkernel shell takes — but
- *  here it is a SIBLING option (StorageNodeOptions.quota), deliberately outside
+ *  operator policy, spelled inside the `localConfig` a seedkernel shell takes per bundle
+ *  load — but here it is a SIBLING option (StorageNodeOptions.quota), deliberately outside
  *  StorageConfig so it can never be spread into an author-signed bundle config
  *  (scripts/storage-bundle.mjs). Drivers that stand up shells and StorageNodes side by
  *  side (tests/holder-guest.test.mjs) do have both spellings in view at once. */
@@ -137,8 +137,9 @@ export function assertStorageConfig(config?: Partial<StorageConfig>): void {
     if (key === "quota") {
       throw new Error(
         "StorageConfig has no `quota`: it is operator policy, passed as the sibling option " +
-        "`quota` on StorageNode.create({ quota }) — only a seedkernel shell's boot config " +
-        "carries it inline (boot({ config: { quota } })). Passing it here would be ignored.",
+        "`quota` on StorageNode.create({ quota }) — only a seedkernel shell's per-load " +
+        "config carries it inline (loadBundleBlob(blob, { localConfig: { quota } })). " +
+        "Passing it here would be ignored.",
       );
     }
     throw new Error(

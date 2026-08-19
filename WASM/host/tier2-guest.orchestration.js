@@ -28,9 +28,9 @@
 //
 // This is a plain script, not a module: it has no imports/exports and no ambient
 // authority. It is loaded as source by the host (host/storage-node.ts, or the
-// seedkernel shell) which prepends an `APP`
-// object carrying the storage config + the codec/reputation kernel names, and
-// runs it after the safe-js PREAMBLE that defines `host.call` and `register`.
+// seedkernel shell) which prepends the `APP` and `LOCAL` config objects (see
+// `CFG` below), and runs it after the safe-js PREAMBLE that defines `host.call`
+// and `register`.
 // The seam is name-addressed (seedkernel §12.2): the guest writes "fs/get",
 // "_net", "crypto/blake2b-256" — never a number. Every capability the guest
 // reaches is an application-neutral primitive; all storage *structure* is right
@@ -81,9 +81,8 @@ function bytesToStr(b) { let s = ""; for (let i = 0; i < b.length; i++) s += Str
 // the nonce convention, the signed-descriptor envelope, the HAVE/OFFER/FETCH/
 // STORE wire format (host/protocol.ts), the codec & reputation module ABIs, and
 // the <hex>.blk/.dsc store layout (read back host-side by host/store-view.ts, which
-// implements none of the policy — see there). Config + the codec and
-// reputation kernel names arrive as the injected `APP` constant (prepended by
-// the driver), not as kernel names. The pure crypto primitives go through the
+// implements none of the policy — see there). Config arrives as the injected `APP` and
+// `LOCAL` constants (prepended by the driver; `CFG` combines them), not as kernel names. The pure crypto primitives go through the
 // `crypto/` prefix of the catalog (`host.call("crypto/blake2b-256", …)` etc.) and
 // resolve to their bytes directly; the net, fs and module-call wrappers are `async`
 // and `await` their one round-trip name (the fs seam is asynchronous on every
@@ -116,10 +115,14 @@ const STORE_BLK = ".blk", STORE_DSC = ".dsc";
 const CODEC_NAME = "codec";
 const REP_NAME = "reputation";
 
-// The injected constant is just `APP` (seedkernel §12.4): the author's signed config
-// with operator policy merged over it (storage-node.ts appPreamble builds it host-side;
-// the shell merges --app-config over the bundle's). Read directly as `APP.*`.
-// Nothing the RUNTIME derives is injected anymore — the signing scope in particular
+// The runtime injects the author's signed config as `APP` and this installation's as
+// `LOCAL`, merging neither (seedkernel §12.4, ABI 8) — the precedence below is the app's.
+// LOCAL wins the deployment dial: geometry is what the WRITER spends, and every read path
+// uses the DESCRIPTOR's (§4.1/§4.3), so mixed geometry across a cohort is supported.
+// `quota` is not in here — quota() reads LOCAL alone, so an author cannot sign one.
+// host/storage-node.ts mirrors this for `node.config`; the two must not drift.
+const CFG = { ...APP, ...LOCAL };
+// Nothing the RUNTIME derives is injected — the signing scope in particular
 // lives on the host side of the seam: node/sign applies it when signing, node/verify
 // when checking, so the guest never holds (or reconstructs) the prefix bytes.
 
@@ -438,15 +441,15 @@ async function knownAuthors() { const s = new Set(await cohortPeers()); s.add(my
 function signChunk(d) { return signCore(encodeDescriptorCore(d)); }
 
 // ── placement + fetch (coordinator §6/§7) ────────────────────────────────────
-// A batched OFFER / STORE / FETCH is split to stay under APP.maxMessageBytes —
+// A batched OFFER / STORE / FETCH is split to stay under CFG.maxMessageBytes —
 // the per-transport cap that keeps one message inside the frame cap AND the request
-// timeout. Transport/operator policy injected via the APP preamble (like quota);
-// default if absent.
-function maxMsgBytes() { const v = APP.maxMessageBytes; return (typeof v === "number" && v > 0) ? v : (1 << 20); }
+// timeout. Transport policy, so it is normally the operator's LOCAL value; default if
+// absent.
+function maxMsgBytes() { const v = CFG.maxMessageBytes; return (typeof v === "number" && v > 0) ? v : (1 << 20); }
 // Ids per FETCH sub-batch, bounded by the RESPONSE frame (blockSize + FETCH_FRAME per
 // present block) so a full reply stays under the cap. The GET gather and the repair
 // audit both size their batches this way; the holder caps served bytes the same (§18).
-function fetchMaxIds() { return Math.max(1, Math.floor(maxMsgBytes() / (APP.blockSize + FETCH_FRAME))); }
+function fetchMaxIds() { return Math.max(1, Math.floor(maxMsgBytes() / (CFG.blockSize + FETCH_FRAME))); }
 // The fan-out window (transport/operator policy, like maxMessageBytes): how many
 // per-peer sub-batches a single Promise.all round fires at once. PUT and GET share
 // one window — they have never been tuned apart in practice, so fanoutWindow bounds
@@ -454,8 +457,8 @@ function fetchMaxIds() { return Math.max(1, Math.floor(maxMsgBytes() / (APP.bloc
 // guest pipeline a holder's many ~1-block messages instead of paying one round trip
 // apiece (the tight-cap WebRTC case the lock-step fan-out was meant to keep
 // windowed). Injected in full by the driver (core.ts homes the default); the guest
-// reads APP and never guesses.
-function fanoutWindow() { return APP.fanoutWindow; }
+// reads its config and never guesses.
+function fanoutWindow() { return CFG.fanoutWindow; }
 function sliceN(arr, size) {
   if (arr.length <= size) return [arr];
   const out = [];
@@ -513,7 +516,7 @@ function makeChunk(d, blocks, descriptor) {
 // index chunk can never collide with a body chunk. `tailBytes` records how much of the
 // chunk is real, which is what a reader trims by instead of a manifest-wide file_size.
 async function encodeChunk(source, localCi, globalCi, K, level) {
-  const c = APP;
+  const c = CFG;
   const plain = source.slice(localCi * c.k * c.blockSize, (localCi + 1) * c.k * c.blockSize);
   const kc = Math.max(1, Math.ceil(plain.length / c.blockSize));
   const ct = encrypt(K, level, globalCi, padTo(plain, kc * c.blockSize));
@@ -741,7 +744,7 @@ async function runFetchTasks(byPeer, maxIds, apply) {
 // data blocks. Every returned block is hash-verified (§4.2) and scores its holder
 // (§8). Returns a Map id-hex → bytes.
 async function gatherBlocks(descriptors, holders) {
-  const c = APP;
+  const c = CFG;
   const got = new Map();
   const tried = new Map();
   const triedOf = (h) => { let s = tried.get(h); if (!s) tried.set(h, (s = new Set())); return s; };
@@ -842,17 +845,17 @@ async function assembleChunk(d, got) {
 // Target footprint for one window's plaintext slice; the ciphertext it expands to
 // (≈ n/k×) plus the slice stays a small fraction of the realm heap at any file size.
 // The host driver derives it from realmMemoryBytes (~realmMemoryBytes / 3, peak
-// guest footprint ratio) and injects it as APP.windowTargetBytes; an explicit
+// guest footprint ratio) and injects it as CFG.windowTargetBytes; an explicit
 // override stays for benchmarking. The host awaits each window fully (OFFER→STORE→ack)
 // before feeding the next, so on a fat/low-loss link a too-small window idles the wire
 // between windows. This is the reader's/writer's OWN memory policy, not file geometry,
 // so it stays a config value even on the descriptor-authoritative GET path.
-function windowTarget() { return APP.windowTargetBytes ?? 4 * 1024 * 1024; }
+function windowTarget() { return CFG.windowTargetBytes ?? 4 * 1024 * 1024; }
 // A chunk-aligned window size in bytes: as many whole chunks (k·blockSize) as fit
 // under the target, at least one. Kept a multiple of k·blockSize so slicing the file
 // at window boundaries never splits a chunk. This is the WRITE side, so k·blockSize is
 // the config the writer encodes with.
-function putWindowBytes() { const chunkData = APP.k * APP.blockSize; return Math.max(1, Math.floor(windowTarget() / chunkData)) * chunkData; }
+function putWindowBytes() { const chunkData = CFG.k * CFG.blockSize; return Math.max(1, Math.floor(windowTarget() / chunkData)) * chunkData; }
 // Chunks per GET window — the reconstruct side's counterpart, bounding the plaintext a
 // single getChunk holds before it is handed back to the host. `chunkData` (k·blockSize)
 // is the DESCRIPTOR's geometry (§4.3), passed in by the reader, never config's.
@@ -864,7 +867,7 @@ function getWindowChunks(chunkData) { return Math.max(1, Math.floor(windowTarget
 // placeChunksBatched places both the same way, and level 0 (the file) and level ℓ > 0
 // (an index over level ℓ−1) are the same call.
 async function placeWindow(slice, baseByteOffset, K, level) {
-  const c = APP;
+  const c = CFG;
   const chunkData = c.k * c.blockSize;
   const baseCi = Math.floor(baseByteOffset / chunkData);
   const numChunks = Math.max(1, Math.ceil(slice.length / chunkData));
@@ -903,7 +906,7 @@ function requirePut() {
 }
 // The largest a signed descriptor gets, framed for the descriptor list: the deployment's
 // own (k, m), since a partial chunk lists fewer ids (§4.3).
-function descriptorBytes() { return 4 + 32 + 64 + 13 + (APP.k + APP.m) * BLOCK_ID_LEN; }
+function descriptorBytes() { return 4 + 32 + 64 + 13 + (CFG.k + CFG.m) * BLOCK_ID_LEN; }
 // Open a stream: mint K and answer with the plaintext window the driver should feed. The
 // file size is no longer an argument — each chunk signs its own `tailBytes` (§4.3), so
 // the writer never needs the total and the reader derives it from the leaves.
@@ -913,7 +916,7 @@ function descriptorBytes() { return 4 + 32 + 64 + 13 + (APP.k + APP.m) * BLOCK_I
 // of (k, blockSize) alone, so it is checked here, once, before a byte moves — never
 // discovered halfway through a placement. Production geometry clears it ~2000×.
 function putStart() {
-  const chunkData = APP.k * APP.blockSize;
+  const chunkData = CFG.k * CFG.blockSize;
   if (chunkData < 2 * descriptorBytes()) {
     throw new Error("put: k·blockSize (" + chunkData + " B) must hold two chunk descriptors ("
       + descriptorBytes() + " B each) so a file's descriptor list can reach a single root — raise blockSize or k");
@@ -1249,14 +1252,11 @@ async function doRepair() {
 // fs (host/store-view.ts) and no write path — so bytesUsed is the budget, rebuilt
 // lazily from the fs the first time it matters.
 let bytesUsed = -1;
-// The §14 byte budget is OPERATOR policy, not author content: the StorageNode injects
-// its store's quota, and a seedkernel shell merges the operator's config over the
-// (author-signed) manifest — so it is always present in the injected APP, never baked
-// into the signed bundle. The guest reads it and never guesses a *generous* default: if
-// a driver under-injects (a shell holder booted with no operator quota — the shell keeps
-// no default of its own), fall to 0 and FAIL CLOSED, so the holder admits nothing rather
-// than becoming an unbounded sink. Reads (FETCH) never check quota, so serving still works.
-function quota() { return APP.quota != null ? APP.quota : 0; }
+// The §14 byte budget is OPERATOR policy, so it is read from LOCAL alone, never CFG: via
+// CFG a `quota` an author signed would stand whenever the operator named none — a bundle
+// granting itself disk. Never guess a *generous* default either: an under-injecting driver
+// falls to 0 and FAILS CLOSED. Reads (FETCH) never check quota, so serving still works.
+function quota() { return LOCAL.quota != null ? LOCAL.quota : 0; }
 // fs/size returns 0xffffffff for an absent key (−1 over the bridge).
 // fsSizeRaw preserves that sentinel — it is how existence is asked (storeHas), since
 // there is no fs/has. fsSize maps the sentinel to 0 so sizing a bare block's missing
@@ -1490,7 +1490,7 @@ async function doRequest(arg) {
 // the wire, so on a cold realm that tax (~0.25 s for a 10 MB PUT) lands entirely
 // in front of the transfer. Self-contained and idempotent; the result is discarded.
 async function doWarm() {
-  const c = APP;
+  const c = CFG;
   const K = randomKey();
   const perRound = Math.max(1, c.k) * c.blockSize;
   const buf = new Uint8Array(perRound);

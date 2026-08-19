@@ -72,10 +72,8 @@ const identity = (() => { const kp = sodium.crypto_sign_keypair(); return { publ
 const { bootTransportShell } = await import("../build/host/storage-node.js");
 const { shell, transport } = await bootTransportShell({
   sodium, identity, timeoutMs: 6000, contactSecret,
-  // The geometry rides in as operator config — the shell merges it over the bundle's
-  // signed config into the guest's APP (a shared shell cannot be re-configured after
-  // boot, so the operator config must be here, not on StorageNode.create).
-  config: { ...config, quota: 64 * 1024 * 1024 },
+  // No app config here: it travels with the storage bundle's own load, so it goes on
+  // StorageNode.create below and this shell's transport guest never sees it.
 });
 
 let node = null;
@@ -96,7 +94,7 @@ const net = new RtcNetwork({
 
 // A real StorageNode serving HAVE / OFFER / STORE / FETCH over the P2P links. Default
 // store.local is an in-RAM fs, read back through the node's FsBlobView.
-node = await StorageNode.create({ shell, transport, sodium, ...wasm, identity, config, timeoutMs: 6000 });
+node = await StorageNode.create({ shell, transport, sodium, ...wasm, identity, config, quota: 64 * 1024 * 1024, timeoutMs: 6000 });
 net.join(); // announce into the room → present peers begin the WebRTC handshake
 
 console.log(`\nseed store RTC holder ${short(node.peerId)} ready — handlers installed: ${node.handlersInstalled()}`);

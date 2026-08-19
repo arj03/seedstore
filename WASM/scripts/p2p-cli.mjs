@@ -206,18 +206,19 @@ console.log("signing scope: derived from the loaded seedstore bundle author");
 // math — r = m+1, the low-water mark — is derived from k/m and from each
 // chunk's signed descriptor, never config). The injection is total — a partial config
 // would feed the strict guest an undefined knob. realmMemoryBytes is host-only (the
-// QuickJS heap bound) — split out of the APP config, passed to the shell as the realm
-// limit; the rest merges over the bundle's signed config into the guest's APP.
+// QuickJS heap bound) and is read out here too, because the SHELL takes it directly —
+// the rest of this object is the storage bundle's LOCAL, handed over at its load.
 const config = { ...defaultConfig(kParam, mParam, blockSize), maxMessageBytes, fanoutWindow: windowN,
   ...(wtargetMB > 0 ? { windowTargetBytes: Math.round(wtargetMB * 1024 * 1024) } : {}),
   ...(heapMB > 0 ? { realmMemoryBytes: Math.round(heapMB * 1024 * 1024) } : {}) };
-const { realmMemoryBytes, ...appConfig } = config;
+const { realmMemoryBytes } = config;
 
 // The transport is now a signed bundle: boot the shared shell with it admitted
 // (the node's network standing), then put the WS socket seam under the driver.
 // The wrapped sodium rides into the shell, so the record-layer AEAD costs are
-// still instrumented. The geometry rides in as operator config (the shell merges
-// it over the bundle's signed config into the guest's APP).
+// still instrumented. The geometry does NOT ride in here: app config travels with the
+// bundle load that wants it, so it goes to createStorageNode below and the transport
+// guest never sees it.
 const peerUp = new Set();
 let onQuorum = null;
 const { bootTransportShell } = await import("../build/host/storage-node.js");
@@ -225,7 +226,6 @@ const { shell, transport } = await bootTransportShell({
   sodium: wrapTransportSodium(sodium),
   identity,
   timeoutMs,
-  config: { ...appConfig, quota: DEFAULT_QUOTA_BYTES },
   realmMemoryBytes,
 });
 const net = new WsNetwork({
@@ -236,7 +236,8 @@ const net = new WsNetwork({
   onPeerDown: (pid) => { node?.removePeer(pid); peerUp.delete(pid); console.log(`link DOWN: ${pid.slice(0, 8)}…`); },
 });
 
-let node = await createStorageNode({ shell, transport, identity, config, timeoutMs });
+// `config` is this node's LOCAL — it reaches the guest with the bundle load.
+let node = await createStorageNode({ shell, transport, identity, config, quota: DEFAULT_QUOTA_BYTES, timeoutMs });
 for (const pid of peerUp) node.addPeer(pid);
 console.log(`node ready: RS(${kParam},${mParam}), ${blockSize / 1024} KiB blocks, batch ${Math.round(maxMessageBytes / 1024)} KiB, window ${windowN}, conns/peer ${connsN}, wtarget ${wtargetMB > 0 ? wtargetMB + " MB" : "4 MiB (default)"}, heap ${heapMB > 0 ? heapMB + " MB" : "64 MiB (default)"}, timeout ${timeoutMs} ms`);
 

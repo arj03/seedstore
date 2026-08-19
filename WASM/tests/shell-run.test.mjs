@@ -113,15 +113,15 @@ export async function run(t) {
         channels: net.view(toHex(shellIdentity.publicKey)),
         listen: { host: "127.0.0.1", port: 0 },
         timeoutMs: TIMEOUT,
-        // Operator config merges over the signed bundle config: bring blockSize back
-        // to test scale (the bundle ships the PRODUCTION 256 KiB, which would make
-        // this tiny test file single-block/replicated instead of RS across the cohort).
-        config: { blockSize: 1024 },
       });
       shell = rt.shell;
       await rt.transport.start();
       for (const h of holders) await link(rt.transport, toHex(shellIdentity.publicKey), h, new Set());
-      const loaded = await shell.loadBundle(bundlePath);
+      // This installation's settings ride WITH the load (seedkernel §12.4), reaching the
+      // guest as `LOCAL`, which its `CFG` lets win: blockSize back to test scale (the
+      // bundle ships the PRODUCTION 256 KiB, which would make this tiny file
+      // single-block/replicated instead of RS across the cohort).
+      const loaded = await shell.loadBundle(bundlePath, { localConfig: { blockSize: 1024 } });
       // The app key is not optional: a node with a network has at least two apps loaded — the
       // storage bundle and the transport, which is an ordinary app that claims `_net` (§12.10).
       const appKey = appKeyFor(authorId, loaded.manifest.app);

@@ -176,22 +176,20 @@ export function writeStorageBundle({ path, sodium, sk, pk, build, version = 1, l
       // The guest's ABI is the shared name-addressed preamble the shell injects at
       // load, not a signed catalog.
       requires: [...STORAGE_REQUIRES],
-      // App constants the shell injects as `const APP = …`: the storage geometry.
-      // NB: no `quota` — that is operator policy supplied at boot, not author-signed
-      // content — and nothing the runtime derives (see the header note): the signing
-      // scope is not injected at all, `node/sign`/`node/verify` apply it host-side.
+      // The AUTHOR's config, injected as `const APP = …` exactly as signed. The shell
+      // merges nothing into it (seedkernel §12.4, ABI 8); an operator's settings arrive
+      // beside it as `LOCAL` and the guest's `CFG` picks precedence.
+      //
+      // NB: no `quota` — the guest reads that from LOCAL alone, so a value here would be
+      // ignored — and nothing the runtime derives (see the header note).
       config: {
         k: cfg.k, m: cfg.m, blockSize: cfg.blockSize,
-        // The APP injection is TOTAL: the guest reads APP and never guesses a default, so
-        // the signed config must carry every value the guest reads (except `quota`, which
-        // is operator policy merged at boot — see above — and the §4.1 durability math,
-        // which is derived: the replica count + low-water mark from each chunk's own signed
-        // descriptor). Transport/operator knobs pinned
-        // here: a holder bounds one FETCH response by ITS maxMessageBytes (serveFetch), so
-        // the cohort agrees on it deliberately, and the fan-out/window knobs match core.ts's
-        // defaults. Operator config can still override any of these at boot (the shell
-        // merges over the signed config), and a mismatched client degrades to tail
-        // re-requests instead of failing (runFetchTasks).
+        // TOTAL over what the guest reads: LOCAL is optional, so a knob missing here reads
+        // `undefined` on a node whose operator named none. (Except `quota`, and the §4.1
+        // durability math, which comes off each chunk's own signed descriptor.) A holder
+        // bounds one FETCH response by ITS maxMessageBytes (serveFetch), so the cohort
+        // agrees on it deliberately; a mismatched client degrades to tail re-requests
+        // rather than failing (runFetchTasks).
         maxMessageBytes: cfg.maxMessageBytes,
         fanoutWindow: cfg.fanoutWindow,
         windowTargetBytes: cfg.windowTargetBytes,
