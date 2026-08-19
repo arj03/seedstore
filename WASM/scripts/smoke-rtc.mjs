@@ -93,13 +93,15 @@ const CONTACT = process.env.CONTACT
 // must be here, not on StorageNode.create.
 async function makeNode(contact = CONTACT) {
   const identity = (() => { const kp = sodium.crypto_sign_keypair(); return { publicKey: kp.publicKey, privateKey: kp.privateKey }; })();
-  const entry = { identity, node: null, shell: null };
-  entry.shell = (await bootTransportShell({
+  const entry = { identity, node: null, shell: null, transport: null };
+  const built = await bootTransportShell({
     sodium, identity, timeoutMs: 8000, contactSecret: contact,
     config: { ...config, quota: 64 * 1024 * 1024 },
-  })).shell;
+  });
+  entry.shell = built.shell;
+  entry.transport = built.transport;
   entry.net = new RtcNetwork({
-    driver: entry.shell.transport,
+    driver: entry.transport,
     signaling: join(), peerConnectionFactory: pcFactory,
     peerContactFor: () => contact,
     onPeerUp: (pid) => entry.node?.addPeer(pid),
@@ -113,7 +115,7 @@ let ok = false;
 try {
   for (let i = 0; i < HOLDERS + 1; i++) {
     const e = await makeNode();
-    e.node = await StorageNode.create({ shell: e.shell, sodium, ...wasm, identity: e.identity, config, timeoutMs: 8000 });
+    e.node = await StorageNode.create({ shell: e.shell, transport: e.transport, sodium, ...wasm, identity: e.identity, config, timeoutMs: 8000 });
     nodes.push(e);
   }
   const owner = nodes[0];
@@ -152,7 +154,7 @@ try {
   const stranger = await makeNode(sodium.randombytes_buf(32));
   nodes.push(stranger);
   stranger.node = await StorageNode.create({
-    shell: stranger.shell, sodium, ...wasm, identity: stranger.identity, config, timeoutMs: 8000 });
+    shell: stranger.shell, transport: stranger.transport, sodium, ...wasm, identity: stranger.identity, config, timeoutMs: 8000 });
   stranger.net.join();
   const before = owner.node.cohortPeers().length;
   const t1 = Date.now();

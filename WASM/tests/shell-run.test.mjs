@@ -21,7 +21,10 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { boot } from "seedkernel-wasm/shell";
+// `bootRuntime` where the test drives the channel adapter (addresses, listeners) and
+// plain `boot` where only the shell is wanted — the adapter is the platform's now, so it
+// comes back beside the shell rather than on it.
+import { boot, bootRuntime } from "seedkernel-wasm/shell";
 import { appKeyFor, verifyBundle } from "seedkernel-wasm/bundle";
 import { TRANSPORT_BUNDLE_B64 } from "seedkernel-wasm/transport-bundle";
 import {
@@ -55,13 +58,14 @@ function transportAuthorHex(sodium) {
   return toHex(verifyBundle(sodium, bytes).author);
 }
 
-/** Wire one shell's driver to one storage node's driver (addresses + dial) and
- *  add the node to the shell's cohort view. */
-async function link(shell, shellPeerId, node, cohortSet) {
-  node.net.addPeerAddr(shellPeerId, { host: "127.0.0.1", port: shell.transport.port, transport: "tcp" });
-  shell.transport.addPeerAddr(node.peerId, { host: "127.0.0.1", port: node.net.port, transport: "tcp" });
+/** Wire one shell's channel adapter to one storage node's (addresses + dial) and
+ *  add the node to the shell's cohort view. The adapter is the platform's — the shell
+ *  does not carry one — so it is passed in beside the peer id it belongs to. */
+async function link(shellNet, shellPeerId, node, cohortSet) {
+  node.net.addPeerAddr(shellPeerId, { host: "127.0.0.1", port: shellNet.port, transport: "tcp" });
+  shellNet.addPeerAddr(node.peerId, { host: "127.0.0.1", port: node.net.port, transport: "tcp" });
   cohortSet.add(node.peerId);
-  await Promise.all([shell.transport.ready(), node.net.ready()]);
+  await Promise.all([shellNet.ready(), node.net.ready()]);
 }
 
 export async function run(t) {
@@ -100,7 +104,7 @@ export async function run(t) {
       // a stranger is exactly the forgery the anchor exists to stop.
       const shellIdentity = generateKeyPair(sodium);
       for (const h of holders) h.addPeer(toHex(shellIdentity.publicKey));
-      shell = await boot({
+      const rt = await bootRuntime({
         policyJson: JSON.stringify({
           authors: [toHex(authorId)],
           grants: { link: [transportHex] },
@@ -114,8 +118,9 @@ export async function run(t) {
         // this tiny test file single-block/replicated instead of RS across the cohort).
         config: { blockSize: 1024 },
       });
-      await shell.transport.start();
-      for (const h of holders) await link(shell, toHex(shellIdentity.publicKey), h, new Set());
+      shell = rt.shell;
+      await rt.transport.start();
+      for (const h of holders) await link(rt.transport, toHex(shellIdentity.publicKey), h, new Set());
       const loaded = await shell.loadBundle(bundlePath);
       // The app key is not optional: a node with a network has at least two apps loaded — the
       // storage bundle and the transport, which is an ordinary app that claims `_net` (§12.10).
@@ -183,7 +188,7 @@ export async function run(t) {
       const authorId = await buildBundle(hiPath, author, sodium, build, 5);
       await buildBundle(loPath, author, sodium, build, 3);
       const shellId = generateKeyPair(sodium);
-      shell = await boot({
+      const rt = await bootRuntime({
         policyJson: JSON.stringify({
           authors: [toHex(authorId)],
           grants: { link: [transportHex] },
@@ -191,7 +196,8 @@ export async function run(t) {
         dir: shellDir, identity: shellId, channels: net.view(toHex(shellId.publicKey)),
         timeoutMs: TIMEOUT,
       });
-      await shell.transport.start();
+      shell = rt.shell;
+      await rt.transport.start();
       await shell.loadBundle(hiPath); // advances the (author, app) high-water mark to 5
       let refused = false;
       try { await shell.loadBundle(loPath); } catch { refused = true; }

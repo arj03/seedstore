@@ -373,7 +373,7 @@ async function boot() {
     const config = { ...CONFIG, blockSize: blockSizeFor(mode), maxMessageBytes: maxMessageBytesFor(mode),
       windowTargetBytes: windowTargetBytesFor(mode), realmMemoryBytes: realmMemoryBytesFor() };
     const { realmMemoryBytes, ...appConfig } = config;
-    const { shell } = await bootTransportShell({
+    const { shell, transport: transportHost } = await bootTransportShell({
       sodium, identity, timeoutMs,
       contactSecret,
       config: { ...appConfig, quota: 64 * 1024 * 1024 },
@@ -381,14 +381,14 @@ async function boot() {
     });
     if (mode === "ws") {
       net = new WsNetwork({
-        driver: shell.transport,
+        driver: transportHost,
         webSocketFactory: (u) => new WebSocket(u),
         connsPerPeer: connsPerPeerFor(mode),
         onPeerUp, onPeerDown,
       });
     } else {
       net = new RtcNetwork({
-        driver: shell.transport,
+        driver: transportHost,
         rtcConfig: RTC_CONFIG, signaling: relaySignaling(relayUrl),
         peerContactFor: () => contactSecret,
         onPeerUp, onPeerDown,
@@ -410,7 +410,7 @@ async function boot() {
       $("author").value = authorHex; // reflect the auto-detected scope in the UI
     }
     node = await createStorageNode({
-      shell, sodium, identity, baseUrl: "./", config, timeoutMs, signAuthor,
+      shell, transport: transportHost, sodium, identity, baseUrl: "./", config, timeoutMs, signAuthor,
     });
     // Log the LIVE config the coordinator actually uses (after defaultConfig
     // merge), so a stale/cached build that lost maxMessageBytes is visible here.

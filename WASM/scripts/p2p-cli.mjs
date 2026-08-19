@@ -221,7 +221,7 @@ const { realmMemoryBytes, ...appConfig } = config;
 const peerUp = new Set();
 let onQuorum = null;
 const { bootTransportShell } = await import("../build/host/storage-node.js");
-const { shell } = await bootTransportShell({
+const { shell, transport } = await bootTransportShell({
   sodium: wrapTransportSodium(sodium),
   identity,
   timeoutMs,
@@ -229,14 +229,14 @@ const { shell } = await bootTransportShell({
   realmMemoryBytes,
 });
 const net = new WsNetwork({
-  driver: shell.transport,
+  driver: transport,
   webSocketFactory: wsFactory,
   connsPerPeer: connsN,
   onPeerUp: (pid) => { node?.addPeer(pid); peerUp.add(pid); console.log(`link up: ${pid.slice(0, 8)}…`); if (peerUp.size >= specs.length) onQuorum?.(); },
   onPeerDown: (pid) => { node?.removePeer(pid); peerUp.delete(pid); console.log(`link DOWN: ${pid.slice(0, 8)}…`); },
 });
 
-let node = await createStorageNode({ shell, identity, config, timeoutMs });
+let node = await createStorageNode({ shell, transport, identity, config, timeoutMs });
 for (const pid of peerUp) node.addPeer(pid);
 console.log(`node ready: RS(${kParam},${mParam}), ${blockSize / 1024} KiB blocks, batch ${Math.round(maxMessageBytes / 1024)} KiB, window ${windowN}, conns/peer ${connsN}, wtarget ${wtargetMB > 0 ? wtargetMB + " MB" : "4 MiB (default)"}, heap ${heapMB > 0 ? heapMB + " MB" : "64 MiB (default)"}, timeout ${timeoutMs} ms`);
 

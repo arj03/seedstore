@@ -23,7 +23,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { boot } from "seedkernel-wasm/shell";
+import { bootRuntime } from "seedkernel-wasm/shell";
 import { appKeyFor, verifyBundle } from "seedkernel-wasm/bundle";
 import { TRANSPORT_BUNDLE_B64 } from "seedkernel-wasm/transport-bundle";
 import {
@@ -78,7 +78,7 @@ export async function run(t) {
     const dir = mkdtempSync(join(tmpdir(), "seedstore-shell-"));
     tmpDirs.push(dir);
     const identity = generateKeyPair(sodium);
-    const shell = await boot({
+    const { shell, transport } = await bootRuntime({
       policyJson, dir, identity,
       channels: net.view(toHex(identity.publicKey)),
       listen: { host: "127.0.0.1", port: 0 },
@@ -95,16 +95,15 @@ export async function run(t) {
       // files single-block/replicated instead of exercising the RS path.
       config: { quota: 64 * 1024 * 1024, blockSize: 1024 },
     });
-    await shell.transport.start(); // bind the loopback port the cohort dials
+    await transport.start(); // bind the loopback port the cohort dials
     // A generic shell + the signed storage bundle is a storage node: the manifest
-    // claims STORAGE_PROTO and the load routes it (§12.10), so nothing here points
-    // the protocol anywhere — `serve()` is the only step between loading and answering.
+    // claims STORAGE_PROTO and the load routes it (§12.10), so nothing here points the
+    // protocol anywhere — and nothing arms it either, the load stands the guest.
     const loaded = await shell.loadBundle(bundlePath);
-    await shell.serve();
     // The app key rides along: a node with a network has at least two apps loaded — the
     // storage bundle and the transport, which is an ordinary app claiming `_net` (§12.10) — so
     // "the only loaded app" is not something an `invoke` caller can mean any more.
-    return { shell, peerId: toHex(identity.publicKey), net: shell.transport, appKey: appKeyFor(loaded.author, loaded.manifest.app) };
+    return { shell, peerId: toHex(identity.publicKey), net: transport, appKey: appKeyFor(loaded.author, loaded.manifest.app) };
   }
   // Dial every pair (addresses + ready). The cohort each guest sees is the TRANSPORT's
   // authenticated set — it asks `_net` for its peers — so linking the nodes is the whole

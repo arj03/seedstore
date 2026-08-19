@@ -70,7 +70,7 @@ const identity = (() => { const kp = sodium.crypto_sign_keypair(); return { publ
 // driver's openLink. The room's contact secret gates the ACCEPTING side, so it is
 // the driver's (the shell's platform), and `peerContactFor` presents it when dialing.
 const { bootTransportShell } = await import("../build/host/storage-node.js");
-const { shell } = await bootTransportShell({
+const { shell, transport } = await bootTransportShell({
   sodium, identity, timeoutMs: 6000, contactSecret,
   // The geometry rides in as operator config — the shell merges it over the bundle's
   // signed config into the guest's APP (a shared shell cannot be re-configured after
@@ -80,7 +80,7 @@ const { shell } = await bootTransportShell({
 
 let node = null;
 const net = new RtcNetwork({
-  driver: shell.transport,
+  driver: transport,
   rtcConfig: RTC_CONFIG,
   signaling: relaySignaling(url),
   // Symmetric room: the accepting side gate is the driver's contactSecret (above);
@@ -96,7 +96,7 @@ const net = new RtcNetwork({
 
 // A real StorageNode serving HAVE / OFFER / STORE / FETCH over the P2P links. Default
 // store.local is an in-RAM fs, read back through the node's FsBlobView.
-node = await StorageNode.create({ shell, sodium, ...wasm, identity, config, timeoutMs: 6000 });
+node = await StorageNode.create({ shell, transport, sodium, ...wasm, identity, config, timeoutMs: 6000 });
 net.join(); // announce into the room → present peers begin the WebRTC handshake
 
 console.log(`\nseed store RTC holder ${short(node.peerId)} ready — handlers installed: ${node.handlersInstalled()}`);

@@ -14,18 +14,19 @@
 // verified author.
 //
 // StorageNode only:
-//   - creates the platform seam (fs, channels/socket seam, freshnessStore,
+//   - creates the platform seam (fs, the channel adapter, freshnessStore,
 //     identity, sodium) and loads the transport bundle through the shared shell
 //   - calls createShell() + loadBundleBlob() to wire the shared shell
 //   - runs the guest's *initiator* ops (put / get / repair) via
 //     shell.invoke() — a loopback into the app's one `handle`
-//   - serves the guest's *holder* entrypoint via shell.serve() — the storage
-//     protocol needs no wiring here: the bundle's manifest claims it and the load
-//     is what routes it (§12.10)
+//   - serves the guest's *holder* entrypoint without wiring anything: the load
+//     stands the guest and the manifest's claim is what routes inbound storage
+//     frames to it (§12.10)
 //
 // A caller that already stands a shell up (a WebRTC/WS node, whose socket seam is
 // a host-managed transport handing channels to the driver's openLink) passes that
-// shell in with `shell`; StorageNode then loads only the seedstore bundle on it.
+// shell in with `shell`, together with the `transport` adapter it built the shell
+// on; StorageNode then loads only the seedstore bundle on it.
 
 import type { Fs } from "seedkernel-wasm/fs";
 // The backend, not the seam: `MemoryFs` is host code alongside `NodeFs`, while
@@ -44,7 +45,7 @@ import { Op } from "./protocol.js";
 import { encodeScoreReq } from "./reputation-core.js";
 import { toHex, fromHex, readU32BE, readU64BE, concatBytes } from "./util.js";
 import {
-  createShell, ModuleTable, scopedFs, byPrivilege, requireTransport, type Shell, type ModuleLookup, type RealmFactory,
+  createShell, ModuleTable, scopedFs, byPrivilege, type Shell, type ModuleLookup, type RealmFactory,
 } from "seedkernel-wasm/shell-core";
 import { FreshnessMarks, appKeyFor, appScopeFor, verifyBundle, type LoadedBundle } from "seedkernel-wasm/bundle";
 import type { ChannelFactoryLike } from "./loopback.js";
@@ -99,10 +100,16 @@ export interface PutResult {
 
 export interface StorageNodeOptions {
   /** A pre-built seedkernel shell with the transport bundle already admitted and
-   *  its driver started (a WebRTC/WS node — the socket seam is host-managed, so
-   *  the driver is standing and the RTC/WS network hands it channels). Absent,
+   *  its listeners started (a WebRTC/WS node — the socket seam is host-managed, so
+   *  the adapter is attached and the RTC/WS network hands it channels). Absent,
    *  StorageNode builds its own shell from `channels`/`listen` below. */
   shell?: Shell;
+  /** The channel adapter that shell was built on. Required alongside `shell` and
+   *  meaningless without it: the adapter is the PLATFORM's — the shell only points it
+   *  at whichever bundle claims `_net` and no longer exposes it — so a caller that
+   *  built the shell is the only one who can hand it over (`bootTransportShell`
+   *  returns both). It is the whole of `node.net`. */
+  transport?: TransportHost;
   sodium: Sodium;
   /** The signed seedstore bundle blob (seedstore.skb). The ONE install path:
    *   the shared shell loads it through the §12.4 bundle loader — verify
@@ -157,8 +164,8 @@ export interface StorageNodeOptions {
 export class StorageNode {
   readonly peerId: PeerId;
   readonly identity: Identity;
-  /** The socket driver (shell.transport) — sockets, addresses, listeners, and nothing
-   *  else. The transport itself is a signed bundle; this is the host side that hands it
+  /** The channel adapter — sockets, addresses, listeners, and nothing else. The
+   *  transport itself is a signed bundle; this is the host side that hands it
    *  descriptors. There is no request face here any more: an app's send is a call to the
    *  id the transport claims, so requests leave from the GUEST (see `netSend` in
    *  host/tier2-guest.orchestration.js) and never through this object. */
@@ -214,6 +221,7 @@ export class StorageNode {
   private constructor(
     opts: StorageNodeOptions,
     shell: Shell,
+    net: TransportHost,
     identity: Identity,
     loaded: LoadedBundle,
     cohort: Set<PeerId>,
@@ -229,9 +237,7 @@ export class StorageNode {
     this.store = opts.store ?? new FsBlobView(this.fs);
     this.clockFn = opts.clock ?? (() => Date.now());
     this.crypto = new Crypto(opts.sodium);
-    // A shell passed in must already have its transport admitted and standing (the
-    // doc on `shell`).
-    this.net = requireTransport(shell, "a StorageNode shell must have the transport bundle standing");
+    this.net = net;
     this.cohort = cohort;
     this.ownsShell = ownsShell;
 
@@ -278,8 +284,14 @@ export class StorageNode {
     // built with comes back too, so the host read view and the guest's writes
     // share ONE backend.
     const ownsShell = opts.shell === undefined;
+    if (opts.shell && !opts.transport) {
+      throw new Error(
+        "StorageNode: a caller-supplied `shell` must come with the `transport` adapter it was built on " +
+        "— the shell does not expose one (seedkernel §12.6); bootTransportShell() returns both.");
+    }
     const built = opts.shell ? null : await buildShell(opts, identity);
     const shell = opts.shell ?? built!.shell;
+    const net = opts.transport ?? built!.transport;
     // The fs the shell was built with — the guest's writes land there. A caller's own
     // fs wins; a pre-built shell brings its own (bootTransportShell created it).
     const fs = opts.fs ?? (opts.shell?.fs ?? built!.fs) ?? new MemoryFs();
@@ -294,8 +306,9 @@ export class StorageNode {
       // The load is the whole of it (seedkernel §12.10): the manifest claims
       // STORAGE_PROTO, so admitting the bundle is what points inbound storage frames at
       // it. Nothing here routes anything — a node that installed storage serves storage.
+      // The load stands the guest, so there is nothing to arm afterwards: the node has
+      // been answerable for STORAGE_PROTO since this line returned.
       const loaded = await shell.loadBundleBlob(opts.bundleBlob);
-      await shell.serve();
 
       // The guest does NOT reach the backend directly: the shell hands it
       // `scopedFs(fs, appScopeFor(author, app))`, so every key the holder writes lands
@@ -307,7 +320,7 @@ export class StorageNode {
       const appFs = scopedFs(fs, appScopeFor(opts.sodium, loaded.author, STORAGE_APP));
       const withFs = { ...opts, fs: appFs }; // share the one fs instance with the constructor below
 
-      return new StorageNode(withFs, shell, identity, loaded, cohort, ownsShell);
+      return new StorageNode(withFs, shell, net, identity, loaded, cohort, ownsShell);
     } catch (err) {
       if (ownsShell) shell.close();
       throw err;
@@ -480,11 +493,14 @@ export class StorageNode {
   }
 }
 
-/** Build the shell a StorageNode loads its bundles onto: the platform seam (fs,
- *  the socket seam, the realm factory) + the transport bundle admitted first —
- *  the node's network — with the driver's listeners started. Returns the shell
- *  AND the fs instance it was built with (a caller with no fs of its own must
- *  read the same backend the guest writes). */
+/** Build the shell a StorageNode loads its bundles onto: the platform seam (fs, the
+ *  channel adapter, the realm factory) + the transport bundle admitted first — the
+ *  node's network — with the adapter's listeners started.
+ *
+ *  Returns all three things the platform now owns: the shell, the `TransportHost` (the
+ *  shell does not expose it — it is the platform's, and `StorageNode.transport` wants it
+ *  back), and the fs instance it was built with (a caller with no fs of its own must read
+ *  the same backend the guest writes). */
 export async function bootTransportShell(
   opts: {
     sodium: Sodium; identity: Identity;
@@ -506,8 +522,24 @@ export async function bootTransportShell(
     realmMemoryBytes?: number;
     now?: () => number;
   },
-): Promise<{ shell: Shell; fs: Fs }> {
+): Promise<{ shell: Shell; transport: TransportHost; fs: Fs }> {
   const fs = opts.fs ?? new MemoryFs();
+
+  // The channel adapter is CONSTRUCTED here rather than by the shell: every knob on it
+  // (which addresses to bind, the dial fan-out, the peer list) is this deployment's
+  // answer. The shell's whole part is pointing it at whichever bundle claims `_net`, and
+  // shell.close() closes it, so there is still one teardown.
+  const transport = new TransportHost({
+    identity: opts.identity,
+    networkKey: opts.networkKey,
+    contactSecret: opts.contactSecret,
+    requestDeadlineMs: opts.timeoutMs,
+    connsPerPeer: opts.connsPerPeer,
+    admitPeers: opts.admitPeers,
+    channels: opts.channels,
+    listen: opts.listen,
+    wsListen: opts.wsListen,
+  });
 
   // The transport slot is author-pinned to the artifact's own author (derived
   // from the blob, never restated): the operator handing us the storage bundle is
@@ -523,13 +555,8 @@ export async function bootTransportShell(
       table: new ModuleTable(),
       fs,
       freshnessStore: new FreshnessMarks(),
-      channels: opts.channels,
-      listen: opts.listen,
-      wsListen: opts.wsListen,
       networkKey: opts.networkKey,
-      contactSecret: opts.contactSecret,
-      admitPeers: opts.admitPeers,
-      connsPerPeer: opts.connsPerPeer,
+      transportHost: transport,
       createRealm: opts.createRealm ?? createRealm,
       now: opts.now,
     },
@@ -547,25 +574,24 @@ export async function bootTransportShell(
       grants: { link: (v) => toHex(v.author) === transportAuthorHex },
     }),
     answer: opts.answer,
-    requestDeadlineMs: opts.timeoutMs,
     config: { ...(opts.config ?? {}), ...(opts.quota != null ? { quota: opts.quota } : {}) },
     realmMemoryBytes: opts.realmMemoryBytes,
   });
 
-  // Load the transport bundle: the node's network (phase 3). This stands the
-  // driver up over the socket seam; the listeners bind below.
+  // Load the transport bundle: the node's network (phase 3). This is what points the
+  // adapter at a claimant; the listeners bind below.
   await shell.loadBundleBlob(blob);
-  const driver = requireTransport(shell, "the loaded transport bundle did not stand a driver");
-  await driver.start();
+  await transport.start();
 
-  return { shell, fs };
+  return { shell, transport, fs };
 }
 
-/** Build the shell a StorageNode loads its bundles onto — the socket seam,
- *  the realm factory, the transport bundle admitted first — with the driver's
- *  listeners started. Returns the shell AND the fs instance it was built with
- *  (a caller with no fs of its own must read the same backend the guest writes). */
-async function buildShell(opts: StorageNodeOptions, identity: Identity): Promise<{ shell: Shell; fs: Fs }> {
+/** Build the shell a StorageNode loads its bundles onto — the channel adapter, the realm
+ *  factory, the transport bundle admitted first — with the listeners started. Returns
+ *  what `bootTransportShell` returns: the shell, the adapter, and the fs instance it was
+ *  built with (a caller with no fs of its own must read the same backend the guest
+ *  writes). */
+async function buildShell(opts: StorageNodeOptions, identity: Identity): Promise<{ shell: Shell; transport: TransportHost; fs: Fs }> {
   // Normalise the operator override: derive windowTargetBytes from realmMemoryBytes
   // when not explicitly set (§3). realmMemoryBytes is host-only (the QuickJS heap
   // bound) — split it out of the config that becomes the guest's APP, and pass it to
