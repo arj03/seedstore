@@ -369,12 +369,12 @@ path; same-machine tabs connect on host candidates without it.)
 
 | | time | rate | |
 |---|---:|---:|---|
-| **write** — full (encrypt + hash + RS encode) | ~0.47 s | ~210 MB/s | |
-| &nbsp;&nbsp;↳ xchacha20 encrypt | ~0.18 s | ~545 MB/s | now the largest single piece |
-| &nbsp;&nbsp;↳ RS encode (SIMD) | ~0.15 s | ~670 MB/s | |
-| &nbsp;&nbsp;↳ BLAKE2b block-ids | ~0.14 s | ~1.1 GB/s | hashes all *n* blocks (1.6×) |
-| **read** — all data present (systematic) | ~0.03 s | ~3 GB/s | common path — a concat, no GF |
-| **read** — one block missing (decode, SIMD) | ~0.16 s | ~625 MB/s | the common failure, §6/§21 |
+| **write** — full (encrypt + hash + RS encode) | ~0.37 s | ~270 MB/s | |
+| &nbsp;&nbsp;↳ xchacha20 encrypt | ~0.19 s | ~550 MB/s | now the largest single piece |
+| &nbsp;&nbsp;↳ RS encode (SIMD) | ~0.07 s | ~1.45 GB/s | |
+| &nbsp;&nbsp;↳ BLAKE2b block-ids | ~0.15 s | ~1.1 GB/s | hashes all *n* blocks (1.6×) |
+| **read** — all data present (systematic) | ~0.04 s | ~2.8 GB/s | common path — a concat, no GF |
+| **read** — one block missing (decode, SIMD) | ~0.06 s | ~1.6 GB/s | the common failure, §6/§21 |
 
 Three optimizations got here. (1) The codec multiplies via a precomputed 256×256
 GF(2⁸) table — one indexed load per byte — making encode **~26× faster** than the
@@ -384,9 +384,9 @@ everything else, already in the libsodium the kernel loads — **no new bytes**
 (§16). (3) The RS multiply-accumulate loops use **WASM SIMD** — the GF(2⁸)
 split-table / `i8x16.swizzle` trick does 16 multiplies per instruction — for
 another **~3.4×** on encode/decode. With all three, the write is balanced across
-encrypt / encode / hash (each ~0.15 s, no single bottleneck) and reads cost
-nothing on the codec unless a block is actually missing. (SIMD needs a runtime
-with the WASM simd feature — Node 16+ and every current browser.) `node
+encrypt / hash / encode (~0.19 / ~0.15 / ~0.07 s, no single bottleneck) and reads
+cost nothing on the codec unless a block is actually missing. (SIMD needs a
+runtime with the WASM simd feature — Node 16+ and every current browser.) `node
 tests/bench.mjs` reproduces these.
 
 **End to end, the link bounds throughput, not the codec.** A multi-MB file is
@@ -399,10 +399,13 @@ window 32):
 
 | | time | rate | |
 |---|---:|---:|---|
-| **PUT** | ~370 ms | ~11 MB/s | ships the 2× erasure overhead — RS(2,2) is 2 data + 2 parity |
-| **GET** | ~240 ms | ~17 MB/s | downloads any *k* of *n* — 1× the file |
+| **PUT** | ~0.75 s | ~5 MB/s | ships the 2× erasure overhead — RS(2,2) is 2 data + 2 parity |
+| **GET** | ~0.34 s | ~12 MB/s | downloads any *k* of *n* — 1× the file |
 
-`node tests/bench-net.mjs 10 4 32` reproduces this and sweeps the window; over a
+`node tests/bench-net.mjs 10 4 32` reproduces this and sweeps the window; the
+latency is modelled at the wire — every message pays it, both directions, so one
+request/response costs the full RTT. (The old ~11/~17 MB/s figures measured a
+host-side delay that charged only the inbound request, not the response.) Over a
 real browser↔browser WebRTC link the `p2p.html` demo reports ~13 MB/s both ways.
 
 **The SIMD split-table trick (GF(2⁸) "PSHUFB").** For a fixed coefficient *c*,

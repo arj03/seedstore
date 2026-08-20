@@ -41,7 +41,7 @@ import {
   type Identity, type PeerId, type StorageConfig, defaultConfig, assertStorageConfig, normaliseConfig, DEFAULT_QUOTA_BYTES,
 } from "./core.js";
 import { STORAGE_APP } from "./manifest.js";
-import { Op } from "./protocol.js";
+import { Op, decodeStats, type RequestStats } from "./protocol.js";
 import { toHex, fromHex, readU32BE, readU64BE, concatBytes } from "./util.js";
 import {
   createShell, scopedFs, byPrivilege, type Shell, type RealmFactory,
@@ -109,9 +109,9 @@ export interface StorageNodeOptions {
   shell?: Shell;
   /** The channel adapter that shell was built on. Required alongside `shell` and
    *  meaningless without it: the adapter is the PLATFORM's — the shell only points it
-   *  at whichever bundle claims `_net` and no longer exposes it — so a caller that
-   *  built the shell is the only one who can hand it over (`bootTransportShell`
-   *  returns both). It is the whole of `node.net`. */
+   *  at whichever bundle owns the raw-link binding and no longer exposes it — so a
+   *  caller that built the shell is the only one who can hand it over
+   *  (`bootTransportShell` returns both). It is the whole of `node.net`. */
   transport?: TransportHost;
   sodium: Sodium;
   /** The signed seedstore bundle blob (seedstore.skb). The ONE install path:
@@ -152,12 +152,6 @@ export interface StorageNodeOptions {
    *  seedkernel artifact; an operator who pins a different transport author
    *  builds their own. Only read when StorageNode builds its own shell. */
   transportBlob?: Uint8Array;
-  /** The shell's own inbound seam (seedkernel §12.10), consulted on each arriving frame
-   *  before the routing table; `null` falls through to the app that claims the protocol.
-   *  A node serving no protocol of its own needs none — the storage tests use it to see
-   *  and delay inbound requests, which is the one place an app-level request is visible
-   *  host-side now that the wire is the record layer's. */
-  answer?: (from: PeerId, proto: string, payload: Uint8Array) => Promise<Uint8Array> | null;
   /** Override the cohort's signing scope author: sign descriptors under this
    *  author instead of the loaded bundle's (used when joining a cohort whose
    *  holders run a DIFFERENT bundle's author — the browser demo's override). */
@@ -211,10 +205,10 @@ export class StorageNode {
    *   is currently online — and it is what `connect` teaches each driver an address for.
    *
    *   It no longer feeds the guest. The guest asks the TRANSPORT who it is linked to (the
-   *   `peers` op behind `_net`), which is the authenticated set — a fact about links, and
-   *   links are the transport's. Handing the guest a host-side roster instead was two copies
-   *   of one fact, and the copy that could be wrong was this one: a peer on the roster
-   *   with no link is a peer every OFFER to it times out against. */
+   *   `peers` op behind its local service name `_net`), which is the authenticated set — a
+   *   fact about links, and links are the transport's. Handing the guest a host-side roster
+   *   instead was two copies of one fact, and the copy that could be wrong was this one: a
+   *   peer on the roster with no link is a peer every OFFER to it times out against. */
   readonly cohort: Set<PeerId>;
   private repairLoopOn = false;
   private repairTimer: ReturnType<typeof setTimeout> | null = null;
@@ -366,9 +360,9 @@ export class StorageNode {
    *  be the same layout maintained on both sides of a seam this file is only a caller of.
    *
    *  The app key is not optional any more. A node with a network has at least two apps
-   *  loaded — the storage bundle and the transport, which is an ordinary app that claims the
-   *  reserved id `_net` (seedkernel §12.10) — so "the only loaded app" is not something a
-   *  StorageNode can mean, and omitting the key is an ambiguity error rather than a
+   *  loaded — the storage bundle and the transport, an ordinary app serving the local
+   *  service name `_net` (seedkernel §12.10) — so "the only loaded app" is not something
+   *  a StorageNode can mean, and omitting the key is an ambiguity error rather than a
    *  default. One place says which app we are, instead of six call sites repeating it. */
   private invoke(op: string, payload: Uint8Array): Promise<Uint8Array> {
     return this.shell.invoke(op, payload, this.appKey);
@@ -450,6 +444,20 @@ export class StorageNode {
     return new DataView(res.buffer, res.byteOffset, 8).getFloat64(0, true);
   }
 
+  /** This node's request statistics since the last read, keyed by MsgType (host/
+   *  protocol.ts `RequestStats`): how many of each request it SENT, the peak number
+   *  in flight at once (the window/fan-out signal), and what it RECEIVED as a holder
+   *  (count, payload bytes, and total processing ms inside the guest's `handle`).
+   *
+   *  The kernel removed the host-side inbound seam the old harnesses timed, so the
+   *  counters live in the guest, where the requests are — this is the read-and-clear
+   *  op over `shell.invoke`. A caller clears by reading once before the measured
+   *  phase and reads again after.
+   */
+  async stats(): Promise<Map<number, RequestStats>> {
+    return decodeStats(await this.invoke(Op.STATS, NO_ARG));
+  }
+
   /** Share a file: seal K to a recipient's kernel key (§4.4). */
   shareKey(K: Uint8Array, recipientPk: Uint8Array): Uint8Array { return this.crypto.seal(K, recipientPk); }
   /** Open a sealed K addressed to this node. */
@@ -520,8 +528,6 @@ export async function bootTransportShell(
     admitPeers?: Uint8Array[]; connsPerPeer?: number;
     timeoutMs?: number; transportBlob?: Uint8Array;
     createRealm?: RealmFactory;
-    /** The shell's own inbound seam — see `StorageNodeOptions.answer`. */
-    answer?: (from: PeerId, proto: string, payload: Uint8Array) => Promise<Uint8Array> | null;
     /** QuickJS heap limit for the guest realm, in bytes. */
     realmMemoryBytes?: number;
     now?: () => number;
@@ -531,8 +537,8 @@ export async function bootTransportShell(
 
   // The channel adapter is CONSTRUCTED here rather than by the shell: every knob on it
   // (which addresses to bind, the dial fan-out, the peer list) is this deployment's
-  // answer. The shell's whole part is pointing it at whichever bundle claims `_net`, and
-  // shell.close() closes it, so there is still one teardown.
+  // answer. The shell's whole part is pointing it at whichever bundle owns the raw-link
+  // binding, and shell.close() closes it, so there is still one teardown.
   const transport = new TransportHost({
     identity: opts.identity,
     networkKey: opts.networkKey,
@@ -566,18 +572,23 @@ export async function bootTransportShell(
     },
     // ONE admission predicate (§12.5), keyed on the privileges the manifest's
     // `requires` reach, said with `byPrivilege`: the `base` branch admits an
-    // app that reaches no privilege, the `link` grant admits the transport
-    // bundle by author pin — the operator handing us the storage bundle is the
-    // trust decision for THAT; an app bundle is admitted because its operator
+    // app that reaches no privilege, the `link` and `route` grants admit the
+    // transport bundle by author pin — the kernel-shipped transport reaches BOTH
+    // (it holds the raw links and submits attributed inbound requests, seedkernel
+    // §12.5), and `byPrivilege` refuses a bundle reaching a privilege with no
+    // grant entry. The operator handing us the storage bundle is the trust
+    // decision for THAT; an app bundle is admitted because its operator
     // handed it to us — the choice of bundle is the trust decision, so there is
     // no author allow-list to clear (the manifest signature + module hashes are
     // still verified by loadBundleBlob, and revocation + the downgrade guard are
     // composed by the shell around whatever we pass here).
     admit: byPrivilege({
       base: () => true,
-      grants: { link: (v) => toHex(v.author) === transportAuthorHex },
+      grants: {
+        link: (v) => toHex(v.author) === transportAuthorHex,
+        route: (v) => toHex(v.author) === transportAuthorHex,
+      },
     }),
-    answer: opts.answer,
     // No app config here: this loads ONE bundle, the transport. App config travels with
     // the load that wants it (§12.4 `localConfig`) — passing it shell-wide put a storage
     // node's settings in the transport guest's APP too.
@@ -605,7 +616,7 @@ async function buildShell(opts: StorageNodeOptions, identity: Identity): Promise
     listen: opts.listen, wsListen: opts.wsListen, networkKey: opts.networkKey,
     contactSecret: opts.contactSecret, admitPeers: opts.admitPeers,
     connsPerPeer: opts.connsPerPeer, timeoutMs: opts.timeoutMs,
-    transportBlob: opts.transportBlob, answer: opts.answer,
+    transportBlob: opts.transportBlob,
     now: opts.clock,
     realmMemoryBytes: normaliseConfig(opts.config ?? {}).realmMemoryBytes,
   });

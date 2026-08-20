@@ -24,7 +24,10 @@
 import { performance } from "node:perf_hooks";
 import { loadWasmBytes, loadSodium, createConnectedCohort } from "../build/host/node.js";
 import { bytesEqual } from "../build/host/util.js";
+import { MsgType } from "../build/host/protocol.js";
 import { LatencyNetwork } from "./latency-net.mjs";
+
+const OFFER = MsgType.OFFER, FETCH = MsgType.FETCH, STORE = MsgType.STORE;
 
 const RTT_MS = Number(process.argv[2] ?? 10);     // round-trip latency to model
 const FILE_MB = Number(process.argv[3] ?? 2);
@@ -57,24 +60,26 @@ async function measure(W) {
     count: 6, network: net, sodium, wasm,
     config: { ...config, fanoutWindow: W }, timeoutMs,
   });
-  // Wrap the transport drivers: the latency link now lives at the driver's request
-  // seam (see latency-net.mjs), where the old frame-level network counted requests.
-  net.wrapAll(nodes);
   const owner = nodes[0];
 
-  net.reset();
+  // The latency link lives at the WIRE (latency-net.mjs — every message delayed);
+  // the request counts and in-flight peaks come from the guest's Op.STATS counter
+  // (read-and-cleared), since the kernel's shell has no host-side inbound seam.
+  await owner.stats(); // clear whatever the cohort wiring accumulated
   let t0 = performance.now();
   const put = await owner.put(data);
   const putMs = performance.now() - t0;
-  const putPeak = net.maxInflightWork;
-  const putReqs = net.requests;
+  let s = await owner.stats();
+  const putPeak = Math.max(s.get(OFFER)?.sentPeak ?? 0, s.get(STORE)?.sentPeak ?? 0); // the "work" types (HAVE excluded)
+  const putReqs = (s.get(OFFER)?.sent ?? 0) + (s.get(STORE)?.sent ?? 0);
 
-  net.reset();
+  await owner.stats(); // clear — the GET below is the only thing counted
   t0 = performance.now();
   const got = await owner.get(put.root, put.key);
   const getMs = performance.now() - t0;
-  const getPeak = net.maxInflightWork;
-  const getReqs = net.requests;
+  s = await owner.stats();
+  const getPeak = s.get(FETCH)?.sentPeak ?? 0;
+  const getReqs = s.get(FETCH)?.sent ?? 0;
 
   const ok = bytesEqual(got, data);
   // Nodes are left open between measures and torn down only by the final

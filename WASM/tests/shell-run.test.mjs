@@ -8,8 +8,9 @@
 // binary never learns it is running storage.
 //
 // The shell's network is itself a signed bundle: `boot()` admits the kernel's
-// transport bundle (its author must clear the policy's `grants: { link: [...] }` entry),
-// standing the TransportHost driver up over the socket seam — here a per-node
+// transport bundle (its author must clear the policy's `grants: { link, route }`
+// entries — the kernel-shipped transport reaches BOTH privileges, §12.5), standing
+// the TransportHost driver up over the socket seam — here a per-node
 // view of the shared LoopbackNetwork fabric, exactly as a shell-run node on real
 // sockets would.
 //
@@ -38,9 +39,9 @@ import { makeT } from "./harness.mjs";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const build = join(__dirname, "..", "build");
 // The per-request deadline. Generous, and it has to be: a request now crosses two
-// confined realms on each side — the app's guest calls the transport, the transport answers the
-// far end's `_host`, and the far end's shell dispatches into its own app's realm — where
-// it used to cross a host-side facade. 40 ms was a wire budget, not a realm budget.
+// confined realms on each side — the app's guest calls the transport, the transport
+// delivers to the far end's app via `route/deliver`, and that realm answers — where it
+// used to cross a host-side facade. 40 ms was a wire budget, not a realm budget.
 const TIMEOUT = 200;
 
 function file(n, seed = 1) {
@@ -97,7 +98,8 @@ export async function run(t) {
 
       // The shell knows only its policy + the kernel; storage arrives as content. The
       // policy admits the bundle author for apps AND grants the transport bundle's
-      // author the `link` privilege — the latter is what stands the shell's network up.
+      // author the `link` and `route` privileges — the latter are what stand the
+      // shell's network up.
       //
       // A cohort is MUTUAL: the holders must know the shell too, because a holder now
       // anchors a descriptor's author to a peer it knows (§4.3) — a valid signature from
@@ -107,7 +109,7 @@ export async function run(t) {
       const rt = await bootRuntime({
         policyJson: JSON.stringify({
           authors: [toHex(authorId)],
-          grants: { link: [transportHex] },
+          grants: { link: [transportHex], route: [transportHex] },
         }),
         dir: shellDir, identity: shellIdentity,
         channels: net.view(toHex(shellIdentity.publicKey)),
@@ -123,7 +125,8 @@ export async function run(t) {
       // single-block/replicated instead of RS across the cohort).
       const loaded = await shell.loadBundle(bundlePath, { localConfig: { blockSize: 1024 } });
       // The app key is not optional: a node with a network has at least two apps loaded — the
-      // storage bundle and the transport, which is an ordinary app that claims `_net` (§12.10).
+      // storage bundle and the transport, an ordinary app serving the local service name
+      // `_net` (§12.10).
       const appKey = appKeyFor(authorId, loaded.manifest.app);
       // A slot's modules are private to its guest now, so there is no table to ask what
       // landed: the load is all-or-none (seedkernel §12.4), so what proves the modules
@@ -152,7 +155,7 @@ export async function run(t) {
       const shell2 = await boot({
         policyJson: JSON.stringify({
           authors: [toHex(generateKeyPair(sodium).publicKey)],
-          grants: { link: [transportHex] },
+          grants: { link: [transportHex], route: [transportHex] },
         }),
         dir: shell2Dir, identity: shell2Id, channels: net.view(toHex(shell2Id.publicKey)),
       });
@@ -194,7 +197,7 @@ export async function run(t) {
       const rt = await bootRuntime({
         policyJson: JSON.stringify({
           authors: [toHex(authorId)],
-          grants: { link: [transportHex] },
+          grants: { link: [transportHex], route: [transportHex] },
         }),
         dir: shellDir, identity: shellId, channels: net.view(toHex(shellId.publicKey)),
         timeoutMs: TIMEOUT,

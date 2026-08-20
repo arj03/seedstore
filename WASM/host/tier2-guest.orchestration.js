@@ -4,7 +4,7 @@
 // host (host/storage-node.ts) only boots the kernel and runs this guest in one
 // realm. Every capability is reached through the one `host.call(name, bytes)` seam.
 // The seam is genuinely async where the world behind it is: the network (a call
-// to the reserved id `_net`), every `fs/*` name, and since guest ABI 6 every bare
+// to the transport's local service name `_net`), every `fs/*` name, and since guest ABI 6 every bare
 // module call (the codec and reputation modules run in their own worker on the JS
 // targets, so their answers cross an isolate) resolve to a real Promise the guest
 // `await`s — so a fan-out is just `await Promise.all(peers.map(...))`, and the
@@ -114,6 +114,38 @@ const STORE_BLK = ".blk", STORE_DSC = ".dsc";
 // the guest seam resolves it against this app's map, so app keys never leave the host.
 const CODEC_NAME = "codec";
 const REP_NAME = "reputation";
+
+// ── request statistics (§18, for the latency/bench harnesses) ────────────────
+// The kernel's shell has no host-side inbound seam since the `route/deliver` move, so
+// the request counters live HERE, where the requests are: `netSend` counts + peaks the
+// OUTBOUND requests, `doHandle` counts + times the inbound holder work. Read and
+// cleared by the Op.STATS local op (protocol.ts `RequestStats`), so a harness clears
+// by reading once before a phase and reads again after. Indexed by MsgType byte —
+// 256 slots keeps an index a bare body byte with no bounds check. `statsPeak` is the
+// most requests of one type in flight at once, the fan-out/window signal the batching
+// tests pin. STATS_TYPES + STATS_RECORD_BYTES come from the stitched protocol.ts, so
+// the encoder here and the host's decoder agree by construction.
+const statsSent = new Uint32Array(256);
+const statsInFlight = new Uint32Array(256);
+const statsPeak = new Uint32Array(256);
+const statsRecv = new Uint32Array(256);
+const statsRecvBytes = new Uint32Array(256);
+const statsRecvMs = new Float64Array(256);
+function encodeStats() {
+  const out = new Uint8Array(STATS_TYPES.length * STATS_RECORD_BYTES);
+  for (let i = 0; i < STATS_TYPES.length; i++) {
+    const t = STATS_TYPES[i];
+    const off = i * STATS_RECORD_BYTES;
+    wU32(out, off, statsSent[t]);
+    wU32(out, off + 4, statsPeak[t]);
+    wU32(out, off + 8, statsRecv[t]);
+    wU32(out, off + 12, statsRecvBytes[t]);
+    new DataView(out.buffer, off + 16, 8).setFloat64(0, statsRecvMs[t], true);
+    statsSent[t] = statsPeak[t] = statsInFlight[t] = statsRecv[t] = statsRecvBytes[t] = 0;
+    statsRecvMs[t] = 0;
+  }
+  return out;
+}
 
 // The runtime injects the author's signed config as `APP` and this installation's as
 // `LOCAL`, merging neither (seedkernel §12.4, ABI 8) — the precedence below is the app's.
@@ -256,10 +288,11 @@ async function storeList() {
   return out;
 }
 
-// ── the network: one reserved id, two ops ────────────────────────────────────
+// ── the network: one local service name, two ops ─────────────────────────────
 // The network is not a host capability any more (seedkernel §12.10): it is a bundle —
-// the transport — that claims the reserved protocol id `_net`, and an app reaches it with
-// the ONE cross-realm call, `host.call("_net", …)`. The host's whole contribution is
+// the transport — that claims the local service name `_net` (an ordinary `_`-led id,
+// no kernel semantics), and an app reaches it with the ONE cross-realm call,
+// `host.call("_net", …)`. The host's whole contribution is
 // attribution: it prepends this app's 32-byte key as the caller, exactly as it prepends
 // a sender's key on an inbound frame, so the transport can tell an app's request from the
 // platform's own events without a second seam.
@@ -335,12 +368,19 @@ function rank(peers) { return makeRanker()(peers); }
 // claims it — and the storage message type leads the payload, which is this app's own
 // framing and opaque to everything in between.
 async function netSend(peer, type, payload) {
-  const head = new Uint8Array(5); // noReply=0, deadline=0 (the node's default)
-  const body = new Uint8Array(1 + payload.length);
-  body[0] = type;
-  body.set(payload, 1);
-  const r = await netOp("send", concat([head, netBlob(fromHex(peer)), netBlob(NET_PROTO), netBlob(body)]));
-  return r[0] === 1 ? r.slice(1) : null; // null = peer unreachable within the window
+  statsSent[type]++;
+  statsInFlight[type]++;
+  if (statsInFlight[type] > statsPeak[type]) statsPeak[type] = statsInFlight[type];
+  try {
+    const head = new Uint8Array(5); // noReply=0, deadline=0 (the node's default)
+    const body = new Uint8Array(1 + payload.length);
+    body[0] = type;
+    body.set(payload, 1);
+    const r = await netOp("send", concat([head, netBlob(fromHex(peer)), netBlob(NET_PROTO), netBlob(body)]));
+    return r[0] === 1 ? r.slice(1) : null; // null = peer unreachable within the window
+  } finally {
+    statsInFlight[type]--;
+  }
 }
 // Per-peer fan-out (§6/§7): a DISTINCT request per peer, all issued CONCURRENTLY.
 // With real net promises the guest fans out itself — `Promise.all` over netSend, the
@@ -1392,6 +1432,13 @@ async function acceptStore(blockId, descriptor, bytes) {
 // block it verifiably holds. The DoS bound stays: one block + cap per request. A per-id
 // memo keeps a repeated id from costing a fresh storeGet.
 async function serveFetch(ids) {
+  // The misbehaving-peer simulator (StorageConfig.lieOnFetch): answer UNANSWERED for
+  // every id, even ones this holder serves. There is no host seam left to intercept
+  // serveFetch with (the kernel's shell has none since the `route/deliver` move), so
+  // the lie lives here, where the tests need it — the READER's §18 no-progress
+  // invariant (a peer that never decides a block is ruled a miss, never re-asked
+  // forever) is exactly what this knob exists to exercise.
+  if (CFG.lieOnFetch) return ids.map(() => FETCH_UNANSWERED);
   const cap = maxMsgBytes();
   const out = new Array(ids.length).fill(null);
   const seen = new Map(); // idHex → bytes|null, so a repeated id is one storeGet
@@ -1450,20 +1497,30 @@ async function doHandle(arg) {
       case Op.REQUEST: return doRequest(payload);
       case Op.WARM: return doWarm();
       case Op.SCORE: return repScoreBytes(payload, clockNow());
+      case Op.STATS: return encodeStats();
       default: return EMPTY;
     }
   }
+  // A peer's wire frame: answer it, timing + counting the request as holder work
+  // (the `recv*` half of the STATS op — the host has no inbound seam to read this
+  // from since the `route/deliver` move, so the harnesses read it off the realm).
   const type = body[0], payload = body.slice(1);
-  if (type === MSG_HAVE) return encodeMask((await Promise.all(decodeHaveReq(payload).map((id) => storeHas(id)))));
-  if (type === MSG_OFFER) return encodeMask(await admitBatch(decodeOfferBatch(payload)));
-  if (type === MSG_STORE) {
+  const t0 = clockNow();
+  let out;
+  if (type === MSG_HAVE) out = await encodeMask(await Promise.all(decodeHaveReq(payload).map((id) => storeHas(id))));
+  else if (type === MSG_OFFER) out = await encodeMask(await admitBatch(decodeOfferBatch(payload)));
+  else if (type === MSG_STORE) {
     const stores = decodeStoreBatch(payload);
     const verdicts = [];
     for (const s of stores) verdicts.push(await acceptStore(s.blockId, s.descriptor, s.bytes));
-    return encodeMask(verdicts);
+    out = await encodeMask(verdicts);
   }
-  if (type === MSG_FETCH) return encodeFetchBatchRes(await serveFetch(decodeFetchBatchReq(payload)));
-  return EMPTY;
+  else if (type === MSG_FETCH) out = await encodeFetchBatchRes(await serveFetch(decodeFetchBatchReq(payload)));
+  else out = EMPTY;
+  statsRecv[type]++;
+  statsRecvBytes[type] += payload.length;
+  statsRecvMs[type] += clockNow() - t0;
+  return out;
 }
 
 // ── one control message, on the host's behalf ────────────────────────────────

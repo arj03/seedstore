@@ -11,7 +11,7 @@
 import {
   LoopbackNetwork, loadWasmBytes, loadSodium, createConnectedCohort, StorageNode,
 } from "../build/host/node.js";
-import { encodeFetchBatchReq, decodeFetchBatchReq, decodeFetchBatchRes, encodeFetchBatchRes, encodeStoreBatch, decodeMask, FETCH_UNANSWERED, VERDICT_ACCEPTED, VERDICT_DECLINED, VERDICT_QUOTA, VERDICT_SIBLING, VERDICT_DESCRIPTOR, MsgType } from "../build/host/protocol.js";
+import { encodeFetchBatchReq, decodeFetchBatchRes, encodeStoreBatch, decodeMask, FETCH_UNANSWERED, VERDICT_ACCEPTED, VERDICT_DECLINED, VERDICT_QUOTA, VERDICT_SIBLING, VERDICT_DESCRIPTOR, MsgType } from "../build/host/protocol.js";
 import { parseSignedDescriptor, signDescriptor, encodeDescriptorList } from "../build/host/manifest.js";
 import { MemoryFs } from "seedkernel-wasm/fs-memory";
 import { toHex, fromHex, bytesEqual } from "../build/host/util.js";
@@ -482,25 +482,25 @@ export async function run(t) {
     // checks the invariant instead — a round that decides nothing rules those ids absent
     // for that peer, a §8 miss — so the GET ends by its own verdict. Both holders lying is
     // the case with no honest fallback left: the GET must FAIL, and failing is the point.
+    //
+    // The lie is a guest config knob (StorageConfig.lieOnFetch, serveFetch in
+    // tier2-guest.orchestration.js): the kernel's shell has no host-side seam left to
+    // intercept the holder's serveFetch with since the `route/deliver` move, so the
+    // misbehaving-peer behavior lives where the serving does. The holders stay honest
+    // on HAVE/OFFER/STORE — they genuinely admit the blocks and advertise them; only
+    // the serving is a lie.
     const net = new LoopbackNetwork();
     const cfg = { k: 1, m: 1, blockSize: 1024 };  // one block per chunk, m+1 = 2 copies → both holders
-    // Honest on HAVE/OFFER/STORE, so these holders genuinely admit the blocks and
-    // advertise them; only the serving is a lie.
-    const stallFetch = (_from, _proto, payload) => {
-      if (payload[0] !== MsgType.FETCH) return null;
-      const ids = decodeFetchBatchReq(payload.slice(1));
-      return Promise.resolve(encodeFetchBatchRes(ids.map(() => FETCH_UNANSWERED)));
-    };
-    const mk = (answer) => {
+    const mk = (lieOnFetch) => {
       const identity = sodium.crypto_sign_keypair();
       return StorageNode.create({
         sodium, bundleBlob: wasm.bundleBlob, identity,
         channels: net.view(toHex(identity.publicKey)), listen: { host: "127.0.0.1", port: 0 },
-        config: cfg, timeoutMs: TIMEOUT, answer,
+        config: { ...cfg, lieOnFetch }, timeoutMs: TIMEOUT,
       });
     };
-    const owner = await mk(undefined);
-    const nodes = [owner, await mk(stallFetch), await mk(stallFetch)];
+    const owner = await mk(false);
+    const nodes = [owner, await mk(true), await mk(true)];
     for (let i = 0; i < nodes.length; i++) {
       for (let j = i + 1; j < nodes.length; j++) await StorageNode.connect(nodes[i], nodes[j]);
     }

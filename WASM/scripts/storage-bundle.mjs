@@ -71,7 +71,7 @@ export function authorKeysFor(sodium, edSk) {
 // (signing AND verification, both scoped to this bundle's (author, app) — the guest
 // checks a peer's descriptor signature without ever reconstructing the host-owned
 // prefix), `node/identity` and `node/random` (identity and entropy), `fs/*` and the
-// clock. And the one RESERVED PROTOCOL ID, `_net`: the network is not a host
+// clock. And the one local service name, `_net`: the network is not a host
 // capability but a bundle — the transport — that claims that id, and an app reaches it
 // with the one cross-realm call (§12.10). It is the only place a manifest says "this
 // app talks to peers", and it carries no privilege: what an operator is asked about

@@ -53,7 +53,43 @@ export const Op = {
   REQUEST: "request",       // one control-plane message: [peer 32][type u8][payload] → [ok u8][resp]
   SCORE: "score",           // this node's decayed standing for a peer: [peer 32] → [score f64 LE]
   WARM: "warm",             // JIT warm-up, no result
+  STATS: "stats",           // request counters, read-and-cleared: → `RequestStats` (below)
 } as const;
+
+// ── the STATS op wire format (§18) ──────────────────────────────────────────
+// The request counters live in the guest (the kernel's shell has no inbound seam
+// since the `route/deliver` move, so the harnesses read the counts off the realm
+// that makes them). One fixed record per MsgType, in `STATS_TYPES` order:
+//   [sent u32][sentPeak u32][recv u32][recvBytes u32][recvMs f64 LE]
+// `sent` counts requests this node ISSUED; `sentPeak` is the most of them in
+// flight at once (the fan-out/window signal); the `recv*` fields count and time
+// the requests this node ANSWERED as a holder (inside the guest's `handle`).
+export const STATS_TYPES = [MsgType.HAVE, MsgType.OFFER, MsgType.FETCH, MsgType.STORE] as const;
+export const STATS_RECORD_BYTES = 24;
+
+export interface RequestStats {
+  sent: number;       // requests issued
+  sentPeak: number;   // peak concurrent requests of this type (sender-side window/fan-out)
+  recv: number;       // requests answered (holder side)
+  recvBytes: number;  // payload bytes of those
+  recvMs: number;     // total processing time inside the guest's `handle`, ms
+}
+
+export function decodeStats(buf: Uint8Array): Map<number, RequestStats> {
+  const out = new Map<number, RequestStats>();
+  for (let i = 0; i < STATS_TYPES.length; i++) {
+    const t = STATS_TYPES[i];
+    const o = i * STATS_RECORD_BYTES;
+    out.set(t, {
+      sent: readU32BE(buf, o),
+      sentPeak: readU32BE(buf, o + 4),
+      recv: readU32BE(buf, o + 8),
+      recvBytes: readU32BE(buf, o + 12),
+      recvMs: new DataView(buf.buffer, buf.byteOffset + o + 16, 8).getFloat64(0, true),
+    });
+  }
+  return out;
+}
 
 // ── the response mask shared by HAVE, OFFER, and STORE ──────────────────────
 // All three replies are the same shape: one byte per batch entry. HAVE's is

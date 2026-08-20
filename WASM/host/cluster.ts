@@ -17,15 +17,8 @@ import { toHex } from "./util.js";
 
 export interface CohortOptions {
   count: number;
-  /** The in-process fabric (with online/offline control) the cohort shares.
-   *
-   *  A fabric may also offer `answerFor(peerId)`: the shell's own inbound seam for that
-   *  node, installed at construction because that is when a shell's is fixed. The latency
-   *  harness (tests/latency-net.mjs) is what uses it — it is the one place an app-level
-   *  request is visible host-side, the wire below being the record layer's. */
-  network: LoopbackNetwork & {
-    answerFor?: (peerId: string) => ((from: string, proto: string, payload: Uint8Array) => Promise<Uint8Array> | null) | undefined;
-  };
+  /** The in-process fabric (with online/offline control) the cohort shares. */
+  network: LoopbackNetwork;
   sodium: Sodium;
   /** The loaded seedstore bundle, as `loadWasmBytes()` returns it — one signed blob,
    *  the ONE install path. Every node in the cohort loads the same bundle, so they all
@@ -55,7 +48,6 @@ export async function createConnectedCohort(opts: CohortOptions): Promise<Storag
       // Each node dials/listens through its own view of the shared fabric.
       channels: opts.network.view(peerId),
       listen: { host: "127.0.0.1", port: 0 },
-      answer: opts.network.answerFor?.(peerId),
     }));
   }
   for (let i = 0; i < nodes.length; i++) {

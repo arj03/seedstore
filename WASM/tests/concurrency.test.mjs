@@ -3,17 +3,25 @@
 // The rest of the suite runs on the zero-latency LoopbackNetwork, where per-block
 // and batched round trips finish in the same ~0 ms — so the cost that batching
 // attacks (wall-clock ≈ round-trip count × RTT) is invisible. This group gives the
-// link a real RTT and asserts what only then matters: that OFFER, STORE, and FETCH
-// are batched *per holder* instead of issued *per block*. The win shows up as
-// request counts (LatencyNetwork.byType), not just wall-clock:
+// link a real RTT (each wire message is delayed; latency-net.mjs) and asserts what
+// only then matters: that OFFER, STORE, and FETCH are batched *per holder* instead
+// of issued *per block*. The win shows up as request counters the guest keeps
+// (StorageNode.stats, the Op.STATS local op — the kernel's shell has no host-side
+// inbound seam since the `route/deliver` move, so the counts come from the realm
+// that makes them), not just wall-clock:
 //   - PUT negotiates with ONE OFFER per holder (accept-mask) and pushes the
 //     accepted blocks in ONE streamed STORE per holder — no per-block handshake.
 //   - GET pulls every block a holder serves in ONE FETCH per holder.
 //   - correctness is unchanged: bytes round-trip, assembly lands at the right
 //     offsets regardless of completion order, and any k of n still reads.
+// The sender-side peaks (how many of a request type the guest has in flight at
+// once) are the direct measure of the fan-out/window behavior the pipelining groups
+// pin — the batching lives in the guest, so the counter that sees it is the
+// guest's.
 
 import { loadWasmBytes, loadSodium, createConnectedCohort } from "../build/host/node.js";
 import { bytesEqual, toHex } from "../build/host/util.js";
+import { MsgType } from "../build/host/protocol.js";
 import { LatencyNetwork } from "./latency-net.mjs";
 
 const DELAY = 2;        // ms per send → ~4 ms per request/response round trip
@@ -21,7 +29,7 @@ const TIMEOUT = 2000;   // generous: requests succeed, so this never fires
 const W = 6;            // window width under test (chunks N > W so the cap binds)
 
 // MsgType (host/protocol.ts) — index the per-type request counter.
-const OFFER = 2, FETCH = 3, STORE = 4;
+const OFFER = MsgType.OFFER, FETCH = MsgType.FETCH, STORE = MsgType.STORE;
 
 function file(n, seed = 1) {
   const out = new Uint8Array(n);
@@ -41,29 +49,30 @@ export async function run(t) {
   const replicas = config.m + 1;        // manifest copies (defaultConfig: m+1)
   const data = file(N * config.k * config.blockSize, 7); // exactly N RS chunks (N > W)
 
-  // Stand up a fresh cohort, run `body(owner)`, and return its wall-clock plus the
-  // link's request counters (reset just before the body runs). The latency link is
-  // the new in-process fabric with the transport drivers wrapped (latency-net.mjs):
-  // every node's outbound request is delayed + counted, exactly where the old
-  // frame-level network counted them.
+  // Stand up a fresh cohort, run `body(owner, net)`, and return its wall-clock plus
+  // the owner's request counters (guest-kept, read-and-cleared via Op.STATS). The
+  // latency link is the in-process fabric with per-message wire delay
+  // (latency-net.mjs); the counters are cleared by an initial read so the cohort's
+  // own wiring traffic is never counted.
   async function onCohort(cfg, body) {
     const net = new LatencyNetwork(DELAY);
     const nodes = await createConnectedCohort({ count: 6, network: net, sodium, wasm, config: cfg, timeoutMs: TIMEOUT });
-    net.wrapAll(nodes);
-    net.reset();
+    const owner = nodes[0];
+    await owner.stats(); // clear whatever the cohort wiring accumulated
     const t0 = performance.now();
-    const result = await body(nodes[0], net);
+    const result = await body(owner, net);
     const ms = performance.now() - t0;
-    const byType = net.byType, peakWork = net.maxInflightWork, peakByType = net.maxInflightByType;
+    const stats = await owner.stats(); // read-and-clear
     nodes.forEach((nn) => nn.close());
-    return { result, ms, byType, peakWork, peakByType };
+    net.close();
+    return { result, ms, stats };
   }
 
   t.group("PUT batches OFFER and STORE per holder, not per block");
   {
     const put = await onCohort(config, (o) => o.put(data));
-    const offers = put.byType[OFFER] ?? 0;
-    const stores = put.byType[STORE] ?? 0;
+    const offers = put.stats.get(OFFER)?.sent ?? 0;
+    const stores = put.stats.get(STORE)?.sent ?? 0;
 
     // A per-block PUT issues N×n OFFERs AND N×n STOREs (+ the manifest's replicas).
     // Batching folds EACH to ≈ one message per holder offered to (≤ n) + the
@@ -97,13 +106,13 @@ export async function run(t) {
     const serial = await onCohort({ ...cfg, fanoutWindow: 1 }, (o) => o.put(webrtcData));
     const windowed = await onCohort({ ...cfg, fanoutWindow: 64 }, (o) => o.put(webrtcData));
 
-    const storeSerial = serial.peakByType[STORE] ?? 0;
-    const storeWindowed = windowed.peakByType[STORE] ?? 0;
-    const offersW = windowed.byType[OFFER] ?? 0;
+    const storeSerial = serial.stats.get(STORE)?.sentPeak ?? 0;
+    const storeWindowed = windowed.stats.get(STORE)?.sentPeak ?? 0;
+    const offersW = windowed.stats.get(OFFER)?.sent ?? 0;
 
     // The cap really did force one block per STORE: the STORE *count* is per-block
     // (Nw·n chunk blocks + the manifest's replicas), the case batching can't shrink.
-    t.eq(windowed.byType[STORE], Nw * n + replicas, `the cap forces one block per STORE: ${Nw * n} chunk blocks + ${replicas} manifest`);
+    t.eq(windowed.stats.get(STORE)?.sent ?? 0, Nw * n + replicas, `the cap forces one block per STORE: ${Nw * n} chunk blocks + ${replicas} manifest`);
     // Point 1 still holds under the tight cap: OFFER collapses to ≈ one batched
     // message per holder (≤ n + the manifest replicas), not one per block.
     t.ok(offersW <= n + replicas, `OFFER stays batched per holder under the WebRTC cap: ${offersW} for ${Nw * n} blocks`);
@@ -117,6 +126,11 @@ export async function run(t) {
     t.ok(storeWindowed > storeSerial * 2, `the window multiplies in-flight STOREs (${storeWindowed} vs ${storeSerial})`);
     // …but stays bounded by fanoutWindow × holders — flow-control, not a flood.
     t.ok(storeWindowed <= 64 * n, `windowed STORE stays bounded by fanoutWindow × holders: ${storeWindowed} ≤ ${64 * n}`);
+    // On a real latency link the pipelining is also WALL-CLOCK: the serial PUT pays
+    // one round trip per block, the windowed one overlaps a window's worth. The
+    // margin is huge (64 serial round trips vs ~4 windows), so a 2× floor is safe.
+    t.ok(windowed.ms < serial.ms / 2,
+      `the windowed PUT is wall-clock faster than the serial one (${windowed.ms.toFixed(0)} ms vs ${serial.ms.toFixed(0)} ms)`);
 
     // Correctness is unchanged: the windowed PUT still places every block + manifest.
     t.eq(windowed.result.blockIds.length, Nw * n + 1, "windowed PUT placed every chunk block + the manifest");
@@ -129,13 +143,12 @@ export async function run(t) {
     // manifest, and assembles byte-identically.
     const net = new LatencyNetwork(DELAY);
     const nodes = await createConnectedCohort({ count: 6, network: net, sodium, wasm, config: { ...config, fanoutWindow: W }, timeoutMs: TIMEOUT });
-    net.wrapAll(nodes);
     const owner = nodes[0];
     const put = await owner.put(data);
 
-    net.reset();
+    await owner.stats(); // clear — only the GET below is counted
     const bytes = await owner.get(put.root, put.key);
-    const fetches = net.byType[FETCH] ?? 0;
+    const fetches = (await owner.stats()).get(FETCH)?.sent ?? 0;
 
     t.ok(bytesEqual(bytes, data), "batched GET reconstructs the file byte-identically");
     // ≤ one FETCH per cohort holder (each serves a batch of the blocks it holds) +
@@ -153,7 +166,6 @@ export async function run(t) {
     // confirm the batched path is correct end-to-end and tolerates loss.
     const net = new LatencyNetwork(DELAY);
     const nodes = await createConnectedCohort({ count: 6, network: net, sodium, wasm, config, timeoutMs: TIMEOUT });
-    net.wrapAll(nodes);
     const owner = nodes[0];
     const put = await owner.put(data);
     t.ok(bytesEqual(await owner.get(put.root, put.key), data), "PUT → GET round-trips on a latency-bearing link");
@@ -168,26 +180,26 @@ export async function run(t) {
   t.group("placement + gather fan out across holders (Promise.all over NET_SEND), not one round trip at a time");
   {
     // The orchestration runs INSIDE the QuickJS realm and reaches net only through
-    // host.call, yet placement/gather must still overlap holders. With the genuinely-
-    // async seam the guest fans out itself — Promise.all over NET_SEND, the host driving
-    // the round trips — lifting the peak in-flight per type from 1 (a serial awaited
-    // round trip) to the holder count.
+    // host.call, yet placement/gather must still overlap holders. The guest's own
+    // in-flight peak (how many requests of a type it has outstanding at once) IS the
+    // fan-out: a serial awaited round trip would peak at 1, the Promise.all fan-out
+    // peaks at the holder count.
     const net = new LatencyNetwork(DELAY);
     const nodes = await createConnectedCohort({ count: 6, network: net, sodium, wasm, config, timeoutMs: TIMEOUT });
-    net.wrapAll(nodes);
     const owner = nodes[0];
 
-    net.reset();
+    await owner.stats(); // clear
     const put = await owner.put(data);
-    const offerPeak = net.maxInflightByType[OFFER] ?? 0;
-    const storePeak = net.maxInflightByType[STORE] ?? 0;
+    let s = await owner.stats();
+    const offerPeak = s.get(OFFER)?.sentPeak ?? 0;
+    const storePeak = s.get(STORE)?.sentPeak ?? 0;
     t.ok(offerPeak > 1, `OFFER fan-out overlaps holders: peak ${offerPeak} in flight (a serial path would be 1)`);
     t.ok(storePeak > 1, `STORE fan-out overlaps holders: peak ${storePeak} in flight (a serial path would be 1)`);
     t.eq(put.chunkCount, N, "placed every RS chunk");
 
-    net.reset();
+    await owner.stats(); // clear
     const bytes = await owner.get(put.root, put.key);
-    const fetchPeak = net.maxInflightByType[FETCH] ?? 0;
+    const fetchPeak = (await owner.stats()).get(FETCH)?.sentPeak ?? 0;
     t.ok(bytesEqual(bytes, data), "GET reconstructs the file byte-identically under latency");
     t.ok(fetchPeak > 1, `FETCH fan-out overlaps holders: peak ${fetchPeak} in flight (a serial path would be 1)`);
 
@@ -201,7 +213,7 @@ export async function run(t) {
     // message turns a holder's blocks into many single-block messages, and the window
     // packs fanoutWindow of them into one Promise.all fan-out instead of one
     // round trip apiece. PUT then GET on ONE cohort (a fresh one would hold none of
-    // the blocks); the setup PUT is excluded from the peak by resetting just before
+    // the blocks); the setup PUT is excluded from the peak by clearing just before
     // the GET.
     const bs = 4096;                                   // a block dominates a FETCH message
     const Nw = 16;                                     // chunks ≫ holders, so a window can bind
@@ -210,12 +222,8 @@ export async function run(t) {
     const cfg = { ...config, blockSize: bs, maxMessageBytes: cap };
 
     async function getPeak(fanoutWindow) {
-      const r = await onCohort({ ...cfg, fanoutWindow }, async (owner, net) => {
-        const put = await owner.put(webrtcData);
-        net.reset();
-        return owner.get(put.root, put.key);
-      });
-      return { bytes: r.result, fetchPeak: r.peakByType[FETCH] ?? 0 };
+      const r = await onCohort({ ...cfg, fanoutWindow }, (owner) => owner.put(webrtcData).then((put) => owner.get(put.root, put.key)));
+      return { bytes: r.result, fetchPeak: r.stats.get(FETCH)?.sentPeak ?? 0, ms: r.ms };
     }
     const serial = await getPeak(1);
     const windowed = await getPeak(64);
@@ -224,6 +232,10 @@ export async function run(t) {
     t.ok(bytesEqual(windowed.bytes, webrtcData), "the windowed GET reconstructs the tight-cap file byte-identically");
     t.ok(serial.fetchPeak <= 1, `serial GET fetches one block at a time: peak ${serial.fetchPeak} in flight (≤ 1)`);
     t.ok(windowed.fetchPeak >= Nw, `windowed GET pipelines past serial: ${windowed.fetchPeak} in flight (≥ ${Nw}, vs ${serial.fetchPeak} serial)`);
+    // The pipelining is real wall-clock too: the serial GET pays a full round trip
+    // per block, the windowed one overlaps a window's worth.
+    t.ok(windowed.ms < serial.ms / 2,
+      `the windowed PUT+GET is wall-clock faster than the serial one (${windowed.ms.toFixed(0)} ms vs ${serial.ms.toFixed(0)} ms)`);
   }
 
   t.group("overlapping PUT/GET operations on one node don't clobber the guest's stream state");
@@ -239,9 +251,9 @@ export async function run(t) {
     // short files.
     const cfg = { ...config, windowTargetBytes: config.k * config.blockSize }; // one chunk per window
     const files = [21, 22, 23].map((seed) => file(N * config.k * config.blockSize, seed));
-    const r = await onCohort(cfg, async (owner) => {
-      const puts = await Promise.all(files.map((f) => owner.put(f)));
-      return { puts, got: await Promise.all(puts.map((p) => owner.get(p.root, p.key))) };
+    const r = await onCohort(cfg, (owner) => {
+      return Promise.all(files.map((f) => owner.put(f))).then((puts) =>
+        Promise.all(puts.map((p) => owner.get(p.root, p.key))).then((got) => ({ puts, got })));
     });
     t.ok(r.result.got.every((got, i) => bytesEqual(got, files[i])), "three concurrent multi-window PUT/GETs each round-trip their own bytes");
     t.ok(r.result.puts.every((p) => p.chunkCount === N), `each PUT sealed a manifest over its own ${N} chunks — no window folded into another's stream`);

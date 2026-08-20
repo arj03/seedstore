@@ -67,7 +67,7 @@ export async function run(t) {
   const bundleBlob = new Uint8Array(readFileSync(bundlePath));
   const policyJson = JSON.stringify({
     authors: [toHex(authorId)],
-    grants: { link: [transportHex] },
+    grants: { link: [transportHex], route: [transportHex] },
   });
   const tmpDirs = [bundleDir];
 
@@ -99,8 +99,9 @@ export async function run(t) {
       localConfig: { quota: 64 * 1024 * 1024, blockSize: 1024 },
     });
     // The app key rides along: a node with a network has at least two apps loaded — the
-    // storage bundle and the transport, which is an ordinary app claiming `_net` (§12.10) — so
-    // "the only loaded app" is not something an `invoke` caller can mean any more.
+    // storage bundle and the transport, an ordinary app serving the local service name
+    // `_net` (§12.10) — so "the only loaded app" is not something an `invoke` caller can
+    // mean any more.
     return { shell, peerId: toHex(identity.publicKey), net: transport, appKey: appKeyFor(loaded.author, loaded.manifest.app) };
   }
   // Dial every pair (addresses + ready). The cohort each guest sees is the TRANSPORT's

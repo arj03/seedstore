@@ -53,10 +53,11 @@ export interface ChannelFactoryLike {
   close(): void;
 }
 
-/** One end of an in-process socket pair. Delivery is asynchronous (a microtask),
- *  mirroring a real socket; closing one end fires the other's onClose — the
- *  close semantics of BufferedChannel's fail() path, which is how a real channel
- *  reports the far side going away. */
+/** One end of an in-process socket pair. Delivery is asynchronous (a microtask, or a
+ *  `setTimeout(delayMs)` when the fabric models a latency-bearing link), mirroring a
+ *  real socket; closing one end fires the other's onClose — the close semantics of
+ *  BufferedChannel's fail() path, which is how a real channel reports the far side
+ *  going away. */
 class LoopbackChannel implements RawLinkLike {
   /** A socket pair with `send` as the boundary: one send is one delivery. */
   readonly framing = 0 as const; // FRAMING.PLATFORM — nothing for the bundle to frame
@@ -65,14 +66,17 @@ class LoopbackChannel implements RawLinkLike {
   cls: (() => void) | null = null;
   dead = false;
   readonly remoteAddr: string;
+  /** Wire latency per delivered message (ms). 0 = the zero-latency fabric. */
+  readonly delayMs: number;
 
-  constructor(remoteAddr: string) {
+  constructor(remoteAddr: string, delayMs = 0) {
     this.remoteAddr = remoteAddr;
+    this.delayMs = delayMs;
   }
 
-  static pair(remoteAddr: string): [LoopbackChannel, LoopbackChannel] {
-    const a = new LoopbackChannel(remoteAddr);
-    const b = new LoopbackChannel(remoteAddr);
+  static pair(remoteAddr: string, delayMs = 0): [LoopbackChannel, LoopbackChannel] {
+    const a = new LoopbackChannel(remoteAddr, delayMs);
+    const b = new LoopbackChannel(remoteAddr, delayMs);
     a.peer = b;
     b.peer = a;
     return [a, b];
@@ -81,7 +85,11 @@ class LoopbackChannel implements RawLinkLike {
   send(bytes: Uint8Array): void {
     if (this.dead) return;
     const p = this.peer;
-    queueMicrotask(() => { if (p && !p.dead) p.msg?.(bytes); });
+    if (this.delayMs > 0) {
+      setTimeout(() => { if (p && !p.dead) p.msg?.(bytes); }, this.delayMs);
+    } else {
+      queueMicrotask(() => { if (p && !p.dead) p.msg?.(bytes); });
+    }
   }
   onData(cb: (bytes: Uint8Array) => void): void { this.msg = cb; }
   onClose(cb: () => void): void { this.cls = cb; }
@@ -108,6 +116,11 @@ class LoopbackChannel implements RawLinkLike {
 class LoopbackChannels implements ChannelFactoryLike {
   private listeners = new Map<number, (channel: RawLinkLike) => void>();
   private nextPort = 10000;
+  private readonly delayMs: number;
+
+  constructor(delayMs = 0) {
+    this.delayMs = delayMs;
+  }
 
   /** The bound ports (set by a driver's start()). */
   port = 0;
@@ -139,13 +152,13 @@ class LoopbackChannels implements ChannelFactoryLike {
       // A dial to a dead port: the channel fails immediately on the DIAL side
       // (mirroring ECONNREFUSED → the socket's error/close events), so the
       // transport forgets the link instead of holding it until the deadline.
-      const [dial] = LoopbackChannel.pair(addr.host);
+      const [dial] = LoopbackChannel.pair(addr.host, this.delayMs);
       queueMicrotask(() => dial.kill());
       return dial;
     }
     // The address's host is the "far end" both sides see — it is what the
     // half-open limiter buckets accepts by (the per-source cap; §12.6.1).
-    const [dial, accepted] = LoopbackChannel.pair(addr.host);
+    const [dial, accepted] = LoopbackChannel.pair(addr.host, this.delayMs);
     queueMicrotask(() => onAccept(accepted));
     return dial;
   }
@@ -205,12 +218,20 @@ function deadChannel(): RawLinkLike {
 }
 
 export class LoopbackNetwork {
-  private readonly fabric = new LoopbackChannels();
+  private readonly fabric: LoopbackChannels;
   /** Bound port → the peer that owns it (for offline dial refusal). */
   private readonly portOf = new Map<number, string>();
   private readonly offline = new Set<string>();
   /** Every live channel of a peer (dialed and accepted) — killed on offline. */
   private readonly links = new Map<string, RawLinkLike[]>();
+
+  /** `delayMs` > 0 makes every delivered message take `delayMs` ms to arrive — a
+   *  wire-level round-trip latency (one request/response costs 2×delayMs), the model
+   *  the latency/concurrency harnesses use now that the kernel's shell has no host
+   *  side inbound seam to time against. */
+  constructor(delayMs = 0) {
+    this.fabric = new LoopbackChannels(delayMs);
+  }
 
   /** The peers' bound ports, for dial wiring. A node binds at most one tcp and
    *  one ws port on the fabric. */

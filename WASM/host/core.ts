@@ -52,6 +52,13 @@ export interface StorageConfig {
    *  (passed to createSafeRealm, not injected into the guest APP). Default 64 MiB
    *  (the safe-js default). */
   realmMemoryBytes?: number;
+  /** Misbehaving-peer simulator (a test/operations knob, read by the guest's
+   *  holder path): when true, every FETCH this node serves answers FETCH_UNANSWERED
+   *  for every id — even ones it holds. Exercises the READER's §18 no-progress
+   *  invariant (a peer that never decides a block is ruled a miss, never re-asked
+   *  forever) without needing a second, patched bundle. Never set by a deployment;
+   *  absent ≡ honest serving. */
+  lieOnFetch?: boolean;
 }
 
 /** Default fan-out window (fanoutWindow): how many per-holder STORE/FETCH
@@ -113,7 +120,7 @@ export function defaultConfig(k = 2, m = 2, blockSize = 256): StorageConfig {
  *  the required set cannot drift from the interface as fields are added; only the
  *  OPTIONAL ones (which a default cannot show) are named here. */
 const CONFIG_KEYS: ReadonlySet<string> = new Set([
-  ...Object.keys(defaultConfig()), "realmMemoryBytes", "windowTargetBytes",
+  ...Object.keys(defaultConfig()), "realmMemoryBytes", "windowTargetBytes", "lieOnFetch",
 ]);
 
 /** Reject unknown keys in a caller-supplied config (StorageConfig is a closed set).
@@ -172,8 +179,9 @@ export function normaliseConfig(raw: Partial<Record<string, unknown>>): Partial<
  *
  *  Stated here rather than imported. It used to come from `seedkernel-wasm/net`, the
  *  `Network`/`Endpoint` pair the host implemented; that pair is gone (the transport is a
- *  guest claiming `_net`, so a fabric interface the host implements would describe an
- *  object nobody holds), and the alias moved to the kernel's `core/socket-seam.ts`, which
- *  is not an exported entry. It is a string either way — the same shape the loopback
- *  fabric's structural `RawLink` is stated for, and for the same reason. */
+ *  guest serving the local service name `_net`, so a fabric interface the host implements
+ *  would describe an object nobody holds), and the alias moved to the kernel's
+ *  `core/socket-seam.ts`, which is not an exported entry. It is a string either way — the
+ *  same shape the loopback fabric's structural `RawLink` is stated for, and for the same
+ *  reason. */
 export type PeerId = string;

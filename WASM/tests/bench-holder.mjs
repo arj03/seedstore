@@ -14,12 +14,14 @@
 // above the ~3.6 MB/s per holder the live run sustained, hypothesis (1) is dead.
 //
 // HOW IT ISOLATES THE HOLDER. Nodes run over a zero-latency in-process loopback, so the
-// only cost left in a request is the work itself. Transport.dispatchRequest calls the
-// holder's handler and, because the confined holder answers synchronously (callSync
-// returns bytes, never a Promise), takes no await before sending the response — the
-// whole admit → hash → verify → fs write → reply runs INSIDE the receiver's sink call.
-// So timing that one call, per inbound request type, is the holder's processing time,
-// with no initiator work and no wire in it.
+// only cost left in a request is the work itself. The kernel's shell has no host-side
+// inbound seam since the `route/deliver` move (the old `createShell({ answer })` seam is
+// gone, and the wire is the transport bundle's record layer), so the holder is timed
+// WHERE the work happens: the confined guest times each inbound request inside its own
+// `handle` (the `recv` half of the Op.STATS counter) — the whole admit → hash → verify →
+// fs write → reply — with no initiator work and no wire in it. ms-resolution clock, so
+// sub-millisecond requests round to 0; the STORE batches here carry several 256 KiB
+// blocks and run for ms, so the per-holder totals are real.
 //
 // WHAT THE HOLDER DOES PER STORE'd BLOCK (acceptStore, tier2-guest.orchestration.js):
 // BLAKE2b over the block; verifyDescriptor → one Ed25519 verify; the §6 sibling check
@@ -70,67 +72,22 @@ const config = { k: K, m: M, blockSize, maxMessageBytes: 1 << 20 };
 const HAVE = 1, OFFER = 2, FETCH = 3, STORE = 4;
 const TYPE_NAME = { [HAVE]: "HAVE", [OFFER]: "OFFER", [FETCH]: "FETCH", [STORE]: "STORE" };
 
-const EMPTY = new Uint8Array(0);
-
-// A zero-latency loopback (host/loopback.ts) where each HOLDER is timed at its own
-// inbound seam: `createShell({ answer })`, consulted on every arriving frame before the
-// routing table (seedkernel §12.10). There the request is plaintext and attributed —
-// `payload[0]` is the app's MsgType (§18) — and the hook dispatches it itself, so what is
-// timed is the holder's own `handle` and nothing else.
-//
-// WHERE IT STANDS HAS MOVED, and this is the third place. It began at the initiator's
-// outbound `driver.request()` seam, inferring holder cost from a loopback round trip —
-// holder work plus two realm hops. That seam is gone: an app's send now leaves from
-// inside the guest as a call to the id the transport claims, and the driver has no
-// request face at all. The receiving shell's `answer` is what is left, and it is the
-// better place anyway: the old number included the initiator's own hops in a figure
-// printed as "time spent inside the confined guest's handle", and this one does not.
-class HolderTimingNetwork {
-  constructor() {
-    this.stats = new Map();
-    /** peerId → the shell whose inbound frames this harness times. */
-    this.shells = new Map();
-  }
-  view(peerId) { return this.fabric.view(peerId); }
-  statsFor(peer) {
-    let s = this.stats.get(peer);
-    if (!s) this.stats.set(peer, (s = {}));
-    return s;
-  }
-  bucket(peer, type) {
-    const s = this.statsFor(peer);
-    return s[type] ?? (s[type] = { n: 0, ms: 0, payloadBytes: 0 });
-  }
-  /** The `answer` hook for ONE holder, handed to its shell at construction because that
-   *  is when a shell's inbound seam is fixed.
-   *
-   *  It cannot dispatch until `track` has told it which shell it belongs to — the node
-   *  does not exist yet at this point — so until then it answers `null` and the frame
-   *  takes the ordinary route, untimed. That window covers the cohort's own wiring (the
-   *  handshakes), which is not app traffic and was never counted. */
-  answerFor(peerId) {
-    const net = this;
-    return (from, proto, payload) => {
-      const shell = net.shells.get(peerId);
-      if (!shell) return null;
-      const b = net.bucket(peerId, payload?.[0]);
-      b.n++; b.payloadBytes += payload.length;
-      const t0 = performance.now();
-      return Promise.resolve(shell.dispatch(from, proto, payload) ?? EMPTY)
-        .finally(() => { b.ms += performance.now() - t0; });
-    };
-  }
-  /** Start timing this node: register the shell its `answer` hook dispatches through. */
-  track(node) { this.shells.set(node.peerId, node.shell); }
-}
-
 const fmt = (n, d = 1) => n.toFixed(d);
 const rate = (bytes, ms) => (ms <= 0 ? Infinity : bytes / MB / (ms / 1000));
 
+/** One holder's received-request stats (the guest's read-and-clear Op.STATS), shaped
+ *  as `{ [MsgType]: { n, ms, payloadBytes } }` for the per-type reporting below. */
+async function holderStats(id) {
+  const node = nodes.find((n) => n.peerId === id);
+  const map = await node.stats();
+  const out = {};
+  for (const [type, rs] of map) out[type] = { n: rs.recv, ms: rs.recvMs, payloadBytes: rs.recvBytes };
+  return out;
+}
+
 const sodium = await loadSodium();
 const wasm = await loadWasmBytes();
-const net = new HolderTimingNetwork();
-net.fabric = new LoopbackNetwork();
+const net = new LoopbackNetwork();
 
 // One initiator + exactly k+m holders, so every chunk's blocks fill the cohort and each
 // holder takes one block per chunk (the §6 sibling rule) — the live shape. Built node by
@@ -157,9 +114,6 @@ for (let i = 0; i < 1 + holders; i++) {
     channels: net.view(peerId),
     listen: { host: "127.0.0.1", port: 0 },
     config, fs,
-    // The holders are what this bench prices, so only they carry the timing seam — the
-    // initiator's inbound traffic is responses, which is not work anyone is measuring.
-    answer: i > 0 ? net.answerFor(peerId) : undefined,
     // Generous: each holder takes ~fileBytes of blocks plus .dsc sidecars, and a §14-full
     // holder would silently decline instead of measuring anything.
     quota: Math.max(64 * MB, fileBytes * 4),
@@ -171,9 +125,6 @@ for (let i = 0; i < nodes.length; i++) {
 }
 const initiator = nodes[0];
 const holderIds = nodes.slice(1).map((n) => n.peerId);
-// Arm the timing seams AFTER the cohort is wired, so the handshake traffic that built it
-// is not counted as app requests.
-for (const n of nodes.slice(1)) net.track(n);
 
 const data = new Uint8Array(fileBytes);
 for (let i = 0; i < fileBytes; i++) data[i] = (i * 1103515245 + 12345) & 255;
@@ -194,10 +145,12 @@ const put = await initiator.put(data);
 const putMs = performance.now() - t0;
 
 // ── holder ingest ──────────────────────────────────────────────────────────
+// Each holder's guest timed every request it answered (the recv half of Op.STATS,
+// read-and-cleared). The stats read here covers exactly the PUT above.
 let storeMs = 0, storeBytes = 0, storeReqs = 0, offerMs = 0, offerReqs = 0;
 console.log("per-holder request handling (time spent inside the confined guest's `handle`):");
 for (const id of holderIds) {
-  const s = net.statsFor(id);
+  const s = await holderStats(id);
   const st = s[STORE] ?? { n: 0, ms: 0, payloadBytes: 0 };
   const of = s[OFFER] ?? { n: 0, ms: 0, payloadBytes: 0 };
   storeMs += st.ms; storeBytes += st.payloadBytes; storeReqs += st.n;
@@ -250,13 +203,12 @@ if (offerReqs) {
 }
 
 // ── GET side, for context ──────────────────────────────────────────────────
-net.stats.clear();
 const g0 = performance.now();
 const got = await initiator.get(put.root, put.key);
 const getMs = performance.now() - g0;
 let fetchMs = 0, fetchReqs = 0;
 for (const id of holderIds) {
-  const b = net.statsFor(id)[FETCH];
+  const b = (await holderStats(id))[FETCH];
   if (b) { fetchMs += b.ms; fetchReqs += b.n; }
 }
 console.log(`\nFETCH (serve path, for contrast — a store read + a copy, no verify, no write):`);
