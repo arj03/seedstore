@@ -306,7 +306,14 @@ export class StorageNode {
       // The operator's settings ride WITH this load as its `LOCAL` (seedkernel §12.4),
       // not on the shell, which also hosts the transport. This is also what makes them
       // reach a CALLER's shell (the browser/RTC nodes), which a shell-wide config missed.
-      const loaded = await shell.loadBundleBlob(opts.bundleBlob, { localConfig: localConfigFor(opts) });
+      // The heap rides with this load too, and for the same reason: a storage guest
+      // streaming windows needs a realm the transport bundle sharing this shell does not,
+      // and a shell-wide number gave the transport the storage node's budget (seedkernel
+      // §12.3, `LoadBundleOptions.realmMemoryBytes`).
+      const loaded = await shell.loadBundleBlob(opts.bundleBlob, {
+        localConfig: localConfigFor(opts),
+        realmMemoryBytes: normaliseConfig(opts.config ?? {}).realmMemoryBytes,
+      });
 
       // The guest does NOT reach the backend directly: the shell hands it
       // `scopedFs(fs, appScopeFor(author, app))`, so every key the holder writes lands
@@ -528,8 +535,6 @@ export async function bootTransportShell(
     admitPeers?: Uint8Array[]; connsPerPeer?: number;
     timeoutMs?: number; transportBlob?: Uint8Array;
     createRealm?: RealmFactory;
-    /** QuickJS heap limit for the guest realm, in bytes. */
-    realmMemoryBytes?: number;
     now?: () => number;
   },
 ): Promise<{ shell: Shell; transport: TransportHost; fs: Fs }> {
@@ -589,10 +594,10 @@ export async function bootTransportShell(
         route: (v) => toHex(v.author) === transportAuthorHex,
       },
     }),
-    // No app config here: this loads ONE bundle, the transport. App config travels with
-    // the load that wants it (§12.4 `localConfig`) — passing it shell-wide put a storage
-    // node's settings in the transport guest's APP too.
-    realmMemoryBytes: opts.realmMemoryBytes,
+    // No app config here, and no realm budget either: this loads ONE bundle, the transport.
+    // Both travel with the load that wants them (§12.4 `localConfig`, §12.3
+    // `realmMemoryBytes`) — passing either shell-wide put a storage node's settings in the
+    // transport guest's APP and a storage node's heap under the transport's realm.
   });
 
   // Load the transport bundle: the node's network (phase 3). This is what points the
@@ -609,8 +614,9 @@ export async function bootTransportShell(
  *  built with (a caller with no fs of its own must read the same backend the guest
  *  writes). */
 async function buildShell(opts: StorageNodeOptions, identity: Identity): Promise<{ shell: Shell; transport: TransportHost; fs: Fs }> {
-  // realmMemoryBytes is the only thing from `config` a SHELL takes — host-owned resource
-  // policy, shell-wide by nature. The rest is the app's; see localConfigFor.
+  // Nothing from `config` reaches the SHELL: the guest's half is `localConfig` and the
+  // host's half (the realm heap) is a per-load bound, both riding with the storage load
+  // rather than with the shell that also hosts the transport. See localConfigFor.
   return bootTransportShell({
     sodium: opts.sodium, identity, fs: opts.fs, channels: opts.channels,
     listen: opts.listen, wsListen: opts.wsListen, networkKey: opts.networkKey,
@@ -618,7 +624,6 @@ async function buildShell(opts: StorageNodeOptions, identity: Identity): Promise
     connsPerPeer: opts.connsPerPeer, timeoutMs: opts.timeoutMs,
     transportBlob: opts.transportBlob,
     now: opts.clock,
-    realmMemoryBytes: normaliseConfig(opts.config ?? {}).realmMemoryBytes,
   });
 }
 

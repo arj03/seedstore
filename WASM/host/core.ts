@@ -48,9 +48,11 @@ export interface StorageConfig {
   /** Memory budget for the guest realm's QuickJS heap. The host derives
    *  windowTargetBytes from it (~realmMemoryBytes / 3, since peak heap footprint is
    *  ≈ 3× the plaintext window at RS(1,1)), so the two real flow-control knobs are
-   *  this (the memory number) and maxMessageBytes (the transport number). Host-only
-   *  (passed to createSafeRealm, not injected into the guest APP). Default 64 MiB
-   *  (the safe-js default). */
+   *  this (the memory number) and maxMessageBytes (the transport number). Host-only:
+   *  it is split back out of the guest's config and passed as THIS BUNDLE's realm bound
+   *  (seedkernel §12.3 `LoadBundleOptions.realmMemoryBytes`), never shell-wide — the
+   *  transport bundle shares the shell and needs none of it. Default 64 MiB (the shared
+   *  seedkernel default). */
   realmMemoryBytes?: number;
   /** Misbehaving-peer simulator (a test/operations knob, read by the guest's
    *  holder path): when true, every FETCH this node serves answers FETCH_UNANSWERED

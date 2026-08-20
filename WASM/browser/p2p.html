@@ -370,15 +370,14 @@ async function boot() {
     // The WS/TCP path carries far larger frames than WebRTC, so it gets bigger
     // blocks (fewer chunks → fewer round trips) and a bigger per-message batch cap;
     // WebRTC stays under the werift ~64 KiB channel on both. realmMemoryBytes is
-    // host-only — read out here because the SHELL takes it directly; the rest of this
-    // object is the storage bundle's LOCAL, handed over at its load.
+    // host-only — split back out by createStorageNode and applied as the storage load's
+    // own realm bound; the rest of this object is that bundle's LOCAL. Neither half
+    // reaches the shell, which also hosts the transport.
     const config = { ...CONFIG, blockSize: blockSizeFor(mode), maxMessageBytes: maxMessageBytesFor(mode),
       windowTargetBytes: windowTargetBytesFor(mode), realmMemoryBytes: realmMemoryBytesFor() };
-    const { realmMemoryBytes } = config;
     const { shell, transport: transportHost } = await bootTransportShell({
       sodium, identity, timeoutMs,
       contactSecret,
-      realmMemoryBytes,
     });
     if (mode === "ws") {
       net = new WsNetwork({

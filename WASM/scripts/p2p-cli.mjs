@@ -206,12 +206,12 @@ console.log("signing scope: derived from the loaded seedstore bundle author");
 // math — r = m+1, the low-water mark — is derived from k/m and from each
 // chunk's signed descriptor, never config). The injection is total — a partial config
 // would feed the strict guest an undefined knob. realmMemoryBytes is host-only (the
-// QuickJS heap bound) and is read out here too, because the SHELL takes it directly —
-// the rest of this object is the storage bundle's LOCAL, handed over at its load.
+// QuickJS heap bound) and is split back out by createStorageNode, which carries it as the
+// storage load's own realm bound; the rest of this object is that bundle's LOCAL. Neither
+// half reaches the shell, which also hosts the transport.
 const config = { ...defaultConfig(kParam, mParam, blockSize), maxMessageBytes, fanoutWindow: windowN,
   ...(wtargetMB > 0 ? { windowTargetBytes: Math.round(wtargetMB * 1024 * 1024) } : {}),
   ...(heapMB > 0 ? { realmMemoryBytes: Math.round(heapMB * 1024 * 1024) } : {}) };
-const { realmMemoryBytes } = config;
 
 // The transport is now a signed bundle: boot the shared shell with it admitted
 // (the node's network standing), then put the WS socket seam under the driver.
@@ -226,7 +226,6 @@ const { shell, transport } = await bootTransportShell({
   sodium: wrapTransportSodium(sodium),
   identity,
   timeoutMs,
-  realmMemoryBytes,
 });
 const net = new WsNetwork({
   driver: transport,
