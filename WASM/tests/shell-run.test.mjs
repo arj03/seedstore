@@ -26,8 +26,8 @@ import { fileURLToPath } from "node:url";
 // plain `boot` where only the shell is wanted — the adapter is the platform's now, so it
 // comes back beside the shell rather than on it.
 import { boot, bootRuntime } from "seedkernel-wasm/shell";
-import { appKeyFor, verifyBundle } from "seedkernel-wasm/bundle";
-import { TRANSPORT_BUNDLE_B64 } from "seedkernel-wasm/transport-bundle";
+import { verifyBundle } from "seedkernel-wasm/bundle";
+import { transportBundleBytes } from "seedkernel-wasm/transport-bundle";
 import {
   loadSodium, generateKeyPair, LoopbackNetwork, createConnectedCohort,
 } from "../build/host/node.js";
@@ -53,9 +53,7 @@ function file(n, seed = 1) {
 /** The transport bundle's author — derived from the artifact, never restated —
  *  so the policy can admit it for the transport role. */
 function transportAuthorHex(sodium) {
-  const bin = atob(TRANSPORT_BUNDLE_B64);
-  const bytes = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  const bytes = transportBundleBytes();
   return toHex(verifyBundle(sodium, bytes).author);
 }
 
@@ -124,10 +122,10 @@ export async function run(t) {
       // bundle ships the PRODUCTION 256 KiB, which would make this tiny file
       // single-block/replicated instead of RS across the cohort).
       const loaded = await shell.loadBundle(bundlePath, { localConfig: { blockSize: 1024 } });
-      // The app key is not optional: a node with a network has at least two apps loaded — the
-      // storage bundle and the transport, an ordinary app serving the local service name
-      // `_net` (§12.10).
-      const appKey = appKeyFor(authorId, loaded.manifest.app);
+      // The app key rides the load's handle: a node with a network has at least two apps
+      // loaded — the storage bundle and the transport, an ordinary app serving the local
+      // service name `_net` (§12.10).
+      const appKey = loaded.key;
       // A slot's modules are private to its guest now, so there is no table to ask what
       // landed: the load is all-or-none (seedkernel §12.4), so what proves the modules
       // stood up is the app answering on the claim it made — and, below, a PUT that

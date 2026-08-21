@@ -24,8 +24,8 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { bootRuntime } from "seedkernel-wasm/shell";
-import { appKeyFor, verifyBundle } from "seedkernel-wasm/bundle";
-import { TRANSPORT_BUNDLE_B64 } from "seedkernel-wasm/transport-bundle";
+import { verifyBundle } from "seedkernel-wasm/bundle";
+import { transportBundleBytes } from "seedkernel-wasm/transport-bundle";
 import {
   loadSodium, generateKeyPair, LoopbackNetwork, createConnectedCohort,
 } from "../build/host/node.js";
@@ -47,9 +47,7 @@ function file(n, seed = 1) {
 /** The transport bundle's author — derived from the artifact, never restated —
  *  so the policy can admit it for the transport role. */
 function transportAuthorHex(sodium) {
-  const bin = atob(TRANSPORT_BUNDLE_B64);
-  const bytes = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  const bytes = transportBundleBytes();
   return toHex(verifyBundle(sodium, bytes).author);
 }
 
@@ -98,11 +96,11 @@ export async function run(t) {
     const loaded = await shell.loadBundle(bundlePath, {
       localConfig: { quota: 64 * 1024 * 1024, blockSize: 1024 },
     });
-    // The app key rides along: a node with a network has at least two apps loaded — the
-    // storage bundle and the transport, an ordinary app serving the local service name
-    // `_net` (§12.10) — so "the only loaded app" is not something an `invoke` caller can
-    // mean any more.
-    return { shell, peerId: toHex(identity.publicKey), net: transport, appKey: appKeyFor(loaded.author, loaded.manifest.app) };
+    // The app key rides the load's handle: a node with a network has at least two apps
+    // loaded — the storage bundle and the transport, an ordinary app serving the local
+    // service name `_net` (§12.10) — so "the only loaded app" is not something an
+    // `invoke` caller can mean any more, and the handle carries the key with the binding.
+    return { shell, peerId: toHex(identity.publicKey), net: transport, appKey: loaded.key };
   }
   // Dial every pair (addresses + ready). The cohort each guest sees is the TRANSPORT's
   // authenticated set — it asks `_net` for its peers — so linking the nodes is the whole

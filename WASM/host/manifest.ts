@@ -19,12 +19,12 @@ import type { Sodium } from "./sodium.js";
 import {
   encodeDescriptorCore, parseSignedDescriptor, type Descriptor, type SignedDescriptor,
 } from "./manifest-core.js";
-import { concatBytes, toHex } from "./util.js";
-import { createGuestSeam, appSignScope, guestSignScope, UNRESTRICTED_NAMES } from "seedkernel-wasm/guest-seam";
+import { concatBytes } from "./util.js";
+import { appSigner, guestSignScope } from "seedkernel-wasm/guest-seam";
 
 // The scoped signing namespace is the KERNEL's to state, and this package's
-// sign/verify go through the kernel's scoped seam: `node/sign` applies
-// `DOMAIN_guest ‖ scope ‖ msg` host-side when signing, `node/verify` checks the same
+// sign/verify go through the kernel's scoped signer: `sign` applies
+// `DOMAIN_guest ‖ scope ‖ msg` host-side, `verify` checks the same
 // preimage for a caller-named key. Neither this host mirror nor the guest ever
 // reconstructs the host-owned prefix bytes (seedkernel §12.2).
 export { guestSignScope };
@@ -67,39 +67,13 @@ export function storageSignScope(authorPk: Uint8Array): Uint8Array {
 /** The host-side mirror's one seam, per (sodium, signing key, scope author): the
  *  SAME scoped names the confined guest calls, so the preimage the two sides must
  *  agree on is the kernel's to build and nothing here reconstructs it. The scope
- *  author is the deployment's — `appSignScope(key, scopeAuthor, STORAGE_APP)`
+ *  author is the deployment's — `appSigner(sodium, key, scopeAuthor, STORAGE_APP)`
  *  derives the byte-identical scope the shell derives for the admitted bundle (§16).
- *  Cached per triple: node/verify ignores the bridge's key, so a verify-built
- *  bridge must never be the one node/sign signs with — keying on the secret key too
- *  keeps the two apart. */
-const scopedBridges = new WeakMap<Sodium, Map<string, (name: string, payload: Uint8Array) => Uint8Array | Promise<Uint8Array>>>();
-
-function scopedBridge(sodium: Sodium, authorPk: Uint8Array, authorSk: Uint8Array, scopeAuthor: Uint8Array): (name: string, payload: Uint8Array) => Uint8Array | Promise<Uint8Array> {
-  let byKey = scopedBridges.get(sodium);
-  if (!byKey) {
-    byKey = new Map();
-    scopedBridges.set(sodium, byKey);
-  }
-  const cacheKey = toHex(authorPk) + ":" + toHex(authorSk) + ":" + toHex(scopeAuthor);
-  let bridge = byKey.get(cacheKey);
-  if (!bridge) {
-    const key = { publicKey: authorPk, privateKey: authorSk };
-    bridge = createGuestSeam({
-      platform: { sodium, identity: key },
-      grants: {
-        names: UNRESTRICTED_NAMES,
-        signScope: appSignScope(key, scopeAuthor, STORAGE_APP),
-      },
-      modules: { names: new Set(), call: () => null },
-    });
-    byKey.set(cacheKey, bridge);
-  }
-  return bridge;
+ *  Built per call: the signer is a closure over the scope and the derivation is one
+ *  hash, so there is nothing here worth caching. */
+function storageSigner(sodium: Sodium, authorPk: Uint8Array, authorSk: Uint8Array, scopeAuthor: Uint8Array) {
+  return appSigner(sodium, { publicKey: authorPk, privateKey: authorSk }, scopeAuthor, STORAGE_APP);
 }
-
-/** The never-signing key verify bridges are built with — node/verify takes the key
- *  it checks from the envelope, so this half of the bridge's scope never matters. */
-const DUMMY_SK = new Uint8Array(32);
 
 /** A signed chunk descriptor as stored alongside every block and listed in the
  *  manifest (§4.3): [authorPk 32][sig 64][core ...]. Signing stays sender-side
@@ -112,12 +86,12 @@ export function signDescriptor(
   scopeAuthor: Uint8Array,
 ): Uint8Array {
   const core = encodeDescriptorCore(d);
-  const sig = scopedBridge(sodium, authorPk, authorSk, scopeAuthor)("node/sign", core) as Uint8Array;
+  const sig = storageSigner(sodium, authorPk, authorSk, scopeAuthor).sign(core);
   return concatBytes([authorPk, sig, core]);
 }
 
 /** Verify the author signature over the descriptor (§4.3), via the kernel's scoped
- *  `node/verify` — the host applies `DOMAIN_guest ‖ storageSignScope(scopeAuthor) ‖
+ *  signer — the host applies `DOMAIN_guest ‖ storageSignScope(scopeAuthor) ‖
  *  core` for us. Returns the parsed signed descriptor if valid, else null.
  *  `scopeAuthor` must match the signing-scope author the cohort was built with. */
 export function verifyDescriptor(
@@ -125,10 +99,7 @@ export function verifyDescriptor(
 ): SignedDescriptor | null {
   let sd: SignedDescriptor;
   try { sd = parseSignedDescriptor(env); } catch { return null; }
-  const bridge = scopedBridge(sodium, sd.authorPk, DUMMY_SK, scopeAuthor);
-  try {
-    const verdict = bridge("node/verify", concatBytes([sd.authorPk, sd.sig, sd.core])) as Uint8Array;
-    if (verdict[0] !== 1) return null;
-  } catch { return null; }
-  return sd;
+  const ok = storageSigner(sodium, sd.authorPk, new Uint8Array(32), scopeAuthor)
+    .verify(sd.authorPk, sd.sig, sd.core);
+  return ok ? sd : null;
 }

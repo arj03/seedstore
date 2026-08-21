@@ -2,7 +2,7 @@
 // bootstrap). It is now a THIN host: the entire storage protocol lives in the
 // confined guest (host/tier2-guest.js), run inside ONE seedkernel safe-js realm
 // over the generic capability bridge. StorageNode stands up the shared
-// platform-neutral `createShell()` from seedkernel (the §12.9 move) and loads the
+// platform-neutral `bootShell()` from seedkernel (the §12.9 move) and loads the
 // signed bundles — the ONE install path (§12.4): first the kernel-shipped
 // **transport bundle** (the signed program that IS the node's network, §12.6),
 // then the seedstore bundle.
@@ -15,10 +15,12 @@
 //
 // StorageNode only:
 //   - creates the platform seam (fs, the channel adapter, freshnessStore,
-//     identity, sodium) and loads the transport bundle through the shared shell
-//   - calls createShell() + loadBundleBlob() to wire the shared shell
-//   - runs the guest's *initiator* ops (put / get / repair) via
-//     shell.invoke() — a loopback into the app's one `handle`
+//     identity, sodium) and loads the transport bundle through the shared
+//     `bootShell` — the assembly itself, transport author pin included
+//   - calls bootShell() + loadBundleBlob() to wire the shared shell
+//   - runs the guest's *initiator* ops (put / get / repair) via the load's
+//     returned handle — `invoke(op, payload)`, a loopback into the app's one
+//     `handle` bound to this app's key
 //   - serves the guest's *holder* entrypoint without wiring anything: the load
 //     stands the guest and the manifest's claim is what routes inbound storage
 //     frames to it (§12.10)
@@ -33,42 +35,21 @@ import type { Fs } from "seedkernel-wasm/fs";
 // `seedkernel-wasm/fs` stays the `Fs` contract plus the key rule. The scoping
 // wrapper (`scopedFs`) is shell logic now and lives in `shell-core` below.
 import { MemoryFs } from "seedkernel-wasm/fs-memory";
-import { TransportHost } from "seedkernel-wasm/transport-host";
-import { TRANSPORT_BUNDLE_B64 } from "seedkernel-wasm/transport-bundle";
+import type { TransportHost } from "seedkernel-wasm/transport-host";
 import { FsBlobView, type BlobView } from "./store-view.js";
 import { Crypto } from "./crypto.js";
 import {
   type Identity, type PeerId, type StorageConfig, defaultConfig, assertStorageConfig, normaliseConfig, DEFAULT_QUOTA_BYTES,
 } from "./core.js";
-import { STORAGE_APP } from "./manifest.js";
 import { Op, decodeStats, type RequestStats } from "./protocol.js";
 import { toHex, fromHex, readU32BE, readU64BE, concatBytes } from "./util.js";
-import {
-  createShell, scopedFs, byPrivilege, type Shell, type RealmFactory,
-} from "seedkernel-wasm/shell-core";
-// The JS target's builder for a bundle's private pure modules (seedkernel §4): a slot's
-// modules are its own now, so the host hands the shell a builder rather than a table it
-// could call into.
-import { ModuleTable } from "seedkernel-wasm/module-table";
-import { FreshnessMarks, appKeyFor, appScopeFor, verifyBundle, type LoadedBundle } from "seedkernel-wasm/bundle";
 import type { ChannelFactoryLike } from "./loopback.js";
 import type { Sodium } from "./sodium.js";
+import {
+  bootShell, type AppHandle, type RealmFactory, type Shell,
+} from "seedkernel-wasm/shell-core";
 
 const NO_ARG = new Uint8Array(0);
-
-const createRealm: RealmFactory = async (o) => (await import("seedkernel-wasm/safe-js")).createSafeRealm(o);
-
-/** The kernel-shipped transport bundle, as raw bytes (seedkernel §12.6): the
- *  channel AKE, the record layer, link routing and the request/response layer
- *  run as a confined guest program, signed into a `role: "transport"` bundle and
- *  embedded in the host. Admitting it below stands the shell's transport driver
- *  up; the storage bundle is an ordinary app on top of it. */
-function transportBlob(): Uint8Array {
-  const bin = atob(TRANSPORT_BUNDLE_B64);
-  const out = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
-  return out;
-}
 
 /** Decode the guest's PUT result — the single result format every driver reads
  *  (`encodePutResult` in tier2-guest.orchestration.js):
@@ -196,10 +177,12 @@ export class StorageNode {
    *   read view finds nothing at all: FsBlobView drops any key whose hex is not 64
    *   chars, so a prefixed key is skipped rather than misread. */
   readonly appScope: string;
-  /** This app's table key (§5.1). Its modules live in a map under it, at the logical
-   *   names the manifest declares ("codec", "reputation"), so there is no per-module
-   *   name to derive or hold. */
-  private readonly appKey: string;
+  /** The load's returned handle: the app key, the scoped fs view and the loopback
+   *   `invoke` bound to this app — an initiator-only app claims no protocol, so
+   *   `shell.invoke` could not route to it without the key, and the handle carries the
+   *   key AND the binding together. One object, so nothing here re-derives what the
+   *   shell computed. */
+  private readonly handle: AppHandle;
   /** Durable cohort roster: the set of peers this node has a storage relationship
    *   with. The network owns connectivity; the cohort is app state — independent of who
    *   is currently online — and it is what `connect` teaches each driver an address for.
@@ -221,7 +204,7 @@ export class StorageNode {
     shell: Shell,
     net: TransportHost,
     identity: Identity,
-    loaded: LoadedBundle,
+    loaded: AppHandle,
     cohort: Set<PeerId>,
     ownsShell: boolean,
   ) {
@@ -230,6 +213,10 @@ export class StorageNode {
     this.moduleNames = new Set(loaded.manifest.modules.map((m) => m.name));
     this.identity = identity;
     this.peerId = toHex(identity.publicKey);
+    // The scoped view the shell computed for this load (`loaded.fs`) — the guest's
+    // writes land under this app's prefix on the same backend the shell was built
+    // with, so the host's read view enters through the same door. A caller's own fs
+    // wins.
     this.fs = opts.fs ?? new MemoryFs();
     this.quota = opts.quota ?? DEFAULT_QUOTA_BYTES;
     this.store = opts.store ?? new FsBlobView(this.fs);
@@ -238,15 +225,14 @@ export class StorageNode {
     this.net = net;
     this.cohort = cohort;
     this.ownsShell = ownsShell;
+    this.handle = loaded;
 
-    // Derive signing scope and kernel names from the verified bundle author —
-    // the same derivation a shell-run node uses. `signAuthor` lets a caller join
-    // a cohort whose holders run a DIFFERENT bundle's author (descriptors are
-    // scoped to the deployment, §16); the fs keyspace and app key stay the
-    // loaded bundle's.
+    // Derive the signing scope from the verified bundle author — the same derivation a
+    // shell-run node uses. `signAuthor` lets a caller join a cohort whose holders run a
+    // DIFFERENT bundle's author (descriptors are scoped to the deployment, §16); the fs
+    // keyspace and app key stay the loaded bundle's (both carried on the handle).
     this.signAuthor = opts.signAuthor ?? loaded.author;
-    this.appScope = appScopeFor(opts.sodium, loaded.author, STORAGE_APP);
-    this.appKey = appKeyFor(loaded.author, STORAGE_APP);
+    this.appScope = loaded.appScope;
 
     // `this.config` is the geometry a caller can inspect (p2p-cli reads config.k/.m), so
     // it must equal what the guest runs. The guest decides that now, so this MIRRORS its
@@ -275,9 +261,9 @@ export class StorageNode {
 
     // The shell to load the storage bundle onto: the caller's (its transport
     // bundle is already admitted and its driver standing — the RTC/WS path) or
-    // one built here from the socket seam below. The fs instance the shell was
-    // built with comes back too, so the host read view and the guest's writes
-    // share ONE backend.
+    // one built here from the socket seam below. The fs backend the shell was
+    // built with comes back with the load's handle (scoped view), so the host
+    // read view and the guest's writes share ONE backend.
     const ownsShell = opts.shell === undefined;
     if (opts.shell && !opts.transport) {
       throw new Error(
@@ -287,9 +273,6 @@ export class StorageNode {
     const built = opts.shell ? null : await buildShell(opts, identity);
     const shell = opts.shell ?? built!.shell;
     const net = opts.transport ?? built!.transport;
-    // The fs the shell was built with — the guest's writes land there. A caller's own
-    // fs wins; a pre-built shell brings its own (bootTransportShell created it).
-    const fs = opts.fs ?? (opts.shell?.fs ?? built!.fs) ?? new MemoryFs();
 
     // Everything from here on can fail — a blob that does not verify, a config the
     // constructor refuses — and a factory that throws must not leave what it built
@@ -315,17 +298,14 @@ export class StorageNode {
         realmMemoryBytes: normaliseConfig(opts.config ?? {}).realmMemoryBytes,
       });
 
-      // The guest does NOT reach the backend directly: the shell hands it
-      // `scopedFs(fs, appScopeFor(author, app))`, so every key the holder writes lands
-      // under this app's opaque prefix (seedkernel §12.2). The host's read view has to
-      // enter through the same door, or `store.list()` walks past the guest's writes and
-      // reads back scope-prefixed keys as if they were block ids. One keyspace per app,
-      // one handle to it — the scope is derived here rather than passed in because it
-      // depends on the *verified* bundle author, which only exists after the load above.
-      const appFs = scopedFs(fs, appScopeFor(opts.sodium, loaded.author, STORAGE_APP));
-      const withFs = { ...opts, fs: appFs }; // share the one fs instance with the constructor below
-
-      return new StorageNode(withFs, shell, net, identity, loaded, cohort, ownsShell);
+      // The guest does NOT reach the backend directly: the shell handed it
+      // `loaded.fs`, a `scopedFs(backend, appScope)` view, so every key the holder
+      // writes lands under this app's opaque prefix (seedkernel §12.2). The host's
+      // read view enters through the same handle — one keyspace per app, one handle
+      // to it — rather than re-deriving the scope here, where drift would make
+      // `store.list()` walk past the guest's writes and read scope-prefixed keys as
+      // block ids.
+      return new StorageNode({ ...opts, fs: loaded.fs }, shell, net, identity, loaded, cohort, ownsShell);
     } catch (err) {
       if (ownsShell) shell.close();
       throw err;
@@ -355,26 +335,21 @@ export class StorageNode {
     await Promise.all([a.net.ready(), b.net.ready()]);
   }
 
-  // ── PUT / GET / repair / share — all local ops through shell.invoke() ──────
+  // ── PUT / GET / repair / share — all local ops through the load's handle ─────
 
   /** One LOCAL op into this app's one entrypoint, `handle` (seedkernel §12.2): name the
-   *  op and loop back through the shell's `invoke`, which writes the host's caller id and
-   *  the op envelope — so storage has one op vocabulary, not an entrypoint per initiator
-   *  operation.
+   *  op and loop back through the handle's `invoke` (`this.handle.invoke`), which writes
+   *  the host's caller id and the op envelope — so storage has one op vocabulary, not an
+   *  entrypoint per initiator operation.
    *
-   *  It frames nothing itself. The envelope is the guest ABI's, written by `opCall` and
-   *  read by the preamble's `readOp` (seedkernel `host/guest-seam.ts`); a copy here would
-   *  be the same layout maintained on both sides of a seam this file is only a caller of.
-   *
-   *  The app key is not optional any more. A node with a network has at least two apps
+   *  The framing is the guest ABI's, written by `opCall` and read by the preamble's
+   *  `readOp` (seedkernel `host/guest-seam.ts`); a copy here would be the same layout
+   *  maintained on both sides of a seam this file is only a caller of. The app key rides
+   *  the handle, not a call-site argument: a node with a network has at least two apps
    *  loaded — the storage bundle and the transport, an ordinary app serving the local
-   *  service name `_net` (seedkernel §12.10) — so "the only loaded app" is not something
-   *  a StorageNode can mean, and omitting the key is an ambiguity error rather than a
-   *  default. One place says which app we are, instead of six call sites repeating it. */
-  private invoke(op: string, payload: Uint8Array): Promise<Uint8Array> {
-    return this.shell.invoke(op, payload, this.appKey);
-  }
-
+   *  service name `_net` (seedkernel §12.10) — so `shell.invoke`'s "the only loaded app"
+   *  default is not something a StorageNode can mean, and the handle carries the binding
+   *  so no call site repeats the key. */
   private runExclusive<T>(body: () => Promise<T>): Promise<T> {
     if (this.closed) return Promise.reject(new Error("storage node closed"));
     const p = this.inFlight.then(body);
@@ -385,13 +360,13 @@ export class StorageNode {
   /** PUT a file (§6), orchestrated in the guest, STREAMED. */
   async put(plaintext: Uint8Array): Promise<PutResult> {
     return this.runExclusive(async () => {
-      const meta = await this.invoke(Op.PUT_START, NO_ARG);
+      const meta = await this.handle.invoke(Op.PUT_START, NO_ARG);
       const windowBytes = readU32BE(meta, 0);
       for (let off = 0; ; off += windowBytes) {
-        await this.invoke(Op.PUT_WINDOW, plaintext.subarray(off, Math.min(off + windowBytes, plaintext.length)));
+        await this.handle.invoke(Op.PUT_WINDOW, plaintext.subarray(off, Math.min(off + windowBytes, plaintext.length)));
         if (off + windowBytes >= plaintext.length) break;
       }
-      return decodePutResult(await this.invoke(Op.PUT_FINISH, NO_ARG));
+      return decodePutResult(await this.handle.invoke(Op.PUT_FINISH, NO_ARG));
     });
   }
 
@@ -400,11 +375,11 @@ export class StorageNode {
    *  variable-length root can be its tail. */
   async get(root: Uint8Array, key: Uint8Array): Promise<Uint8Array> {
     return this.runExclusive(async () => {
-      const fileSize = readU64BE(await this.invoke(Op.GET_START, concatBytes([key, root])), 0);
+      const fileSize = readU64BE(await this.handle.invoke(Op.GET_START, concatBytes([key, root])), 0);
       const out = new Uint8Array(fileSize);
       let written = 0;
       while (written < fileSize) {
-        const part = await this.invoke(Op.GET_NEXT, NO_ARG);
+        const part = await this.handle.invoke(Op.GET_NEXT, NO_ARG);
         if (part.length === 0) throw new Error(`get: stream ended ${written}/${fileSize} bytes in`);
         out.set(part, written); written += part.length;
       }
@@ -424,19 +399,19 @@ export class StorageNode {
    *  Throws if the peer was unreachable within the request window; a peer that answered,
    *  including a decline, comes back as its response bytes. */
   async request(peer: PeerId, body: Uint8Array): Promise<Uint8Array> {
-    const r = await this.runExclusive(() => this.invoke(Op.REQUEST, concatBytes([fromHex(peer), body])));
+    const r = await this.runExclusive(() => this.handle.invoke(Op.REQUEST, concatBytes([fromHex(peer), body])));
     if (r[0] !== 1) throw new Error(`request: peer ${peer.slice(0, 8)}… unreachable within the request window`);
     return r.slice(1);
   }
 
   /** Pre-warm the realm's codec + crypto caps. */
   async warm(): Promise<void> {
-    await this.runExclusive(() => this.invoke(Op.WARM, NO_ARG));
+    await this.runExclusive(() => this.handle.invoke(Op.WARM, NO_ARG));
   }
 
   /** Run one repair pass over every chunk this node holds a block of (§9). */
   async runRepair(): Promise<number> {
-    return readU32BE(await this.runExclusive(() => this.invoke(Op.REPAIR, NO_ARG)), 0);
+    return readU32BE(await this.runExclusive(() => this.handle.invoke(Op.REPAIR, NO_ARG)), 0);
   }
 
   /** Decayed reciprocity score this node holds for a peer (§13). The reputation module
@@ -446,7 +421,7 @@ export class StorageNode {
    *  instance the placement ranker scores against, which a second host-side one would
    *  not have been. */
   async score(peerPk: Uint8Array): Promise<number> {
-    const res = await this.invoke(Op.SCORE, peerPk);
+    const res = await this.handle.invoke(Op.SCORE, peerPk);
     if (!res || res.length < 8) return 0;
     return new DataView(res.buffer, res.byteOffset, 8).getFloat64(0, true);
   }
@@ -462,7 +437,7 @@ export class StorageNode {
    *  phase and reads again after.
    */
   async stats(): Promise<Map<number, RequestStats>> {
-    return decodeStats(await this.invoke(Op.STATS, NO_ARG));
+    return decodeStats(await this.handle.invoke(Op.STATS, NO_ARG));
   }
 
   /** Share a file: seal K to a recipient's kernel key (§4.4). */
@@ -521,6 +496,12 @@ export class StorageNode {
  *  channel adapter, the realm factory) + the transport bundle admitted first — the
  *  node's network — with the adapter's listeners started.
  *
+ *  This is the kernel's `bootShell` with this deployment's knobs: everything that used
+ *  to be restated here — the module builder, the freshness store, the transport-author
+ *  pin, the transport-bundle load, the listener start — is the assembly's, and this
+ *  function is what remains: the seam, the adapter options, and the ONE admission
+ *  branch that is actually ours.
+ *
  *  Returns all three things the platform now owns: the shell, the `TransportHost` (the
  *  shell does not expose it — it is the platform's, and `StorageNode.transport` wants it
  *  back), and the fs instance it was built with (a caller with no fs of its own must read
@@ -539,72 +520,44 @@ export async function bootTransportShell(
   },
 ): Promise<{ shell: Shell; transport: TransportHost; fs: Fs }> {
   const fs = opts.fs ?? new MemoryFs();
-
-  // The channel adapter is CONSTRUCTED here rather than by the shell: every knob on it
-  // (which addresses to bind, the dial fan-out, the peer list) is this deployment's
-  // answer. The shell's whole part is pointing it at whichever bundle owns the raw-link
-  // binding, and shell.close() closes it, so there is still one teardown.
-  const transport = new TransportHost({
-    identity: opts.identity,
+  const { shell, transport } = await bootShell({
+    sodium: opts.sodium, identity: opts.identity, fs,
+    // Which network this node belongs to (seedkernel §12.6) — an isolation boundary, and
+    // a top-level field because it must reach BOTH the adapter bootShell constructs and
+    // the shell's link signing scope. Restating it under `transport` would forward it to
+    // one of the two.
     networkKey: opts.networkKey,
-    contactSecret: opts.contactSecret,
-    requestDeadlineMs: opts.timeoutMs,
-    connsPerPeer: opts.connsPerPeer,
-    admitPeers: opts.admitPeers,
-    channels: opts.channels,
-    listen: opts.listen,
-    wsListen: opts.wsListen,
-  });
-
-  // The transport slot is author-pinned to the artifact's own author (derived
-  // from the blob, never restated): the operator handing us the storage bundle is
-  // the trust decision for THAT; the transport bundle is the kernel's, and no
-  // other transport-role bundle may claim the slot on this node.
-  const blob = opts.transportBlob ?? transportBlob();
-  const transportAuthorHex = toHex(verifyBundle(opts.sodium, blob).author);
-
-  const shell = createShell({
-    platform: {
-      sodium: opts.sodium,
-      identity: opts.identity,
-      modules: new ModuleTable(),
-      fs,
-      freshnessStore: new FreshnessMarks(),
-      networkKey: opts.networkKey,
-      transportHost: transport,
-      createRealm: opts.createRealm ?? createRealm,
-      now: opts.now,
+    createRealm: opts.createRealm, now: opts.now,
+    // The channel adapter is CONSTRUCTED by bootShell from these options: every knob on
+    // it (which addresses to bind, the dial fan-out, the peer list) is this deployment's
+    // answer, and shell.close() closes it, so there is still one teardown.
+    transport: {
+      contactSecret: opts.contactSecret,
+      requestDeadlineMs: opts.timeoutMs,
+      connsPerPeer: opts.connsPerPeer,
+      admitPeers: opts.admitPeers,
+      channels: opts.channels,
+      listen: opts.listen,
+      wsListen: opts.wsListen,
     },
-    // ONE admission predicate (§12.5), keyed on the privileges the manifest's
-    // `requires` reach, said with `byPrivilege`: the `base` branch admits an
-    // app that reaches no privilege, the `link` and `route` grants admit the
-    // transport bundle by author pin — the kernel-shipped transport reaches BOTH
-    // (it holds the raw links and submits attributed inbound requests, seedkernel
-    // §12.5), and `byPrivilege` refuses a bundle reaching a privilege with no
-    // grant entry. The operator handing us the storage bundle is the trust
-    // decision for THAT; an app bundle is admitted because its operator
-    // handed it to us — the choice of bundle is the trust decision, so there is
-    // no author allow-list to clear (the manifest signature + module hashes are
-    // still verified by loadBundleBlob, and revocation + the downgrade guard are
-    // composed by the shell around whatever we pass here).
-    admit: byPrivilege({
-      base: () => true,
-      grants: {
-        link: (v) => toHex(v.author) === transportAuthorHex,
-        route: (v) => toHex(v.author) === transportAuthorHex,
-      },
-    }),
-    // No app config here, and no realm budget either: this loads ONE bundle, the transport.
-    // Both travel with the load that wants them (§12.4 `localConfig`, §12.3
-    // `realmMemoryBytes`) — passing either shell-wide put a storage node's settings in the
-    // transport guest's APP and a storage node's heap under the transport's realm.
+    // The transport bundle to load — and to PIN: the transport slot is author-pinned to
+    // this blob's own author (derived from the blob, never restated), so the operator
+    // handing us the storage bundle is the trust decision for THAT, and no other
+    // transport-role bundle may claim the slot on this node. Defaults to the
+    // kernel-shipped artifact.
+    transportBundle: opts.transportBlob,
+    // ONE admission predicate (§12.5), and the one branch that is actually ours: an app
+    // bundle is admitted because its operator handed it to us — the choice of bundle is
+    // the trust decision, so there is no author allow-list to clear (the manifest
+    // signature + module hashes are still verified by loadBundleBlob). The transport
+    // author pin is composed around this by bootShell, and revocation + the downgrade
+    // guard by the shell, so no posture here can lose either.
+    admit: () => true,
+    // No app config here, and no realm budget either: this loads ONE bundle, the
+    // transport. Both travel with the load that wants them (§12.4 `localConfig`, §12.3
+    // `realmMemoryBytes`) — passing either shell-wide put a storage node's settings in
+    // the transport guest's APP and a storage node's heap under the transport's realm.
   });
-
-  // Load the transport bundle: the node's network (phase 3). This is what points the
-  // adapter at a claimant; the listeners bind below.
-  await shell.loadBundleBlob(blob);
-  await transport.start();
-
   return { shell, transport, fs };
 }
 

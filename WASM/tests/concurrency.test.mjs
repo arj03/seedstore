@@ -27,6 +27,12 @@ import { LatencyNetwork } from "./latency-net.mjs";
 const DELAY = 2;        // ms per send → ~4 ms per request/response round trip
 const TIMEOUT = 2000;   // generous: requests succeed, so this never fires
 const W = 6;            // window width under test (chunks N > W so the cap binds)
+// The wall-clock comparisons run on a LATENCY-DOMINANT wire instead of DELAY: a
+// wire delay this large makes the round trip dwarf the per-message realm/JS
+// processing, whose absolute cost varies with machine load (a 4 ms RTT is
+// invisible next to a busy box's ~10-40 ms per message, which is why a 2×
+// wall-clock floor on DELAY flipped under load). See `pipelinedSavesWallClock`.
+const WC_DELAY = 25;    // ms per send on the wall-clock wire → RTT = 2×WC_DELAY
 
 // MsgType (host/protocol.ts) — index the per-type request counter.
 const OFFER = MsgType.OFFER, FETCH = MsgType.FETCH, STORE = MsgType.STORE;
@@ -54,8 +60,8 @@ export async function run(t) {
   // latency link is the in-process fabric with per-message wire delay
   // (latency-net.mjs); the counters are cleared by an initial read so the cohort's
   // own wiring traffic is never counted.
-  async function onCohort(cfg, body) {
-    const net = new LatencyNetwork(DELAY);
+  async function onCohort(cfg, body, delayMs = DELAY) {
+    const net = new LatencyNetwork(delayMs);
     const nodes = await createConnectedCohort({ count: 6, network: net, sodium, wasm, config: cfg, timeoutMs: TIMEOUT });
     const owner = nodes[0];
     await owner.stats(); // clear whatever the cohort wiring accumulated
@@ -66,6 +72,20 @@ export async function run(t) {
     nodes.forEach((nn) => nn.close());
     net.close();
     return { result, ms, stats };
+  }
+
+  /** The wall-clock floor for a pipelined-vs-serial comparison on the
+   *  latency-dominant wire (WC_DELAY). The pipelined run sends all `depth` blocks
+   *  per holder back-to-back, so it pays ONE round trip where the serial run pays
+   *  `depth`; the time saved is ≈ (depth−1) × RTT NO MATTER how slow the machine
+   *  is, because both runs pay the same per-message realm/JS processing and that
+   *  cost cancels out of the difference. The floor is HALF the theoretical savings
+   *  (timer jitter tolerance); a run whose window did not actually pipeline saves
+   *  ≈ 0 and fails it by a wide margin. */
+  function pipelinedSavesWallClock(serialMs, windowedMs, depth, wireDelayMs) {
+    const saved = serialMs - windowedMs;
+    const floor = (depth - 1) * wireDelayMs; // ½ × (depth−1) × 2×wireDelayMs
+    return { saved, floor };
   }
 
   t.group("PUT batches OFFER and STORE per holder, not per block");
@@ -102,9 +122,11 @@ export async function run(t) {
 
     // Same file, same cohort shape, same cap — only the window differs. fanoutWindow
     // = 1 reproduces the OLD serial-per-holder STORE loop (a window of 1 is strictly
-    // serial); fanoutWindow = 64 is the fix.
-    const serial = await onCohort({ ...cfg, fanoutWindow: 1 }, (o) => o.put(webrtcData));
-    const windowed = await onCohort({ ...cfg, fanoutWindow: 64 }, (o) => o.put(webrtcData));
+    // serial); fanoutWindow = 64 is the fix. The wall-clock runs use the
+    // latency-dominant wire: the pipelining's win is measured as time SAVED, not as
+    // a ratio of two noisy totals (see `pipelinedSavesWallClock`).
+    const serial = await onCohort({ ...cfg, fanoutWindow: 1 }, (o) => o.put(webrtcData), WC_DELAY);
+    const windowed = await onCohort({ ...cfg, fanoutWindow: 64 }, (o) => o.put(webrtcData), WC_DELAY);
 
     const storeSerial = serial.stats.get(STORE)?.sentPeak ?? 0;
     const storeWindowed = windowed.stats.get(STORE)?.sentPeak ?? 0;
@@ -128,9 +150,12 @@ export async function run(t) {
     t.ok(storeWindowed <= 64 * n, `windowed STORE stays bounded by fanoutWindow × holders: ${storeWindowed} ≤ ${64 * n}`);
     // On a real latency link the pipelining is also WALL-CLOCK: the serial PUT pays
     // one round trip per block, the windowed one overlaps a window's worth. The
-    // margin is huge (64 serial round trips vs ~4 windows), so a 2× floor is safe.
-    t.ok(windowed.ms < serial.ms / 2,
-      `the windowed PUT is wall-clock faster than the serial one (${windowed.ms.toFixed(0)} ms vs ${serial.ms.toFixed(0)} ms)`);
+    // savings are asserted absolutely (the RTTs the window removed), not as a ratio
+    // of two wall-clock totals — per-message processing noise cancels out of the
+    // difference, so the floor holds on a loaded machine too.
+    const { saved, floor } = pipelinedSavesWallClock(serial.ms, windowed.ms, Nw, WC_DELAY);
+    t.ok(saved >= floor,
+      `windowed PUT saved the pipelined round trips: ${saved.toFixed(0)} ms (≥ ${floor} = half of ${Nw - 1} × RTT on the latency wire)`);
 
     // Correctness is unchanged: the windowed PUT still places every block + manifest.
     t.eq(windowed.result.blockIds.length, Nw * n + 1, "windowed PUT placed every chunk block + the manifest");
@@ -221,21 +246,24 @@ export async function run(t) {
     const webrtcData = file(Nw * config.k * bs, 9);    // exactly Nw RS chunks
     const cfg = { ...config, blockSize: bs, maxMessageBytes: cap };
 
-    async function getPeak(fanoutWindow) {
-      const r = await onCohort({ ...cfg, fanoutWindow }, (owner) => owner.put(webrtcData).then((put) => owner.get(put.root, put.key)));
+    async function getPeak(fanoutWindow, delayMs = DELAY) {
+      const r = await onCohort({ ...cfg, fanoutWindow }, (owner) => owner.put(webrtcData).then((put) => owner.get(put.root, put.key)), delayMs);
       return { bytes: r.result, fetchPeak: r.stats.get(FETCH)?.sentPeak ?? 0, ms: r.ms };
     }
-    const serial = await getPeak(1);
-    const windowed = await getPeak(64);
+    const serial = await getPeak(1, WC_DELAY);
+    const windowed = await getPeak(64, WC_DELAY);
 
     t.ok(bytesEqual(serial.bytes, webrtcData), "the serial GET reconstructs the tight-cap file byte-identically");
     t.ok(bytesEqual(windowed.bytes, webrtcData), "the windowed GET reconstructs the tight-cap file byte-identically");
     t.ok(serial.fetchPeak <= 1, `serial GET fetches one block at a time: peak ${serial.fetchPeak} in flight (≤ 1)`);
     t.ok(windowed.fetchPeak >= Nw, `windowed GET pipelines past serial: ${windowed.fetchPeak} in flight (≥ ${Nw}, vs ${serial.fetchPeak} serial)`);
-    // The pipelining is real wall-clock too: the serial GET pays a full round trip
-    // per block, the windowed one overlaps a window's worth.
-    t.ok(windowed.ms < serial.ms / 2,
-      `the windowed PUT+GET is wall-clock faster than the serial one (${windowed.ms.toFixed(0)} ms vs ${serial.ms.toFixed(0)} ms)`);
+    // The pipelining is real wall-clock too: both phases (PUT and GET) pipeline, so
+    // the windowed run pays one round trip per phase where the serial one pays Nw —
+    // two phases' worth of savings, asserted absolutely on the latency-dominant
+    // wire (the processing noise cancels; see `pipelinedSavesWallClock`).
+    const { saved, floor } = pipelinedSavesWallClock(serial.ms, windowed.ms, Nw, 2 * WC_DELAY);
+    t.ok(saved >= floor,
+      `windowed PUT+GET saved the pipelined round trips: ${saved.toFixed(0)} ms (≥ ${floor} = half of ${Nw - 1} × RTT per phase, two phases)`);
   }
 
   t.group("overlapping PUT/GET operations on one node don't clobber the guest's stream state");
