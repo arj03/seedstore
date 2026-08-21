@@ -46,6 +46,21 @@ export async function run(t) {
     rep.reset();
     const stranger = newKey().publicKey;
     t.eq(rep.score(stranger, 1_000_000_000_000), 0, "never-seen peer has zero standing");
+    t.eq(rep.count(), 0, "scoring a stranger is read-only — it never enters the peer set");
+  }
+
+  t.group("reputation: stale peers are pruned when the set grows (bounded state)");
+  {
+    rep.reset();
+    const stale = newKey().publicKey;
+    const t0 = 1_000_000_000_000;
+    rep.observe(stale, t0, true); // single observation → mass 1.0
+    t.eq(rep.count(), 1, "one peer tracked after first observe");
+    const fresh = newKey().publicKey;
+    const tLater = t0 + 120 * DAY; // > 16 half-lives (112 days) past t0 — mass has decayed below 2^-16
+    rep.observe(fresh, tLater, true); // appending a NEW peer triggers a prune pass
+    t.eq(rep.count(), 1, "the decayed-away stale peer was evicted when a new peer arrived");
+    t.eq(rep.score(stale, tLater), 0, "the pruned peer is scored as never seen");
   }
 
   t.group("reputation: independent per-peer state (Sybil-local, §13)");

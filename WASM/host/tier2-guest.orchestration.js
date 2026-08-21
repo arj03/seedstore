@@ -241,20 +241,50 @@ async function rsDecode(k, m, blockSize, present) {
   return data;
 }
 function clockNow() { const b = host.call("clock/now", EMPTY); return rU32(b, 0) * 0x100000000 + rU32(b, 4); }
+
+// Per-peer reputation accumulators: the module is a pure transform, so callers hold state.
+// Map from peer hex pubkey → {serve, miss, last} (per PROTOCOL.md contract). A peer enters
+// this map only through repObserve — a real witnessed event (§8) — never through a bare
+// score query: scoring a stranger must stay free of side effects, exactly as findPeer's
+// -1 branch cost the old module nothing (§13, Sybil-local: only witnessed peers persist).
+const peerReps = new Map();
+
+const ZERO_REP = { serve: 0, miss: 0, last: 0 };
+
 async function repScore(peerPk, t) {
-  return readF64LE(await repScoreBytes(peerPk, t));
+  return decodeScoreResp(await repScoreBytes(peerPk, t));
 }
-// The module's answer as it stands — [score f64 LE] — for the one caller that wants the
-// bytes rather than the number: Op.SCORE, the host asking this guest what standing it
-// holds for a peer. The reputation module is this slot's private one, so the host cannot
-// call it itself, and re-encoding a float it will only decode again would be two framings
-// of one fact.
-function repScoreBytes(peerPk, t) { return host.call(REP_NAME, encodeScoreReq(peerPk, t)); }
-function repObserve(peerPk, t, pass) {
-  // Returns the new score; the guest doesn't need it. Fire-and-forget — the promise is
-  // dropped on purpose, and the catch is hygiene: a module call resolves (never
-  // rejects) but an unhandled rejection in the realm would surface as a job failure.
-  void host.call(REP_NAME, encodeObserveReq(peerPk, t, pass)).catch(() => {});
+// Call the reputation module's SCORE op with the peer's accumulator at time t, or the
+// zero accumulator for a peer never observed. Read-only: never touches peerReps.
+async function repScoreBytes(peerPk, t) {
+  const rep = peerReps.get(toHex(peerPk)) ?? ZERO_REP;
+  const req = encodeScoreReq(rep.serve, rep.miss, rep.last, t);
+  return host.call(REP_NAME, req);
+}
+
+async function repObserve(peerPk, t, pass) {
+  // Record a witnessed pass/fail for a peer: get or create the peer's accumulator, call
+  // the module with the new pure-function interface, and write the updated accumulator
+  // back. Unlike the old fire-and-forget, this must properly await to update the Map.
+  const peerHex = toHex(peerPk);
+  let rep = peerReps.get(peerHex);
+  if (rep === undefined) {
+    pruneStalePeers(peerReps, t);
+    rep = { serve: 0, miss: 0, last: 0 };
+    peerReps.set(peerHex, rep);
+  }
+  const req = encodeObserveReq(rep.serve, rep.miss, rep.last, t, pass);
+  try {
+    const resp = await host.call(REP_NAME, req);
+    const updated = decodeObserveResp(resp);
+    // Write the updated accumulators back to the Map
+    rep.serve = updated.serve;
+    rep.miss = updated.miss;
+    rep.last = updated.last;
+  } catch (e) {
+    // Module call failed or timed out — the reputation op is fire-and-forget at the
+    // call sites, so failures are logged but don't surface as unhandled rejections.
+  }
 }
 
 // ── local store over fs.* (the <hex>.blk / <hex>.dsc layout) ─────────────────
