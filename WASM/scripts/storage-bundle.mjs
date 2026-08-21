@@ -177,7 +177,7 @@ export function writeStorageBundle({ path, sodium, sk, pk, build, version = 1, l
       // load, not a signed catalog.
       requires: [...STORAGE_REQUIRES],
       // The AUTHOR's config, injected as `const APP = …` exactly as signed. The shell
-      // merges nothing into it (seedkernel §12.4, ABI 8); an operator's settings arrive
+      // merges nothing into it (seedkernel §12.4); an operator's settings arrive
       // beside it as `LOCAL` and the guest's `CFG` picks precedence.
       //
       // NB: no `quota` — the guest reads that from LOCAL alone, so a value here would be
