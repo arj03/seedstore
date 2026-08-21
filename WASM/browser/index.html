@@ -36,6 +36,7 @@
     "seedkernel-wasm/shell-core":     "./seedkernel/host/shell-core.js",
     "seedkernel-wasm/module-table":   "./seedkernel/host/module-table.js",
     "seedkernel-wasm/bundle":         "./seedkernel/host/bundle.js",
+    "seedkernel-wasm/crypto-browser": "./seedkernel/host/crypto-browser.js",
     "seedkernel-wasm/guest-seam":     "./seedkernel/host/guest-seam.js",
     "seedkernel-wasm/fs":             "./seedkernel/core/fs.js",
     "seedkernel-wasm/fs-memory":      "./seedkernel/host/fs-memory.js",
@@ -73,6 +74,7 @@
 
 <script type="module">
 import sodium from "seedkernel-wasm/libsodium";
+import { loadCrypto } from "seedkernel-wasm/crypto-browser";
 import { loadWasmBytes, createConnectedCohort, LoopbackNetwork } from "./host/browser.js";
 
 const logEl = document.getElementById("log");
@@ -82,8 +84,8 @@ const hex = (b) => [...b].map((x) => x.toString(16).padStart(2, "0")).join("");
 let nodes, net, lastPut;
 
 (async () => {
-  log("readying libsodium (sumo)…");
-  await sodium.ready;
+  log("readying crypto (sumo libsodium + ML-DSA-65 + ML-KEM-768)…");
+  await loadCrypto(sodium, "./");
   log("loading wasm: kernel, codec, reputation…");
   const wasm = await loadWasmBytes("./");
   net = new LoopbackNetwork();

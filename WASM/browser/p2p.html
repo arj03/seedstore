@@ -42,7 +42,7 @@
     "seedkernel-wasm/shell-core":     "./seedkernel/host/shell-core.js",
     "seedkernel-wasm/module-table":   "./seedkernel/host/module-table.js",
     "seedkernel-wasm/bundle":         "./seedkernel/host/bundle.js",
-    "seedkernel-wasm/pq":             "./seedkernel/host/pq.js",
+    "seedkernel-wasm/crypto-browser": "./seedkernel/host/crypto-browser.js",
     "seedkernel-wasm/guest-seam":     "./seedkernel/host/guest-seam.js",
     "seedkernel-wasm/fs":             "./seedkernel/core/fs.js",
     "seedkernel-wasm/fs-memory":      "./seedkernel/host/fs-memory.js",
@@ -149,12 +149,12 @@
 
 <script type="module">
 import sodium from "seedkernel-wasm/libsodium";
+import { loadCrypto } from "seedkernel-wasm/crypto-browser";
 import { createStorageNode } from "./host/browser.js";
 import { bootTransportShell } from "./host/storage-node.js";
 import { RtcNetwork, relaySignaling } from "seedkernel-wasm/net-rtc";
 import { WsNetwork } from "seedkernel-wasm/net-ws";
 import { verifyManifest } from "seedkernel-wasm/bundle";
-import { withMlDsa65, loadMlDsa65 } from "seedkernel-wasm/pq";
 
 // k=1, m=1: replication r = m+1 = 2 — each block is copied to two distinct holders
 // (RS(1,·) is replication in disguise, so the guest takes the replication path, not
@@ -263,20 +263,17 @@ const fromHex = (s) => new Uint8Array(s.match(/.{1,2}/g)?.map((h) => parseInt(h,
 // which no amount of slicing produces. Verifying also means the scope this page adopts
 // came from a manifest whose signature checked, not from bytes a static server happened
 // to serve.
-let pqReady = null;
+// Crypto (sumo libsodium + ML-DSA-65 + ML-KEM-768) readies eagerly here, shared by
+// this check and boot() below (seedkernel-wasm/crypto-browser's loadCrypto) —
+// verifyManifest needs the PQ half mixed onto sodium, and boot() needs it
+// regardless of whether a manifest.bundle is even staged.
+const cryptoReady = loadCrypto(sodium, "./");
 async function detectCohortAuthor() {
   try {
     const r = await fetch("./manifest.bundle", { cache: "no-store" });
     if (!r.ok) return null;
     const env = new Uint8Array(await r.arrayBuffer());
-    await sodium.ready;
-    // ML-DSA-65, the PQ half of the one manifest suite, mixed onto the same sodium
-    // instance the node uses (seedkernel host/pq.ts). Loaded once, here, because this
-    // page's only use of a manifest is this read — and unconditionally, since without it
-    // no manifest verifies at all.
-    pqReady ??= fetch("./mldsa65.wasm").then((res) => res.arrayBuffer())
-      .then(loadMlDsa65).then((m) => withMlDsa65(sodium, m));
-    await pqReady;
+    await cryptoReady;
     const v = verifyManifest(sodium, env);
     if (!v) log("staged manifest.bundle did not verify — falling back to the zero-author scope.");
     return v ? hex(v.author) : null;
@@ -327,8 +324,8 @@ async function boot() {
   if (node) return; // already booted — guard against a second click stacking networks
   $("connect").disabled = true;
   try {
-    log("readying libsodium (sumo)…");
-    await sodium.ready;
+    log("readying crypto (sumo libsodium + ML-DSA-65 + ML-KEM-768)…");
+    await cryptoReady;
     // One identity, shared by the transport and the storage node so their peer ids
     // match (the transport registers under this id).
     const identity = sodium.crypto_sign_keypair();
