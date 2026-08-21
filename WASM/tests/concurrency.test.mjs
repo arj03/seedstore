@@ -1,23 +1,15 @@
 // PUT/GET round-trip economy over a *latency-bearing* link.
 //
-// The rest of the suite runs on the zero-latency LoopbackNetwork, where per-block
-// and batched round trips finish in the same ~0 ms — so the cost that batching
-// attacks (wall-clock ≈ round-trip count × RTT) is invisible. This group gives the
-// link a real RTT (each wire message is delayed; latency-net.mjs) and asserts what
-// only then matters: that OFFER, STORE, and FETCH are batched *per holder* instead
-// of issued *per block*. The win shows up as request counters the guest keeps
-// (StorageNode.stats, the Op.STATS local op — the kernel's shell has no host-side
-// inbound seam since the `route/deliver` move, so the counts come from the realm
-// that makes them), not just wall-clock:
-//   - PUT negotiates with ONE OFFER per holder (accept-mask) and pushes the
-//     accepted blocks in ONE streamed STORE per holder — no per-block handshake.
+// The rest of the suite runs on the zero-latency LoopbackNetwork, where the
+// cost batching attacks (wall-clock ~ round-trip count x RTT) is invisible.
+// This group gives the link a real RTT (latency-net.mjs) and asserts that
+// OFFER, STORE, and FETCH are batched *per holder*, not issued *per block*:
+//   - PUT negotiates ONE OFFER per holder and pushes accepted blocks in ONE
+//     streamed STORE per holder.
 //   - GET pulls every block a holder serves in ONE FETCH per holder.
-//   - correctness is unchanged: bytes round-trip, assembly lands at the right
-//     offsets regardless of completion order, and any k of n still reads.
-// The sender-side peaks (how many of a request type the guest has in flight at
-// once) are the direct measure of the fan-out/window behavior the pipelining groups
-// pin — the batching lives in the guest, so the counter that sees it is the
-// guest's.
+//   - correctness is unchanged regardless of completion order.
+// The win shows up in request counters the guest keeps (StorageNode.stats),
+// since the batching lives in the guest.
 
 import { loadWasmBytes, loadSodium, createConnectedCohort } from "../build/host/node.js";
 import { bytesEqual, toHex } from "../build/host/util.js";
@@ -27,11 +19,9 @@ import { LatencyNetwork } from "./latency-net.mjs";
 const DELAY = 2;        // ms per send → ~4 ms per request/response round trip
 const TIMEOUT = 2000;   // generous: requests succeed, so this never fires
 const W = 6;            // window width under test (chunks N > W so the cap binds)
-// The wall-clock comparisons run on a LATENCY-DOMINANT wire instead of DELAY: a
-// wire delay this large makes the round trip dwarf the per-message realm/JS
-// processing, whose absolute cost varies with machine load (a 4 ms RTT is
-// invisible next to a busy box's ~10-40 ms per message, which is why a 2×
-// wall-clock floor on DELAY flipped under load). See `pipelinedSavesWallClock`.
+// Wall-clock comparisons use a larger delay than DELAY so the round trip dwarfs
+// per-message realm/JS processing, whose cost varies with machine load (a 4 ms
+// RTT flipped under load). See `pipelinedSavesWallClock`.
 const WC_DELAY = 25;    // ms per send on the wall-clock wire → RTT = 2×WC_DELAY
 
 // MsgType (host/protocol.ts) — index the per-type request counter.
@@ -55,11 +45,9 @@ export async function run(t) {
   const replicas = config.m + 1;        // manifest copies (defaultConfig: m+1)
   const data = file(N * config.k * config.blockSize, 7); // exactly N RS chunks (N > W)
 
-  // Stand up a fresh cohort, run `body(owner, net)`, and return its wall-clock plus
-  // the owner's request counters (guest-kept, read-and-cleared via Op.STATS). The
-  // latency link is the in-process fabric with per-message wire delay
-  // (latency-net.mjs); the counters are cleared by an initial read so the cohort's
-  // own wiring traffic is never counted.
+  // Stand up a fresh cohort, run `body(owner, net)`, and return its wall-clock
+  // plus the owner's request counters (guest-kept, read-and-cleared via
+  // Op.STATS) — cleared by an initial read so wiring traffic isn't counted.
   async function onCohort(cfg, body, delayMs = DELAY) {
     const net = new LatencyNetwork(delayMs);
     const nodes = await createConnectedCohort({ count: 6, network: net, sodium, wasm, config: cfg, timeoutMs: TIMEOUT });
@@ -74,14 +62,10 @@ export async function run(t) {
     return { result, ms, stats };
   }
 
-  /** The wall-clock floor for a pipelined-vs-serial comparison on the
-   *  latency-dominant wire (WC_DELAY). The pipelined run sends all `depth` blocks
-   *  per holder back-to-back, so it pays ONE round trip where the serial run pays
-   *  `depth`; the time saved is ≈ (depth−1) × RTT NO MATTER how slow the machine
-   *  is, because both runs pay the same per-message realm/JS processing and that
-   *  cost cancels out of the difference. The floor is HALF the theoretical savings
-   *  (timer jitter tolerance); a run whose window did not actually pipeline saves
-   *  ≈ 0 and fails it by a wide margin. */
+  /** The wall-clock floor for a pipelined-vs-serial comparison. The pipelined
+   *  run pays ONE round trip where serial pays `depth`, so savings ~= (depth-1)
+   *  x RTT regardless of machine speed (per-message processing cost cancels
+   *  out of the difference). Floor is HALF that (jitter tolerance). */
   function pipelinedSavesWallClock(serialMs, windowedMs, depth, wireDelayMs) {
     const saved = serialMs - windowedMs;
     const floor = (depth - 1) * wireDelayMs; // ½ × (depth−1) × 2×wireDelayMs
@@ -106,13 +90,9 @@ export async function run(t) {
 
   t.group("PUT windows the per-holder STOREs so they pipeline (fanoutWindow), not one serial round trip per block");
   {
-    // The WebRTC case: a small frame cap forces ~one block per STORE message (two
-    // won't fit), so a big file becomes many single-block STOREs. OFFER descriptors
-    // are tiny, so the OFFER still collapses to one batched message per holder
-    // (point 1 — discovery helped even on WebRTC); the STORE bytes must cross one
-    // block per message (point 2 — transport physics); the only lever left is
-    // pipelining those per-holder STOREs (point 3 — this fix). On the zero-latency
-    // loopback the gap is invisible; under an RTT it is the dominant cost.
+    // The WebRTC case: a small frame cap forces ~one block per STORE message, so
+    // a big file becomes many single-block STOREs. OFFER still batches (tiny
+    // descriptors); the only lever left is pipelining those per-holder STOREs.
     const bs = 4096;                                 // block big enough to dominate a STORE message
     const Nw = 16;                                   // chunks ≫ holders, so a per-holder window can bind
     const cap = bs + 2000;                           // one 4 KiB block + headers fits a STORE; two don't.
@@ -120,11 +100,9 @@ export async function run(t) {
     const cfg = { ...config, blockSize: bs, maxMessageBytes: cap };
     const replicas = config.m + 1;                   // manifest copies (defaultConfig: m+1)
 
-    // Same file, same cohort shape, same cap — only the window differs. fanoutWindow
-    // = 1 reproduces the OLD serial-per-holder STORE loop (a window of 1 is strictly
-    // serial); fanoutWindow = 64 is the fix. The wall-clock runs use the
-    // latency-dominant wire: the pipelining's win is measured as time SAVED, not as
-    // a ratio of two noisy totals (see `pipelinedSavesWallClock`).
+    // Same file/cohort/cap — only the window differs. fanoutWindow=1 is strictly
+    // serial (the old behavior); 64 is the fix. Measured as time SAVED, not a
+    // ratio of noisy totals (see `pipelinedSavesWallClock`).
     const serial = await onCohort({ ...cfg, fanoutWindow: 1 }, (o) => o.put(webrtcData), WC_DELAY);
     const windowed = await onCohort({ ...cfg, fanoutWindow: 64 }, (o) => o.put(webrtcData), WC_DELAY);
 
@@ -148,11 +126,8 @@ export async function run(t) {
     t.ok(storeWindowed > storeSerial * 2, `the window multiplies in-flight STOREs (${storeWindowed} vs ${storeSerial})`);
     // …but stays bounded by fanoutWindow × holders — flow-control, not a flood.
     t.ok(storeWindowed <= 64 * n, `windowed STORE stays bounded by fanoutWindow × holders: ${storeWindowed} ≤ ${64 * n}`);
-    // On a real latency link the pipelining is also WALL-CLOCK: the serial PUT pays
-    // one round trip per block, the windowed one overlaps a window's worth. The
-    // savings are asserted absolutely (the RTTs the window removed), not as a ratio
-    // of two wall-clock totals — per-message processing noise cancels out of the
-    // difference, so the floor holds on a loaded machine too.
+    // Savings asserted absolutely (RTTs removed), not as a ratio of two totals,
+    // so per-message processing noise cancels out and the floor holds under load.
     const { saved, floor } = pipelinedSavesWallClock(serial.ms, windowed.ms, Nw, WC_DELAY);
     t.ok(saved >= floor,
       `windowed PUT saved the pipelined round trips: ${saved.toFixed(0)} ms (≥ ${floor} = half of ${Nw - 1} × RTT on the latency wire)`);
@@ -234,12 +209,10 @@ export async function run(t) {
 
   t.group("GET windows the per-holder FETCHes so they pipeline (fanoutWindow), not one serial round trip per block");
   {
-    // The WebRTC tight-cap twin of the STORE-window group above: ~one block per FETCH
-    // message turns a holder's blocks into many single-block messages, and the window
-    // packs fanoutWindow of them into one Promise.all fan-out instead of one
-    // round trip apiece. PUT then GET on ONE cohort (a fresh one would hold none of
-    // the blocks); the setup PUT is excluded from the peak by clearing just before
-    // the GET.
+    // The WebRTC tight-cap twin of the STORE-window group above: ~one block per
+    // FETCH message, windowed into one Promise.all fan-out per fanoutWindow
+    // instead of one round trip apiece. PUT then GET on ONE cohort; the setup
+    // PUT is excluded from the peak by clearing stats just before the GET.
     const bs = 4096;                                   // a block dominates a FETCH message
     const Nw = 16;                                     // chunks ≫ holders, so a window can bind
     const cap = bs + 2000;                             // one 4 KiB block + headers fits; two don't
@@ -257,10 +230,8 @@ export async function run(t) {
     t.ok(bytesEqual(windowed.bytes, webrtcData), "the windowed GET reconstructs the tight-cap file byte-identically");
     t.ok(serial.fetchPeak <= 1, `serial GET fetches one block at a time: peak ${serial.fetchPeak} in flight (≤ 1)`);
     t.ok(windowed.fetchPeak >= Nw, `windowed GET pipelines past serial: ${windowed.fetchPeak} in flight (≥ ${Nw}, vs ${serial.fetchPeak} serial)`);
-    // The pipelining is real wall-clock too: both phases (PUT and GET) pipeline, so
-    // the windowed run pays one round trip per phase where the serial one pays Nw —
-    // two phases' worth of savings, asserted absolutely on the latency-dominant
-    // wire (the processing noise cancels; see `pipelinedSavesWallClock`).
+    // Both phases (PUT and GET) pipeline, so this is two phases' worth of
+    // savings, asserted absolutely (see `pipelinedSavesWallClock`).
     const { saved, floor } = pipelinedSavesWallClock(serial.ms, windowed.ms, Nw, 2 * WC_DELAY);
     t.ok(saved >= floor,
       `windowed PUT+GET saved the pipelined round trips: ${saved.toFixed(0)} ms (≥ ${floor} = half of ${Nw - 1} × RTT per phase, two phases)`);
@@ -268,15 +239,11 @@ export async function run(t) {
 
   t.group("overlapping PUT/GET operations on one node don't clobber the guest's stream state");
   {
-    // The guest keeps a streamed PUT's protocol state — K, the running byte offset, the
-    // signed descriptors placed so far — in realm state rather than round-tripping it
-    // through the host, so exactly one stream may be open per role at a time. StorageNode
-    // is what makes that safe: runExclusive chains whole OPERATIONS, not individual window
-    // calls, so a second putStart cannot land between the first PUT's windows. Force the
-    // worst case for that — one chunk per window, so each PUT is a dozen separate realm
-    // calls with an await between every one — and fire three PUTs, then three GETs,
-    // concurrently. Per-call chaining would interleave them and hand back crossed or
-    // short files.
+    // The guest keeps a streamed PUT's state in realm state, so exactly one
+    // stream may be open per role at a time; runExclusive chains whole
+    // OPERATIONS (not individual window calls) to keep that safe. Force the
+    // worst case — one chunk per window, so each PUT is a dozen separate realm
+    // calls — and fire three PUTs, then three GETs, concurrently.
     const cfg = { ...config, windowTargetBytes: config.k * config.blockSize }; // one chunk per window
     const files = [21, 22, 23].map((seed) => file(N * config.k * config.blockSize, seed));
     const r = await onCohort(cfg, (owner) => {

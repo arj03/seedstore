@@ -1,21 +1,14 @@
-// End-to-end PUT/GET wall-clock over a *latency-bearing* cohort — the benchmark
-// the repo was missing. bench.mjs and bench-wasm.mjs both measure pure compute
-// (RS codec + crypto) in-process, and the integration tests run on the
-// zero-latency LoopbackNetwork, so none of them can see the cost that dominates a
-// real cross-machine cohort: wall-clock ≈ (serial round-trip count) × RTT. This
-// drives a real round-trip latency through the link and sweeps the guest's
-// fanoutWindow (the guest reads it from its injected APP config) so the
-// widening the window stops helping — is visible for BOTH directions. PUT/GET run
-// the confined guest (the only path), reached over the per-peer fan-out cap. (Within
-// a chunk the n blocks already place in parallel, so the "peak" column reflects
-// window × n in flight.)
+// End-to-end PUT/GET wall-clock over a *latency-bearing* cohort. bench.mjs
+// measures pure compute in-process, and the integration tests run on the
+// zero-latency LoopbackNetwork, so neither sees the cost that dominates a real
+// cross-machine cohort: wall-clock ~ (serial round-trip count) x RTT. This
+// drives real latency through the link and sweeps the guest's fanoutWindow to
+// find where widening it stops helping, for both directions.
 //
-// The window binds hardest when the transport cap forces ~one block per STORE/FETCH
-// message — exactly the WebRTC case (a ~64 KB data channel, 32 KiB blocks). So the
-// cap defaults to blockKiB + 16, modelling that link: at W = 1 a 10 MB file pays one
-// serial round trip per block in each direction; widening W pipelines them. Pass a
-// big cap (e.g. 1024) to model a WS/TCP frame, where a holder's blocks ride a few
-// large batches and the window is a near no-op.
+// The window binds hardest when the transport cap forces ~one block per
+// STORE/FETCH message (the WebRTC case), so the cap defaults to blockKiB + 16.
+// Pass a big cap (e.g. 1024) to model a WS/TCP frame instead, where the window
+// is a near no-op.
 //
 // Run:  node tests/bench-net.mjs [rttMs] [fileMB] [blockKiB] [capKiB]
 //   e.g. node tests/bench-net.mjs 10 2 32       (10 ms RTT, 2 MB file, 32 KiB blocks, WebRTC cap)

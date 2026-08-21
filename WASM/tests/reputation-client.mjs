@@ -1,13 +1,10 @@
-// Test-only host-owned instance of the reputation WASM (README §13, §17). Lets a
-// test drive the decayed-reciprocity counters directly — it is pure (no host
-// calls), so it instantiates with only the env imports. The runtime never uses
-// this: a node reaches reputation as an installed kernel handler over MODULE_CALL
-// (host/storage-node.ts score()), so this client lives with its test. The ABI
-// (op-tag layout) is owned by assembly/reputation/index.ts.
+// Test-only host-owned instance of the reputation WASM (README §13, §17). Lets
+// a test drive the decayed-reciprocity counters directly — it is pure (no host
+// calls), so it instantiates with only the env imports. The ABI is owned by
+// assembly/reputation/index.ts.
 //
-// The module is now a PURE TRANSFORM — the client holds per-peer accumulators
-// (serve, miss, last) in a Map, and the module computes updated accumulators
-// from them (per PROTOCOL.md contract: WASM modules are restartable).
+// The module is a PURE TRANSFORM — the client holds per-peer accumulators
+// (serve, miss, last) in a Map, and the module computes updated ones from them.
 
 const OP_OBSERVE = 1, OP_SCORE = 2;
 

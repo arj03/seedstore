@@ -1,13 +1,8 @@
-// The reputation handler's request framing (assembly/reputation/index.ts ABI), in one
-// place. The module is now a PURE TRANSFORM — the caller holds per-peer accumulators
-// (serve, miss, last) and passes them in each request, receiving updated accumulators
-// back. This enforces the PROTOCOL.md contract: WASM modules are restartable transforms
-// (any timeout kills the instance), so callers cannot depend on module memory state.
-// Only the confined guest frames requests now (repScore/repObserve, via a bare-name
-// host.call): the module is private to the app's slot, so a host-side reading goes
-// through the guest's own Op.SCORE. This module is imported by the host AND stitched into
-// the Tier-2 guest (scripts/build-guest.mjs), so the two agree on the wire layout by
-// construction, not by a hand-kept mirror.
+// The reputation handler's request framing (assembly/reputation/index.ts ABI), in
+// one place. The module is a PURE TRANSFORM — the caller holds per-peer
+// accumulators (serve, miss, last) and passes them in each request, since WASM
+// modules are restartable (any timeout kills the instance). Imported by the host
+// AND stitched into the Tier-2 guest, so the two agree on the wire layout by construction.
 
 import { writeU64BE, readU64BE } from "./util.js";
 
@@ -64,19 +59,16 @@ export function decodeObserveResp(buf: Uint8Array): ObserveResp {
   };
 }
 
-// Eviction mirrors assembly/reputation/index.ts's HALF_LIFE_MS/threshold (§13.1) as a
-// housekeeping heuristic — callers hold the state now, so this is no longer wire format,
-// and the two copies are not required to match bit-for-bit, only in spirit ("~16 weeks").
+// Eviction mirrors assembly/reputation/index.ts's HALF_LIFE_MS/threshold (§13.1)
+// as a housekeeping heuristic — not wire format, so the two need only match in
+// spirit ("~16 weeks").
 const PRUNE_HALF_LIFE_MS = 7 * 24 * 3600 * 1000;
 const PRUNE_LN2 = 0.6931471805599453;
 const PRUNE_MASS_THRESHOLD = 1 / 65536;
 
-/** Evict every peer from `map` whose reciprocity mass, decayed forward to `now`, has
- *  fallen below 2^-16 of a single observation (≈16 half-lives ≈16 weeks for a once-seen
- *  peer) — bounds the caller's peer set the way the old module's prunePeers bounded its
- *  own arrays, now that the state lives outside the WASM memory ceiling that used to
- *  contain it. Call only when about to grow the set with a peer not already in it —
- *  re-observing a known peer should cost nothing extra. */
+/** Evict every peer from `map` whose reciprocity mass, decayed to `now`, has
+ *  fallen below 2^-16 of a single observation (~16 weeks for a once-seen peer).
+ *  Call only when adding a peer not already in the set. */
 export function pruneStalePeers(map: Map<string, { serve: number; miss: number; last: number }>, now: number): void {
   for (const [key, rep] of map) {
     const dt = now - rep.last;

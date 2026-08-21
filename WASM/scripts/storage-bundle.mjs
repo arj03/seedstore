@@ -1,32 +1,16 @@
 // The single source of truth for a seedstore app bundle's *content* — shared by
 // the offline producer (scripts/build-bundle.mjs) and the test fixture
-// (tests/bundle-fixture.mjs) so the two can never drift (the `caps` field used to).
-// Given a kernel host + author key + the build dir, it writes the bundle: one signed
-// blob holding each module's wasm, the guest, and the signed manifest envelope. The
-// manifest commits to every module's genesisHash, so the shell installs the verified
-// bytes at the kernel name it derives from the signed `(app, name)` pair — the manifest
-// declares no bind name (seedkernel §12.4, §5.1).
+// (tests/bundle-fixture.mjs) so the two can never drift. Writes one signed blob
+// holding each module's wasm, the guest, and the signed manifest envelope; the
+// manifest commits to every module's genesisHash (seedkernel §12.4, §5.1).
 //
-// Three deliberate choices live here, once:
-//   • `requires` declares the fine-grained authority *names* (seedkernel
-//     AUTHORITY_CALLS keys), not capability domains. The shell enforces them as the
-//     exact set a guest's host.call may reach, and wires only the matching backends.
-//     Storage reaches the node identity/signing/random, net send/peers, fs
-//     get/put/list/size and the clock — nothing more. (There is no `ops` catalog in
-//     the manifest — the guest's ABI is the shared name-addressed preamble, not
-//     signed content; the grant is `requires`.) It lives
-//     inside `guest`, where the authority it grants does.
-//   • `abi` names the guest seam this program was written against (seedkernel §12.2).
-//     Not a version of the bundle or of storage — of the HOST contract the guest calls
-//     through — so it is the constant the runtime exports, never a literal here: a seam
-//     change must fail this build, not this node's first request.
-//   • `quota` is absent from the signed config. It is OPERATOR policy, supplied at
-//     boot (seedkernel ShellOptions.config), never baked into author-signed content.
-//   • Nothing the RUNTIME derives is in the config, and nothing runtime-derived is
-//     injected at all (seedkernel §12.4): the signing scope in particular is not a
-//     fact the guest ever holds — `node/sign`/`node/verify` apply it host-side.
-//     Baking it here would be a build-time copy of a load-time fact, and a
-//     copy that drifts fails as signatures that verify nowhere.
+// Three deliberate choices:
+//   • `requires` declares fine-grained authority NAMES, not capability domains —
+//     the shell enforces them as the exact set a guest's host.call may reach.
+//   • `abi` is read from the runtime constant (seedkernel §12.2), never a
+//     literal, so a seam change fails this build, not a node's first request.
+//   • `quota` and anything runtime-derived (e.g. the signing scope) are absent
+//     from the signed config — both are host-applied facts, never author content.
 
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -44,46 +28,28 @@ import { toHex } from "../build/host/util.js";
 const APP_NAME = "seedstore";
 
 /**
- * The author's full key set: the Ed25519 half and the ML-DSA-65 half, both from the ONE
- * seed an operator stores, so the pinned id (seedkernel `hybridAuthorId`, a hash over
- * both public keys) is stable across rebuilds of the same key.
+ * The author's full key set: Ed25519 + ML-DSA-65, both from the ONE seed an
+ * operator stores, so the pinned id (`hybridAuthorId`) is stable across
+ * rebuilds. A thin call on seedkernel's `hybridAuthorKeysFromSeed` so this
+ * bundle derives it the same way the runtime and other apps do.
  *
- * A thin call on seedkernel's `hybridAuthorKeysFromSeed` rather than a local derivation:
- * the runtime's own transport author, the chat demo and this bundle must all derive the
- * same way, and a copy that drifted would not fail a build — it would publish under a
- * different author id and match nobody's policy pin.
- *
- * @param {any}    sodium  loaded libsodium, with the ML-DSA-65 signer mixed in
- *                         (seedkernel `loadSodium` supplies it; `signManifest`
- *                         throws without it, so a build that cannot sign PQ fails loud)
+ * @param {any}    sodium  loaded libsodium with the ML-DSA-65 signer mixed in
  * @param {Uint8Array} edSk  the author's 64-byte Ed25519 secret key (seed‖pk)
  */
 export function authorKeysFor(sodium, edSk) {
   return hybridAuthorKeysFromSeed(sodium, edSk.slice(0, 32));
 }
 
-// The grants the storage guest reaches, EXACTLY (`guest.requires`, the fine-grained
-// list). Declaring them is exactly what the shell enforces: a `host.call` naming a
-// grant outside this list is refused at the bridge, name by name.
+// The grants the storage guest reaches, EXACTLY (`guest.requires`): a `host.call`
+// naming a grant outside this list is refused at the bridge. Two kinds: the
+// host's own authorities (`node/sign`/`node/verify` scoped to this bundle's
+// (author, app), `node/identity`, `node/random`, `fs/*`, the clock), and the one
+// local service name `_net` — the network is a bundle (the transport) claiming
+// that id, reached via one cross-realm call (§12.10), carrying no privilege.
 //
-// Two kinds, because there are two kinds of thing a guest cannot reach on its own
-// (seedkernel §12.2). The host's own AUTHORITIES: `node/sign` + `node/verify`
-// (signing AND verification, both scoped to this bundle's (author, app) — the guest
-// checks a peer's descriptor signature without ever reconstructing the host-owned
-// prefix), `node/identity` and `node/random` (identity and entropy), `fs/*` and the
-// clock. And the one local service name, `_net`: the network is not a host
-// capability but a bundle — the transport — that claims that id, and an app reaches it
-// with the one cross-realm call (§12.10). It is the only place a manifest says "this
-// app talks to peers", and it carries no privilege: what an operator is asked about
-// is who may *be* the network (`link/*`), which this bundle never names.
-//
-// The pure transforms —
-// BLAKE2b, XChaCha20 — are not grants at all: they live under the
-// ungated `crypto/` prefix, because a function of a guest's own arguments grants
-// nothing. This bundle's own `codec`/`reputation` module names are the same story:
-// bare names on the same seam, reaching modules installed and verified with this
-// bundle, so they are ungated like `crypto` (seedkernel §12.1) and never appear
-// in `requires`.
+// Pure transforms (BLAKE2b, XChaCha20, and this bundle's own codec/reputation
+// modules) are not grants — ungated on the `crypto/` prefix (seedkernel §12.1)
+// and never listed here.
 const STORAGE_REQUIRES = [
   "node/sign", "node/verify", "node/identity", "node/random",
   "_net",
@@ -109,87 +75,50 @@ const STORAGE_REQUIRES = [
  */
 export function writeStorageBundle({ path, sodium, sk, pk, build, version = 1, log = () => {} }) {
   if (!Number.isInteger(version)) throw new Error("writeStorageBundle: version must be an integer");
-  // The two modules by logical name. That name is all the manifest carries: the loader
-  // derives the kernel name each binds at from `(app, name)` (seedkernel §5.1), so there
-  // is no bind name to state here and none to drift from what the runtime does.
+  // The loader derives each module's kernel name from `(app, name)` (seedkernel
+  // §5.1), so there is no bind name to state here.
   const modSpecs = ["codec", "reputation"];
-  // Files inside the bundle blob, keyed by the names §12.4 derives — a module lives in
-  // `<name>.wasm` and the guest in `guest.js`, so the manifest names no filenames.
   const files = {};
 
-  // The two pure handlers (§17). The manifest commits to each module's genesisHash;
-  // the shell verifies the bytes against it and installs them at the name it derives
-  // from the signed `(app, name)` pair, re-checking author + module hash under the same
-  // policy gate (seedkernel §12.4).
+  // The two pure handlers (§17); the manifest commits to each module's genesisHash.
   const modules = modSpecs.map((name) => {
-    // The build dir still stages each module as <name>.wasm, which is also its name
-    // inside the bundle.
     const wasm = new Uint8Array(readFileSync(join(build, moduleFile(name))));
     files[moduleFile(name)] = wasm;
-    // hash = genesisHash(wasm): the `bytes_hash` a policy.modules allowlist matches
-    // (seedkernel §7.1) and the manifest module `hash` the loader checks the bytes against.
-    // Hashing lives in the bundle module now (a free `genesisHash(sodium, …)`), not on the
-    // host — the kernel table touches no crypto.
     const hash = toHex(genesisHash(sodium, wasm));
     log(`  ${name}: bytesHash ${hash}`);
     return { name, hash };
   });
 
-  // The zero-authority orchestration guest, shipped *minified* (the shell injects
-  // the op preamble and runs it as source). We ship the comment-stripped copy to
-  // keep the signed bundle small; the minifier (scripts/minify.mjs) gates every
-  // file through `node --check`, so it is valid JS, just without the doc comments.
-  // The content hash below covers exactly these bytes, so shipped == verified.
+  // Ship the comment-stripped guest (scripts/minify.mjs, `node --check`-gated) to
+  // keep the signed bundle small; the content hash below covers these exact bytes.
   const guestText = readFileSync(join(build, "host-min", "tier2-guest.js"), "utf8");
   files[GUEST_FILE] = new TextEncoder().encode(guestText);
 
-  // The signed config must carry PRODUCTION geometry: defaultConfig()'s bare blockSize is
-  // test-scale (256 BYTES — sized so unit tests exercise multi-block chunking on tiny
-  // payloads), and when it leaked in here unchanged, a loader-initiated `--put` chunked a
-  // 10 MB file into ~41k blocks. PRODUCTION_BLOCK_SIZE is the one named deployment geometry
-  // (why 256 KiB: see its doc in core.ts), so this site and the CLI can't drift apart.
+  // Must carry PRODUCTION geometry — defaultConfig()'s bare blockSize is
+  // test-scale (256 bytes); leaking that in here once chunked a 10 MB file into
+  // ~41k blocks. PRODUCTION_BLOCK_SIZE keeps this site and the CLI from drifting.
   const cfg = defaultConfig(undefined, undefined, PRODUCTION_BLOCK_SIZE);
   const manifest = {
     app: APP_NAME,
-    // A monotonic integer freshness mark per (author, app): the shell enforces it as a
-    // high-water mark and refuses a downgrade (README §12.4). Bump it on every publish.
+    // Monotonic freshness mark per (author, app): the shell refuses a downgrade
+    // below its high-water mark (README §12.4). Bump on every publish.
     version,
-    // The wire protocol this app serves (seedkernel §12.10) — the claim, signed with
-    // everything else here. The load that admits this bundle routes the id to it, so a
-    // node that installed storage IS a storage node; there is no second operator act
-    // between landing the code and answering a peer. Read from STORAGE_PROTO, the same
-    // constant the guest names in every request it sends (NET_PROTO), so the id a sender
-    // writes and the id a receiver routes by cannot drift.
+    // The wire protocol this app serves (seedkernel §12.10), read from the same
+    // STORAGE_PROTO constant the guest names in every request (NET_PROTO), so
+    // sender and receiver can't drift apart.
     protocols: [STORAGE_PROTO],
     modules,
-    // Everything about the guest — its content hash, its authority, and its config — in
-    // one place (seedkernel §12.4). The guest is required by the format — every app is
-    // a guest — and storage's holds the whole authority the bundle has.
     guest: {
       hash: toHex(genesisHash(sodium, files[GUEST_FILE])),
-      // Which host seam this guest was written against (seedkernel §12.2). Read from the
-      // runtime rather than written as a literal, so a seam change breaks the build here
-      // instead of surfacing as a wrong answer at the first `host.call`.
+      // Read from the runtime, not a literal, so a seam change breaks this
+      // build rather than surfacing as a wrong answer at the first host.call.
       abi: GUEST_ABI_VERSION,
-      // The enforced capability grant — the fine-grained authority names
-      // (seedkernel AUTHORITY_CALLS), EXACTLY what the guest's host.call reaches.
-      // The guest's ABI is the shared name-addressed preamble the shell injects at
-      // load, not a signed catalog.
       requires: [...STORAGE_REQUIRES],
-      // The AUTHOR's config, injected as `const APP = …` exactly as signed. The shell
-      // merges nothing into it (seedkernel §12.4); an operator's settings arrive
-      // beside it as `LOCAL` and the guest's `CFG` picks precedence.
-      //
-      // NB: no `quota` — the guest reads that from LOCAL alone, so a value here would be
-      // ignored — and nothing the runtime derives (see the header note).
+      // The AUTHOR's config, injected as `const APP = …` exactly as signed. The
+      // shell merges nothing into it; LOCAL (operator settings) arrives beside
+      // it and the guest's CFG picks precedence. No `quota` here — LOCAL-only.
       config: {
         k: cfg.k, m: cfg.m, blockSize: cfg.blockSize,
-        // TOTAL over what the guest reads: LOCAL is optional, so a knob missing here reads
-        // `undefined` on a node whose operator named none. (Except `quota`, and the §4.1
-        // durability math, which comes off each chunk's own signed descriptor.) A holder
-        // bounds one FETCH response by ITS maxMessageBytes (serveFetch), so the cohort
-        // agrees on it deliberately; a mismatched client degrades to tail re-requests
-        // rather than failing (runFetchTasks).
         maxMessageBytes: cfg.maxMessageBytes,
         fanoutWindow: cfg.fanoutWindow,
         windowTargetBytes: cfg.windowTargetBytes,

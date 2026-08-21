@@ -3,19 +3,16 @@
 //   - the four WASM modules (kernel, signature, codec, reputation)
 //   - this project's compiled host, minified (build/host-min → host/)
 //   - seedkernel's node:fs-free browser host, minified (build-min → seedkernel/)
-//   - the pages:
-//       index.html   — in-page loopback cohort (self-contained)
-//       p2p.html     — real P2P over RtcNetwork + relay (signaling) + STUN
+//   - the pages: index.html (in-page loopback cohort), p2p.html (real P2P)
 //
-// Serve it with any static file server, e.g.:
+// Serve it with any static file server:
 //   npx http-server build/browser-demo -p 3000   (then open /index.html, /p2p.html)
 //
 // The pages' import maps resolve "seedkernel-wasm/*" → ./seedkernel/* and this
-// project's host → ./host/. Nothing is fetched at runtime: the QuickJS engine and
-// libsodium both come from the kernel (its "./quickjs" and "./libsodium" exports) and
-// the JS layer over the engine is vendored under ./vendor/, so the staged dir runs
-// offline. Needs both builds' minified host: seedstore `npm run build`
-// and seedkernel `npm run build:host && npm run build:host:min`.
+// project's host → ./host/. Nothing is fetched at runtime — QuickJS, libsodium,
+// and the vendored JS layer all ship under this dir, so it runs offline. Needs
+// both builds' minified host: seedstore `npm run build`, seedkernel
+// `npm run build:host && npm run build:host:min`.
 
 import { mkdirSync, copyFileSync, existsSync, readdirSync, statSync, rmSync,
          readFileSync, writeFileSync } from "node:fs";
@@ -44,13 +41,10 @@ if (!existsSync(join(seedkernelHost, "host", "shell-core.js"))) {
 }
 
 // ── staleness guard: the browser runs the MINIFIED host, Node tests run build/ ──
-// The two builds diverge silently when `build:host` (tsc) is re-run but `build:host:min`
-// (minify) is not — a real trap after switching branches: tests stay green against the
-// fresh build/ while the browser serves a stale min tree, so the demo runs old code
-// and fails in confusing ways (e.g. a codec/guest mismatch → "blockIds.length must equal
-// k+m"). Catch it here, the last step before the browser, for BOTH repos: if any compiled
-// build/ .js is newer than the whole min tree, the minify step lagged. This also
-// covers the cross-repo seam — seedkernel's min tree is trivial to leave stale from here.
+// The two builds diverge silently when `build:host` (tsc) reruns but
+// `build:host:min` does not — tests stay green against fresh build/ while the
+// browser serves stale code. Catch it here, for both repos: if any compiled
+// build/ .js is newer than the whole min tree, the minify step lagged.
 function newestJsMtime(dir) {
   let newest = 0;
   for (const name of readdirSync(dir)) {
@@ -62,17 +56,11 @@ function newestJsMtime(dir) {
   return newest;
 }
 function assertMinFresh(label, hostDir, minDir, rebuildCmd, subs = [""]) {
-  // `subs` narrows the comparison to the subtrees the minify step actually covers. It
-  // matters for the kernel: its build/ ALSO holds AssemblyScript fixture output
-  // (forwarder.*) that no tsc↔minify cycle touches, and `npm test` compiles those
-  // fixtures *after* minifying — so a whole-tree compare reports a stale min tree
-  // every time the kernel's suite has been run, which is a false alarm that teaches
-  // people to ignore a guard worth heeding. Same scoping seedchat's vendor.mjs uses.
+  // `subs` narrows the comparison to the subtrees the minify step actually
+  // covers — the kernel's build/ also holds fixture output that no
+  // tsc<->minify cycle touches, which would otherwise false-alarm every run.
   for (const sub of subs) {
     const host = join(hostDir, sub), min = join(minDir, sub);
-    // Need both trees to compare mtimes: no compiled host (a min-only checkout) or no min
-    // dir at all → nothing to assert. (The min dirs are also checked earlier before staging,
-    // so a missing min here is only reachable if this guard is reused in another order.)
     if (!existsSync(host) || !existsSync(min)) continue;
     if (newestJsMtime(host) > newestJsMtime(min) + 1000) { // 1s slack for mtime granularity
       console.error(
@@ -95,11 +83,9 @@ assertMinFresh("seedkernel", join(root, "..", "..", "seedkernel", "WASM", "build
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // Copy by overwriting in place — we do NOT wipe `out` first. A recursive delete
-// followed by an immediate re-copy races on Windows (the dir entry lingers, and
-// Defender briefly locks each freshly written file for scanning), which aborts the
-// stage mid-copy and leaves a half-populated dir. The staged file set is fixed, so
-// overwriting is enough; a transient EPERM/EBUSY/EACCES on a just-written file is
-// retried rather than fatal.
+// followed by an immediate re-copy races on Windows (Defender briefly locks each
+// freshly written file), aborting the stage mid-copy. Retry a transient
+// EPERM/EBUSY/EACCES rather than treating it as fatal.
 const staged = new Set(); // every path we write, so we can prune anything else from `out`
 async function copy(src, dst) {
   staged.add(resolve(dst));
@@ -128,32 +114,22 @@ for (const f of ["codec.wasm", "reputation.wasm"]) {
 await copy(join(build, "host", "tier2-guest.js"), join(out, "tier2-guest.js"));
 
 // Host JS (seedstore + seedkernel). Copy .js recursively — the kernel's minified
-// tree now has host/ and core/ subdirs (host modules import ../core/* by relative
-// path), and the import maps resolve "seedkernel-wasm/*" into ./seedkernel/ and
-// this project's host into ./host/.
+// tree has host/ and core/ subdirs, and the import maps resolve
+// "seedkernel-wasm/*" into ./seedkernel/ and this project's host into ./host/.
 //
-// Node-only modules do NOT ship. Both minified trees carry modules that exist for the
-// Node host (the kernel's crypto-node/fs-node/net-node/main*, this project's node.js)
-// and reach for `node:` builtins and bare npm specifiers no browser can resolve. No
-// page imports them, so today they are only dead weight — but dead weight that makes
-// the served tree look like it depends on packages it does not (crypto-node's bare
-// `libsodium-wrappers-sumo` is why the import map used to carry a sumo entry it never
-// needed). Skip them on the property that makes them node-only, a STATIC `node:` import,
-// and assert below that nothing staged imports one — so the rule can never silently drop a
-// module a page actually needs.
+// Node-only modules do NOT ship: both minified trees carry modules that exist
+// only for the Node host and reach for `node:` builtins or bare npm specifiers
+// no browser can resolve. Skip them on the property that makes them node-only —
+// a STATIC `node:` import — and assert below that nothing staged still imports
+// one, so the rule can never silently drop a module a page actually needs.
 //
-// Static is the whole test, for the same reason the walk below applies it: a static
-// `node:` import is rejected by the browser before a line of the module runs, so it IS a
-// Node-host module. A DYNAMIC one is a branch — the kernel's module table spawns a DOM
-// `Worker` when there is one and only reaches for `node:worker_threads` when there is
-// not, which is one implementation serving both targets. Skipping it would drop the
-// module every page's shell needs to stand its WASM modules up.
-// A specifier is `from "x"`, `import("x")`, or a bare side-effect `import "x"` at the
-// start of a statement. Kept deliberately tight — no newline inside the quotes and no
-// newline before them — so prose in a comment ("…the import kind…") followed by an
-// unrelated string literal cannot read as an import. The `import(` form is captured
-// separately because static and dynamic differ in what they PROVE about a `node:`
-// specifier — see `isNodeOnly` just below and the node: case in the walk further down.
+// A DYNAMIC `node:` import is a branch, not a dependency (e.g. the kernel's
+// module table reaches for `node:worker_threads` only when there's no DOM
+// `Worker`), so it must not be treated as node-only.
+//
+// A specifier is `from "x"`, `import("x")`, or a bare side-effect `import "x"`
+// at the statement start — kept tight (no newline inside or before the quotes)
+// so comment prose can't be misread as an import.
 const SPEC = /(?:\bfrom[ \t]*|(\bimport[ \t]*\([ \t]*)|(?:^|[;}])[ \t]*import[ \t]*)["']([^"'\n]+)["']/gm;
 const skippedNodeOnly = new Set(); // dest paths deliberately NOT staged
 const isNodeOnly = (src) => {
@@ -176,10 +152,10 @@ async function copyJs(srcDir, dstDir) {
 await copyJs(seedstoreHost, join(out, "host"));
 await copyJs(seedkernelHost, join(out, "seedkernel"));
 
-// ML-DSA-65, the PQ half of seedkernel's one manifest suite (§12.4) — the same artifact
-// Node reads and the Go loader embeds. p2p.html mixes it into its sodium instance so
-// `verifyManifest` can read the cohort's author id; without it no manifest verifies at
-// all and the page would silently fall back to the zero-author scope.
+// ML-DSA-65, the PQ half of seedkernel's one manifest suite (§12.4). p2p.html
+// mixes it into its sodium instance so `verifyManifest` can read the cohort's
+// author id; without it no manifest verifies and the page falls back silently
+// to the zero-author scope.
 {
   const src = join(root, "..", "..", "seedkernel", "WASM", "browser", "mldsa65.wasm");
   if (!existsSync(src)) {
@@ -191,13 +167,11 @@ await copyJs(seedkernelHost, join(out, "seedkernel"));
 }
 
 // ── sumo libsodium: the kernel's, not a second copy ──────────────────────────
-// The pages import "seedkernel-wasm/libsodium" — the kernel's published browser entry
-// — rather than the upstream npm package, so the browser, the Node host and the Go
-// loader all run the SAME crypto binary. (They used to vendor libsodium-wrappers-sumo
-// out of node_modules below, which is the same library but not the same artifact, and
-// it needed a dev install of the kernel to stage.) These three files are checked in and
-// must land in ONE directory: the wrapper resolves the core and the .wasm relative to
-// its own import.meta.url, and its wasm is a sibling fetch rather than a base64 blob.
+// The pages import "seedkernel-wasm/libsodium" (the kernel's published browser
+// entry) rather than the upstream npm package, so browser, Node, and the Go
+// loader all run the SAME crypto binary. These three files must land in ONE
+// directory: the wrapper resolves the core and .wasm relative to its own
+// import.meta.url, and the wasm is a sibling fetch, not a base64 blob.
 {
   const srcDir = join(root, "..", "..", "seedkernel", "WASM", "browser");
   for (const f of ["libsodium-wrappers.mjs", "libsodium-core.mjs", "libsodium.wasm"]) {
@@ -212,14 +186,11 @@ await copyJs(seedkernelHost, join(out, "seedkernel"));
 }
 
 // ── the QuickJS engine: the kernel's own build, like everything else ─────────
-// safe-js runs its realms on seedkernel's in-repo quickjs-ng 0.16.1 build (its
-// WASM/quickjs/dist, reached as the package export "seedkernel-wasm/quickjs") — the
-// same engine its Node tests use and, at the same source pin, the Go loader. So it is
-// staged from the kernel checkout beside libsodium above, not vendored from npm, and
-// it needs no install there: dist/ is checked in. Its glue is built for `web,node` and
-// picks the browser's fetch path at runtime; the four files must land in ONE dir, since
-// variant.mjs imports its siblings relatively and the glue fetches
-// `new URL("emscripten-module.wasm", import.meta.url)`.
+// safe-js runs its realms on seedkernel's in-repo quickjs-ng build (package
+// export "seedkernel-wasm/quickjs"), staged from the kernel checkout rather
+// than vendored from npm. Its glue picks the browser's fetch path at runtime;
+// the four files must land in ONE dir since variant.mjs imports its siblings
+// relatively and fetches `new URL("emscripten-module.wasm", import.meta.url)`.
 {
   const src = join(root, "..", "..", "seedkernel", "WASM", "quickjs", "dist");
   mkdirSync(join(out, "seedkernel", "quickjs"), { recursive: true });
@@ -234,16 +205,12 @@ await copyJs(seedkernelHost, join(out, "seedkernel"));
 }
 
 // ── vendor the browser-only npm deps so the demo runs OFFLINE ────────────────
-// What is left from npm is the JS API layer over that engine: quickjs-emscripten-core
-// plus the @jitl/quickjs-ffi-types it imports by name — multi-file ESM packages with
-// their own bare-specifier imports, which the pages used to pull from esm.sh. Copy the
-// exact runtime files into ./vendor/ and let the pages' import map name every bare
-// specifier in their graph. NOT the `quickjs-emscripten` umbrella: safe-js passes its
-// own variant, and the umbrella's only job is bundling defaults — which it does by
-// statically importing four Bellard engines nothing here runs, the reason this map used
-// to alias them to the -ng builds. Source from seedkernel's node_modules (where safe-js
-// pulls them), falling back to seedstore's. libsodium is NOT here — it is staged from
-// the kernel above.
+// What's left from npm is the JS API layer over that engine: quickjs-emscripten-core
+// plus @jitl/quickjs-ffi-types — multi-file ESM packages with their own
+// bare-specifier imports. Copy the exact runtime files into ./vendor/ and let
+// the pages' import map name every bare specifier. NOT the `quickjs-emscripten`
+// umbrella — safe-js passes its own variant. Source from seedkernel's
+// node_modules, falling back to seedstore's; libsodium is staged separately above.
 const nodeModulesDirs = [
   join(root, "..", "..", "seedkernel", "WASM", "node_modules"),
   join(root, "node_modules"),
@@ -273,28 +240,24 @@ for (const [pkg, sub, dest, files, allMjs] of VENDOR) {
 }
 
 // The signed bundle manifest, if a bundle has been built (`npm run build:bundle`).
-// p2p.html fetches ./manifest.bundle and reads its author public key (the first 32
-// bytes) to auto-derive the cohort's signing scope, so a browser joining a cohort of
-// bundle-running holders (seedloaders) matches their author scope without the user
-// pasting a key. Absent → the page falls back to the zero-author default.
+// p2p.html reads its author public key to auto-derive the cohort's signing
+// scope. Absent -> the page falls back to the zero-author default.
 //
-// A bundle is one blob (seedkernel §12.4), so unpack it and stage ONLY the manifest
-// envelope from inside — a standalone signed artifact (32-byte author header + sig +
-// JSON) that `verifyManifest` checks on its own. The *.wasm payloads and the guest stay
-// on the holders: the browser needs the author, not megabytes of bundle contents.
+// A bundle is one blob (seedkernel §12.4); unpack it and stage ONLY the
+// manifest envelope (a standalone signed artifact `verifyManifest` checks on
+// its own) — the *.wasm payloads and guest stay on the holders.
 const bundleBlob = [join(root, "bundle", "seedstore.skb"), join(build, "bundle", "seedstore.skb")]
   .find((p) => existsSync(p));
 let bundleManifest = false;
 if (bundleBlob) {
-  // Stage the whole signed bundle: a browser page boots a StorageNode on it (the ONE
-  // install path), so the page fetches ./seedstore.skb exactly like a Node node reads
-  // bundle/seedstore.skb.
+  // Stage the whole signed bundle too: a browser page boots a StorageNode on
+  // it, fetching ./seedstore.skb exactly like a Node node reads bundle/seedstore.skb.
   await copy(bundleBlob, join(out, "seedstore.skb"));
   const files = unpackBundle(new Uint8Array(readFileSync(bundleBlob)));
   if (files[MANIFEST_FILE]) {
     const dst = join(out, MANIFEST_FILE);
     writeFileSync(dst, files[MANIFEST_FILE]);
-    staged.add(resolve(dst)); // it is unpacked, not copy()'d, so register it or prune eats it
+    staged.add(resolve(dst)); // unpacked, not copy()'d, so register it or prune eats it
     bundleManifest = true;
   }
 }
@@ -305,14 +268,11 @@ for (const page of ["index.html", "p2p.html"]) {
 }
 
 // ── resolve each page's module graph, exactly as the browser will ────────────
-// Two ways this stage ships a dir the browser refuses, both of which used to surface
-// only as a console error on load: a bare "seedkernel-wasm/*" specifier the page's
-// import map has no entry for (the map is hand-maintained, the imports are not), and a
-// relative import of a module that is not staged — including the `node:`-importing ones
-// copyJs deliberately left out. Walk the real graph from each page: follow relative
-// imports through the staged files, resolve bare ones through that page's own map, and
-// fail here with the file that named the specifier. Only what a page can actually reach
-// is checked, so a module staged for the OTHER page (net-rtc) needs no entry in this one.
+// Catches two failures that otherwise only surface as a console error on load:
+// a bare specifier missing from the page's (hand-maintained) import map, and a
+// relative import of a module that isn't staged. Walk the real graph from each
+// page, resolving relative imports through staged files and bare ones through
+// the map, failing with the file that named the bad specifier.
 function importMapOf(html) {
   const m = html.match(/<script type="importmap">([\s\S]*?)<\/script>/);
   if (!m) throw new Error("page has no import map");
@@ -336,15 +296,10 @@ function checkPage(page) {
       } else if (map[spec]) {
         target = resolve(out, map[spec]);
       } else if (spec.startsWith("node:")) {
-        // A STATIC `node:` import is fatal wherever it appears: the browser rejects the
-        // module before a line of it runs, so its presence in the graph is the bug (this
-        // is what catches a Node-host module that slipped past copyJs).
-        //
-        // A DYNAMIC one is a branch, not a dependency — evaluated only if taken. The
-        // kernel's QuickJS glue is built for `web,node` and reaches for `node:module`
-        // inside its `ENVIRONMENT_IS_NODE` test, which is exactly how one engine artifact
-        // serves both targets. Failing it here would ban the shared build over a line the
-        // browser never reaches. Nothing to resolve either way, so this specifier ends here.
+        // STATIC is fatal wherever it appears (catches a Node-host module that
+        // slipped past copyJs). DYNAMIC is a branch, not a dependency (e.g. the
+        // kernel's glue reaches for `node:module` only inside its
+        // ENVIRONMENT_IS_NODE test) — nothing to resolve, so skip it.
         if (dynamic) continue;
         fail(file, spec, "a Node builtin: this module should not be in the browser graph.");
       } else {
@@ -366,14 +321,9 @@ function checkPage(page) {
 for (const page of ["index.html", "p2p.html"]) checkPage(page);
 
 // ── prune: remove anything in `out` we did NOT just stage ────────────────────
-// We overwrite in place rather than wiping `out` up front (a wipe-then-recopy races
-// Windows/Defender — see copy() above), so files from an earlier build linger. After
-// a branch switch that means stale host/*.js, seedkernel/*.js, or a leftover signed
-// bundle sit next to fresh code and get served — the same class of confusing failure
-// the staleness guard above prevents. The staged set is authoritative: delete every
-// other file, then drop the dirs left empty, so `out` holds EXACTLY this build. A
-// staged manifest.bundle is in the set (copy() adds it), so it survives; a stale one
-// from a prior build with no bundle now is correctly pruned.
+// We overwrite in place rather than wiping `out` up front (see copy() above),
+// so files from an earlier build (or branch) can linger and get served stale.
+// The staged set is authoritative: delete everything else, then drop dirs left empty.
 function prune(dir) {
   let kept = 0;
   for (const name of readdirSync(dir)) {

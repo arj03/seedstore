@@ -1,8 +1,7 @@
-// Shared test scaffolding: the one libsodium, the wasm paths, and the store helpers
-// a test reaches around the protocol with. There is no module-table helper any more —
-// a bundle's modules are private to its slot (seedkernel §4), so nothing outside the
-// guest can hold or call them, and no signature wrapper either: authenticity is the
-// transport's job (the AKE channel).
+// Shared test scaffolding: the one libsodium, the wasm paths, and the store
+// helpers a test reaches around the protocol with. A bundle's modules are
+// private to its slot (seedkernel §4), so nothing outside the guest can hold
+// or call them directly.
 
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -44,15 +43,13 @@ export async function liveBlockCount(nodes, net, ids) {
   return live;
 }
 
-/** Plant a block straight into a node's store.local, bypassing the protocol — for
- *  tests that need a holder to already have something (a FETCH to serve, a block to
- *  repair around). There is no host-side write path any more: admission and the quota
- *  are the confined guest holder's alone, so a test writes the `<hex>.blk`/`.dsc`
- *  layout on the fs the guest serves, exactly as the guest itself would.
+/** Plant a block straight into a node's store.local, bypassing the protocol —
+ *  for tests that need a holder to already have something. Writes the
+ *  `<hex>.blk`/`.dsc` layout directly, since admission is the guest holder's alone.
  *
- *  Seed BEFORE the holder is otherwise exercised: the guest rebuilds its byte total
- *  from the fs lazily, so a plant after it has started counting is invisible to its
- *  §14 accounting until the realm is rebuilt. */
+ *  Seed BEFORE the holder is otherwise exercised: the guest rebuilds its §14
+ *  byte total from the fs lazily, so a later plant is invisible to it until
+ *  the realm is rebuilt. */
 export async function plantBlock(fs, idHex, bytes, descriptor = null) {
   await fs.put(idHex + ".blk", bytes);
   if (descriptor) await fs.put(idHex + ".dsc", descriptor);

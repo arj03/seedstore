@@ -17,13 +17,9 @@ import { writeU32BE } from "./util.js";
 // manifest domain to keep in step (§4.4).
 export const LEVEL_BODY = 0x00;
 
-/** Content-address hash for block_id (§4.2). Block-ids never cross into the
- *  kernel — they are pure content addressing within the storage layer — so the
- *  hash is a storage-local choice, decoupled from the kernel's BLAKE2b-256 genesis
- *  hash. We use BLAKE2b (`crypto_generichash`): fast in software and *also*
- *  already in the libsodium the kernel loads, so it ships no new bytes (§16).
- *  (A future BLAKE3 + SIMD `hash_many` over the equal-size blocks is the next
- *  step up — see ../README.md "Block-id hash choice".) */
+/** Content-address hash for block_id (§4.2). BLAKE2b (`crypto_generichash`):
+ *  fast in software and already in the libsodium the kernel loads (§16), so it
+ *  ships no new bytes. (A future BLAKE3 + SIMD step is discussed in the README.) */
 export const BLOCK_ID_BYTES = 32;
 
 export class Crypto {

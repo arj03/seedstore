@@ -1,19 +1,10 @@
 // The host's READ VIEW of what this node's holder has stored (README §12).
 //
-// The confined guest holder owns store.local outright: it decides what to admit
-// (§4.3 descriptor check, §6 sibling rule, §14 quota) and writes the
-// `<hex>.blk` / `<hex>.dsc` layout itself through the raw-byte `fs.*` capability
-// (host/tier2-guest.orchestration.js). This module deliberately implements NONE of
-// that policy — no put, no delete, no quota budget. It only *reads* the layout back
-// out, so a host-side caller (a test, the demo's per-holder counts, an operator
-// script) can see what landed.
-//
-// One implementation of the quota rule, in the guest, is the whole point: a second
-// host-side copy could only ever agree with it by being maintained byte-for-byte in
-// step, and could not see the guest's own writes without re-reading the fs anyway.
-//
-// Everything here reads the backend live rather than caching an index, since the
-// guest writes out of band as far as this view is concerned.
+// The confined guest holder owns store.local outright (admission, quota, the
+// `<hex>.blk`/`<hex>.dsc` layout — host/tier2-guest.orchestration.js). This
+// module implements NONE of that policy — no put, no delete — only reads the
+// layout back for a host-side caller (tests, demo counts, operator scripts).
+// Reads the backend live rather than caching, since the guest writes out of band.
 
 import { toHex, fromHex } from "./util.js";
 import type { Fs } from "seedkernel-wasm/fs";

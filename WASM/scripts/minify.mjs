@@ -1,15 +1,10 @@
-// Dependency-free "minifier" for the compiled host JS.
-//
-// The source is heavily documented and over half the gzipped host bytes are doc
-// comments, so simply stripping comments ~halves the wire size — no bundler, no
-// terser, no new dependencies. It reads the commented build/host (kept as-is for
-// debugging) and emits a comment-stripped build/host-min (for shipping). One
-// `npm run build` produces both.
+// Dependency-free "minifier" for the compiled host JS: strips comments to shrink
+// the gzipped wire size, no bundler/terser needed. Reads build/host (kept as-is
+// for debugging), emits build/host-min (for shipping).
 //
 // The host has no regex literals (verified), so a bare `/` is never a regex
-// start here and a small string/template-aware scanner is enough. As a safety
-// net, every emitted file is syntax-checked with `node --check`, so any scanner
-// mistake fails the build loudly rather than shipping broken JS.
+// start and a small string/template-aware scanner suffices. Every emitted file
+// is syntax-checked with `node --check` as a safety net against scanner bugs.
 
 import { readFileSync, writeFileSync, mkdirSync, rmSync, readdirSync, statSync } from "node:fs";
 import { gzipSync } from "node:zlib";

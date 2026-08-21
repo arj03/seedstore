@@ -1,20 +1,15 @@
 // reputation — the second pure-compute handler (README §13, §17, "no caps").
 //
 // Each node keeps, per peer, a small *decayed* reciprocity balance built only
-// from things it has witnessed directly: verification-fetch passes (the peer
-// reliably served data it holds for me) raise its score; misses decay it; and
-// old observations fade so a peer that stops serving fades and the state never
-// grows without bound (§13.1). The whole computation is arithmetic over
-// locally-witnessed events, so it lives here in the pure sandbox — it can never
-// reach disk or network even if buggy, which is exactly where you want the
-// trust math (§17). Portable/transitive reputation (§20) is a swap-in for this
-// handler, not part of the base.
+// from things it has witnessed directly: verification-fetch passes raise the
+// score, misses decay it, and old observations fade so state never grows
+// unbounded (§13.1). Living here in the pure sandbox means the trust math can
+// never reach disk or network even if buggy (§17).
 //
-// ABI (same scratch discipline as codec): the module is now a PURE TRANSFORM of
-// accumulated state (the caller holds per-peer accumulator), not a state keeper.
-// Per PROTOCOL.md contract: a WASM module is a restartable transform — any timeout
-// kills the instance and discards module memory, so callers cannot depend on
-// module-side state surviving a call. All per-peer accumulators live in the guest.
+// ABI (same scratch discipline as codec): a PURE TRANSFORM of accumulated
+// state — the caller holds the per-peer accumulator and passes it in each
+// call, since a WASM module is a restartable transform that discards its
+// memory on any timeout.
 //   request  = [op u8] [args ...]
 //   OP_OBSERVE (1) [serve f64 LE][miss f64 LE][last u64 BE][now u64 BE][result u8]
 //     → [serve f64 LE][miss f64 LE][last u64 BE][score f64 LE]
@@ -103,20 +98,16 @@ export function handle(input_len: i32): i32 {
     const now = readU64BE(scratch + 25);
     const result = load<u8>(scratch + 33) as i32;
 
-    // Decay forward to now
     const decayed = decayTo(serve, miss, last, now);
     serve = decayed[0];
     miss = decayed[1];
     last = decayed[2];
 
-    // Apply pass/miss weight
     if (result != 0) serve = serve + 1.0;
     else miss = miss + 1.0;
 
-    // Compute score
     const score = scoreOf(serve, miss);
 
-    // Write response: serve, miss, last, score
     writeF64(scratch, serve);
     writeF64(scratch + 8, miss);
     writeU64BE(scratch + 16, last);
@@ -133,12 +124,11 @@ export function handle(input_len: i32): i32 {
     const last = readU64BE(scratch + 17);
     const now = readU64BE(scratch + 25);
 
-    // Decay forward to now
     const decayed = decayTo(serve, miss, last, now);
     const decayedServe = decayed[0];
     const decayedMiss = decayed[1];
 
-    // Compute and write score (read-only, no write-back of accumulators)
+    // Read-only: no write-back of accumulators.
     const score = scoreOf(decayedServe, decayedMiss);
     writeF64(scratch, score);
     return 8;

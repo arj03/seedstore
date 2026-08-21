@@ -82,13 +82,10 @@ export async function run(t) {
 
   t.group("large blocks (> the 128 KB default handler scratch) round-trip (§4.1)");
   {
-    // The p2p demo runs 256 KiB blocks so a WS cohort pays few round trips. A
-    // codec encode/decode request is then k·blockSize bytes — far past the kernel's
-    // 128 KB default handler scratch — so the codec must declare its larger scratch
-    // (exported `scratchSize`) and the host must honor it. Before that wiring the
-    // codec call silently returned no parity and PUT died with "blockIds.length must
-    // equal k+m". Use RS(2,2) at 96 KiB so both the encode request (2·96 KiB) and its
-    // parity response (2·96 KiB) exceed the default, over genuine (k>1) parity.
+    // A codec request of k·blockSize bytes can exceed the kernel's 128 KB
+    // default handler scratch, so the codec must declare its larger scratch
+    // (exported `scratchSize`). RS(2,2) at 96 KiB puts both the encode request
+    // and parity response past the default, over genuine (k>1) parity.
     const net = new LoopbackNetwork();
     const bigCfg = { k: 2, m: 2, blockSize: 96 * 1024 };
     const nodes = await createConnectedCohort({ count: 6, network: net, sodium, wasm, config: bigCfg, timeoutMs: TIMEOUT });
@@ -218,11 +215,9 @@ export async function run(t) {
 
   t.group("repair settles on a high-redundancy k=1 config (RS(1,4)) (§9)");
   {
-    // RS(1,4) is replication r = m+1 = 5: each chunk's lone id lives on 5 distinct
-    // holders, giving a loss margin of 4 against a low-water margin of ceil(m/2) = 2.
-    // Repair must read the *full* live-holder set, never a capped sample: a sample of,
-    // say, 2 reads a margin of 1 < 2 and would re-place on every pass, never settling.
-    // A freshly-PUT, fully-healthy file must therefore be a strict no-op for repair.
+    // RS(1,4) is replication r = m+1 = 5, loss margin 4 vs low-water ceil(m/2)=2.
+    // Repair must read the *full* live-holder set — a capped sample would read a
+    // lower margin and re-place forever, never settling.
     const net = new LoopbackNetwork();
     const cfg = { k: 1, m: 4, blockSize: 1024 };
     const nodes = await createConnectedCohort({ count: 7, network: net, sodium, wasm, config: cfg, timeoutMs: TIMEOUT }); // owner + 6 holders >= r=5
@@ -240,12 +235,10 @@ export async function run(t) {
 
   t.group("mixed geometry: a replicated chunk is repaired to ITS OWN r, not the repairer's config (§4.1, §9)");
   {
-    // §4.1 permits a cohort to run mixed geometry, because every chunk descriptor is
-    // self-describing. That promise only holds if the *replica target* is descriptor-math
-    // too: here the owner writes at RS(1,4) — r = m+1 = 5 copies, low-water margin
-    // ceil(4/2) = 2 — while every holder is configured RS(1,1), which for its own writes
-    // would be r = 2. A repairer reading r (and the low-water mark) off its own config
-    // sees 2 live copies of a 5-copy chunk, calls it healthy, and repairs nothing.
+    // §4.1's mixed-geometry promise only holds if the replica target is
+    // descriptor-math too: the owner writes RS(1,4) (r=5, low-water 2) while
+    // every holder is configured RS(1,1) (r=2). A repairer reading its own
+    // config would see 2 live copies of a 5-copy chunk and call it healthy.
     const net = new LoopbackNetwork();
     const ownerId = sodium.crypto_sign_keypair();
     const owner = await StorageNode.create({
@@ -369,12 +362,10 @@ export async function run(t) {
     net.close();
   }
 
-  // The browser demos run k=1 (RS(1,·)) on two or three holders — a shape the groups
-  // above never used (they are all RS(2,2) on a full cohort). That blind spot is
-  // why two real bugs shipped: the old degenerate coded k=1 repeated one id across its
-  // slots, so it leaked into the returned set (the "13/13" holder probe); and a cohort
-  // smaller than n=k+m used to fail the whole PUT. k=1 is now replication (one id per
-  // chunk, m=0 descriptor), so the dup-id leak is structurally impossible — cover both.
+  // The browser demos run k=1 on two or three holders — a shape the groups
+  // above never use (all RS(2,2) on a full cohort), which is why two real bugs
+  // shipped here: a duplicate-id leak in the old degenerate coded k=1, and a
+  // cohort smaller than n=k+m failing the whole PUT. Cover both.
   t.group("k=1 replication on a 2-holder cohort (RS(1,9) on an undersized cohort)");
   {
     const net = new LoopbackNetwork();
@@ -427,13 +418,11 @@ export async function run(t) {
 
   t.group("maxMessageBytes mismatch: a holder's smaller FETCH cap degrades, never fails (§18)");
   {
-    // maxMessageBytes is per-node operator policy, so a cohort can diverge: this owner
-    // sizes FETCH sub-batches for 4 blocks per response (cap 4480 > 4·(1024+5) + header),
-    // while its holders serve at most ~1 block per response (cap 1600). A block past a
-    // holder's cap comes back tagged FETCH_UNANSWERED — held, but no room this response —
-    // distinct from a genuine miss. serveFetch must always serve the first present block,
-    // and the reader must re-request exactly the unanswered blocks (runFetchTasks), so the
-    // mismatch costs round trips, not data.
+    // maxMessageBytes is per-node operator policy, so a cohort can diverge: this
+    // owner sizes FETCH for 4 blocks/response (cap 4480), holders serve only
+    // ~1 block/response (cap 1600). A block past the holder's cap comes back
+    // FETCH_UNANSWERED (held, no room) — distinct from a genuine miss — and the
+    // reader re-requests it (runFetchTasks), so the mismatch costs round trips, not data.
     const net = new LoopbackNetwork();
     const ownerCfg = { k: 2, m: 2, blockSize: 1024, maxMessageBytes: 4480 };
     const holderCfg = { ...ownerCfg, maxMessageBytes: 1600 };
@@ -473,22 +462,15 @@ export async function run(t) {
 
   t.group("a holder that answers UNANSWERED forever cannot hang a GET (§18)");
   {
-    // The mismatch above is the honest use of UNANSWERED, and its re-request loop
-    // terminates because serveFetch always serves the first present block — so each round
-    // decides ≥1 id and the re-asked slice strictly shrinks. That is an honest HOLDER's
-    // property, not a property of the wire: a peer that tags EVERY id UNANSWERED decides
-    // nothing, and a reader that took its word would re-ask the same slice forever, one
-    // peer hanging any GET (and growing the reader's task list without bound). The reader
-    // checks the invariant instead — a round that decides nothing rules those ids absent
-    // for that peer, a §8 miss — so the GET ends by its own verdict. Both holders lying is
-    // the case with no honest fallback left: the GET must FAIL, and failing is the point.
+    // The re-request loop above terminates because serveFetch always serves the
+    // first present block — an honest HOLDER's property, not the wire's. A peer
+    // that tags EVERY id UNANSWERED decides nothing; a reader that took its word
+    // would re-ask forever. The reader instead rules a no-progress round absent
+    // (a §8 miss), so the GET ends by its own verdict — and with both holders
+    // lying, the GET must FAIL, which is the point.
     //
-    // The lie is a guest config knob (StorageConfig.lieOnFetch, serveFetch in
-    // tier2-guest.orchestration.js): the kernel's shell has no host-side seam left to
-    // intercept the holder's serveFetch with since the `route/deliver` move, so the
-    // misbehaving-peer behavior lives where the serving does. The holders stay honest
-    // on HAVE/OFFER/STORE — they genuinely admit the blocks and advertise them; only
-    // the serving is a lie.
+    // The lie is a guest config knob (StorageConfig.lieOnFetch): the holders
+    // stay honest on HAVE/OFFER/STORE; only serveFetch lies.
     const net = new LoopbackNetwork();
     const cfg = { k: 1, m: 1, blockSize: 1024 };  // one block per chunk, m+1 = 2 copies → both holders
     const mk = (lieOnFetch) => {
@@ -584,11 +566,10 @@ export async function run(t) {
   // ── §4.3 the descriptor signature is ANCHORED, not merely valid ────────────
   t.group("a holder declines a validly-signed descriptor from an author its cohort does not know (§4.3)");
   {
-    // The envelope carries its own author pubkey, so a signature checked against it alone
-    // proves nothing about WHO signed: any cohort peer can mint a fresh keypair and
-    // self-sign a descriptor with a truncated sibling list, defeating both the §4.3
-    // "cannot substitute its own key" claim and the §6/§10 sibling rule. Anchoring the
-    // author to a peer the holder knows is what makes a forgery attributable (§13).
+    // The envelope carries its own author pubkey, so a signature checked
+    // against it alone proves nothing about WHO signed — any peer could mint a
+    // fresh keypair and self-sign. Anchoring the author to a known peer is what
+    // makes a forgery attributable (§13).
     const net = new LoopbackNetwork();
     const [a, b] = await createConnectedCohort({ count: 2, network: net, sodium, wasm, config, timeoutMs: TIMEOUT });
     try {
@@ -643,13 +624,9 @@ export async function run(t) {
   // ── §4.3 the index descent is checked, not assumed ────────────────────────
   t.group("GET rejects an index level that does not descend (§4.3, §7)");
   {
-    // A reader is HANDED (root, K) by whoever shared the file, and §4.4's cipher carries
-    // no tag — so that sharer chose the plaintext at every level. Nothing else stops a
-    // root at level ℓ from naming a list that is ALSO at level ℓ: content-addressing does
-    // not catch it (the bytes genuinely hash to their ids), and the descriptors are
-    // validly signed by a known author. Only the strict descent does. Note the danger is
-    // a non-descending CHAIN, built bottom-up at no cost — a self-referential cycle would
-    // need a hash preimage and is not constructible.
+    // A reader is HANDED (root, K), and §4.4's cipher carries no tag, so the
+    // sharer chose the plaintext at every level — nothing else stops a root at
+    // level ℓ from naming a list also at level ℓ. Only the strict descent check does.
     const net = new LoopbackNetwork();
     const cfg = { k: 1, m: 1, blockSize: 512 };
     const nodes = await createConnectedCohort({ count: 4, network: net, sodium, wasm, config: cfg, timeoutMs: TIMEOUT });
@@ -683,11 +660,9 @@ export async function run(t) {
   // ── §4.3 the index is a file, so it has no size ceiling ────────────────────
   t.group("a file whose index needs several levels still round-trips (§4.3)");
   {
-    // The old manifest was one block, so it crossed maxMessageBytes at a bounded file
-    // size and degraded rather than failing. The index is chunked like any file, so the
-    // only thing a bigger file changes is how many levels the roll-up takes. Squeeze the
-    // geometry (small blocks, many chunks) so this test file needs a genuinely multi-level
-    // index — the case a single root descriptor could never cover.
+    // The index is chunked like any file, so a bigger file only changes how many
+    // levels the roll-up takes. Squeeze the geometry so this file needs a
+    // genuinely multi-level index — a single root descriptor could never cover it.
     const net = new LoopbackNetwork();
     const cfg = { k: 2, m: 2, blockSize: 256 };            // one index chunk holds just 2 descriptors
     const nodes = await createConnectedCohort({ count: 6, network: net, sodium, wasm, config: cfg, timeoutMs: TIMEOUT });

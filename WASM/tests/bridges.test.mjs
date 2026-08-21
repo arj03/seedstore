@@ -1,13 +1,8 @@
 // Storage host-service tests: the crypto primitives (§16). There are no
-// storage-specific kernel bridges any more — the codec no longer hashes through a
-// crypto.hash service (it is a pure transform), and the confined guest reaches
-// crypto/net/fs/clock/module through seedkernel's generic cap-bridge, so nothing
-// storage-named is wired onto the kernel.
-//
-// store.local is not tested here: the host holds only a read view of it now
-// (host/store-view.ts, covered in net.test.mjs), and the policy that fills it —
-// admission and the §14 quota — is the confined holder's, covered end-to-end over
-// the real wire in protocol.test.mjs.
+// storage-specific kernel bridges any more — the guest reaches crypto/net/fs/
+// clock/module through seedkernel's generic cap-bridge. store.local is not
+// tested here: the host only has a read view (net.test.mjs); admission/quota
+// policy is the confined holder's, covered in protocol.test.mjs.
 
 import { Crypto, LEVEL_BODY } from "../build/host/crypto.js";
 import { bytesEqual } from "../build/host/util.js";

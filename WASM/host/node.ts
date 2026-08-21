@@ -1,10 +1,6 @@
 // Node entry point — reads the signed seedstore bundle (.skb) from disk and
 // boots a StorageNode against the sumo libsodium. Use this on Node / Bun / Deno;
 // for the browser see ./browser.ts.
-//
-// With the §12.9 move, the ONE install path is the signed bundle. The raw
-// `codecBytes`/`reputationBytes`/`guestSource` splits are gone — a Node node
-// reads the single `seedstore.skb` and the shared shell loads + verifies + installs it.
 
 import { readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";

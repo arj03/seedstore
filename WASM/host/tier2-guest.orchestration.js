@@ -1,49 +1,21 @@
-// The Tier-2 guest — the WHOLE storage protocol (README §6/§7/§9) as zero-authority
-// JS that runs *inside* the QuickJS realm (§2.1). This is the single
-// implementation of placement, k-of-n, admission, the wire format, and repair: the
-// host (host/storage-node.ts) only boots the kernel and runs this guest in one
-// realm. Every capability is reached through the one `host.call(name, bytes)` seam.
-// The seam is genuinely async where the world behind it is: the network (a call
-// to the transport's local service name `_net`), every `fs/*` name, and since guest ABI 6 every bare
-// module call (the codec and reputation modules run in their own worker on the JS
-// targets, so their answers cross an isolate) resolve to a real Promise the guest
-// `await`s — so a fan-out is just `await Promise.all(peers.map(...))`, and the
-// holder's own store reads await like the initiator's round trips — while the pure
-// crypto (the `crypto/*` primitive catalog) and clock resolve synchronously to
-// their bytes.
+// The Tier-2 guest: the whole storage protocol (README §6/§7/§9) as zero-authority
+// JS running inside the QuickJS realm (§2.1) — placement, k-of-n, admission, wire
+// format, and repair. Reached only through `host.call(name, bytes)` (seedkernel §12.2);
+// net/fs/module calls resolve async, crypto/clock resolve sync.
 //
-// Two roles share this one program, this one realm, and this ONE entrypoint. `handle`
-// is reached two ways (seedkernel §12.2): a peer's inbound frame carries
-// `[peer 32][MsgType u8][payload]` (HAVE/OFFER/STORE/FETCH — admission,
-// content-addressing, quota, fs writes), and the host's own `invoke` loopback carries
-// `[zero 32][opLen u8][opName][payload]` (put/get/repair/request/warm) — both split by
-// the guest ABI's own `callerOf`/`readOp`. Both may `await` — the
-// initiator fans out over net and parks mid-round-trip, the holder answers from local
-// storage, and the fs seam is asynchronous on every backend (seedkernel core/fs.ts) —
-// so what keeps the two roles from interleaving is the realm's explicit per-realm FIFO
-// (seedkernel realm-queue.ts): one invocation runs to completion before the next
-// begins, an inbound request queues behind a parked initiator and is served when the
-// queue drains (the serialization cost the runtime documents; a node that must serve
-// while initiating runs two realms).
+// Both roles (initiator and holder) share this one realm/entrypoint (`handle`,
+// split by `callerOf`/`readOp`); the realm's per-realm FIFO (seedkernel
+// realm-queue.ts) keeps them from interleaving.
 //
-// This is a plain script, not a module: it has no imports/exports and no ambient
-// authority. It is loaded as source by the host (host/storage-node.ts, or the
-// seedkernel shell) which prepends the `APP` and `LOCAL` config objects (see
-// `CFG` below), and runs it after the safe-js PREAMBLE that defines `host.call`
-// and `register`.
-// The seam is name-addressed (seedkernel §12.2): the guest writes "fs/get",
-// "_net", "crypto/blake2b-256" — never a number. Every capability the guest
-// reaches is an application-neutral primitive; all storage *structure* is right
-// here. The same file is hosted by JSC on Bun today and by WAMR in the native
-// node later — one artifact, both runtimes.
+// A plain script (no imports/exports/ambient authority), prepended with `APP`/`LOCAL`
+// config and the safe-js preamble by the host before running. Hosted by JSC (Bun)
+// today, WAMR later — one artifact, both runtimes.
 
 "use strict";
 
 // ── byte helpers ────────────────────────────────────────────────────────────
-// toHex / fromHex / bytesEqual / concatBytes / writeU32BE / readU32BE come from the
-// SHARED pure core (host/util.ts), stitched in ahead of this body by
-// scripts/build-guest.mjs — one definition, not a hand-copied mirror. Bridge the
-// short names this body is written against to the shared ones.
+// toHex/fromHex/bytesEqual/concatBytes/writeU32BE/readU32BE are stitched in from
+// host/util.ts by scripts/build-guest.mjs. Short local aliases for this body.
 const concat = concatBytes, wU32 = writeU32BE, rU32 = readU32BE;
 function splitBlocks(buf, blockSize) {
   const out = [];
@@ -74,21 +46,10 @@ function strBytes(s) { const o = new Uint8Array(s.length); for (let i = 0; i < s
 function bytesToStr(b) { let s = ""; for (let i = 0; i < b.length; i++) s += String.fromCharCode(b[i]); return s; }
 
 // ── the capability seam: storage policy over GENERIC kernel caps ─────────────
-// Every wrapper is built from the application-neutral names of the one seam —
-// crypto primitives, fs, module-call, clock, identity (host/guest-seam.ts in
-// seedkernel) plus the one cross-realm call that reaches the transport. All *structure*
-// lives here in the guest, never in the kernel:
-// the nonce convention, the signed-descriptor envelope, the HAVE/OFFER/FETCH/
-// STORE wire format (host/protocol.ts), the codec & reputation module ABIs, and
-// the <hex>.blk/.dsc store layout (read back host-side by host/store-view.ts, which
-// implements none of the policy — see there). Config arrives as the injected `APP` and
-// `LOCAL` constants (prepended by the driver; `CFG` combines them), not as kernel names. The pure crypto primitives go through the
-// `crypto/` prefix of the catalog (`host.call("crypto/blake2b-256", …)` etc.) and
-// resolve to their bytes directly; the net, fs and module-call wrappers are `async`
-// and `await` their one round-trip name (the fs seam is asynchronous on every
-// backend, so the holder awaits its store ops exactly as the initiator awaits its
-// round trips — and since guest ABI 6 a bare module call round-trips like an `fs/`
-// name, so the codec and reputation calls await too).
+// Thin wrappers over the seam's application-neutral names (crypto/fs/module-call/
+// clock/identity, seedkernel host/guest-seam.ts). All storage STRUCTURE — nonce
+// convention, signed-descriptor envelope, wire format, store layout — lives here,
+// never in the kernel. Crypto calls resolve sync; net/fs/module calls are async.
 
 // The op bytes of the codec handler (the guest owns its ABI). The reputation handler's
 // op bytes + request framing (REP_OBSERVE/REP_SCORE, encodeScoreReq/encodeObserveReq)
@@ -97,13 +58,8 @@ function bytesToStr(b) { let s = ""; for (let i = 0; i < b.length; i++) s += Str
 const CODEC_ENCODE = 1, CODEC_DECODE = 2;     // assembly/codec/index.ts
 // Control-plane message types carried over netSend (host/protocol.ts §18).
 const MSG_HAVE = 1, MSG_OFFER = 2, MSG_FETCH = 3, MSG_STORE = 4;
-// The protocol id this app speaks on the wire (§12.10) — named in every request this
-// guest sends so the receiving host routes it to this app, and the SAME id this bundle's manifest
-// claims (`protocols`, scripts/storage-bundle.mjs). That is what makes the frame arrive:
-// the load that admitted this code claimed the id, so what a sender writes here and what
-// a receiver routes by are one fact. The constant lives host-side (STORAGE_PROTO,
-// manifest.ts) and both the manifest and this line come from it.
-// strBytes encodes ASCII without TextEncoder (QuickJS has none).
+// This app's wire protocol id (§12.10) — must match the bundle manifest's `protocols`
+// entry (scripts/storage-bundle.mjs) so the receiving host routes frames here.
 const NET_PROTO = strBytes("seedstore");
 const HAVE_ID_LEN = 32;      // a HAVE/FETCH request names 32-byte block_ids (§18)
 const FETCH_FRAME = 5;       // a present block costs [found u8][len u32] in a FETCH response (§18)
@@ -116,15 +72,9 @@ const CODEC_NAME = "codec";
 const REP_NAME = "reputation";
 
 // ── request statistics (§18, for the latency/bench harnesses) ────────────────
-// The kernel's shell has no host-side inbound seam since the `route/deliver` move, so
-// the request counters live HERE, where the requests are: `netSend` counts + peaks the
-// OUTBOUND requests, `doHandle` counts + times the inbound holder work. Read and
-// cleared by the Op.STATS local op (protocol.ts `RequestStats`), so a harness clears
-// by reading once before a phase and reads again after. Indexed by MsgType byte —
-// 256 slots keeps an index a bare body byte with no bounds check. `statsPeak` is the
-// most requests of one type in flight at once, the fan-out/window signal the batching
-// tests pin. STATS_TYPES + STATS_RECORD_BYTES come from the stitched protocol.ts, so
-// the encoder here and the host's decoder agree by construction.
+// The kernel has no host-side inbound seam, so these counters live here: `netSend`
+// counts+peaks outbound requests, `doHandle` counts+times inbound holder work.
+// Read and cleared by the Op.STATS local op. Indexed by MsgType byte (256 slots).
 const statsSent = new Uint32Array(256);
 const statsInFlight = new Uint32Array(256);
 const statsPeak = new Uint32Array(256);
@@ -147,26 +97,18 @@ function encodeStats() {
   return out;
 }
 
-// The runtime injects the author's signed config as `APP` and this installation's as
-// `LOCAL`, merging neither (seedkernel §12.4, ABI 8) — the precedence below is the app's.
-// LOCAL wins the deployment dial: geometry is what the WRITER spends, and every read path
-// uses the DESCRIPTOR's (§4.1/§4.3), so mixed geometry across a cohort is supported.
-// `quota` is not in here — quota() reads LOCAL alone, so an author cannot sign one.
-// host/storage-node.ts mirrors this for `node.config`; the two must not drift.
+// `APP` (author-signed) and `LOCAL` (this install) merge with LOCAL winning
+// (seedkernel §12.4, ABI 8) — mixed cohort geometry is fine since reads use the
+// DESCRIPTOR's, not CFG's (§4.1/§4.3). `quota` is deliberately not merged in here;
+// quota() reads LOCAL alone so an author can't sign one. Mirrored by node.config
+// in host/storage-node.ts — keep the two in sync.
 const CFG = { ...APP, ...LOCAL };
-// Nothing the RUNTIME derives is injected — the signing scope in particular
-// lives on the host side of the seam: node/sign applies it when signing, node/verify
-// when checking, so the guest never holds (or reconstructs) the prefix bytes.
 
 // ── crypto primitives + storage framing ──
-// The pure transforms reach the host under the `crypto/` prefix of the one seam
-// (host.call("crypto/<name>", args) — seedkernel §12.2): BLAKE2b-256 for
-// block-ids and XChaCha20 stream XOR for the §4.4 keystream. The authorities —
-// node/sign, node/verify, node/identity, node/random — are host.call names like
-// anything else, as are the clock and the module call. Signing AND verification are
-// scoped, never raw: the host applies `DOMAIN_guest ‖ scope` to the message on both
-// sides (seedkernel §12.2), so this guest names the key it signs with / checks under
-// and never reconstructs host-owned prefix bytes.
+// Pure transforms reach the host under the `crypto/` prefix (seedkernel §12.2):
+// BLAKE2b-256 for block-ids, XChaCha20 stream XOR for the §4.4 keystream.
+// node/sign and node/verify apply the scoped `DOMAIN_guest ‖ scope` prefix on the
+// host side — the guest never holds or reconstructs it.
 function hash(bytes) { return host.call("crypto/blake2b-256", bytes); }
 function randomKey() { const n = new Uint8Array(4); wU32(n, 0, 32); return host.call("node/random", n); }
 function identity() { return host.call("node/identity", EMPTY); }
@@ -178,37 +120,24 @@ function nonce(level, index) { const n = new Uint8Array(24); n[0] = level & 255;
 function streamXor(K, non, msg) { return host.call("crypto/xchacha20/xor", concat([non, K, msg])); }
 function encrypt(K, level, index, msg) { return streamXor(K, nonce(level, index), msg); }
 function decrypt(K, level, index, ct) { return streamXor(K, nonce(level, index), ct); }
-// Signed chunk descriptor envelope: [authorPk 32][sig 64][core] (§4.3, §16). The
-// scope rides the seam: `node/sign` signs `DOMAIN_guest ‖ scope ‖ core` for us (so
-// signCore passes the bare core and gets back a scoped signature), and node/verify
-// checks the same preimage for the author key in the envelope. The stored envelope
-// holds only [pk][sig][core] — the prefix is preimage-only, never transmitted.
+// Signed chunk descriptor envelope: [authorPk 32][sig 64][core] (§4.3, §16).
+// node/sign applies the scoped prefix and returns just the signature; the stored
+// envelope carries only [pk][sig][core] — the prefix is preimage-only, never sent.
 function signCore(core) { return concat([identity(), host.call("node/sign", core), core]); }
 function verifyEnv(env) {
   return host.call("node/verify", concat([env.slice(0, 32), env.slice(32, 96), env.slice(96)]))[0] === 1;
 }
 
 // ── codec + reputation ──
-// Both are ordinary `host.call`s: the module name IS the seam's name argument, so
-// there is no header to build and the request body crosses as itself. The RS request
-// is large (k data blocks ≈ 640 KB) and this is the one place that matters — the old
-// framing prepended a length-prefixed name, so every encode copied the blocks into a
-// request buffer and then copied that whole buffer again. Now the single `concat`
-// below is the only pass over them.
-//
-// Since guest ABI 6 a module call is ASYNC — the module runs in its own worker on the
-// JS targets, so its answer crosses an isolate — so every module call here is awaited
-// like an `fs/*` call, and the transforms built on them (encodeChunk, assembleChunk,
-// the ranker) are async in turn. The call still runs under the calling guest's
-// remaining execution budget (§4.3), which is what keeps the module interruptible.
+// Both are ordinary `host.call`s (module name IS the seam's name arg, no header to
+// build). Module calls are async (the module runs in its own worker), so encode/decode
+// and their callers (encodeChunk, assembleChunk, the ranker) are async in turn.
 async function rsEncode(k, m, blockSize, dataBlocks) {
   const head = new Uint8Array(7);
   head[0] = CODEC_ENCODE; head[1] = k; head[2] = m; wU32(head, 3, blockSize);
   const parity = splitBlocks(await host.call(CODEC_NAME, concat([head, ...dataBlocks])), blockSize);
-  // A codec that returns no/short parity (its handler scratch too small for a
-  // k·blockSize request, or the module missing) would otherwise surface far away as
-  // the descriptor's "blockIds.length must be k (replicated) or k+m (coded)" — or, worse,
-  // as a chunk silently signed with the wrong shape. Fail here, where the cause is.
+  // Fail here, where the cause is, rather than as a far-away "blockIds.length must be
+  // k or k+m" error or a chunk silently signed with the wrong shape.
   if (parity.length !== m) {
     throw new Error("rsEncode: codec returned " + parity.length + " parity blocks, expected " + m +
       " — chunk (k=" + k + " × blockSize=" + blockSize + ") likely exceeds the codec handler's scratch");
@@ -226,14 +155,9 @@ async function rsDecode(k, m, blockSize, present) {
   const idx = new Uint8Array(use.length);
   for (let i = 0; i < use.length; i++) idx[i] = use[i].index;
   const data = splitBlocks(await host.call(CODEC_NAME, concat([head, idx, ...use.map((p) => p.bytes)])), blockSize);
-  // The seam check rsEncode makes above, on the side where a miss costs more. The
-  // geometry is the DESCRIPTOR's, never this node's config (§4.1), so a chunk written
-  // under a k·blockSize past this codec handler's scratch reaches here on an ordinary
-  // GET — and the module answers short or empty rather than throwing. Unchecked, that
-  // is a chunk silently reassembled from fewer blocks than it has: content addressing
-  // verified the INPUT blocks (§4.2) and nothing on the read path re-verifies the
-  // codec's OUTPUT (heal re-certifies its own against the signed ids, §9, which is why
-  // repair degrades where a read would corrupt). A short decode must be an error.
+  // A short/empty answer here (scratch too small for this descriptor's k·blockSize)
+  // would otherwise silently reassemble from fewer blocks than the chunk has — nothing
+  // on the read path re-verifies the codec's output (§4.2 only checks inputs). Must error.
   if (data.length !== k) {
     throw new Error("rsDecode: codec returned " + data.length + " blocks, expected " + k +
       " — chunk (k=" + k + " × blockSize=" + blockSize + ") likely exceeds the codec handler's scratch");
@@ -242,11 +166,9 @@ async function rsDecode(k, m, blockSize, present) {
 }
 function clockNow() { const b = host.call("clock/now", EMPTY); return rU32(b, 0) * 0x100000000 + rU32(b, 4); }
 
-// Per-peer reputation accumulators: the module is a pure transform, so callers hold state.
-// Map from peer hex pubkey → {serve, miss, last} (per PROTOCOL.md contract). A peer enters
-// this map only through repObserve — a real witnessed event (§8) — never through a bare
-// score query: scoring a stranger must stay free of side effects, exactly as findPeer's
-// -1 branch cost the old module nothing (§13, Sybil-local: only witnessed peers persist).
+// Per-peer reputation accumulators (module is a pure transform; callers hold state).
+// hex pubkey → {serve, miss, last}. Entries are created only by repObserve — a real
+// witnessed event (§8) — never by a bare score query, which must stay side-effect-free.
 const peerReps = new Map();
 
 const ZERO_REP = { serve: 0, miss: 0, last: 0 };
@@ -262,10 +184,9 @@ async function repScoreBytes(peerPk, t) {
   return host.call(REP_NAME, req);
 }
 
+// Record a witnessed pass/fail for a peer, awaiting the module call so the Map
+// update actually lands (this is not fire-and-forget).
 async function repObserve(peerPk, t, pass) {
-  // Record a witnessed pass/fail for a peer: get or create the peer's accumulator, call
-  // the module with the new pure-function interface, and write the updated accumulator
-  // back. Unlike the old fire-and-forget, this must properly await to update the Map.
   const peerHex = toHex(peerPk);
   let rep = peerReps.get(peerHex);
   if (rep === undefined) {
@@ -277,21 +198,19 @@ async function repObserve(peerPk, t, pass) {
   try {
     const resp = await host.call(REP_NAME, req);
     const updated = decodeObserveResp(resp);
-    // Write the updated accumulators back to the Map
     rep.serve = updated.serve;
     rep.miss = updated.miss;
     rep.last = updated.last;
   } catch (e) {
-    // Module call failed or timed out — the reputation op is fire-and-forget at the
-    // call sites, so failures are logged but don't surface as unhandled rejections.
+    // Call sites treat reputation updates as fire-and-forget; swallow so a failure
+    // here never surfaces as an unhandled rejection.
   }
 }
 
 // ── local store over fs.* (the <hex>.blk / <hex>.dsc layout) ─────────────────
-// Every fs/* name round-trips now (the seam is async — seedkernel core/fs.ts), so
-// the whole store layer is async and every caller awaits it. Existence is
-// `size ≥ 0` (there is no fs/has): the raw fs/size is 0xFFFFFFFF
-// (−1 over the bridge) only for an absent key, so a present-but-empty value still reads as held.
+// fs/* is async, so the whole store layer is async. Existence is `size ≥ 0`
+// (there is no fs/has): raw fs/size is 0xFFFFFFFF (−1 over the bridge) only for an
+// absent key, so a present-but-empty value still reads as held.
 async function storeHas(id) { return (await fsSizeRaw(toHex(id) + STORE_BLK)) !== 0xffffffff; }
 async function storeGet(id) {
   const hex = toHex(id);
@@ -319,38 +238,18 @@ async function storeList() {
 }
 
 // ── the network: one local service name, two ops ─────────────────────────────
-// The network is not a host capability any more (seedkernel §12.10): it is a bundle —
-// the transport — that claims the local service name `_net` (an ordinary `_`-led id,
-// no kernel semantics), and an app reaches it with the ONE cross-realm call,
-// `host.call("_net", …)`. The host's whole contribution is
-// attribution: it prepends this app's 32-byte key as the caller, exactly as it prepends
-// a sender's key on an inbound frame, so the transport can tell an app's request from the
-// platform's own events without a second seam.
-//
-// What crosses is the transport's op wire: `[opLen u8][op][args]`, where the op is a NAME
-// (never a number two sides must agree on) and `args` is a fixed field order the op
-// declares — a u8, a u32 BE, or a `[len u32][bytes]` blob. Two ops are an app's to
-// name, and they are the two that were app-facing host names before the transport
-// became a bundle: `send` (was `net/send`) and `peers` (was `net/peers`). Anything
-// else the transport refuses, because the platform's events are not an app's to fake.
-//
-// Both answer on a LATER turn — the callee never runs inside this guest's frame — so
-// both are awaited, `peers` included. That is the one shape change from the old host
-// names, and it is why the roster reads flow through `await` here.
+// The network is a bundle (the transport) claiming local service name `_net`
+// (seedkernel §12.10), reached via `host.call("_net", …)`. The host prepends this
+// app's 32-byte key as caller so the transport can attribute the request.
+// Wire: `[opLen u8][op][args]`. This app uses two ops, `send` and `peers`; both
+// answer on a later turn, so both are awaited.
 const NET_ID = "_net";
 function netBlob(b) { const h = new Uint8Array(4); wU32(h, 0, b.length); return concat([h, b]); }
 function netOp(op, args) {
-  // Framed by the preamble's `writeOp` (seedkernel `host/guest-seam.ts`) — the same
-  // envelope this app's own `handle` is called with, written by the one function that
-  // defines it rather than open-coded per caller.
-  const out = writeOp(op, args);
-  // A cross-realm call REJECTS for the two cases that are not about a peer at all: no
-  // realm claims `_net` (a node whose transport bundle was never loaded or was replaced)
-  // and a transport that is being torn down under us. Neither is an error this app can act on
-  // — both mean "the network is not there" — and both read here as the empty answer,
-  // which is exactly how an unreachable peer already reads: `send` answers no `[1]`, so
-  // netSend returns null, and `peers` answers an empty roster. A PUT then reports "no
-  // holder answered" instead of a stack trace out of a fan-out.
+  const out = writeOp(op, args); // seedkernel host/guest-seam.ts
+  // A rejected cross-realm call (no transport loaded, or torn down mid-flight) maps to
+  // the empty answer — same shape as an unreachable peer — so a PUT reports "no holder
+  // answered" instead of an uncaught rejection out of a fan-out.
   return host.call(NET_ID, out).then((r) => r, () => EMPTY);
 }
 
@@ -363,16 +262,10 @@ function decodePeers(r) {
   return out;
 }
 async function cohortPeers() { return decodePeers(await netOp("peers", EMPTY)); }
-// A reciprocity ranker (§13): orders peers best-score-first. Scoring one peer costs a
-// reputation MODULE_CALL across the bridge, so `makeRanker` reads the clock once and
-// memoizes each DISTINCT peer's decayed score for its lifetime — reuse one across a
-// round and ranking many overlapping holder subsets (a large GET ranks the same
-// holders for thousands of ids) costs one crossing per peer, not one per (peer, id).
-// Scores decay negligibly within a round, so a shared `t` is fine. The module call is
-// async since guest ABI 6, so the ranker's per-peer scores resolve in a Promise.all
-// before the sort — and what is memoized is the PROMISE, not the settled score, so two
-// scorings of one peer in the same fan-out share the one crossing the cache exists for
-// rather than both missing it while the first is still in flight.
+// A reciprocity ranker (§13): orders peers best-score-first. `makeRanker` memoizes
+// each distinct peer's score (by PROMISE, not settled value, so concurrent lookups
+// share one in-flight call) for its lifetime, so ranking overlapping holder subsets
+// across a round costs one bridge crossing per peer, not one per (peer, id).
 function makeRanker() {
   const t = clockNow();
   const cache = new Map(); // peerHex → Promise<decayed score>
@@ -387,16 +280,11 @@ function makeRanker() {
 function rank(peers) { return makeRanker()(peers); }
 
 // ── net (request/response over the transport; wire format here) ──
-// One round trip to one peer, as the transport's `send` op:
+// One round trip via the transport's `send` op:
 //   [noReply u8][deadlineMs u32][to blob][proto blob][payload blob]
-// A zero deadline means the node's own default (the host's `requestDeadlineMs`), which
-// is where that number belongs — one place, not mirrored on both sides of the seam.
-// The answer is `[ok u8][response]`: an unreachable peer comes back `[0]` rather than a
-// rejection, so this maps it to null within the request window.
-//
-// `proto` is the routing (§12.10) — the id the receiving host resolves to the app that
-// claims it — and the storage message type leads the payload, which is this app's own
-// framing and opaque to everything in between.
+// Zero deadline = the host's own default. Answer is `[ok u8][response]`; an
+// unreachable peer comes back `[0]`, mapped to null below. `proto` is the routing
+// id (§12.10); the storage message type leads the payload, opaque in between.
 async function netSend(peer, type, payload) {
   statsSent[type]++;
   statsInFlight[type]++;
@@ -412,13 +300,9 @@ async function netSend(peer, type, payload) {
     statsInFlight[type]--;
   }
 }
-// Per-peer fan-out (§6/§7): a DISTINCT request per peer, all issued CONCURRENTLY.
-// With real net promises the guest fans out itself — `Promise.all` over netSend, the
-// host driving every round trip in parallel — so there is no host-side scatter-gather
-// cap. A broadcast of one shared payload to many peers (disc.have/want) is just N
-// identical entries. `requests` = [{ peer, type, payload }]; results align to input
-// order, an unreachable peer coming back `ok:false`/`bytes:null` (partial, never a
-// throw — netSend already swallowed the unreachable case).
+// Per-peer fan-out (§6/§7): a distinct request per peer, all issued concurrently via
+// Promise.all. `requests` = [{ peer, type, payload }]; results align to input order,
+// an unreachable peer coming back `ok:false`/`bytes:null` rather than a throw.
 function netSendMany(requests) {
   return Promise.all(requests.map(async (rq) => {
     const bytes = await netSend(rq.peer, rq.type, rq.payload);
@@ -433,11 +317,8 @@ async function haveWant(ids) {
   for (const id of ids) holders.set(toHex(id), new Set());
   for (const id of ids) if (await storeHas(id)) holders.get(toHex(id)).add(myPeer());
   const peers = await cohortPeers();
-  // Split the id list so one HAVE request stays under the frame cap, exactly as
-  // OFFER/STORE/FETCH do (§18). A HAVE request is 32 bytes/id (the reply is a 1-byte
-  // mask, so the request is the binding side): on a tight transport (WebRTC's ~48 KB
-  // cap → ~1.5k ids) an unsplit HAVE would break discovery for a modest file. Merge
-  // the per-slice masks — a holder accumulates across slices.
+  // Split so one HAVE request stays under the frame cap (§18) — the request side
+  // (32 B/id) is what binds since the reply is a 1-byte mask. Merge per-slice masks.
   const maxIds = Math.max(1, Math.floor((maxMsgBytes() - 4) / HAVE_ID_LEN));
   for (const slice of sliceN(ids, maxIds)) {
     const haveReq = encodeHaveReq(slice); // one shared request, broadcast to every peer
@@ -451,19 +332,12 @@ async function haveWant(ids) {
   }
   return holders;
 }
-// The HAVE/OFFER/STORE/FETCH wire codecs (encode/decodeHaveReq, encode/decodeOfferBatch,
-// encode/decodeStoreBatch, encode/decodeFetchBatchReq, encode/decodeFetchBatchRes, and
-// the shared encodeMask / decodeMask that all three of the HAVE/OFFER/STORE responses use)
-// come from the SHARED host/protocol.ts, stitched in ahead of this body — one
-// definition of the §18 control-plane format, not a hand-copied mirror. Composing them
-// with netSend — and with the unreachable-peer (null) case — is transport policy, and
-// there are exactly two places that do it: fetchBatch below, and the placement engine.
+// The HAVE/OFFER/STORE/FETCH wire codecs (§18) are stitched in from host/protocol.ts.
 
 // Batched fetch from one peer (the GET hot path): one round trip for many blocks.
 // Self reads the local store. Returns an array aligned to `ids` (bytes|null), or
 // null for the whole batch if the peer was unreachable — so the caller can score a
-// reachable-but-didn't-serve as a §8 miss but never an unreachable peer. The
-// caller hash-verifies every block (§4.2).
+// reachable-but-didn't-serve as a §8 miss but never an unreachable peer.
 async function fetchBatch(peer, ids) {
   if (peer === myPeer()) return Promise.all(ids.map(async (id) => { const sb = await storeGet(id); return sb ? sb.bytes : null; }));
   const resp = await netSend(peer, MSG_FETCH, encodeFetchBatchReq(ids));
@@ -471,27 +345,20 @@ async function fetchBatch(peer, ids) {
   const blocks = decodeFetchBatchRes(resp);
   return ids.map((_, i) => blocks[i] || null);
 }
-// There is ONE placement engine (placeChunksBatched, below) and it drives the shared
-// §18 codecs — encodeOfferBatch / encodeStoreBatch with the shared decodeMask
-// (host/protocol.ts) — directly through netSendMany, mapping an unreachable peer
-// (netSend → null) to all-declines. Nothing places a block any other way: a small
-// file, a window of coded chunks, an index level, and a repair pass all express
-// themselves as (block, slot) targets and hand them to that one function.
+// One placement engine (placeChunksBatched, below) drives the shared §18 codecs
+// through netSendMany. Nothing places a block any other way — a small file, a
+// window of coded chunks, an index level, and a repair pass all express themselves
+// as (block, slot) targets handed to that one function.
 
 // ── descriptor ───────────────────────────────────────────────────────────────
-// The pure §4.3 codecs — encode/decodeDescriptorCore, parseSignedDescriptor,
-// encode/decodeDescriptorList, descriptorContains, copyTargets, BLOCK_ID_LEN — come
-// from the SHARED host/manifest-core.ts, stitched in ahead of this body (one
-// definition). What stays here is only the part that needs a capability: verify/sign
-// over the scoped `node/verify` / `node/sign` seam, composed with the shared
-// parser/encoder.
+// The pure §4.3 codecs (parseSignedDescriptor, encode/decodeDescriptorList,
+// descriptorContains, copyTargets, BLOCK_ID_LEN) are stitched in from
+// host/manifest-core.ts. What stays here needs a capability: verify/sign.
 //
-// verifyDescriptor checks the author signature AND structurally validates the core
-// (the parity the host holder has): a *signed* but malformed descriptor (junk core, an
-// id count that is not k+m) is rejected — not parsed into garbage block-ids that
-// sidestep the §10 sibling rule — because parseSignedDescriptor throws on a bad core.
-// It returns the whole signed envelope, because a valid signature is only half the
-// check: knownAuthors below is the other half.
+// verifyDescriptor checks the author signature AND structurally validates the core:
+// a signed-but-malformed descriptor (bad id count) is rejected rather than parsed
+// into block-ids that sidestep the §10 sibling rule. Returns the whole envelope —
+// a valid signature is only half the check; knownAuthors below is the other half.
 function verifyDescriptor(env) {
   // Length-gate before the verify seam: the envelope is [pk 32][sig 64][core ≥13]
   // (parseSignedDescriptor's own bound), so anything shorter — an absent descriptor
@@ -500,34 +367,26 @@ function verifyDescriptor(env) {
   if (!verifyEnv(env)) return null;
   try { return parseSignedDescriptor(env); } catch (_e) { return null; }
 }
-// The §4.3 ANCHOR. A signature checked against a public key carried inside the object
-// it signs proves only that *someone* held a private key — any cohort peer can mint a
-// fresh keypair and self-sign whatever descriptor it likes, which is exactly the
-// substitution §4.3 forbids and exactly what would let a malicious placer ship a
-// truncated sibling list and concentrate a chunk on itself (§6, §10). So the author must
-// also be an identity this node's cohort knows (§5.1). Forgery then costs a known peer
-// its standing instead of nothing, which is §13's job, not new machinery.
+// The §4.3 ANCHOR: a signature checked against a pubkey carried inside the signed
+// object only proves someone held a private key — any peer could self-sign a fresh
+// keypair. The author must also be an identity the cohort knows (§5.1), so forgery
+// costs a known peer its standing (§13) instead of nothing.
 async function knownAuthors() { const s = new Set(await cohortPeers()); s.add(myPeer()); return s; }
 function signChunk(d) { return signCore(encodeDescriptorCore(d)); }
 
 // ── placement + fetch (coordinator §6/§7) ────────────────────────────────────
-// A batched OFFER / STORE / FETCH is split to stay under CFG.maxMessageBytes —
-// the per-transport cap that keeps one message inside the frame cap AND the request
-// timeout. Transport policy, so it is normally the operator's LOCAL value; default if
-// absent.
+// A batched OFFER/STORE/FETCH is split to stay under CFG.maxMessageBytes — the
+// per-transport cap keeping one message inside the frame cap AND request timeout.
+// Operator (LOCAL) policy; default if absent.
 function maxMsgBytes() { const v = CFG.maxMessageBytes; return (typeof v === "number" && v > 0) ? v : (1 << 20); }
 // Ids per FETCH sub-batch, bounded by the RESPONSE frame (blockSize + FETCH_FRAME per
 // present block) so a full reply stays under the cap. The GET gather and the repair
 // audit both size their batches this way; the holder caps served bytes the same (§18).
 function fetchMaxIds() { return Math.max(1, Math.floor(maxMsgBytes() / (CFG.blockSize + FETCH_FRAME))); }
-// The fan-out window (transport/operator policy, like maxMessageBytes): how many
-// per-peer sub-batches a single Promise.all round fires at once. PUT and GET share
-// one window — they have never been tuned apart in practice, so fanoutWindow bounds
-// STORE messages PER PEER and FETCH messages TOTAL across the cohort, letting the
-// guest pipeline a holder's many ~1-block messages instead of paying one round trip
-// apiece (the tight-cap WebRTC case the lock-step fan-out was meant to keep
-// windowed). Injected in full by the driver (core.ts homes the default); the guest
-// reads its config and never guesses.
+// The fan-out window (operator policy, like maxMessageBytes): how many per-peer
+// sub-batches one Promise.all round fires at once. PUT and GET share it — it bounds
+// STORE messages PER PEER and FETCH messages TOTAL across the cohort, pipelining a
+// holder's many small messages instead of one round trip apiece. core.ts homes the default.
 function fanoutWindow() { return CFG.fanoutWindow; }
 function sliceN(arr, size) {
   if (arr.length <= size) return [arr];
@@ -548,20 +407,11 @@ function batchBytes(items, sizeOf, maxBytes) {
   if (group.length > 0) out.push(group);
   return out;
 }
-// A placement JOB: the unit the one engine below consumes. It is a flat list of SLOTS —
-// (block bytes, id) targets to land on distinct peers — plus the signed descriptor that
-// admits them, a `floor` of distinct ids that must land, and the peers the job may not
-// use. Everything that places blocks builds one of these:
-//
-//   a chunk (makeChunk)  one slot per LISTED id — which is a coded chunk's k+m blocks
-//                        once each and a k=1 chunk's lone block m+1 times, by the same
-//                        rule (§4.1); floor = its own k
-//   an index chunk       exactly that, one level up (§4.3) — not a special case
-//   a repair pass (heal) only the copies still owed, floor 0 (best-effort), excluding the
-//                        peers already holding part of the chunk
-//
-// So placement has one sentence of semantics: a set of (block, slot) targets negotiated
-// in batched rounds.
+// A placement JOB: the unit the one engine below consumes. A flat list of SLOTS —
+// (block bytes, id) targets to land on distinct peers — plus the signed descriptor
+// that admits them, a `floor` of distinct ids that must land, and peers to exclude.
+// A chunk (makeChunk) is one slot per listed id, floor = its own k; a repair pass
+// (heal) is only the copies still owed, floor 0 (best-effort).
 function makeJob(slotIds, slotBlocks, descriptor, floor, exclude) {
   return {
     floor, slotIds, slotBlocks, descriptor, exclude,
@@ -569,22 +419,17 @@ function makeJob(slotIds, slotBlocks, descriptor, floor, exclude) {
     placedIds: [],
   };
 }
-// A signed chunk ready to place, expanded into its placement slots (§6/§10). One slot per
-// listed id — since a k=1 chunk lists its block m+1 times, that IS its r = m+1 replica
-// slots, with no branch and no slot table. Placement only ever sees a list of slots to
-// land on distinct peers. The floor is the chunk's OWN k, not config's, and a fresh chunk
-// excludes nothing.
+// A signed chunk ready to place, expanded into its placement slots (§6/§10). One
+// slot per listed id — a k=1 chunk's m+1-times-listed block IS its m+1 replica
+// slots, no special case needed. Floor is the chunk's OWN k, not config's.
 function makeChunk(d, blocks, descriptor) {
   return makeJob(d.blockIds.slice(), blocks.slice(), descriptor, d.k, new Set());
 }
-// Encode + sign one chunk at its OWN k: every chunk is coded at k = ceil(plain / blockSize),
-// the actual block count it carries, rather than padded to the deployment's k. At k = 1 the
-// code degenerates — RS(1,m) parity ≡ data — so the codec is skipped and the chunk simply
-// LISTS its lone block m+1 times; n = k+m either way and multiplicity is the replica count
-// (§4.1). At k ≥ 2 it is RS(k, m). The nonce is (this chunk's level, its GLOBAL index within
-// that level) (§4.4), so a windowed encode is byte-identical to a whole-level one, and an
-// index chunk can never collide with a body chunk. `tailBytes` records how much of the
-// chunk is real, which is what a reader trims by instead of a manifest-wide file_size.
+// Encode + sign one chunk at its OWN k = ceil(plain / blockSize), not padded to the
+// deployment's k. At k=1, RS(1,m) parity ≡ data, so the codec is skipped and the
+// chunk simply lists its lone block m+1 times (§4.1). Nonce = (level, GLOBAL index
+// within that level) (§4.4), so a windowed encode matches a whole-level one.
+// `tailBytes` is what a reader trims by, instead of a manifest-wide file_size.
 async function encodeChunk(source, localCi, globalCi, K, level) {
   const c = CFG;
   const plain = source.slice(localCi * c.k * c.blockSize, (localCi + 1) * c.k * c.blockSize);
@@ -597,28 +442,19 @@ async function encodeChunk(source, localCi, globalCi, K, level) {
   const d = { level, k: kc, m: c.m, blockSize: c.blockSize, tailBytes: plain.length, blockIds: ids };
   return makeChunk(d, blocks, signChunk(d));
 }
-// THE placement engine (§6/§10). Place every job's slots with one batched OFFER per peer
-// per round, then the accepted blocks STORE'd in fanoutWindow()-deep fan-outs per peer.
-// Slot i targets cands[i], cands[i+slots], … (a disjoint residue class per i, so one
-// job's slots land on distinct peers — which is the sibling rule for a coded chunk, the
-// r distinct replica holders for a replicated one, and "somewhere new" for a repaired
-// copy: one rule). Per peer the OFFER is one round trip for slot i of every job at once;
-// the STOREs that follow window the peer's many capped messages (peak W·peers). Returns
-// nothing; fills each job's placedPeer[] and placedIds[].
+// THE placement engine (§6/§10). Places every job's slots with one batched OFFER
+// per peer per round, then accepted blocks STORE'd in fanoutWindow()-deep fan-outs.
+// Slot i targets cands[i], cands[i+slots], … — a disjoint residue class per i, so
+// one job's slots land on distinct peers (the sibling rule / replica distinctness /
+// "somewhere new" for repair, all one rule). Fills each job's placedPeer[]/placedIds[].
 //
-// Throws if a job lands fewer than its `floor` distinct ids — for a chunk, the readable
-// floor either way: any k of a coded chunk's blocks reconstruct it, and a replicated
-// chunk lists exactly the k blocks it needs. `what` names the job in that error, so a
-// failure says which placement gave up; a floor of 0 is best-effort (repair places what
-// the cohort will take and the next pass retries the rest), which cannot raise it and so
-// passes no name.
+// Throws if a job lands fewer than its `floor` distinct ids. `what` names the job in
+// that error; floor 0 (repair) never throws and so passes no name.
 async function placeChunksBatched(jobs, what) {
   const ranked = await rank(await cohortPeers());
-  // Each job draws from the ranked cohort minus the peers it must avoid. PUT excludes
-  // nothing (a fresh chunk is nowhere yet); repair excludes the peers already holding
-  // part of the chunk, so a restored copy lands somewhere new instead of being pushed at
-  // a holder that would either decline it as a sibling (§6) or silently overwrite the
-  // copy it already has.
+  // Each job draws from the ranked cohort minus peers to avoid. PUT excludes nothing;
+  // repair excludes peers already holding part of the chunk, so a restored copy lands
+  // somewhere new instead of a sibling-declining or silently-overwritten holder.
   const candsOf = new Map();
   for (const job of jobs) candsOf.set(job, job.exclude.size === 0 ? ranked : ranked.filter((p) => !job.exclude.has(p)));
   const maxBytes = maxMsgBytes();
@@ -644,16 +480,9 @@ async function placeChunksBatched(jobs, what) {
     }
     if (byPeer.size === 0) break;
 
-    // Lock-step fan-out: ALL of this round's OFFERs (one Promise.all over the peers)
-    // complete before its STOREs (no optimistic STORE — §6). The OFFER
-    // phase carries ≤1 message per peer per fan-out (a peer's offers are small and
-    // rarely exceed maxOffers, so the sub-batch index is round-robined one-per-peer).
-    // The STORE phase windows up to fanoutWindow() of a peer's byte-bounded sub-batches
-    // into each fan-out (peers concurrent → peak W·peers), so a holder's many capped
-    // STORE messages pipeline instead of going one round trip apiece — a within-phase
-    // parallelism bounded by putWindow. Within a phase every peer goes in
-    // parallel; the only loss vs a per-peer pipeline is ~one slow-peer half-RTT
-    // between the two phases.
+    // Lock-step fan-out: ALL of this round's OFFERs complete before its STOREs (no
+    // optimistic STORE — §6). STORE phase windows fanoutWindow() sub-batches per peer
+    // (peers concurrent → peak W·peers) so a holder's many capped messages pipeline.
 
     // ── OFFER phase ──
     const offerSlices = new Map(); // peer → [slice]
@@ -728,11 +557,9 @@ async function placeChunksBatched(jobs, what) {
       if (diag.sibling) { parts.push("sibling"); total += diag.sibling; }
       if (diag.descriptor) { parts.push("descriptor-rejected"); total += diag.descriptor; }
       if (diag.error) { parts.push("holder-error"); total += diag.error; }
-      // NO verdicts at all is itself the diagnosis, and the most confusing failure to
-      // read: every response failed (a request deadline that expired while the bytes
-      // were still queued behind a deep socket buffer, or an unreachable peer), so no
-      // holder ever judged anything. Saying "holders declined" with an empty tally
-      // points at the holders, which is precisely where the fault is NOT.
+      // No verdicts at all is itself the diagnosis: every response failed (deadline
+      // expiry or unreachable peers), so no holder ever judged anything — saying
+      // "holders declined" here would point at the wrong place.
       const why = parts.length
         ? "holders declined (" + total + " holders: " + parts.join(", ") + "). Check quota (--app-config), signing scope (§16), or connect more holders"
         : "no holder returned a verdict — the requests timed out or the peers were unreachable rather than refusing. Raise the request deadline if a large PUT is queueing past it (p2p-cli --timeout, loader --request-deadline)";
@@ -742,24 +569,16 @@ async function placeChunksBatched(jobs, what) {
   }
 }
 // Run a windowed batched FETCH over a peer→[idHex] plan. Self reads the local store
-// directly (no round trip, no scoring); every other holder's sub-batches are flattened
-// into one task list and fanned out fanoutWindow() FETCH messages at a time (peak W in
-// flight, the fanoutWindow window). `apply(peer, sliceHex, ids, blocks)` sees each
-// sub-batch's result — blocks aligned to ids (bytes|null), or null for the whole slice
-// if the peer was unreachable (partial, never a §8 miss). Shared by the GET gather and
-// the repair audit, so both express the same window through one Promise.all round.
+// directly; other holders' sub-batches fan out fanoutWindow() FETCH messages at a
+// time. `apply(peer, sliceHex, ids, blocks)` sees each result — null blocks for the
+// whole slice means unreachable (not a §8 miss). Shared by GET gather and repair audit.
 //
-// Truncation vs miss is a wire bit: a holder bounds one FETCH response by ITS
-// maxMessageBytes (serveFetch), which can be smaller than ours (the caps are per-node
-// operator policy, so they diverge). A block it has but couldn't fit comes back tagged
-// FETCH_UNANSWERED, distinct from an ABSENT genuine miss (§18). Re-request exactly the
-// unanswered blocks as a fresh task; report present/absent as final verdicts, so `apply`
-// (and the tried/§8-miss bookkeeping on it) only ever sees decided blocks. serveFetch
-// always serves the first present block, so each re-request round resolves ≥1 block, which
-// terminates — an honest holder's property, so the loop CHECKS it (a round that decides
-// nothing is ruled a miss, below) instead of taking the answering peer's word for its own
-// termination. A genuine miss is ABSENT even past the cap, so it is ruled a miss in one
-// round trip.
+// Truncation vs miss is a wire bit: a holder bounds its FETCH response by its own
+// maxMessageBytes (serveFetch), which can differ from ours. A block it has but
+// couldn't fit comes back FETCH_UNANSWERED, distinct from an ABSENT genuine miss
+// (§18); it's re-requested as a fresh task. An honest holder always serves the first
+// present block, so each round resolves ≥1 — the loop CHECKS that (below) rather than
+// trusting the peer, ruling no-progress a miss instead of looping forever.
 async function runFetchTasks(byPeer, maxIds, apply) {
   const me = myPeer();
   if (byPeer.has(me)) {
@@ -789,15 +608,9 @@ async function runFetchTasks(byPeer, maxIds, apply) {
         if (decoded[i] === FETCH_UNANSWERED) { reSlice.push(slice[i]); reIds.push(ids[i]); }
         else { aSlice.push(slice[i]); aIds.push(ids[i]); aBlocks.push(decoded[i] || null); }
       }
-      // Re-queue the unanswered ids only if this round DECIDED something — the
-      // strictly-smaller-slice invariant, checked rather than assumed. Every round
-      // resolving ≥1 block is a property of an honest serveFetch, not of the wire: a peer
-      // that answers UNANSWERED for every id it was asked has resolved nothing, and
-      // re-queueing it would append a same-size task forever — an unbounded loop, and
-      // unbounded `tasks` growth in this realm, that ONE holder could hang any GET or
-      // repair pass with. No progress therefore rules those ids absent for this peer,
-      // which is what a claimed-but-never-served block is: a §8 miss that scores the
-      // holder down and sends the reader to the next holder of the block.
+      // Re-queue only if this round decided something (checked, not assumed): a peer
+      // answering UNANSWERED for every id has resolved nothing, and re-queueing would
+      // loop forever. No progress rules those ids absent — a §8 miss for this peer.
       if (reSlice.length && aSlice.length === 0) {
         for (let i = 0; i < reSlice.length; i++) { aSlice.push(reSlice[i]); aIds.push(reIds[i]); aBlocks.push(null); }
         reSlice.length = 0;
@@ -807,12 +620,9 @@ async function runFetchTasks(byPeer, maxIds, apply) {
     }
   }
 }
-// Fetch every block the file's chunks need, batched per holder. After the file-wide
-// have/want, each still-missing block is requested from its best untried holder,
-// sub-batched under the frame cap and fanned out fanoutWindow() FETCH messages at a time
-// (peak W in flight, the fanoutWindow window); a coded chunk stops at k, preferring
-// data blocks. Every returned block is hash-verified (§4.2) and scores its holder
-// (§8). Returns a Map id-hex → bytes.
+// Fetch every block the file's chunks need, batched per holder. Each still-missing
+// block is requested from its best untried holder; a coded chunk stops at k. Every
+// returned block is hash-verified (§4.2) and scores its holder (§8).
 async function gatherBlocks(descriptors, holders) {
   const c = CFG;
   const got = new Map();
@@ -880,11 +690,10 @@ async function gatherBlocks(descriptors, holders) {
   }
   return got;
 }
-// Assemble one chunk's ciphertext from the gathered blocks (§4.1/§7): take the first k
-// DISTINCT listed blocks that arrived, and if they are the k data blocks in order just
-// concatenate them (systematic RS — the common case, and the only case at k = 1, whose
-// one listed block is data). Anything else decodes. Distinct matters because a k = 1
-// descriptor lists its block m+1 times, so the same bytes must not fill two rows.
+// Assemble one chunk's ciphertext from the gathered blocks (§4.1/§7): take the first
+// k DISTINCT listed blocks, and if they're the k data blocks in order just concatenate
+// (systematic RS). Distinct matters: a k=1 descriptor lists its block m+1 times, so
+// the same bytes must not fill two rows.
 async function assembleChunk(d, got) {
   const k = d.k;
   const present = [], seen = new Set();
@@ -904,38 +713,25 @@ async function assembleChunk(d, got) {
 }
 
 // ── PUT (§6) ─────────────────────────────────────────────────────────────────
-// A large file is never wholly resident in the confined guest heap: it is encoded
-// and placed in chunk-aligned WINDOWS, and each window's ciphertext blocks are
-// dropped once placed (README §3). The driver streams the plaintext IN a window at a
-// time (putStart → putWindow* → putFinish), so not even the 1× plaintext ever fully
-// crosses into the guest. The whole-file `put` entry (used by the seedkernel shell and
-// the Go loader, which hand over bytes and read bytes back) drives that very same loop
-// over its own in-memory argument — one windowed loop, not two.
+// A large file is never wholly resident in the confined guest heap: encoded and
+// placed in chunk-aligned WINDOWS, dropping ciphertext blocks once placed (§3). The
+// driver streams plaintext a window at a time (putStart → putWindow* → putFinish);
+// the whole-file `put` entry drives the same loop over its own in-memory argument.
 
-// Target footprint for one window's plaintext slice; the ciphertext it expands to
-// (≈ n/k×) plus the slice stays a small fraction of the realm heap at any file size.
-// The host driver derives it from realmMemoryBytes (~realmMemoryBytes / 3, peak
-// guest footprint ratio) and injects it as CFG.windowTargetBytes; an explicit
-// override stays for benchmarking. The host awaits each window fully (OFFER→STORE→ack)
-// before feeding the next, so on a fat/low-loss link a too-small window idles the wire
-// between windows. This is the reader's/writer's OWN memory policy, not file geometry,
-// so it stays a config value even on the descriptor-authoritative GET path.
+// Target footprint for one window's plaintext slice, derived by the host driver
+// from realmMemoryBytes (~/3, peak guest footprint ratio) as CFG.windowTargetBytes.
+// A too-small window idles the wire between OFFER→STORE→ack rounds on a fat link.
 function windowTarget() { return CFG.windowTargetBytes ?? 4 * 1024 * 1024; }
-// A chunk-aligned window size in bytes: as many whole chunks (k·blockSize) as fit
-// under the target, at least one. Kept a multiple of k·blockSize so slicing the file
-// at window boundaries never splits a chunk. This is the WRITE side, so k·blockSize is
-// the config the writer encodes with.
+// A chunk-aligned window size: as many whole chunks (k·blockSize) as fit under the
+// target, at least one, so window boundaries never split a chunk.
 function putWindowBytes() { const chunkData = CFG.k * CFG.blockSize; return Math.max(1, Math.floor(windowTarget() / chunkData)) * chunkData; }
-// Chunks per GET window — the reconstruct side's counterpart, bounding the plaintext a
-// single getChunk holds before it is handed back to the host. `chunkData` (k·blockSize)
-// is the DESCRIPTOR's geometry (§4.3), passed in by the reader, never config's.
+// Chunks per GET window. `chunkData` (k·blockSize) is the DESCRIPTOR's geometry
+// (§4.3), passed in by the reader, never config's.
 function getWindowChunks(chunkData) { return Math.max(1, Math.floor(windowTarget() / chunkData)); }
 
 // Encode + place the chunks wholly contained in `slice` — a chunk-aligned slice of a
-// LEVEL's byte stream starting at byte offset `baseByteOffset` within it. Each chunk is
-// coded at its own k (§4.1): RS(kc, m) at kc ≥ 2, the m+1-way listing at kc = 1.
-// placeChunksBatched places both the same way, and level 0 (the file) and level ℓ > 0
-// (an index over level ℓ−1) are the same call.
+// LEVEL's byte stream at offset `baseByteOffset`. Each chunk codes at its own k
+// (§4.1). Level 0 (the file) and level ℓ > 0 (an index) are the same call.
 async function placeWindow(slice, baseByteOffset, K, level) {
   const c = CFG;
   const chunkData = c.k * c.blockSize;
@@ -947,10 +743,9 @@ async function placeWindow(slice, baseByteOffset, K, level) {
   return chunks;
 }
 
-// Place a whole byte stream as a run of chunks, windowed exactly as the driver windows
-// the file body, and answer with their signed descriptors. This is the ONLY thing that
-// turns bytes into placed chunks — and a file's own descriptor list is bytes, so it goes
-// through here too, at a different `level`. One path, called twice; not two paths.
+// Place a whole byte stream as a run of chunks, answering with signed descriptors.
+// The only thing that turns bytes into placed chunks — a file's descriptor list is
+// bytes too, so it goes through here at a different `level`. One path, called twice.
 async function placeStream(s, bytes, level, base) {
   const out = [];
   const wb = putWindowBytes();
@@ -963,12 +758,10 @@ async function placeStream(s, bytes, level, base) {
 }
 
 // ── the streamed PUT session ─────────────────────────────────────────────────
-// The protocol state a PUT carries between windows — the file's content key K, how far
-// into the file we are, the signed descriptors placed so far, the replica accounting —
-// lives HERE, in realm state, instead of being round-tripped through the driver. One
-// implicit session is safe by construction: every driver runs an initiator operation to
-// completion before starting the next (StorageNode's runExclusive; the whole-file
-// wrappers below are a single call), so two streams never overlap in this realm.
+// Protocol state a PUT carries between windows (K, offset, descriptors, replica
+// accounting) lives here in realm state rather than round-tripped through the
+// driver. Safe by construction: every driver runs one initiator op to completion
+// before the next (StorageNode's runExclusive), so streams never overlap.
 let putStream = null;
 function requirePut() {
   if (!putStream) throw new Error("put: no stream open — call putStart first");
@@ -977,14 +770,12 @@ function requirePut() {
 // The largest a signed descriptor gets, framed for the descriptor list: the deployment's
 // own (k, m), since a partial chunk lists fewer ids (§4.3).
 function descriptorBytes() { return 4 + 32 + 64 + 13 + (CFG.k + CFG.m) * BLOCK_ID_LEN; }
-// Open a stream: mint K and answer with the plaintext window the driver should feed. The
-// file size is no longer an argument — each chunk signs its own `tailBytes` (§4.3), so
-// the writer never needs the total and the reader derives it from the leaves.
+// Open a stream: mint K and answer with the plaintext window the driver should feed.
+// File size is no longer an argument — each chunk signs its own `tailBytes` (§4.3).
 //
-// The ONE thing a descriptor list asks of the deployment: a chunk must hold at least two
-// descriptors, or a list of them could never shrink to a single root. That is a property
-// of (k, blockSize) alone, so it is checked here, once, before a byte moves — never
-// discovered halfway through a placement. Production geometry clears it ~2000×.
+// A chunk must hold at least two descriptors, or a descriptor list could never
+// shrink to a single root — checked here, once, before a byte moves. Production
+// geometry clears it ~2000×.
 function putStart() {
   const chunkData = CFG.k * CFG.blockSize;
   if (chunkData < 2 * descriptorBytes()) {
@@ -994,13 +785,11 @@ function putStart() {
   putStream = { K: randomKey(), offset: 0, descriptors: [], placedIds: [], placed: 0, intended: 0 };
   return putWindowBytes();
 }
-// Fold placed chunks into the stream's durability accounting (§8), whichever level they
-// belong to. It counts REPLICA PLACEMENTS — one stored (block, peer), i.e. one filled
-// slot — not distinct ids: a k=1 chunk is one id on m+1 peers, so counting ids would
-// report 1 even when every copy landed. `intended` is capped at the reachable cohort
-// because the §6/§10 sibling rule puts at most one of a chunk's blocks on any one peer —
-// so a genuinely small cohort is not flagged, while a reachable-but-declining (full)
-// holder makes placed < intended.
+// Fold placed chunks into the stream's durability accounting (§8). Counts REPLICA
+// PLACEMENTS (one filled slot), not distinct ids — a k=1 chunk is one id on m+1
+// peers, so counting ids would under-report. `intended` caps at the reachable
+// cohort (the §6/§10 sibling rule caps one block per peer), so a small cohort isn't
+// flagged while a declining (full) holder makes placed < intended.
 async function recordPlacements(s, chunks) {
   const peerCount = (await cohortPeers()).length;
   for (const ch of chunks) {
@@ -1017,15 +806,12 @@ async function putFeed(slice) {
   for (const env of await placeStream(s, slice, LEVEL_BODY, s.offset)) s.descriptors.push(env);
   s.offset += slice.length;
 }
-// Seal the stream and report the whole PUT. The stream closes first, so a failed or
-// abandoned PUT leaves nothing behind for the next one to inherit.
+// Seal the stream and report the whole PUT. Closes the stream first, so a failed or
+// abandoned PUT leaves nothing behind.
 //
-// The descriptors this PUT placed are bytes, so they go through placeStream like the body
-// did — and so do the descriptors THAT produces, until one chunk is left. Its signed
-// descriptor is the file's root (§4.3). The loop is bounded and shallow: one chunk holds
-// thousands of descriptors at production geometry, so it runs 0 times up to 512 KiB, once
-// up to ~1 GB, twice up to ~2.5 TB. A file that fits one chunk has no index at all — its
-// own descriptor IS the root, which a reader tells apart by the signed `level`.
+// The descriptors this PUT placed are bytes too, so they go through placeStream at
+// increasing `level` until one chunk is left — its descriptor is the file's root
+// (§4.3). A file that fits one chunk has no index: its own descriptor IS the root.
 async function putFinish() {
   const s = requirePut();
   putStream = null;
@@ -1037,13 +823,9 @@ async function putFinish() {
 // The ONE PUT result format, read by every driver:
 //   [K 32][chunkCount u32][placed u32][intended u32][rootLen u32][root ...]
 //   [idCount u32]{id 32}
-// The root is the signed ROOT DESCRIPTOR (§4.3), not a 32-byte hash — that is the whole
-// ergonomic cost of deleting the manifest object, and it is why the head carries its
-// length. Offsets 0–47 are fixed and the root starts at 48, so the byte-in/byte-out
-// drivers (the seedkernel shell, the Go loader) can read K and the root without knowing
-// the rest. (placed, intended) is the replica accounting (§8) — how many replicas landed
-// vs how many were reachable-and-intended — so a driver can warn on a PUT that met the
-// ≥ k floor but is silently under-replicated (a full/declining holder, or a short cohort).
+// root is the signed ROOT DESCRIPTOR (§4.3), variable-length (there's no manifest
+// object), hence the length prefix. Offsets 0-47 are fixed. (placed, intended) is
+// the §8 replica accounting, so a driver can warn on a silently under-replicated PUT.
 function encodePutResult(root, s) {
   const out = new Uint8Array(48 + root.length + 4 + s.placedIds.length * 32);
   out.set(s.K, 0);
@@ -1065,11 +847,9 @@ async function doPutWindow(arg) { await putFeed(arg); return EMPTY; }
 // No argument — the stream is the argument.
 function doPutFinish() { return putFinish(); }
 
-// Whole-file PUT: one call, bytes in, result out — what the seedkernel shell and the Go
-// loader drive, since they pass raw bytes and read raw bytes and hold no protocol
-// structure of their own. It runs the very same session as the streamed path, so there
-// is one windowed loop and one result format; only the 1× plaintext is resident, which
-// still bounds the ≈ n/k× ciphertext amplification.
+// Whole-file PUT: one call, bytes in, result out — for drivers with no protocol
+// structure of their own. Runs the same session as the streamed path; only the 1×
+// plaintext is resident.
 async function doPut(plaintext) {
   const wb = putStart();
   for (let off = 0; ; off += wb) {
@@ -1081,13 +861,10 @@ async function doPut(plaintext) {
 
 // ── GET (§7) ─────────────────────────────────────────────────────────────────
 // Fetch, reconstruct (§4.1) and decrypt (§4.4) the plaintext for a run of parsed chunk
-// descriptors `ds` whose first chunk is index `chunkStart` within its level. One
-// have/want + batched FETCH per holder (gatherBlocks) over just these chunks' block ids —
-// shared by the whole-file `get`, the streamed getNext window, AND the index walk, since
-// an index level is read exactly like a run of file chunks. Geometry is the DESCRIPTOR's,
-// never config's (§4.1/§4.3): the nonce level, the decode (assembleChunk/rsDecode use
-// d.k/d.blockSize) and the tail trim all come from the chunk in hand, so there is no
-// cumulative byte bookkeeping to keep in step and nothing to disagree.
+// descriptors `ds` starting at level-relative index `chunkStart`. Shared by the
+// whole-file `get`, streamed getNext, and the index walk, since an index level
+// reads exactly like a run of file chunks. Geometry is always the DESCRIPTOR's,
+// never config's (§4.1/§4.3).
 async function reconstructChunks(ds, K, chunkStart) {
   const allIds = [];
   for (const d of ds) for (const id of d.blockIds) allIds.push(id);
@@ -1105,21 +882,16 @@ async function reconstructChunks(ds, K, chunkStart) {
   return concat(parts);
 }
 // ── the streamed GET session ─────────────────────────────────────────────────
-// The mirror of the PUT stream: getStart walks the index down to the leaf descriptors and
-// keeps them — parsed, in file order — in realm state. The driver then calls getNext until
-// it has the file, each call reconstructing one window's chunks, so only one window's
-// plaintext is ever resident.
+// The mirror of the PUT stream: getStart walks the index to the leaf descriptors,
+// kept in realm state; getNext then reconstructs one window's chunks at a time.
 let getStream = null;
-// Open a stream from the ROOT DESCRIPTOR the reader was handed. Its signed `level` says
-// what it describes: 0 is the file's own ciphertext (a one-chunk file needs no index at
-// all), ℓ > 0 an index whose plaintext is the descriptor list of level ℓ−1 — read by the
-// very same reconstruct path. Walk down to the leaves, then sum their signed tailBytes for
-// the file size.
+// Open a stream from the ROOT DESCRIPTOR the reader was handed. Signed `level` says
+// what it describes: 0 is the file's ciphertext, ℓ > 0 an index over level ℓ−1.
+// Walk to the leaves, then sum their signed tailBytes for the file size.
 //
-// No signature check on this path. It would be checking something already proven: the
-// reader holds the root, and every level below it is reached through content-addressed
-// block ids (§4.2), so a tampered index fails its hash long before it is parsed. The
-// author signature is what a HOLDER checks, at admission, where it is load-bearing (§4.3).
+// No signature check here — content-addressed block ids (§4.2) already guarantee a
+// tampered index fails its hash before being parsed. The author signature is what a
+// HOLDER checks at admission (§4.3).
 async function getStart(rootEnv, K) {
   let ds;
   try { ds = [parseSignedDescriptor(rootEnv).descriptor]; }
@@ -1127,13 +899,9 @@ async function getStart(rootEnv, K) {
   while (ds[0].level > 0) {
     const above = ds[0].level;
     ds = decodeDescriptorList(await reconstructChunks(ds, K, 0)).map((env) => parseSignedDescriptor(env).descriptor);
-    // The descent MUST strictly decrease, and this is the one place that is worth
-    // enforcing rather than assuming. A reader is HANDED (root, K) by a sharer, and a
-    // stream cipher with no tag (§4.4) means that sharer chose the plaintext at every
-    // level — so a hostile one can hand out an index whose chunk decrypts to a list
-    // naming itself. Content-addressing does not catch it (the bytes really do hash to
-    // their ids); without this check the walk fetches in a loop forever, which is a hang
-    // rather than an error. Levels are a u8, so this also bounds the descent at 255.
+    // Descent MUST strictly decrease — a hostile sharer (unauthenticated stream
+    // cipher, §4.4) could hand out an index whose chunk decrypts to a list naming
+    // itself, which content-addressing wouldn't catch. Unchecked, the walk hangs.
     if (!ds.length || ds[0].level >= above) throw new Error("get: index does not descend at level " + above + " — malformed or hostile root");
   }
   let fileSize = 0, maxChunkBytes = 0;
@@ -1177,13 +945,10 @@ async function doGet(arg) {
 
 // ── repair (§9) ────────────────────────────────────────────────────────────--
 // Audit a chunk's blocks: for each block_id, the live holders — advertised via
-// have/want, then confirmed retrievable by a verification-fetch (§8). Returns
-// { live: Map hex → Set(peer), bytes: Map hex → one verified copy }. The audit
-// already pulls a verifying copy from every live holder, so it keeps one per id in
-// `bytes` — healing re-places THOSE instead of re-fetching (a whole-cohort have/want
-// per id, the pre-batch cost). The verification is unchanged per (peer, block): the
-// same hash-check (§4.2) + repObserve (§8), just batched one FETCH per holder (all the
-// ids it advertised) and windowed by fanoutWindow(), not one round trip per (id, holder).
+// have/want, confirmed retrievable by a verification-fetch (§8). Returns
+// { live: Map hex → Set(peer), bytes: Map hex → one verified copy }; healing
+// re-places from `bytes` instead of re-fetching. Batched one FETCH per holder,
+// windowed by fanoutWindow(), not one round trip per (id, holder).
 async function liveHolders(ids) {
   const advertised = await haveWant(ids);
   const me = myPeer();
@@ -1218,17 +983,10 @@ async function liveHolders(ids) {
   await runFetchTasks(byPeer, fetchMaxIds(), applyAudit);
   return { live, bytes };
 }
-// Heal one chunk back toward full redundancy (§9), from its signed descriptor alone.
-// ONE slot model, because the descriptor already says how many copies each listed block
-// wants: its MULTIPLICITY in the id list (copyTargets) — once for each of a coded chunk's
-// k+m blocks, whose redundancy is the parity instead, and m+1 times for a k=1 chunk's lone
-// block. A block short of that count is topped up from the copy the audit (liveHolders)
-// already fetched and verified, so a block that still has a live holder costs no extra
-// round trip. A CODED block (k ≥ 2) no live holder serves at all has no copy to lean on,
-// so it is first reconstructed from any k present blocks and re-certified against its
-// signed block_id; a k=1 chunk has no parity to rebuild from — its other copies were the
-// redundancy — so it can only be copied while one survives. The copies it ends up owing
-// are then just placement slots, handed to the same engine PUT uses.
+// Heal one chunk back toward full redundancy (§9). Wanted copies per block = its
+// multiplicity in the id list (copyTargets); a short block is topped up from the
+// audit's verified copy, or reconstructed from any k present blocks if coded (k≥2)
+// with no live holder — a k=1 block can only be copied while one copy survives.
 async function heal(d, descEnv, holders, verified) {
   const copiesOf = (h) => (holders.get(h) || new Set()).size;
   const want = copyTargets(d);
@@ -1256,10 +1014,9 @@ async function heal(d, descEnv, holders, verified) {
   const occupied = new Set();
   for (const set of holders.values()) for (const p of set) occupied.add(p);
 
-  // The copies still owed, expressed as PLACEMENT SLOTS — exactly what a PUT window hands
-  // the engine, so "place the regenerated blocks" is the same call as placing a window.
-  // A block already at full redundancy contributes no slots, and neither does one with no
-  // live copy that this pass couldn't reconstruct.
+  // Copies still owed, expressed as PLACEMENT SLOTS — same shape a PUT window hands
+  // the engine. A block already at full redundancy, or with no reconstructable copy,
+  // contributes no slots.
   const slotIds = [], slotBlocks = [];
   for (const [h, target] of want) {
     const bytes = verified.get(h) || regenerated.get(h);
@@ -1283,10 +1040,8 @@ async function repairChunk(descEnv) {
   if (!sd) return 0;
   const d = sd.descriptor;
   const { live: holders, bytes: verified } = await liveHolders(d.blockIds);
-  // Chunk health is ONE number, whatever the chunk's k (§8, §9): the loss margin — how
-  // many further losses this chunk survives — against the low-water mark ⌈m/2⌉. Both
-  // come out of the shared manifest-core from the SIGNED descriptor, so a repairer needs
-  // no deployment config here either: a cohort running mixed geometry (§4.1) repairs
+  // Chunk health is one number (§8, §9): loss margin against low-water mark ⌈m/2⌉,
+  // both derived from the SIGNED descriptor — a mixed-geometry cohort (§4.1) repairs
   // each chunk to the count its own author signed.
   const copies = d.blockIds.map((id) => (holders.get(toHex(id)) || new Set()).size);
   if (lossMargin(d, copies) >= lowWaterMargin(d)) return 0;          // healthy
@@ -1310,22 +1065,14 @@ async function doRepair() {
 }
 
 // ── holder side (§5/§6/§7) ───────────────────────────────────────────────────
-// The request side a node serves to its cohort: admission control (the §6 sibling
-// rule + §14 quota), content-addressing (§4.2), and the <hex>.blk/.dsc + quota
-// writes — all of it confined here, and nowhere else: the host has a read view of
-// the same fs (host/store-view.ts) and no write path at all.
-// Reached only through the generic caps, and *async*: a holder answers from local
-// fs, and the fs seam is asynchronous on every backend (seedkernel core/fs.ts), so
-// `doHandle` is an async entrypoint — the transport driver already accepts an async
-// app handler (it answers through the `respond` entrypoint on a later turn). This
-// is the ONLY implementation of the quota rule — the host keeps a read view of the
-// fs (host/store-view.ts) and no write path — so bytesUsed is the budget, rebuilt
-// lazily from the fs the first time it matters.
+// The request side a node serves to its cohort: admission control (§6 sibling rule
+// + §14 quota), content-addressing (§4.2), and the <hex>.blk/.dsc writes — confined
+// here; the host keeps only a read view (host/store-view.ts), no write path. Async,
+// since the fs seam is async on every backend (seedkernel core/fs.ts).
 let bytesUsed = -1;
-// The §14 byte budget is OPERATOR policy, so it is read from LOCAL alone, never CFG: via
-// CFG a `quota` an author signed would stand whenever the operator named none — a bundle
-// granting itself disk. Never guess a *generous* default either: an under-injecting driver
-// falls to 0 and FAILS CLOSED. Reads (FETCH) never check quota, so serving still works.
+// The §14 byte budget is OPERATOR policy: read from LOCAL alone, never CFG (an
+// author-signed `quota` in CFG would let a bundle grant itself disk). No generous
+// default either — an under-injecting driver falls to 0 and FAILS CLOSED.
 function quota() { return LOCAL.quota != null ? LOCAL.quota : 0; }
 // fs/size returns 0xffffffff for an absent key (−1 over the bridge).
 // fsSizeRaw preserves that sentinel — it is how existence is asked (storeHas), since
@@ -1336,10 +1083,8 @@ async function fsSize(keyStr) { const v = await fsSizeRaw(keyStr); return v === 
 async function ensureUsed() {
   if (bytesUsed >= 0) return;
   bytesUsed = 0;
-  // The committed tier is the <hex>.blk ciphertext AND its <hex>.dsc descriptor
-  // sidecar — the descriptor is real bytes a holder keeps per block, so charging only
-  // .blk would over-admit by the whole descriptor tier (§14). Rebuilt from the fs, so
-  // a restarted holder re-derives its budget from what is actually on the backend.
+  // Charge both the .blk ciphertext AND its .dsc sidecar (§14) — rebuilt from the
+  // fs, so a restarted holder re-derives its budget from what's actually stored.
   for (const id of await storeList()) { const hex = toHex(id); bytesUsed += await fsSize(hex + STORE_BLK) + await fsSize(hex + STORE_DSC); }
 }
 async function quotaFree() { await ensureUsed(); return Math.max(0, quota() - bytesUsed); }
@@ -1348,24 +1093,18 @@ async function fsPut(keyStr, bytes) {
   const head = new Uint8Array(4); wU32(head, 0, kb.length);
   await host.call("fs/put", concat([head, kb, bytes]));
 }
-// The one write path into store.local: the <hex>.blk ciphertext + its sibling
-// <hex>.dsc descriptor, under the quota budget. Throws past quota so admission
-// refuses rather than over-commits.
+// The one write path into store.local: the .blk ciphertext + its .dsc sidecar,
+// under the quota budget. Throws past quota so admission refuses rather than
+// over-commits.
 //
-// The quota throw is TAGGED, because it is the only failure here the caller can
-// name: everything else (a full disk, a backend error, a realm OOM) surfaces as
-// some other exception from the fs seam, and reporting those as "quota" sends an
-// operator to raise a number that was never the constraint. A holder has no
-// console — the verdict byte is its ONLY way to say what happened — so the two
-// cases must not share one code.
+// The quota throw is TAGGED — it's the only failure here the caller can name.
+// Everything else (full disk, backend error, realm OOM) must surface differently:
+// a holder has no console, so the verdict byte is its only way to say what happened.
 async function storeWrite(id, bytes, descriptor) {
   await ensureUsed();
   const hex = toHex(id);
-  // Charge the ciphertext AND the descriptor sidecar, crediting whatever was already
-  // stored under this id, instead of writing the .dsc for free. Admission (admitBatch)
-  // has already verified the descriptor, so every committed block has one: the .dsc
-  // write is unconditional, with no described-block-overwritten-by-a-bare-one case to
-  // unwind.
+  // Charge the ciphertext AND descriptor sidecar, crediting whatever was already
+  // stored under this id — never write the .dsc for free.
   const prevBlk = (await storeHas(id)) ? await fsSize(hex + STORE_BLK) : 0;
   const prevDsc = await fsSize(hex + STORE_DSC);
   const next = bytesUsed - prevBlk - prevDsc + bytes.length + descriptor.length;
@@ -1375,14 +1114,12 @@ async function storeWrite(id, bytes, descriptor) {
   bytesUsed = next;
 }
 // Admission (§4.3 descriptor check, §6 sibling rule, §14 quota): a holder verifies
-// the chunk's signed descriptor and enforces no-two-blocks-of-a-chunk itself, so the
-// §10 invariant survives a careless or malicious placer (a repairer included), not
-// just an honest coordinator. A single block is just the one-element case of
-// admitBatch — same verify, sibling, and quota checks (the batch's provisional set is
-// empty for one block), so there is one implementation.
+// the signed descriptor and enforces no-two-blocks-of-a-chunk itself, so the §10
+// invariant survives a careless or malicious placer, not just an honest coordinator.
+// A single block is the one-element case of admitBatch — one implementation.
 //
-// `size` is the length of the block ACTUALLY in hand, which only STORE has; an OFFER
-// carries no size on the wire (the geometry is the descriptor's) and passes null.
+// `size` is the length of the block actually in hand (STORE only); OFFER carries
+// none on the wire and passes null.
 async function admit(descriptor, blockId, size) {
   return (await admitBatch([{ blockId, descriptor, size }]))[0];
 }
@@ -1392,11 +1129,9 @@ async function admit(descriptor, blockId, size) {
 // blocks of one chunk never both pass. STORE re-checks each block (acceptStore/admit),
 // so this is the advisory pre-check, never the enforcement.
 //
-// The signed descriptor is REQUIRED on every path (§4.3: "every peer that accepts a
-// block first verifies its descriptor"). There is deliberately no descriptor-less
-// branch: one would be an admission gated by quota alone, letting any cohort peer push
-// arbitrary bytes past the sibling rule — the wire decoders reject a descriptor-less
-// entry outright, and a forged, malformed, or not-of-this-chunk one is declined here.
+// The signed descriptor is REQUIRED on every path (§4.3). Deliberately no
+// descriptor-less branch — that would let any peer push arbitrary bytes past the
+// sibling rule under quota alone.
 async function admitBatch(offers) {
   let free = await quotaFree();
   const provisional = new Set();
@@ -1448,26 +1183,13 @@ async function acceptStore(blockId, descriptor, bytes) {
   try { await storeWrite(blockId, bytes, descriptor); return VERDICT_ACCEPTED; }
   catch (e) { return (e && e.quota) ? VERDICT_QUOTA : VERDICT_ERROR; }
 }
-// Serve a batched FETCH, but never emit much more than one message's worth of bytes:
-// an honest requester caps itself at fetchMaxIds() so its whole response fits, but a
-// hostile cohort member can name the same id thousands of times in one ~1 MB request
-// and make this holder concat thousands × blockSize into one reply. Cap the served
-// bytes at maxMsgBytes (accounting for the response framing). A block the holder has but
-// that won't fit under the cap is tagged FETCH_UNANSWERED, so the reader re-requests
-// exactly those (runFetchTasks); a block it doesn't have is ABSENT. The FIRST present
-// block is served even when it alone exceeds the cap — the same single-over-cap-item rule
-// as batchBytes — so every request a holder can serve at all makes progress: a requester
-// whose config assumes a bigger cap than ours (the caps are per-node operator policy, so
-// they can diverge) degrades to one block per round trip instead of an absent-forever
-// block it verifiably holds. The DoS bound stays: one block + cap per request. A per-id
-// memo keeps a repeated id from costing a fresh storeGet.
+// Serve a batched FETCH, capped at maxMsgBytes so a hostile cohort member can't name
+// one id thousands of times and force an oversized reply. A held block that won't
+// fit is tagged FETCH_UNANSWERED (re-requested by runFetchTasks); the FIRST present
+// block is always served even alone over cap, so every request makes progress.
 async function serveFetch(ids) {
-  // The misbehaving-peer simulator (StorageConfig.lieOnFetch): answer UNANSWERED for
-  // every id, even ones this holder serves. There is no host seam left to intercept
-  // serveFetch with (the kernel's shell has none since the `route/deliver` move), so
-  // the lie lives here, where the tests need it — the READER's §18 no-progress
-  // invariant (a peer that never decides a block is ruled a miss, never re-asked
-  // forever) is exactly what this knob exists to exercise.
+  // Misbehaving-peer simulator (StorageConfig.lieOnFetch): answer UNANSWERED for
+  // everything, exercising the reader's §18 no-progress invariant in tests.
   if (CFG.lieOnFetch) return ids.map(() => FETCH_UNANSWERED);
   const cap = maxMsgBytes();
   const out = new Array(ids.length).fill(null);
@@ -1487,32 +1209,20 @@ async function serveFetch(ids) {
   }
   return out;
 }
-// The wire codecs a holder decodes/encodes (decodeHaveReq, decodeOfferBatch,
-// decodeStoreBatch, decodeFetchBatchReq, encodeFetchBatchRes, and the shared
-// encodeMask the HAVE/OFFER/STORE responses share) all come from the SHARED
-// host/protocol.ts stitched in ahead of this body — the holder admits over the SAME
-// §18 format the initiator speaks, by construction, not by a hand-kept mirror.
+// The wire codecs a holder decodes/encodes (HAVE/OFFER/STORE/FETCH, encodeMask) come
+// from the shared host/protocol.ts — the holder admits over the same §18 format the
+// initiator speaks, by construction.
 
-// Dispatch one incoming control message: arg = [type u8][payload]. Async — every
-// branch is local fs + crypto, and the fs seam is async (core/fs.ts), so the holder
-// awaits its store ops like the initiator awaits its round trips. OFFER and FETCH
-// carry a batch of blocks (one per peer per PUT/GET) and answer all at once.
-//
-// A STORE batch is processed SEQUENTIALLY, not in parallel: admission spends the
-// §14 budget cumulatively across the batch (admitBatch's provisional accounting is
-// the same rule, and a parallel fan-out would race `bytesUsed` — two blocks both
-// seeing the pre-batch budget and both passing). A HAVE batch is independent reads
-// and may fan out.
+// Dispatch one incoming control message: arg = [type u8][payload]. Async since the
+// fs seam is async. A STORE batch is processed SEQUENTIALLY, not in parallel: a
+// parallel fan-out would race `bytesUsed` (two blocks both seeing the pre-batch
+// budget). A HAVE batch is independent reads and may fan out.
 async function doHandle(arg) {
-  // The call envelope is the guest ABI's, read with the preamble's own two functions
-  // (seedkernel `host/guest-seam.ts`) rather than open-coded here — the same shape the
-  // transport's `handle` reads, and the same one `shell.invoke` writes.
+  // Call envelope is the guest ABI's, read via the preamble's own functions
+  // (seedkernel host/guest-seam.ts) — same shape `handle` and `shell.invoke` share.
   const { fromHost, body } = callerOf(arg);
-  // The host's loopback (caller = 32 zero bytes) drives the initiator ops, so `handle`
-  // serves a peer's wire frame and the host's own local call alike. The op is a NAME;
-  // a peer's frame is a MsgType BYTE, and the caller id is what tells the two framings
-  // apart — the wire keeps a compact tag because it is a protocol with peers, while the
-  // local vocabulary is an API and names itself.
+  // The host's loopback (caller = 32 zero bytes) drives the initiator ops; a peer's
+  // frame carries a MsgType byte instead of an op name, and the caller id tells them apart.
   if (fromHost) {
     const { op, args: payload } = readOp(body);
     switch (op) {
@@ -1531,9 +1241,8 @@ async function doHandle(arg) {
       default: return EMPTY;
     }
   }
-  // A peer's wire frame: answer it, timing + counting the request as holder work
-  // (the `recv*` half of the STATS op — the host has no inbound seam to read this
-  // from since the `route/deliver` move, so the harnesses read it off the realm).
+  // A peer's wire frame: answer it, timing + counting it as holder work (the
+  // `recv*` half of the STATS op, since the host has no inbound seam of its own).
   const type = body[0], payload = body.slice(1);
   const t0 = clockNow();
   let out;
@@ -1554,50 +1263,36 @@ async function doHandle(arg) {
 }
 
 // ── one control message, on the host's behalf ────────────────────────────────
-// arg = [to 32][type u8][payload] — the mirror image of `handle`, and the ONLY way a
-// host-side caller reaches a peer now. There is no host request facade left to route
-// around: an app's send is a call to the id the transport claims (§12.10), so it leaves from
-// in here or not at all, and a console line that wants to probe a holder asks this app to
-// ask. It grants nothing new — the same netSend the placement engine drives unprompted,
-// on this app's own protocol id — which is why it is a local op (Op.REQUEST) on the one
-// `handle` rather than a second entrypoint.
-//
-// Answers `[ok u8][response]`: an unreachable peer is `[0]`, exactly as netSend reads it,
-// so a caller distinguishes "declined" from "never arrived" without a rejection.
+// arg = [to 32][type u8][payload] — the mirror image of `handle`, and the only way
+// a host-side caller reaches a peer (§12.10). Grants nothing new: the same netSend
+// the placement engine drives, exposed as a local op (Op.REQUEST) rather than a
+// second entrypoint. Answers `[ok u8][response]`; unreachable is `[0]`.
 async function doRequest(arg) {
   const resp = await netSend(toHex(arg.slice(0, 32)), arg[32], arg.slice(33));
   return resp === null ? Uint8Array.from([0]) : concat([Uint8Array.from([1]), resp]);
 }
 
 // ── warm (boot-time JIT warmup) ──────────────────────────────────────────────
-// One throwaway RS encode + decode + verify under a random key, with NO network
-// and NO store, run once at boot. It pays V8's cold-JIT tax on the codec (RS) and
-// crypto (XChaCha20 / BLAKE2b / Ed25519) caps up front, off the latency-sensitive
-// path: the first real PUT encodes the WHOLE file before the first byte reaches
-// the wire, so on a cold realm that tax (~0.25 s for a 10 MB PUT) lands entirely
-// in front of the transfer. Self-contained and idempotent; the result is discarded.
+// One throwaway RS encode + decode + verify under a random key, no network/store,
+// run once at boot. Pays V8's cold-JIT tax on codec + crypto up front, since a cold
+// realm's first real PUT would otherwise pay it (~0.25s for 10 MB) in front of the
+// transfer. Self-contained and idempotent; the result is discarded.
 async function doWarm() {
   const c = CFG;
   const K = randomKey();
   const perRound = Math.max(1, c.k) * c.blockSize;
   const buf = new Uint8Array(perRound);
-  // The cold-JIT tax is per-byte (un-optimized codec/crypto), not per-call, so one
-  // chunk only reaches V8's baseline tier — measured first-PUT encode stays ~2× the
-  // warm floor. Push ~4 MB through (the same volume a real PUT's first chunks take to
-  // tier up), capped at 64 rounds so a tiny test-scale blockSize can't spin forever.
+  // Push ~4 MB through (what a real PUT's first chunks take to JIT-tier up),
+  // capped at 64 rounds so a tiny test-scale blockSize can't spin forever.
   const rounds = Math.min(64, Math.max(1, Math.ceil((4 * 1024 * 1024) / perRound)));
   for (let r = 0; r < rounds; r++) {
-    // `r` is the chunk index, which is the NONCE counter (encrypt(K, level, globalCi, …)):
-    // one key with a fixed counter would reuse one keystream every round, which is the
-    // shape of a two-time pad. Nothing here leaves the realm and the plaintext is a
-    // constant buffer, so there is nothing to leak — but this loop is the compact example
-    // of "encrypt a sequence of chunks" in the file, and it should not be the one someone
-    // copies. The counter advances, exactly as the real PUT path advances it.
+    // `r` is both the chunk index and the nonce counter — must advance each round
+    // or this becomes a two-time pad (nothing here leaves the realm, but don't copy
+    // this loop as an example with a fixed counter).
     const chunk = await encodeChunk(buf, 0, r, K, LEVEL_BODY);                       // encrypt + RS-encode + hash + sign
     const sd = verifyDescriptor(chunk.descriptor);                               // Ed25519 verify (+ §16 scope preimage)
-    // Reconstruct from the k data blocks to warm the GET-side decode seam too — at k ≥ 2
-    // only, the same test the real path makes: a k = 1 deployment never reaches the codec
-    // on PUT, GET, or repair, so there is no cold-JIT tax there to pay down.
+    // Warm the decode seam too, at k ≥ 2 only — a k=1 deployment never reaches the
+    // codec on PUT/GET/repair, so there's no cold-JIT tax there to pay down.
     if (sd && sd.descriptor.k > 1) {
       await rsDecode(c.k, c.m, c.blockSize, chunk.slotBlocks.slice(0, c.k).map((bytes, index) => ({ index, bytes })));
     }

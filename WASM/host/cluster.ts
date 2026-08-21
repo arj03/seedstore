@@ -1,13 +1,8 @@
 // A small helper to stand up a fully-connected cohort of storage nodes on one
 // LoopbackNetwork — used by the tests and the browser demo. A real deployment
 // grows its cohort by introduction or a rendezvous point (§5.1); this just wires
-// every node to every other so placement has somewhere to go.
-//
-// The transport is now a signed bundle driven over the ChannelFactory seam: each
-// node binds its own loopback port (via its view of the shared fabric) and every
-// node dials every other (StorageNode.connect → addPeerAddr + ready). The
-// in-process fabric runs the REAL transport — AKE, record layer, routing — over
-// microtask-delivered channel pairs, so these cohorts exercise the shipped stack.
+// every node to every other so placement has somewhere to go. The fabric runs
+// the real transport (AKE, record layer, routing) over microtask-delivered pairs.
 
 import type { Sodium } from "./sodium.js";
 import type { StorageConfig } from "./core.js";

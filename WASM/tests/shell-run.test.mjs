@@ -1,18 +1,13 @@
 // The "shell runs the app" end-to-end (the runtime split). A *generic*
-// seedkernel-shell — which knows nothing about storage and imports no seedstore
-// code — loads the signed seedstore bundle and runs its zero-authority guest as
-// the PUT/GET initiator over the application-neutral cap-bridge, against a cohort
-// of real seedstore StorageNode holders on the in-process loopback fabric. This
-// is the proof that storage rides on the runtime as signed content over a fixed
-// primitive vocabulary (crypto / net / fs / module-call / clock / identity) — the
-// binary never learns it is running storage.
+// seedkernel-shell — no seedstore code — loads the signed seedstore bundle and
+// runs its zero-authority guest as the PUT/GET initiator over the
+// application-neutral cap-bridge, against real StorageNode holders on the
+// loopback fabric: proof storage rides the runtime as signed content, never
+// baked into the binary.
 //
 // The shell's network is itself a signed bundle: `boot()` admits the kernel's
-// transport bundle (its author must clear the policy's `grants: { link, route }`
-// entries — the kernel-shipped transport reaches BOTH privileges, §12.5), standing
-// the TransportHost driver up over the socket seam — here a per-node
-// view of the shared LoopbackNetwork fabric, exactly as a shell-run node on real
-// sockets would.
+// transport bundle, standing the TransportHost driver up over a per-node view
+// of the shared LoopbackNetwork fabric — exactly as a real-sockets node would.
 //
 //   node tests/shell-run.test.mjs
 //   bun  tests/shell-run.test.mjs
@@ -94,14 +89,9 @@ export async function run(t) {
         count: 6, network: net, sodium, wasm: { bundleBlob }, config: { blockSize: 1024 }, timeoutMs: TIMEOUT,
       });
 
-      // The shell knows only its policy + the kernel; storage arrives as content. The
-      // policy admits the bundle author for apps AND grants the transport bundle's
-      // author the `link` and `route` privileges — the latter are what stand the
-      // shell's network up.
-      //
-      // A cohort is MUTUAL: the holders must know the shell too, because a holder now
-      // anchors a descriptor's author to a peer it knows (§4.3) — a valid signature from
-      // a stranger is exactly the forgery the anchor exists to stop.
+      // The shell knows only its policy + the kernel; storage arrives as
+      // content. A cohort is MUTUAL: the holders must know the shell too,
+      // since a holder anchors a descriptor's author to a peer it knows (§4.3).
       const shellIdentity = generateKeyPair(sodium);
       for (const h of holders) h.addPeer(toHex(shellIdentity.publicKey));
       const rt = await bootRuntime({

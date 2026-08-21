@@ -1,52 +1,29 @@
 // p2p-cli — a headless "p2p.html light": boots the SAME WsNetwork + StorageNode the
-// browser demo uses (WS mode: 256 KiB blocks, 1 MiB batches, window 64) and drives
-// PUT/GET against real `seedloader --ws-listen` nodes from the terminal, printing a
-// wire-level timeline so a slow transfer can be attributed to a phase. All four are
-// CUMULATIVE TIMESTAMPS — ms since the operation started, NOT durations — so read them
-// as points on one clock and subtract to get a phase:
+// browser demo uses and drives PUT/GET against real `seedloader --ws-listen` nodes,
+// printing a wire-level timeline. All four are CUMULATIVE TIMESTAMPS (ms since the
+// op started, not durations):
+//   encode = first STORE frame sent     queue  = last STORE frame handed to a socket
+//   drain  = socket buffers last non-empty     settle = last STORE response
+// `drain` BEFORE `queue` means the wire was STARVED (buffers ran dry while frames
+// were still being handed over) — the fix is more TCP flows (--conns), since a
+// loss-limited path's per-flow cwnd caps each socket; a deeper --window barely moves
+// throughput.
 //
-//   encode  = first STORE frame handed to a socket (guest CPU up to that point:
-//             XChaCha20 + RS + BLAKE2b + Ed25519, plus the OFFER round trip)
-//   queue   = LAST STORE frame handed to a socket (guest → socket handoff, incl.
-//             the per-frame AEAD seal, whose cost is also totalled separately)
-//   drain   = socket buffers last sampled non-empty (from ws.bufferedAmount)
-//   settle  = last STORE response (holder verify/store + RTT)
-//
-// They are NOT ordered: `drain` BEFORE `queue` is the diagnostic that matters. It means
-// the buffers ran dry while frames were still being handed over — the wire was STARVED
-// and the link was waiting on us, not the reverse, with `peak buffered` pinning at ~one
-// window's ciphertext.
-//
-// CORRECTED 2026-08-03 — that signature was long read as the streamed PUT's per-window
-// OFFER→STORE→ack barrier idling the wire, i.e. an APP-side serialisation to be
-// pipelined away. It is not. Raising --conns makes it vanish (drain<queue 3/3 runs at
-// conns 2 → 0/3 at conns 16, peak buffered 42 MB → 0) while a window sweep at fixed
-// conns moves throughput only ~6%. So the starved wire means we were handing frames to
-// TOO FEW TCP FLOWS to absorb them, not that the window was too shallow: the buffers
-// drain early because a loss-limited path's per-flow cwnd caps each socket, and the
-// remaining frames then trickle. Read drain<queue as "add flows", not "deepen window".
-//
-// CAVEAT on the "MB/s upload" printed with drain: it divides ALL bulk bytes by
-// (drain − encode). Whenever drain < queue that span did not carry all of them, so the
-// figure OVER-REPORTS and must not be read as "the link is saturated". Sustained rate is
-// the "N MB/s wire" on the headline PUT line, which uses the true total.
+// The "MB/s upload" printed with drain over-reports whenever drain < queue (it
+// divides all bulk bytes by too-short a span); the true sustained rate is the
+// headline PUT line's "N MB/s wire".
 //
 // Usage (Node ≥20 needs the WebSocket global):
 //   node --experimental-websocket scripts/p2p-cli.mjs \
 //     --peers "pk[.secret]@host:port,…" [--size 10] [--file path] \
 //     [--puts 1] [--gets 1] [--author hex|none] [--block 256] [--batch 1024] [--window 64]
 //
-// The optional `.secret` is THAT PEER's 32-byte hex contact secret — what it demands of
-// anyone dialing it (`seedloader --contact-secret <file of 64 hex chars>`, so the secret
-// itself never appears in an argument list). It is the peer's credential,
-// not ours: we are a dialer only, we never listen, so we have no inbound secret of our
-// own. Omit it for an open peer. Get it wrong and the dial draws SILENCE rather than an
-// error — a gated node refuses without answering, by design — so a peer that never
-// reaches "link up" with a secret set is the symptom to look for.
+// `.secret` is THAT PEER's contact secret (its credential, not ours — we only dial).
+// Omit for an open peer; a wrong secret draws silence, not an error, so "never
+// reaches link up" is the symptom to look for.
 //
-// NOTE each PUT permanently costs every holder ~fileSize bytes of its §14 quota
-// (content-addressed under a fresh random K, so re-putting the same file never
-// dedups). Keep --puts low against live nodes.
+// NOTE each PUT permanently costs every holder ~fileSize bytes of its §14 quota (no
+// dedup on re-put). Keep --puts low against live nodes.
 
 import { readFile } from "node:fs/promises";
 import { randomBytes } from "node:crypto";
@@ -79,27 +56,18 @@ const sizeMB = num("size", 10);
 // holders) to test whether more parallel upload flows beat the per-flow cwnd cap.
 const kParam = num("k", 1);
 const mParam = num("m", 1);
-// Parallel connections per holder — bulk transfers stripe frames across them so N TCP
-// flows fill a link one flow can't, once the window no longer idles the wire. Independent
-// of k/m: raises flows-per-holder rather than holders-per-chunk. Holders must run the
-// multi-link core. --conns 1 to A/B against a single flow.
-//
-// Default 16 (raised from 2 on 2026-08-03) — flow count, not load shape, is what the
-// long-standing "app gets half the link" gap was made of. Interleaved sweep to the live
-// iola holders: 4.9 / 5.8 / 6.8 / 9.0 / 10.4 / 11.7 / 13.3 MB/s wire at conns
-// 1/2/4/8/16/32/64, monotonic, while --batch barely moved and moved the wrong way for a
-// burstiness story (256 KiB was the WORST config, 4 MiB beat it). 50 MB A/B, conns 2 →
-// 16: 6.5 → 10.3 MB/s wire, 15.4 → 9.7 s. See the long note in browser/p2p.html.
+// Parallel connections per holder — bulk transfers stripe frames across them so N
+// TCP flows fill a link one flow can't. Independent of k/m (flows-per-holder, not
+// holders-per-chunk); holders must run the multi-link core. --conns 1 to A/B
+// against a single flow.
 const connsN = num("conns", 16);
 const blockSize = num("block", PRODUCTION_BLOCK_SIZE / 1024) * 1024;
 const maxMessageBytes = num("batch", 1024) * 1024;
 const windowN = num("window", 64);
-// Streamed PUT/GET window (--wtarget MB): the host feeds the guest one chunk-aligned
-// window at a time and awaits it fully before the next, so a small window idles the
-// wire between windows on a fat link. Bigger windows = fewer barriers but a larger
-// guest heap footprint (peak ≈ 3× window at RS(1,1)), so raise --heap (realm memory,
-// MB) with it. Defaults 24/256 = the measured-best config; --wtarget 4 --heap 64
-// reproduces the old barrier, --wtarget 0 uses the guest's built-in 4 MiB fallback.
+// Streamed PUT/GET window (--wtarget MB): bigger windows mean fewer inter-window
+// barriers but a larger guest heap footprint (peak ~3x window at RS(1,1)), so raise
+// --heap with it. Defaults 24/256 = measured-best; --wtarget 0 uses the guest's
+// built-in 4 MiB fallback.
 const wtargetMB = num("wtarget", 24);
 const heapMB = num("heap", 256);
 const timeoutMs = num("timeout", 5000);
@@ -196,29 +164,21 @@ const sodium = await loadSodium();
 const identity = sodium.crypto_sign_keypair();
 console.log(`me: ${hex(identity.publicKey).slice(0, 16)}…`);
 
-// The node loads the staged seedstore bundle (bundle/seedstore.skb, via loadWasmBytes
-// inside createStorageNode) and derives its signing scope (§16) from that bundle's
-// verified author. Every p2p-cli node running the same staged bundle therefore agrees on
-// scope automatically — there is no separate --author to keep in sync any more.
+// The node derives its signing scope (§16) from the staged bundle's verified
+// author, so every p2p-cli node on the same bundle agrees automatically.
 console.log("signing scope: derived from the loaded seedstore bundle author");
 
-// Base on defaultConfig so the fan-out/window defaults are all set (the §4.1 durability
-// math — r = m+1, the low-water mark — is derived from k/m and from each
-// chunk's signed descriptor, never config). The injection is total — a partial config
-// would feed the strict guest an undefined knob. realmMemoryBytes is host-only (the
-// QuickJS heap bound) and is split back out by createStorageNode, which carries it as the
-// storage load's own realm bound; the rest of this object is that bundle's LOCAL. Neither
-// half reaches the shell, which also hosts the transport.
+// Base on defaultConfig so every guest knob is set (a partial config would feed
+// the strict guest an undefined one). realmMemoryBytes is host-only and split
+// back out by createStorageNode as the load's realm bound.
 const config = { ...defaultConfig(kParam, mParam, blockSize), maxMessageBytes, fanoutWindow: windowN,
   ...(wtargetMB > 0 ? { windowTargetBytes: Math.round(wtargetMB * 1024 * 1024) } : {}),
   ...(heapMB > 0 ? { realmMemoryBytes: Math.round(heapMB * 1024 * 1024) } : {}) };
 
-// The transport is now a signed bundle: boot the shared shell with it admitted
-// (the node's network standing), then put the WS socket seam under the driver.
-// The wrapped sodium rides into the shell, so the record-layer AEAD costs are
-// still instrumented. The geometry does NOT ride in here: app config travels with the
-// bundle load that wants it, so it goes to createStorageNode below and the transport
-// guest never sees it.
+// The transport is a signed bundle: boot the shared shell with it admitted, then
+// put the WS socket seam under the driver. Wrapped sodium rides into the shell so
+// record-layer AEAD costs stay instrumented. Storage geometry does NOT ride here
+// — it goes to createStorageNode below, so the transport guest never sees it.
 const peerUp = new Set();
 let onQuorum = null;
 const { bootTransportShell } = await import("../build/host/storage-node.js");

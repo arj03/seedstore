@@ -1,37 +1,18 @@
 // LoopbackNetwork — the in-process network fabric for tests and single-process
-// demos (the successor of the old seedkernel LoopbackNetwork, which sat under a
-// hand-rolled Transport). The transport is now a signed bundle driven by the
-// shared TransportHost over the ChannelFactory seam (seedkernel §12.6): this file
-// is that seam — a loopback fabric, one `view()` per node — plus the
-// online/offline control the storage tests and the in-page demo need.
+// demos. The transport is a signed bundle driven by the shared TransportHost over
+// the ChannelFactory seam (seedkernel §12.6); this file is that seam (a loopback
+// fabric, one `view()` per node) plus offline/online control. Vendored here
+// because seedkernel moved this test/demo infra out of its own runtime.
 //
-// The base fabric (LoopbackChannel/LoopbackChannels) used to ship inside
-// seedkernel's shared host bundle, exported from `seedkernel-wasm/transport-host`.
-// It is test/demo infrastructure, so seedkernel moved it out of the runtime (it
-// lives in seedkernel's own tests/ now, and is no longer an exported entry). This
-// app's tests and browser demo run on it, so the fabric is vendored here: the
-// `ChannelFactory` it implements is the same seam a real deployment's sockets
-// satisfy, and nothing about the transport changes because the bottom is
-// in-process.
-//
-// The old LoopbackNetwork had `setOnline(peerId, bool)`/`isOnline(peerId)` and
-// dropped frames to/from an offline peer. Here a node going offline is made real:
-// every link it holds (dialed or accepted) is killed, so its side of each
-// authenticated channel closes and the transport forgets it, and a later dial to
-// its port draws a dead channel (the ECONNREFUSED of the fabric's own dead-port
-// dial). Requests to an offline peer then fail within the transport's stall
-// window, exactly as a real offline peer would.
-//
-// There is no re-online in the tests (a node that returns boots a fresh
-// transport), so going back online is only a bookkeeping toggle here.
+// Going offline kills every link a node holds (dialed or accepted), so the
+// transport forgets it and a later dial draws a dead channel (ECONNREFUSED-like) —
+// requests then fail within the transport's stall window like a real offline peer.
+// There is no re-online in the tests, so going back online is a bookkeeping toggle.
 
 /** The structural RawLink shape this file needs (socket-seam.ts is not an
- *  exported entry, so the shape is stated here rather than imported). `framing`
- *  says which wire codec the transport bundle runs over the link — the closed set
- *  of socket-seam.ts's `FRAMING` (0 PLATFORM, 1 LENGTH, 2 WS_CLIENT, 3 WS_SERVER),
- *  restated as the literal union so it still assigns to the kernel's `Framing`.
- *  The fabric's channels are `PLATFORM`: one `send` is one delivery, so there is
- *  nothing for the bundle to frame. */
+ *  exported entry). `framing` restates socket-seam.ts's `FRAMING` (0 PLATFORM,
+ *  1 LENGTH, 2 WS_CLIENT, 3 WS_SERVER) as a literal union. The fabric's channels
+ *  are PLATFORM: one `send` is one delivery, nothing to frame. */
 export interface RawLinkLike {
   send(bytes: Uint8Array): void;
   onData(cb: (bytes: Uint8Array) => void): void;
@@ -167,16 +148,9 @@ class LoopbackChannels implements ChannelFactoryLike {
     this.listeners.clear();
   }
 
-  /** A per-node view of this fabric: it dials and listens through the same registry,
-   *  but its `close` unbinds only the ports *it* bound.
-   *
-   *  Sharing one `LoopbackChannels` between nodes is a test convenience — in
-   *  production each shell holds its own `NodeChannelFactory` — and the whole-fabric
-   *  `close` above is right for teardown and wrong for anything else. An in-place
-   *  transport upgrade closes the outgoing driver and re-binds its port, so on the
-   *  shared object that would unbind every other node in the test. This is the shape
-   *  the file header already claimed: closing one driver clears its listeners without
-   *  poisoning the fabric for the others. */
+  /** A per-node view of this fabric: dials/listens through the same registry, but
+   *  its `close` unbinds only the ports *it* bound — an in-place transport upgrade
+   *  closing its driver must not unbind every other node sharing this fabric. */
   view(): ChannelFactoryLike {
     const fabric = this;
     const mine: number[] = [];

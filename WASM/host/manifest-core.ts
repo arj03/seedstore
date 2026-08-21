@@ -1,50 +1,34 @@
-// The PURE, cap-free core of the file descriptor (README §4.3): the fixed binary
-// codecs and structural validation, with NO crypto/capability dependency. This is
-// the *one definition* of the descriptor wire format, shared two ways: the host
-// imports it (manifest.ts re-exports it and adds the sodium-backed sign/verify),
-// and the build stitches it verbatim into the zero-authority guest bundle
-// (scripts/build-guest.mjs) so the confined orchestration never re-implements the
-// format. Every function here is synchronous and QuickJS-safe (Uint8Array only —
-// no TextEncoder/Buffer).
+// The PURE, cap-free core of the file descriptor (README §4.3): fixed binary
+// codecs and structural validation, no crypto/capability dependency. One
+// definition of the wire format, shared by manifest.ts (host) and stitched
+// verbatim into the guest bundle (scripts/build-guest.mjs). Synchronous and
+// QuickJS-safe (Uint8Array only, no TextEncoder/Buffer).
 //
-// There is no manifest *object* here, and no manifest codec: a file's index is an
-// ordered list of these same descriptors, chunked and placed exactly like the file
-// body (§4.3), so the only list format is the self-delimiting one at the bottom of
-// this file.
-//
-// Signing/verifying lives in manifest.ts (host) and the guest's node/sign +
-// crypto/ed25519/verify seam, NOT here — the author signature is checked from the
-// author's *public* key alone, never the read key, which is what preserves keyless
-// repair (§9).
+// There is no manifest object: a file's index is an ordered list of these same
+// descriptors (§4.3). Signing/verifying lives in manifest.ts, not here — the
+// author signature is checked from the public key alone, preserving keyless repair (§9).
 
 import { bytesEqual, toHex, writeU32BE, readU32BE, concatBytes } from "./util.js";
 
 export const BLOCK_ID_LEN = 32;
 
 // ── signed-format tags (README §16) ──────────────────────────────────────────
-// Every *signed* storage object opens with a distinct leading byte, so an object of
-// one type can never be replayed as another (the kernel's sub-separation rule applied
-// to storage's own vocabulary). The tag sits inside the signed `core`, so it is already
-// under the signature and inside the scoped preimage with no extra framing. Descriptor
-// is 0x01; the Part II signed formats reserve their own before they exist.
+// Every signed storage object opens with a distinct leading byte inside the
+// signed `core`, so one type can never be replayed as another.
 export const TAG_DESCRIPTOR = 0x01;
 export const TAG_TOMBSTONE = 0x02; // reserved: the §25 block.tombstone (not yet implemented)
 export const TAG_HEAD = 0x03;      // reserved: the §27.3 mutable file head (not yet implemented)
 
 // ── chunk descriptor ───────────────────────────────────────────────────────
 
-// ONE chunk shape, not two. `n = k + m` always, and `m` always means **this chunk
-// survives m losses** (§4.1). Where the code degenerates — `k = 1`, where RS(1, m)
-// parity is byte-identical to the lone data block — the descriptor simply LISTS that
-// block `m + 1` times: multiplicity carries the replica count, so a coded chunk and a
-// replicated one are the same object read the same way. There is no id count to branch
-// on, no replica target to compute, and no second row in a table anywhere.
+// ONE chunk shape, not two. `n = k + m` always, and `m` always means this chunk
+// survives m losses (§4.1). At k=1, RS(1,m) parity ≡ the lone data block, so the
+// descriptor simply LISTS that block m+1 times — multiplicity carries the replica
+// count, no branch needed.
 //
-// `level` places the chunk in the file's index tree (§4.3) and doubles as the nonce
-// domain (§4.4): level 0 is the file's own ciphertext, level ℓ > 0 an index chunk whose
-// plaintext is the ordered descriptor list of level ℓ−1. `tailBytes` is how many of the
-// chunk's `k × blockSize` plaintext bytes are real, which is what replaces the manifest's
-// old `file_size` field — a reader trims each chunk by its own signed number.
+// `level` places the chunk in the file's index tree (§4.3) and doubles as the
+// nonce domain (§4.4). `tailBytes` is how much of the chunk's plaintext is real —
+// replaces the old manifest `file_size`; each chunk trims by its own signed number.
 export interface Descriptor {
   level: number;        // 0 = file body, ℓ > 0 = index over level ℓ−1 (also the nonce domain)
   k: number;            // data blocks (0..k are data rows)
@@ -129,13 +113,10 @@ export function copyTargets(d: Descriptor): Map<string, number> {
   return want;
 }
 
-/** The chunk's **loss margin**: how many further losses it survives right now, given
- *  the live-holder count of each listed block (in blockIds order — repeats of one id
- *  repeat its count). Each distinct block contributes at most the copies the descriptor
- *  asked for, so an over-replicated block can never inflate the margin, and the sum
- *  minus k is the spare: `live_blocks − k` for a coded chunk, `min(copies, m+1) − 1` for
- *  a k = 1 one. Both are m on a fully-healthy chunk and 0 one loss from death — one
- *  health number, one formula (§8). */
+/** The chunk's loss margin: how many further losses it survives right now, given
+ *  each listed block's live-holder count. Each distinct block contributes at most
+ *  the copies the descriptor asked for (over-replication can't inflate it); the
+ *  sum minus k is the spare — m when fully healthy, 0 one loss from death (§8). */
 export function lossMargin(d: Descriptor, copies: number[]): number {
   const live = new Map<string, number>();
   for (let i = 0; i < d.blockIds.length; i++) live.set(toHex(d.blockIds[i]), copies[i] ?? 0);
@@ -152,12 +133,9 @@ export function lowWaterMargin(d: Descriptor): number {
 }
 
 // ── the index list (§4.3) ────────────────────────────────────────────────────
-// A file's index level is nothing but its ordered signed descriptors, length-prefixed
-// so the list is self-delimiting. It carries no header: there is no version (the
-// descriptor's own tag covers it), no file_size (each descriptor signs its tailBytes),
-// and no enc alg (the format version fixes it). This byte stream is then encrypted and
-// chunked by the SAME window/chunk path the file body takes, so it has no size ceiling
-// of its own and no object type of its own.
+// A file's index level is its ordered signed descriptors, length-prefixed so the
+// list is self-delimiting, with no header of its own. Encrypted and chunked by
+// the same window/chunk path as the file body, so it has no size ceiling.
 
 export function encodeDescriptorList(envelopes: Uint8Array[]): Uint8Array {
   const parts: Uint8Array[] = [];

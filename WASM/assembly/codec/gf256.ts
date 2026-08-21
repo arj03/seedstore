@@ -1,17 +1,12 @@
 // GF(2^8) arithmetic for Reed–Solomon (README §4.1).
 //
-// The construction is pinned deployment-wide: field polynomial 0x11D, the
-// generator (primitive element) α = 2. §9's keyless repair only holds when
-// every peer's encoder emits byte-identical parity, which means every peer
-// must agree on these tables — so they are fixed constants, never a knob.
+// The construction (field polynomial 0x11D, generator α = 2) is pinned
+// deployment-wide and fixed, never a knob: §9's keyless repair only holds when
+// every peer's encoder emits byte-identical parity.
 //
-// Addition in GF(2^8) is XOR. Multiplication is served from a precomputed
-// 256×256 table MUL (64 KB): MUL[a*256 + b] = a·b. This turns the hot
-// encode/decode inner loop from "two log lookups + an add + an exp lookup + a
-// zero branch" into a single indexed byte load, which is the bulk of the
-// speedup. EXP/LOG are still kept for inverse (matrix solve) and to build MUL.
-// This is the only cryptographic-grade arithmetic that ships in storage WASM —
-// libsodium has no erasure coding (§2, §16).
+// Addition is XOR. Multiplication is a precomputed 256x256 table MUL (64 KB):
+// MUL[a*256 + b] = a·b, turning the hot inner loop into a single indexed byte
+// load. EXP/LOG remain for inverse (matrix solve) and to build MUL.
 
 export const GF_POLY: i32 = 0x11d;
 

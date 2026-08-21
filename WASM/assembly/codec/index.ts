@@ -1,12 +1,10 @@
 // codec — the storage layer's pure-compute handler (README §17, "no caps").
 //
 // It owns the one algorithm libsodium cannot provide: systematic Reed–Solomon
-// erasure coding over GF(2^8) (§4.1). A kernel handler is now a PURE TRANSFORM: it
-// imports nothing but the AssemblyScript runtime shims and cannot call back into the
-// host (there is no kernel.call any more). So confidentiality, hashing, and block-ids
-// are NOT here — the confined guest computes block-ids itself via the cap-bridge hash
-// (CAP_HASH), and the codec just stages bytes → RS blocks. The structural sandbox thus
-// guarantees this module touches neither disk nor network even if compromised (§2, §17).
+// erasure coding over GF(2^8) (§4.1). A kernel handler is a PURE TRANSFORM — no
+// host callback, no crypto, no block-ids (the guest computes those itself); the
+// codec just stages bytes -> RS blocks. So the structural sandbox guarantees
+// this module touches neither disk nor network even if compromised (§2, §17).
 //
 // ABI: the host stages a request at the exported `scratch` offset, calls
 // handle(input_len), and reads the response back from `scratch`.

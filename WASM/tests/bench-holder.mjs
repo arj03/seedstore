@@ -1,47 +1,23 @@
-// HOLDER-SIDE STORE-processing throughput — the benchmark the repo was missing.
+// HOLDER-SIDE STORE-processing throughput. bench.mjs measures the initiator's
+// compute and bench-net.mjs measures round-trip economy; neither isolates what
+// the RECEIVING side costs per block — the open question behind a live PUT
+// that fills socket buffers (receiver-limited vs. path-limited). Answer: holder
+// STORE-processing runs ~96 MB/s/holder on real disk, ~7x live demand — not the bottleneck.
 //
-// bench.mjs measures the INITIATOR's compute (RS codec + hash + encrypt) and
-// bench-net.mjs measures round-trip economy over a latency-bearing link. Neither
-// isolates what the RECEIVING side costs per block, which is the open question left
-// by the live PUT numbers: a 50 MB PUT to two WS holders sustains ~7.2 MB/s wire and
-// fills our socket buffers (peak buffered 67.5 MB), which is equally consistent with
-//   (1) receiver-limited — the holder ingests slowly and TCP backpressure fills us, or
-//   (2) path-limited — the link carries ~62 Mbit for this traffic and full buffers are
-//       just the consequence.
-// Removing the sender-side window barrier changed neither the time nor the answer (see
-// the note over put() in host/storage-node.ts), so the way to separate them is to price
-// the holder with the network taken out of the picture. If holder ingest here lands far
-// above the ~3.6 MB/s per holder the live run sustained, hypothesis (1) is dead.
+// Isolates the holder by running over a zero-latency loopback and timing each
+// inbound request inside the guest's own `handle` (the `recv` half of
+// Op.STATS): admit -> hash -> verify -> fs write -> reply, no initiator work
+// and no wire.
 //
-// HOW IT ISOLATES THE HOLDER. Nodes run over a zero-latency in-process loopback, so the
-// only cost left in a request is the work itself. The kernel's shell has no host-side
-// inbound seam since the `route/deliver` move (the old `createShell({ answer })` seam is
-// gone, and the wire is the transport bundle's record layer), so the holder is timed
-// WHERE the work happens: the confined guest times each inbound request inside its own
-// `handle` (the `recv` half of the Op.STATS counter) — the whole admit → hash → verify →
-// fs write → reply — with no initiator work and no wire in it. ms-resolution clock, so
-// sub-millisecond requests round to 0; the STORE batches here carry several 256 KiB
-// blocks and run for ms, so the per-holder totals are real.
+// Per STORE'd block (acceptStore): BLAKE2b, one Ed25519 verify, the §6
+// sibling check (a storeHas fs stat per sibling), then storeWrite = 2 fsSize +
+// 2 fsPut. Geometry defaults to the live deployment's (RS(1,1), 256 KiB
+// blocks) for comparability with p2p-cli runs.
 //
-// WHAT THE HOLDER DOES PER STORE'd BLOCK (acceptStore, tier2-guest.orchestration.js):
-// BLAKE2b over the block; verifyDescriptor → one Ed25519 verify; the §6 sibling check
-// (a storeHas fs stat per sibling id); then storeWrite = 2 fsSize + 2 fsPut. Every fs op
-// is a cap-bridge crossing. NB the Ed25519 verify is NOT redundant work a cache could
-// remove: the sibling rule means a holder takes at most one block per chunk, so the
-// blocks in one STORE batch carry DISTINCT descriptors.
-//
-// Geometry defaults to the live deployment's (RS(1,1), 256 KiB blocks, ~1 MiB batches)
-// so the numbers are comparable to a p2p-cli run rather than to test-scale config.
-//
-// WHAT THIS DOES *NOT* PRICE, so the verdict is not over-read:
-//   - the transport's own receive cost on the holder box (WS unmasking, frame
-//     reassembly, TCP) — loopback hands over a Uint8Array;
-//   - by default, real disk: StorageNode's fs defaults to an in-RAM MemoryFs, so
-//     storeWrite's two fsPut calls are memcpys. Pass `disk` to run the holders on a
-//     NodeFs in a temp dir and get the honest write cost;
-//   - a weaker deployment CPU (this runs on a dev machine; a deployed holder is typically
-//     a VPS, and co-resident holders share one).
-// So read the result as an upper bound on holder ingest, and judge the margin.
+// NOT priced: the transport's own receive cost (loopback hands over a
+// Uint8Array directly), real disk by default (pass `disk` for a NodeFs temp
+// dir), or a weaker deployment CPU. Read the result as an upper bound on
+// holder ingest.
 //
 // Run:  node tests/bench-holder.mjs [fileMB] [blockKiB] [k] [m] [disk]
 //   e.g. node tests/bench-holder.mjs 16            (the live geometry, in-RAM fs)

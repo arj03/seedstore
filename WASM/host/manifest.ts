@@ -1,19 +1,9 @@
 // The one object that describes a file (README §4.3): the per-chunk *signed*
-// descriptor. There is no separate manifest object — a file's index is an ordered
-// list of these same descriptors, chunked and placed like any other bytes.
-//
-// The pure binary codecs + structural validation live in manifest-core.ts — the
-// single definition of the wire format, shared with the zero-authority guest
-// (stitched into its bundle at build time). This module re-exports that core and
-// adds the only two pieces that need a capability: signing and verifying the
-// author signature. The descriptor is signed by the file's author (the §2 identity)
-// so a holder cannot forge it to misdirect repair; crucially the signature is
-// checked from the author's *public* key alone, never the read key, which is what
-// preserves keyless repair (§9). A holder additionally anchors that key to a peer
-// its cohort knows (§4.3) — a signature that verifies against a key nobody knows
-// binds authority to nothing. The descriptor names *what* blocks a chunk is made
-// of, never *which* peers hold them — placement is discovered live via have/want
-// (§5), so it never goes stale under churn.
+// descriptor — no separate manifest object. Pure codecs live in manifest-core.ts
+// (shared with the guest); this module adds the two capability-needing pieces:
+// signing and verifying the author signature. Verified from the author's public
+// key alone, never the read key, which preserves keyless repair (§9); a holder
+// additionally anchors that key to a peer its cohort knows (§4.3).
 
 import type { Sodium } from "./sodium.js";
 import {
@@ -22,11 +12,9 @@ import {
 import { concatBytes } from "./util.js";
 import { appSigner, guestSignScope } from "seedkernel-wasm/guest-seam";
 
-// The scoped signing namespace is the KERNEL's to state, and this package's
-// sign/verify go through the kernel's scoped signer: `sign` applies
-// `DOMAIN_guest ‖ scope ‖ msg` host-side, `verify` checks the same
-// preimage for a caller-named key. Neither this host mirror nor the guest ever
-// reconstructs the host-owned prefix bytes (seedkernel §12.2).
+// This package's sign/verify go through the kernel's scoped signer (seedkernel
+// §12.2): `sign` applies `DOMAIN_guest ‖ scope ‖ msg` host-side; neither this
+// mirror nor the guest ever reconstructs the prefix bytes.
 export { guestSignScope };
 
 export {
@@ -48,13 +36,9 @@ export type { Descriptor, SignedDescriptor } from "./manifest-core.js";
  *  scope when they share a bundle author). */
 export const STORAGE_APP = "seedstore";
 
-/** The wire protocol id storage speaks (seedkernel §12.10) — named in every request the
- *  guest sends so the receiving host routes it to this app, and CLAIMED by the
- *  bundle's signed manifest (`protocols`, scripts/storage-bundle.mjs), which is what
- *  gives the id a destination on the receiving node: the load that admits this code
- *  claims it, with no operator step in between. The id an app speaks is the app's own
- *  fact, so it is stated once here and read by the two places that need it — the
- *  bundle build and the guest's NET_PROTO — rather than retyped per deployment. */
+/** The wire protocol id storage speaks (seedkernel §12.10), claimed by the
+ *  bundle's signed manifest (`protocols`, scripts/storage-bundle.mjs) and read by
+ *  the guest's NET_PROTO — stated once here rather than retyped per deployment. */
 export const STORAGE_PROTO = "seedstore";
 
 /** The signing scope `author_pk ‖ app_len u8 ‖ app` for a storage deployment
@@ -64,13 +48,8 @@ export function storageSignScope(authorPk: Uint8Array): Uint8Array {
   return guestSignScope(authorPk, STORAGE_APP);
 }
 
-/** The host-side mirror's one seam, per (sodium, signing key, scope author): the
- *  SAME scoped names the confined guest calls, so the preimage the two sides must
- *  agree on is the kernel's to build and nothing here reconstructs it. The scope
- *  author is the deployment's — `appSigner(sodium, key, scopeAuthor, STORAGE_APP)`
- *  derives the byte-identical scope the shell derives for the admitted bundle (§16).
- *  Built per call: the signer is a closure over the scope and the derivation is one
- *  hash, so there is nothing here worth caching. */
+/** The host-side mirror's one seam: derives the byte-identical scope the shell
+ *  derives for the admitted bundle (§16). Built per call — nothing worth caching. */
 function storageSigner(sodium: Sodium, authorPk: Uint8Array, authorSk: Uint8Array, scopeAuthor: Uint8Array) {
   return appSigner(sodium, { publicKey: authorPk, privateKey: authorSk }, scopeAuthor, STORAGE_APP);
 }

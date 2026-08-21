@@ -1,17 +1,11 @@
 // Control-plane message catalog (README §18) for the storage RPC carried over
-// net.send. Each message is a small typed request/response; the bulk block
-// bytes ride the bulk plane (§3) as unsigned, hash-verified frames, except for
-// FETCH responses which return the (small, §27) blocks over the same channel and
-// are still validated by content_hash(bytes) == block_id by the reader (§4.2).
+// net.send.
 //
-// OFFER and FETCH are *batched*: one OFFER lists every block headed to a peer and
-// the holder replies a per-block verdict (quota + the §6 sibling rule
-// evaluated over the whole batch); one FETCH names every block wanted from a peer
-// and the holder returns them together. That collapses N per-block control round
-// trips (and N QuickJS holder invocations) into one per peer. STORE stays
-// per-block — its bytes are the bandwidth, and it is the binding admission point
-// (content-address + sibling + quota are re-checked there, §4.2/§6/§14), so the
-// batched OFFER is an advisory pre-check, never the enforcement.
+// OFFER and FETCH are *batched*: one OFFER lists every block headed to a peer,
+// answered with a per-block verdict; one FETCH names every block wanted from a
+// peer, returned together — collapsing N round trips into one per peer. STORE
+// stays per-block and is the BINDING admission point (re-checked there, §4.2/§6/
+// §14); the batched OFFER is only an advisory pre-check.
 
 import { writeU32BE, readU32BE, concatBytes } from "./util.js";
 
@@ -27,20 +21,11 @@ export const MsgType = {
 
 // ── the initiator's LOCAL op names (the host's loopback vocabulary) ──────────
 // The storage protocol has one entrypoint, `handle`, reached two ways (seedkernel
-// §12.2): a peer's inbound frame carries `[peer 32][MsgType u8][payload]`, and the
-// host's own `invoke` loopback carries `[zero 32][opLen u8][opName][payload]` — the
-// 32-byte caller id tells the two framings apart, and both are split by the guest ABI's
-// own `callerOf`/`readOp` (seedkernel `host/guest-seam.ts`) rather than by a parse
-// written here. Two framings under one entrypoint is deliberate and is not two
-// vocabularies: the wire keeps a compact `MsgType` byte because it is a protocol with
-// PEERS, versioned by the protocol id, while the local ops are an API for the host and
-// name themselves. The op is therefore a NAME, not a number — the same convention the
-// transport's `handle` uses — so a generic caller (the seedkernel CLI's `--op`, which
-// knows no storage word at all) and StorageNode both address an op without agreeing on
-// a tag byte. `Op` is the
-// initiator side the whole-file `put`/`get` used to be reached by entrypoint name;
-// folded into `handle`, an app has one op vocabulary rather than a per-entrypoint one
-// (StorageNode.invoke).
+// §12.2): a peer's inbound frame carries `[peer 32][MsgType u8][payload]`; the
+// host's own loopback carries `[zero 32][opLen u8][opName][payload]` — the caller
+// id tells the two framings apart. The op is a NAME, not a number, so a generic
+// caller (the seedkernel CLI's `--op`) and StorageNode both address it without
+// agreeing on a tag byte.
 export const Op = {
   PUT: "put",               // whole-file: [plaintext ..] → the PutResult envelope
   PUT_START: "putStart",    // open the stream → [windowBytes u32]
@@ -57,13 +42,11 @@ export const Op = {
 } as const;
 
 // ── the STATS op wire format (§18) ──────────────────────────────────────────
-// The request counters live in the guest (the kernel's shell has no inbound seam
-// since the `route/deliver` move, so the harnesses read the counts off the realm
-// that makes them). One fixed record per MsgType, in `STATS_TYPES` order:
+// The request counters live in the guest (the host has no inbound seam of its
+// own). One fixed record per MsgType, in `STATS_TYPES` order:
 //   [sent u32][sentPeak u32][recv u32][recvBytes u32][recvMs f64 LE]
-// `sent` counts requests this node ISSUED; `sentPeak` is the most of them in
-// flight at once (the fan-out/window signal); the `recv*` fields count and time
-// the requests this node ANSWERED as a holder (inside the guest's `handle`).
+// `sent`/`sentPeak` are this node's issued requests + peak in-flight; `recv*` is
+// what it answered as a holder.
 export const STATS_TYPES = [MsgType.HAVE, MsgType.OFFER, MsgType.FETCH, MsgType.STORE] as const;
 export const STATS_RECORD_BYTES = 24;
 
@@ -92,11 +75,9 @@ export function decodeStats(buf: Uint8Array): Map<number, RequestStats> {
 }
 
 // ── the response mask shared by HAVE, OFFER, and STORE ──────────────────────
-// All three replies are the same shape: one byte per batch entry. HAVE's is
-// "held" (1/0), OFFER's is a VERDICT_* code, STORE's is a VERDICT_* code —
-// one codec, three uses. A verdict ≠ 1 is a decline; codes 2–5 carry advisory
-// diagnostics (quota, sibling, descriptor-rejected, holder-error) that turn the
-// initiator's error from a guessing essay into an exact report.
+// All three replies are the same shape: one byte per batch entry (HAVE: held
+// 1/0; OFFER/STORE: a VERDICT_* code). A verdict ≠ 1 is a decline; codes 2-5
+// carry advisory diagnostics for an exact initiator error message.
 export function encodeMask(bits: (boolean | number)[]): Uint8Array {
   const out = new Uint8Array(bits.length);
   for (let i = 0; i < bits.length; i++) {
@@ -130,20 +111,13 @@ export function decodeHaveReq(buf: Uint8Array): Uint8Array[] {
 
 // ── OFFER (block.offer, §6) ────────────────────────────────────────────────
 // Each entry carries block_id and the signed chunk descriptor so the holder can
-// verify it and enforce the no-two-blocks-of-a-chunk-same-holder rule (§6). A batch
-// is a count followed by the self-delimiting entries; the response is one accept
-// byte per entry.
+// verify it and enforce the sibling rule (§6). A batch is a count + self-delimiting
+// entries; response is one accept byte per entry.
 //
-// The descriptor is MANDATORY — §4.3's "every peer that accepts a block first
-// verifies its descriptor" is only true if there is no way to offer a block without
-// one. A descriptor-less entry is a malformed message, rejected by the decoder, not
-// a block admitted on quota alone.
-//
-// There is no size field: a block is exactly `descriptor.blockSize` bytes (padding
-// guarantees it, and the replicated manifest chunk signs blockSize = its ciphertext
-// length), so a size on the wire would be an unauthenticated restatement of signed
-// geometry — free to disagree with it. The holder charges its §14 quota from the
-// descriptor instead.
+// The descriptor is MANDATORY — a descriptor-less entry is a malformed message,
+// rejected by the decoder, never a block admitted on quota alone. No size field
+// either: a block is exactly `descriptor.blockSize` bytes, so a wire size would be
+// an unauthenticated restatement of signed geometry.
 export interface Offer {
   blockId: Uint8Array;
   descriptor: Uint8Array; // signed chunk-descriptor envelope (§4.3) — never absent
@@ -184,23 +158,16 @@ export const VERDICT_ACCEPTED   = 1;
 export const VERDICT_QUOTA      = 2; // §14 quota exhausted
 export const VERDICT_SIBLING    = 3; // §6 sibling already held
 export const VERDICT_DESCRIPTOR = 4; // descriptor verify failed (§4.3)
-// The holder ADMITTED the block and then failed to commit it — a full disk, a
-// backend error, a realm OOM. Distinct from VERDICT_QUOTA because the two send an
-// operator to opposite places: quota is a policy number to raise, this is a broken
-// holder to inspect. They were one code once, and a mislabelled internal failure
-// cost a live debugging session chasing a budget that was never the problem.
+// The holder ADMITTED the block and then failed to commit it (full disk, backend
+// error, realm OOM) — distinct from VERDICT_QUOTA since one is a policy number to
+// raise and the other a broken holder to inspect.
 export const VERDICT_ERROR      = 5;
 
 // ── STORE (the push, §6 step 4) ─────────────────────────────────────────────
-// Batched per holder: every block headed to a peer streams in one message, and
-// the holder replies a per-block verdict. Each entry carries its own
-// descriptor + bytes (different chunks → different descriptors in one batch). This
-// is the upload twin of the batched FETCH download — one streamed transfer + one
-// ack instead of a request/response per block. STORE is still the BINDING
-// admission point: the holder hash-verifies (§4.2) and admits (§6/§14) EVERY block
-// in the batch (acceptStore), so batching changes only the framing, not the gate.
-// The byte length here is framing (the entry is self-delimiting); the holder still
-// checks it against the descriptor's signed blockSize before admitting.
+// Batched per holder: every block headed to a peer streams in one message,
+// answered with a per-block verdict — the upload twin of batched FETCH. Still
+// the BINDING admission point: the holder hash-verifies (§4.2) and admits (§6/
+// §14) EVERY block, so batching changes only the framing, not the gate.
 export interface StoreReq {
   blockId: Uint8Array;
   descriptor: Uint8Array; // signed chunk-descriptor envelope (§4.3) — never absent, as for OFFER
@@ -242,18 +209,14 @@ export function decodeStoreBatch(buf: Uint8Array): StoreReq[] {
 
 // ── FETCH (block.fetch_req / block.data, §7, §8) ────────────────────────────
 // A batch names every block wanted from one peer; the response returns them in
-// request order, each tagged by a found byte the reader acts on directly. Each
-// returned block is still hash-verified by the reader (§4.2) — the holder is
-// never trusted to have served the right bytes.
+// request order, each tagged by a found byte. Each block is still hash-verified
+// by the reader (§4.2) — the holder is never trusted to have served the right bytes.
 //
-// The found byte has three states, so "didn't serve" and "couldn't fit" are distinct
-// on the wire and the reader need not infer cap-truncation from the response's shape:
+// The found byte has three states, so "didn't serve" and "couldn't fit" are distinct:
 //   1 PRESENT     — the block follows as [len u32][bytes].
 //   0 ABSENT      — a genuine miss; the reader falls to another holder.
-//   2 UNANSWERED  — the holder has the block but its own per-response byte cap
-//                   (maxMessageBytes, per-node operator policy, so caps diverge) left
-//                   no room for it. The reader re-requests exactly these as a fresh
-//                   FETCH, never treating them as misses.
+//   2 UNANSWERED  — the holder has it but its own response byte cap left no room;
+//                   the reader re-requests it fresh, never as a miss.
 export const FETCH_ABSENT = 0, FETCH_PRESENT = 1, FETCH_UNANSWERED = 2;
 
 /** One FETCH response entry: the block bytes if PRESENT, null for a genuine miss

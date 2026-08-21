@@ -2,11 +2,6 @@
 // against a caller-provided sumo libsodium. The page readies libsodium and
 // passes it in. Browser nodes run the same protocol as long-running peers,
 // differing only in backend and default quota (§1, §8).
-//
-// With the §12.9 move, the ONE install path is the signed bundle — the
-// raw `codecBytes`/`reputationBytes`/`guestSource` splits are gone.
-// A browser node fetches the single `seedstore.skb` and the shared shell
-// loads + verifies + installs it.
 
 import type { Sodium } from "./sodium.js";
 import { StorageNode, type StorageNodeOptions } from "./storage-node.js";

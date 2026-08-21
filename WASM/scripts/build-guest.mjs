@@ -1,22 +1,15 @@
-// build-guest.mjs — assemble the Tier-2 guest program from the SHARED pure core +
-// the orchestration body, so the descriptor/manifest/protocol/byte-helper wire
-// format has ONE definition (host/{util,reputation-core,protocol,manifest-core}.ts) instead of a
-// hand-copied second one inside the guest.
+// build-guest.mjs — assemble the Tier-2 guest program from the SHARED pure core
+// (host/{util,reputation-core,protocol,manifest-core}.ts) + the orchestration
+// body, so the wire format has ONE definition instead of a hand-copied second one.
 //
-// The guest is loaded as plain QuickJS *source* (not an ESM module) by the host
-// (host/storage-node.ts) or the seedkernel shell, which prepends the bundle facts
-// + the `APP`/`LOCAL` config blocks. So this stitch must emit a FLAT script: strip the
-// ESM import/export scaffolding off the compiled core (every imported name is
-// defined by another file included here), then append the orchestration body
-// verbatim. Unlike seedkernel's bundle-loader.mjs there is NO IIFE and NO globalThis
-// assignment — the orchestration reads `APP`/`LOCAL`/`host`/`register` as ambient
-// names the runtime injects (the seam is name-addressed; the guest writes
-// "fs/get", "node/sign", "crypto/blake2b-256").
+// The guest is loaded as plain QuickJS *source* (not an ESM module), which
+// prepends `APP`/`LOCAL` config blocks — so this emits a FLAT script: strip ESM
+// import/export scaffolding off the compiled core, then append the orchestration
+// body verbatim. No IIFE, no globalThis assignment.
 //
 //   node scripts/build-guest.mjs   →  build/host/tier2-guest.js
 //
-// Run after `npm run build:host` (the core must be compiled first) and before
-// `npm run build:host:min` (which minifies + `node --check`s the result).
+// Run after `npm run build:host` and before `npm run build:host:min`.
 
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import { dirname, join } from "node:path";

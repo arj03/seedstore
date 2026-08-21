@@ -1,16 +1,9 @@
-// The batched OFFER / FETCH wire (host/protocol.ts) and the holder's batched
-// admission (the confined guest's admitBatch). Two halves:
-//   - pure encode/decode round trips, including the self-delimiting offer entries,
-//     the per-block accept mask, and FETCH responses with present/absent blocks;
-//   - the holder evaluating a whole OFFER batch at once: the §6 sibling rule
-//     declines the second of a sibling PAIR offered together, and the §14 quota
-//     declines the tail once the cumulative budget is spent. STORE re-checks each
-//     block, so this batched pre-check never has to be the only gate — but it must
-//     still be correct.
-//
-// Every offered or stored block carries its author-signed chunk descriptor (§4.3) —
-// there is no descriptor-less entry to admit, on the wire or in the holder, and the
-// tests below cover both refusals.
+// The batched OFFER/FETCH wire (host/protocol.ts) and the holder's batched
+// admission (admitBatch): pure encode/decode round trips, and the holder
+// evaluating a whole OFFER batch at once (the §6 sibling rule declines a
+// sibling pair, §14 quota declines the tail once spent). Every offered or
+// stored block carries its signed descriptor (§4.3) — no descriptor-less entry
+// is admitted, on the wire or in the holder; tests below cover both refusals.
 
 import {
   encodeOfferBatch, decodeOfferBatch, encodeMask, decodeMask,

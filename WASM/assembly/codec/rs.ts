@@ -1,47 +1,23 @@
 // Systematic Reed–Solomon RS(k, m) over GF(2^8) (README §4.1, §4.2, §9).
 //
-// The generator is [ I_k ; C ] where the top k rows are the identity (so the
-// data blocks pass through verbatim — *systematic*: when all k data blocks are
-// present a read just concatenates them and never decodes, §4.1) and the
-// bottom m rows are a Cauchy matrix C. Because every square submatrix of a
-// Cauchy matrix is non-singular, *any* k of the n = k + m rows form an
-// invertible matrix, which is exactly the MDS "any k of n reconstruct"
-// property the durability invariant (§10) rests on.
+// Generator = [ I_k ; C ]: the top k rows are the identity (systematic — all-k-
+// present reads just concatenate, never decode) and the bottom m rows are a
+// Cauchy matrix, so any k of n = k+m rows are invertible (the MDS property §10
+// durability rests on).
 //
-// The hot multiply-and-accumulate loops use WASM SIMD: for a fixed coefficient
-// c, c·x is split into two 4-bit table lookups — c·(x & 0x0F) and c·(x & 0xF0)
-// — each a 16-entry table, so a single i8x16.swizzle multiplies 16 bytes at
-// once (the GF(2^8) "PSHUFB" trick).
+// Hot multiply-accumulate loops use WASM SIMD: a fixed coefficient c splits
+// c·x into two 4-bit table lookups (GF(2^8) "PSHUFB"), and *output
+// register-blocking* computes 8 output vectors per coefficient-table load so
+// 8 independent XOR-accumulator chains overlap instead of serializing.
+// Encoding is fully deterministic — same (k, m, bytes) -> byte-identical
+// parity — which is what lets a repairer regenerate a block keylessly (§9).
 //
-// The key to throughput is *output register-blocking*: the coefficient and its
-// two 16-byte multiply tables depend only on the input row, not on which output
-// column we are filling, so the inner loop computes a whole STRIP of 8 output
-// vectors (128 bytes) per coefficient-table load. That amortizes the table
-// loads and the coefficient fetch over 8 columns, and gives the core 8
-// independent accumulator chains to overlap (the XOR-accumulate across the k
-// inputs is otherwise a latency-bound dependency). A 16-byte SIMD step and then
-// a scalar tail (the same MUL table, one indexed load per byte) finish a block
-// whose size is not a multiple of 128. Encoding stays fully deterministic —
-// same (k, m, bytes) → byte-identical parity — which is what lets a repairer
-// regenerate a block keylessly (§9).
-//
-// A DECODE row's zero coefficients are dropped once, into a compacted term list,
-// rather than skipped by a branch on every strip. Arithmetically the two are the
-// same — a zero coefficient contributes nothing to an XOR accumulation, so the
-// sum is byte-identical either way and §9's keyless repair still holds — but not
-// in cost: a skipped term still costs a loop iteration, and the rows this codec
-// decodes are mostly zeros (see rsDecode). Dropping them also cuts what the
-// loader's module-call bound charges, since its termination check is billed per
-// loop back-edge (seedkernel SECURITY §14.1).
-//
-// Encode rows are dense, so they get none of that and must not pay for it. The
-// inner loop below is on a codegen cliff — measured on the loader's wazero, a
-// 64 KiB RS(10,6) encode costs ~8% MORE if the zero test is removed from it, and
-// another ~8% if the source address is loaded rather than computed, even though
-// both changes only ever remove work. Neither shape is worth defending on its
-// merits; what is worth defending is that the encode path compiles to what it
-// compiled to before. Hence `dense` below, and hence the zero test staying in a
-// loop whose terms are all non-zero. Re-measure before touching either.
+// DECODE rows have their zero coefficients compacted into a term list once
+// (cheaper than a per-strip branch, and it cuts the loader's per-back-edge
+// module-call billing, seedkernel SECURITY §14.1); ENCODE rows are dense and
+// must NOT get this treatment — measured on the loader's wazero, removing the
+// (dead) zero test or precomputing the source address each cost ~8% MORE on a
+// 64 KiB RS(10,6) encode. Re-measure before touching `dense` or the zero test below.
 
 import { gfMul, gfInv, mulBase, mulHiBase } from "./gf256";
 
@@ -90,20 +66,14 @@ function compactRow(
 }
 
 // One output block = Σ_t COEF[t] · src(t) over GF(2^8), for the `nz` terms of a
-// row. Shared by encode (parity rows) and decode (recovered data rows): both are
-// the same MDS linear combination, only the source blocks and coefficients
-// differ. nz == 0 is a legal row and writes zeros.
+// row. Shared by encode (parity rows) and decode (recovered data rows) — same
+// MDS linear combination, only sources/coefficients differ. nz == 0 writes zeros.
 //
-// `dense` picks how src(t) is found. It is a compile-time argument — this is
-// @inline, so each caller compiles its own copy and the branch folds away:
-//
-//   dense  — term t reads block t, at srcPtr + t·bs: encode's k terms are its k
-//            data blocks in order, so the address is arithmetic on the loop
-//            counter and nothing waits on memory for it.
-//   sparse — term t reads the block at SRC[t], wherever compactRow found it.
-//
-// The zero test is dead in both (compactRow already removed the zeros, and encode
-// has none) but stays for the codegen reason in the header comment.
+// `dense` picks how src(t) is found, and is a compile-time @inline argument so
+// each caller's branch folds away: `dense` reads block t at srcPtr + t·bs
+// (encode's k data blocks, in order); `sparse` reads SRC[t], wherever
+// compactRow found it. The zero test is dead in both but stays for the
+// codegen reason in the file header.
 @inline
 function gfMacBlock(
   nz: i32, bs: i32, coefPtr: i32, srcOffPtr: i32, outPtr: i32,

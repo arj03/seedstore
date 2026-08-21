@@ -1,20 +1,13 @@
-// Build the seedstore app bundle (the runtime split): the signed
-// content a generic seedkernel-shell loads to *become* a storage node —
-// codec.wasm + reputation.wasm + tier2-guest.js + a signed manifest declaring the
-// required caps. The shell verifies + governs + installs it; this script is the
-// offline producer that holds the author key. The bundle *content*
-// (modules/guest/caps/config) is assembled in scripts/storage-bundle.mjs, the
-// one place the test fixture also uses, so the two can never drift.
+// Build the seedstore app bundle: the signed content a generic seedkernel-shell
+// loads to *become* a storage node — codec.wasm + reputation.wasm +
+// tier2-guest.js + a signed manifest declaring the required caps. This script is
+// the offline producer holding the author key; bundle content is assembled in
+// scripts/storage-bundle.mjs (shared with the test fixture, so they can't drift).
 //
-//   node scripts/build-bundle.mjs            (writes ./bundle, signs with ./seedstore-author.key)
+//   node scripts/build-bundle.mjs   (writes ./bundle, signs with ./seedstore-author.key)
 //
-// Output — ONE file the shell loads with --bundle:
-//   bundle/seedstore.skb   the signed manifest envelope + codec.wasm + reputation.wasm
-//                          + guest.js, packed into a single blob (seedkernel §12.4)
-// The signed manifest commits to each module's hash; the shell verifies the bytes
-// against it and installs them directly (seedkernel §12.4).
-//
-// Run `npm run build` first so build/ holds the compiled host + wasm.
+// Output: bundle/seedstore.skb — the signed manifest + all modules packed into
+// one blob (seedkernel §12.4). Run `npm run build` first.
 
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -54,14 +47,10 @@ if (existsSync(keyPath)) {
   console.log(`  minted author key → ${keyPath}`);
 }
 
-// Freshness (README §12.4): the manifest `version` is a monotonic integer the shell
-// enforces as a high-water mark, so a redeploy must bump it or a deployed shell refuses it
-// as a downgrade. Persist the mark NEXT TO THE AUTHOR KEY — the key is what defines the
-// (author, app) namespace the version is monotonic within, and it persists where bundle/ is
-// gitignored + rebuilt. Deriving the mark from bundle/manifest.bundle (as before) silently
-// restarts at 1 after a `git clean`, a fresh checkout, or a build on a second machine — and
-// every deployed shell then correctly rejects the next publish as a downgrade. The key +
-// version file travel together (both out of git); copy one to another machine, copy both.
+// Freshness (README §12.4): manifest `version` is a monotonic high-water mark a
+// deployed shell enforces. Persisted NEXT TO THE AUTHOR KEY (not derived from
+// bundle/, which is gitignored and gets wiped) so it survives a `git clean` or a
+// build on a second machine. Key + version file travel together.
 let prevVersion = 0;
 if (existsSync(versionPath)) {
   const v = Number(readFileSync(versionPath, "utf8").trim());

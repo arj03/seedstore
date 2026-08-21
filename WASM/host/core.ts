@@ -13,53 +13,28 @@ export interface StorageConfig {
   k: number;
   m: number;
   blockSize: number;
-  /** How many per-holder STORE sub-batches a PUT pushes concurrently (and per-holder
- *  FETCH sub-batches a GET pulls). OFFER/STORE/FETCH are batched per holder, so the
- *  round-trip count no longer scales with the file; this windows the bulk transfers
- *  when a transport's frame cap splits a holder's blocks across many messages. The
- *  window binds hardest under a small cap (WebRTC's ~64 KB channel forces ~one
- *  block per STORE/FETCH): without it those messages would go one serial round
- *  trip per block. Under a large cap (WS) each holder has only a few big batches,
- *  so it is a no-op. With the genuinely-async guest seam the guest overlaps the
- *  round trips itself — one Promise.all over NET_SEND fires W per-peer requests at
- *  once (the host driving them concurrently) — so W bounds the peak in flight.
- *  PUT and GET share one window: they have never been tuned apart in practice. */
+  /** How many per-holder STORE/FETCH sub-batches a PUT/GET pushes or pulls
+   *  concurrently — windows the bulk transfers when a transport's frame cap
+   *  splits a holder's blocks across many messages (binds hardest on WebRTC's
+   *  ~64 KB channel; a no-op on a large-cap transport like WS). PUT and GET
+   *  share one window; never tuned apart in practice. */
   fanoutWindow: number;
-  /** Max bytes in one batched OFFER/STORE/FETCH message. Every per-holder batch is
-   *  split to stay under it, so a single message both fits the transport's frame cap
-   *  AND transfers within the request timeout — and the holder (synchronous in the
-   *  confined realm) only ever hashes/admits/serves one capped batch at a time. Set
-   *  per transport: a WS/TCP frame holds up to 16 MB, but a multi-MB transfer can
-   *  outrun a tight request timeout, so the default stays ~1 MB; a WebRTC data
-   *  channel reassembles only ~64 KB, so the browser demo drops it to ~48 KB. (The
-   *  browser picks the value from the connection mode.) */
+  /** Max bytes in one batched OFFER/STORE/FETCH message — split to fit the
+   *  transport's frame cap and stay within the request timeout. ~1 MB default;
+   *  the browser demo drops it to ~48 KB for WebRTC's ~64 KB channel. */
   maxMessageBytes: number;
-  /** Target plaintext bytes per streamed PUT/GET window (§3). The host driver feeds
-   *  the guest one chunk-aligned window at a time and awaits it fully — OFFER, STORE,
-   *  and acks — before the next, so the whole window's ciphertext is dropped before
-   *  more plaintext crosses in and the guest heap never holds the file. Bigger windows
-   *  mean fewer inter-window barriers (less link idle on a fat/low-loss path) but a
-   *  larger peak guest footprint (≈ n/k× the window in ciphertext, peaking at ~3× the
-   *  plaintext window at RS(1,1)). When unset the host derives it from realmMemoryBytes
-   *  (≈ realmMemoryBytes / 3, rounding to the nearest chunk-aligned multiple); explicit
-   *  override stays for benchmarking. The confined guest reads it from the injected APP
-   *  and never keeps its own copy. */
+  /** Target plaintext bytes per streamed PUT/GET window (§3): the guest heap
+   *  never holds the whole file. Bigger windows mean fewer inter-window barriers
+   *  but a larger peak footprint (≈3× the window at RS(1,1)). When unset, derived
+   *  from realmMemoryBytes (~/3); explicit override wins for benchmarking. */
   windowTargetBytes?: number;
-  /** Memory budget for the guest realm's QuickJS heap. The host derives
-   *  windowTargetBytes from it (~realmMemoryBytes / 3, since peak heap footprint is
-   *  ≈ 3× the plaintext window at RS(1,1)), so the two real flow-control knobs are
-   *  this (the memory number) and maxMessageBytes (the transport number). Host-only:
-   *  it is split back out of the guest's config and passed as THIS BUNDLE's realm bound
-   *  (seedkernel §12.3 `LoadBundleOptions.realmMemoryBytes`), never shell-wide — the
-   *  transport bundle shares the shell and needs none of it. Default 64 MiB (the shared
-   *  seedkernel default). */
+  /** Memory budget for the guest realm's QuickJS heap; windowTargetBytes derives
+   *  from it (~/3) when unset. Host-only — passed as THIS BUNDLE's realm bound
+   *  (seedkernel §12.3), never shell-wide, so the transport guest doesn't get it. */
   realmMemoryBytes?: number;
-  /** Misbehaving-peer simulator (a test/operations knob, read by the guest's
-   *  holder path): when true, every FETCH this node serves answers FETCH_UNANSWERED
-   *  for every id — even ones it holds. Exercises the READER's §18 no-progress
-   *  invariant (a peer that never decides a block is ruled a miss, never re-asked
-   *  forever) without needing a second, patched bundle. Never set by a deployment;
-   *  absent ≡ honest serving. */
+  /** Misbehaving-peer test knob: when true, every FETCH answers FETCH_UNANSWERED
+   *  for every id, exercising the reader's §18 no-progress invariant. Never set
+   *  by a real deployment. */
   lieOnFetch?: boolean;
 }
 
@@ -72,28 +47,19 @@ export const DEFAULT_FANOUT_WINDOW = 16;
  *  windowTargetBytes is derived from this (~ /3) unless explicitly overridden. */
 export const DEFAULT_REALM_MEMORY_BYTES = 64 * 1024 * 1024;
 
-/** Default target plaintext bytes per streamed PUT/GET window (§3): 4 MiB. The legacy
- *  conservative default; when realmMemoryBytes is set (explicitly or via the 64 MiB
- *  DEFAULT_REALM_MEMORY_BYTES) the host derives windowTargetBytes from it (~ /3) instead.
- *  The explicit override — set directly via cmdline or benchmark config — always wins. */
+/** Default target plaintext bytes per streamed PUT/GET window (§3): 4 MiB, used
+ *  only when realmMemoryBytes is also unset. An explicit override always wins. */
 export const DEFAULT_WINDOW_TARGET_BYTES = 4 * 1024 * 1024;
 
 /** Default committed-tier byte budget (§14) when the operator sets none: 64 MiB.
- *  Quota is OPERATOR policy, not author content, so it is not part of StorageConfig
- *  and is never signed into a bundle: a driver supplies it at boot (StorageNode's
- *  `quota` option, a shell's boot config) and it is injected into the guest's APP.
- *  The confined holder is the only thing that ENFORCES it — this is just the number
- *  a host-side node injects when its operator named none. A driver that injects
- *  nothing leaves the guest to fail closed at 0 rather than guess a generous default. */
+ *  Quota is operator policy, never signed into a bundle — a driver supplies it at
+ *  boot and it's injected into the guest's APP; the holder alone enforces it. */
 export const DEFAULT_QUOTA_BYTES = 64 * 1024 * 1024;
 
-/** The block size a real DEPLOYMENT uses — the single value the signed bundle and the
- *  CLI derive their geometry from, so "production geometry" is one named constant, not a
- *  magic number copied per site. 256 KiB keeps a k=2 codec request at the 512 KiB the
- *  deployed codec's scratch is proven on, and one block + framing well inside the default
- *  maxMessageBytes (the serveFetch response bound). The browser demo deliberately picks a
- *  per-transport size instead (bigger on WS, tiny on WebRTC's ~64 KiB channel), so it does
- *  NOT consume this — but see it referenced there for why those diverge. */
+/** The block size a real DEPLOYMENT uses — one named constant so "production
+ *  geometry" isn't a magic number copied per site. 256 KiB keeps a k=2 codec
+ *  request within the deployed codec's proven scratch size. The browser demo
+ *  picks its own per-transport size instead and does not use this. */
 export const PRODUCTION_BLOCK_SIZE = 256 * 1024;
 
 /** NB the bare blockSize default is TEST-SCALE — 256 bytes, so unit tests exercise
@@ -101,20 +67,13 @@ export const PRODUCTION_BLOCK_SIZE = 256 * 1024;
  *  bundle producer, a demo page) must pass a real block size (PRODUCTION_BLOCK_SIZE);
  *  baking this default into a deployment chunks a 10 MB file into ~41k blocks. */
 export function defaultConfig(k = 2, m = 2, blockSize = 256): StorageConfig {
-  // (k, m, blockSize) is the whole of the durability dial. Everything derivable from it
   return {
     k,
     m,
     blockSize,
     fanoutWindow: DEFAULT_FANOUT_WINDOW,
-    // ~1 MiB: a batch transfers well inside a typical request timeout and keeps a
-    // synchronous holder's per-message work small, while still collapsing per-block
-    // round trips. A transport with a tighter frame cap (WebRTC) lowers it.
-    maxMessageBytes: 1 << 20,
-    // windowTargetBytes and realmMemoryBytes are both unset here — the two real
-    // flow-control knobs. When omitted the host derives windowTargetBytes from
-    // realmMemoryBytes (≈ /3, peak guest footprint ratio), and when both are
-    // omitted the host applies DEFAULT_WINDOW_TARGET_BYTES as a safe floor.
+    maxMessageBytes: 1 << 20, // ~1 MiB; a tighter-frame-cap transport (WebRTC) lowers it
+    // windowTargetBytes/realmMemoryBytes left unset: derived at boot (see normaliseConfig).
   };
 }
 
@@ -125,20 +84,12 @@ const CONFIG_KEYS: ReadonlySet<string> = new Set([
   ...Object.keys(defaultConfig()), "realmMemoryBytes", "windowTargetBytes", "lieOnFetch",
 ]);
 
-/** Reject unknown keys in a caller-supplied config (StorageConfig is a closed set).
- *
- *  Worth a runtime check because every driver that passes one is plain JS — the tests,
- *  the CLI scripts, the browser demo — so TypeScript's excess-property check never runs
- *  and a misspelled knob is silently ignored: the node runs on the default and the caller
- *  is never told their setting did nothing. That failure is invisible in exactly the way
- *  a tuning knob must not be (a wrong fanoutWindow reads as a perf result, not a bug).
- *
- *  `quota` is called out by name because it is not a typo but a genuine collision: it IS
- *  operator policy, spelled inside the `localConfig` a seedkernel shell takes per bundle
- *  load — but here it is a SIBLING option (StorageNodeOptions.quota), deliberately outside
- *  StorageConfig so it can never be spread into an author-signed bundle config
- *  (scripts/storage-bundle.mjs). Drivers that stand up shells and StorageNodes side by
- *  side (tests/holder-guest.test.mjs) do have both spellings in view at once. */
+/** Reject unknown keys in a caller-supplied config (StorageConfig is a closed
+ *  set). Worth a runtime check since every driver passing one is plain JS, so
+ *  TypeScript's excess-property check never runs and a misspelled knob would
+ *  silently no-op. `quota` gets a dedicated message: it's a genuine collision
+ *  with a SIBLING option (StorageNodeOptions.quota), deliberately kept out of
+ *  StorageConfig so it can never be spread into a signed bundle config. */
 export function assertStorageConfig(config?: Partial<StorageConfig>): void {
   if (!config) return;
   for (const key of Object.keys(config)) {
@@ -164,10 +115,8 @@ export function assertStorageConfig(config?: Partial<StorageConfig>): void {
 export function normaliseConfig(raw: Partial<Record<string, unknown>>): Partial<StorageConfig> {
   const c: Partial<StorageConfig> = { ...raw } as Partial<StorageConfig>;
 
-  // Derive windowTargetBytes from realmMemoryBytes when not explicitly set. Peak guest
-  // heap footprint is ≈ n/k× the window in ciphertext, peaking at ~3× the plaintext
-  // window at RS(1,1), so a third of the realm budget is a safe window. The caller can
-  // always pass an explicit windowTargetBytes (or --wtarget) for benchmarking.
+  // Peak guest heap footprint peaks at ~3× the plaintext window (RS(1,1)), so a
+  // third of the realm budget is a safe window when not explicitly overridden.
   if (c.windowTargetBytes == null) {
     const realm = c.realmMemoryBytes ?? DEFAULT_REALM_MEMORY_BYTES;
     c.windowTargetBytes = Math.round(realm / 3);
@@ -176,14 +125,7 @@ export function normaliseConfig(raw: Partial<Record<string, unknown>>): Partial<
   return c;
 }
 
-/** peer_id is the hex of a peer's channel public key (§2) — WHO a peer is, and the one
- *  identity the address book is keyed on.
- *
- *  Stated here rather than imported. It used to come from `seedkernel-wasm/net`, the
- *  `Network`/`Endpoint` pair the host implemented; that pair is gone (the transport is a
- *  guest serving the local service name `_net`, so a fabric interface the host implements
- *  would describe an object nobody holds), and the alias moved to the kernel's
- *  `core/socket-seam.ts`, which is not an exported entry. It is a string either way — the
- *  same shape the loopback fabric's structural `RawLink` is stated for, and for the same
- *  reason. */
+/** peer_id is the hex of a peer's channel public key (§2) — the identity the
+ *  address book is keyed on. Stated here rather than imported: the kernel's own
+ *  alias lives in `core/socket-seam.ts`, not an exported entry. */
 export type PeerId = string;

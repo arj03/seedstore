@@ -1,12 +1,9 @@
 // Headless storage-over-RtcNetwork smoke: an owner + N holders, all werift-backed
-// RtcNetworks wired by an IN-PROCESS signaling hub (no relay process, no WebSocket),
-// connect over real WebRTC (ICE → DTLS → SCTP on loopback) and PUT → GET a file.
-//
-// This is the node-parity of the relay + STUN path browser/p2p.html runs: the SAME
-// RtcNetwork + StorageNode, only the signaling rendezvous is in-memory here instead
-// of the relay WebSocket (relaySignaling), and loopback host candidates stand in for
-// STUN-punched ones. A green smoke means the console serveRtc holder path is sound;
-// the real demo only swaps the in-memory hub for `relaySignaling(relay/room)`.
+// RtcNetworks wired by an IN-PROCESS signaling hub (no relay process, no
+// WebSocket), connect over real WebRTC (ICE -> DTLS -> SCTP on loopback) and
+// PUT -> GET a file. Node-parity of the relay + STUN path browser/p2p.html runs —
+// the same RtcNetwork + StorageNode, with loopback candidates standing in for
+// STUN-punched ones; the real demo just swaps in `relaySignaling(relay/room)`.
 //
 //   node scripts/smoke-rtc.mjs            (or: bun scripts/smoke-rtc.mjs)   HOLDERS=n
 
@@ -37,15 +34,11 @@ if (RELAY && typeof WebSocket === "undefined") {
   process.exit(1);
 }
 
-// An in-memory N-party signaling hub: every JSON signal from one member is delivered
-// to all OTHER members in the room — exactly what seedchat's scripts/relay.mjs does over a
-// WebSocket, minus the network. RtcNetwork filters by from/to itself.
-//
-// Delivery is DEFERRED (setTimeout 0), not synchronous: RtcNetwork's perfect-
-// negotiation state machine assumes signals arrive asynchronously (as they do over
-// the relay WebSocket). Delivering them synchronously/reentrantly inside send()
-// reorders the offer/answer/ICE handshake and wedges the mesh — only the first pair
-// links. So we mimic the network's async hop.
+// An in-memory N-party signaling hub: every JSON signal from one member is
+// delivered to all OTHER members (RtcNetwork filters by from/to itself).
+// Delivery is DEFERRED (setTimeout 0): RtcNetwork's perfect-negotiation state
+// machine assumes async arrival, and a synchronous/reentrant send() reorders the
+// offer/answer/ICE handshake and wedges the mesh.
 function makeSignalingHub() {
   const members = new Set();
   return () => {
@@ -72,25 +65,19 @@ const wasm = await loadWasmBytes();
 const join = RELAY ? () => relaySignaling(`${RELAY}/${encodeURIComponent(ROOM)}`) : makeSignalingHub();
 // Loopback host candidate so every pair connects with no STUN (the smoke is offline).
 const pcFactory = weriftPeerConnectionFactory({ iceAdditionalHostAddresses: ["127.0.0.1"] });
-// Small file — replicated to every holder (≤ blockSize); 48 KiB stays under werift's
-// 64 KiB data-channel reassembly cap on the receiving (console) side. maxMessageBytes
-// holds a batched OFFER/STORE/FETCH to the same ceiling, so a larger file can't pack
-// a batch past the data channel either.
+// Small file, replicated to every holder; 48 KiB stays under werift's 64 KiB
+// data-channel reassembly cap, and maxMessageBytes holds batched OFFER/STORE/
+// FETCH to the same ceiling.
 const config = { k: 1, m: HOLDERS, blockSize: 48 * 1024, maxMessageBytes: 48 * 1024 };
 
-// The room's shared contact secret. A cohort in one room is symmetric — every node both
-// accepts and dials — so one value serves as both the secret we demand of callers and
-// the one we present when dialing. Gating this smoke (rather than running it open) is
-// what makes it cover the credential path the real demos use, not just the transport.
+// The room's shared, symmetric contact secret. Gating this smoke (rather than
+// running it open) covers the credential path the real demos use too.
 const CONTACT = process.env.CONTACT
   ? Uint8Array.from(process.env.CONTACT.match(/../g).map((b) => parseInt(b, 16)))
   : sodium.randombytes_buf(32);
 
-// The transport is a signed bundle: each node boots a shared shell with it admitted
-// (the node's network standing — no TCP/WS listeners, a WebRTC-edge node), then the
-// RtcNetwork puts the WebRTC socket seam under the driver. The geometry does not ride in
-// here — app config travels with the load that wants it, so it goes on
-// StorageNode.create and the transport guest never sees it.
+// A WebRTC-edge node (no TCP/WS listeners); storage geometry does not ride
+// here — it goes on StorageNode.create, so the transport guest never sees it.
 async function makeNode(contact = CONTACT) {
   const identity = (() => { const kp = sodium.crypto_sign_keypair(); return { publicKey: kp.publicKey, privateKey: kp.privateKey }; })();
   const entry = { identity, node: null, shell: null, transport: null };
@@ -145,11 +132,8 @@ try {
   const got = await owner.node.get(r.root, r.key);
   const roundTrip = bytesEqual(got, data);
 
-  // Negative: a stranger with the right room but the WRONG contact secret. It reaches
-  // signaling and gets as far as a data channel — the gate is in the handshake, not the
-  // rendezvous — and then draws nothing. Refusal is SILENT by design (§12.6.2), so the
-  // only observable is a peer that never links; we assert exactly that, giving it the
-  // same 30 s the real holders got so a slow werift handshake can't fake a pass.
+  // Negative: a stranger with the right room but the WRONG contact secret. Refusal
+  // is SILENT by design (§12.6.2), so we assert "never links" within the same 30 s window.
   const stranger = await makeNode(sodium.randombytes_buf(32));
   nodes.push(stranger);
   stranger.node = await StorageNode.create({

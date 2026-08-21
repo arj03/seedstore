@@ -1,19 +1,13 @@
 // The holder side, confined (the runtime split — full Target B). Where
-// shell-run.test.mjs proved a generic seedkernel-shell runs the *initiator* side as
-// signed content, this proves the *request* side too: a shell serving HAVE / OFFER /
-// STORE / FETCH — admission control, the §6 sibling rule, content-addressing, the
-// §14 quota, and the <hex>.blk/.dsc fs writes — entirely from the confined guest,
-// with zero storage-specific host code in the runtime.
+// shell-run.test.mjs proved a generic seedkernel-shell runs the *initiator* side
+// as signed content, this proves the *request* side too: a shell serving
+// HAVE/OFFER/STORE/FETCH — admission, the §6 sibling rule, content-addressing,
+// §14 quota, and the fs writes — entirely from the confined guest.
 //
-// The holder path is async now, like the initiator's: a holder answers from local
-// fs, and the fs seam is asynchronous on every backend (seedkernel core/fs.ts).
-// What once kept the two roles from interleaving — the realm's synchronous second
-// entry (`callSync`, which never pumped the job queue) — is now the realm's
-// explicit per-realm FIFO (seedkernel realm-queue.ts): one entrypoint runs to
-// completion before the next begins, so an inbound request to a node whose
-// initiator is parked waits for the queue to drain rather than being answered
-// around. The concurrency group below still overlaps two initiators — the
-// serialization costs round trips on a busy realm, never correctness.
+// The holder path is async, like the initiator's. The realm's per-realm FIFO
+// (seedkernel realm-queue.ts) keeps the two roles from interleaving: an
+// inbound request to a node whose initiator is parked waits for the queue to
+// drain, costing round trips on a busy realm, never correctness.
 //
 //   node tests/holder-guest.test.mjs
 //   bun  tests/holder-guest.test.mjs
@@ -83,30 +77,21 @@ export async function run(t) {
       timeoutMs: TIMEOUT,
     });
     await transport.start(); // bind the loopback port the cohort dials
-    // A generic shell + the signed storage bundle is a storage node: the manifest
-    // claims STORAGE_PROTO and the load routes it (§12.10), so nothing here points the
-    // protocol anywhere — and nothing arms it either, the load stands the guest.
-    //
-    // The operator's settings go on THIS LOAD, not on the shell (seedkernel §12.4), and
-    // reach the guest as `LOCAL`. NB this is the SHELL's spelling: a StorageNode takes
-    // quota as a sibling option instead (`StorageNode.create({ quota })`) and rejects it
-    // inside `config`. Both drivers run in this file, so the two are easy to confuse.
-    // blockSize goes back to test scale — the bundle ships PRODUCTION 256 KiB, which
-    // would make these tiny files single-block/replicated instead of exercising RS.
+    // A generic shell + the signed storage bundle is a storage node: the
+    // manifest claims STORAGE_PROTO and the load routes it (§12.10). Operator
+    // settings go on THIS LOAD as `LOCAL` (seedkernel §12.4) — note this is the
+    // SHELL's spelling of quota; StorageNode takes it as a sibling option instead.
+    // blockSize goes back to test scale (the bundle ships PRODUCTION 256 KiB).
     const loaded = await shell.loadBundle(bundlePath, {
       localConfig: { quota: 64 * 1024 * 1024, blockSize: 1024 },
     });
-    // The app key rides the load's handle: a node with a network has at least two apps
-    // loaded — the storage bundle and the transport, an ordinary app serving the local
-    // service name `_net` (§12.10) — so "the only loaded app" is not something an
-    // `invoke` caller can mean any more, and the handle carries the key with the binding.
+    // The app key rides the load's handle: a node with a network runs ≥2 apps
+    // (storage + transport), so "the only loaded app" isn't unambiguous for `invoke`.
     return { shell, peerId: toHex(identity.publicKey), net: transport, appKey: loaded.key };
   }
-  // Dial every pair (addresses + ready). The cohort each guest sees is the TRANSPORT's
-  // authenticated set — it asks `_net` for its peers — so linking the nodes is the whole
-  // of the wiring: there is no host-side roster to mirror into a closure any more, and no
-  // way for one to disagree with the links. `addPeer` stays for a StorageNode, whose
-  // cohort is its own durable app state (and what `connect` teaches an address for).
+  // Dial every pair (addresses + ready). Each guest's cohort is the TRANSPORT's
+  // authenticated set (it asks `_net` for peers), so linking IS the wiring.
+  // `addPeer` stays for a StorageNode, whose cohort is its own durable app state.
   const connectAll = async (net, entries) => {
     for (const e of entries) {
       for (const o of entries) {
@@ -149,15 +134,12 @@ export async function run(t) {
       const net = new LoopbackNetwork();
       const shells = [];
       for (let i = 0; i < 5; i++) shells.push(await bootShell(net));
-      // A host-side StorageNode (plain JS — no QuickJS) is a second, concurrent
-      // initiator + holder in the same cohort, so two PUTs overlap. The realm
-      // serializes: a shell whose initiator is parked answers inbound requests as
-      // its queue drains (the parker's own round trips to free realms settle in
-      // microseconds on the loopback), so the overlap costs latency on a busy
-      // realm — never correctness.
+      // A host-side StorageNode (plain JS) is a second, concurrent initiator +
+      // holder in the same cohort, so two PUTs overlap. The realm serializes —
+      // costing latency on a busy realm, never correctness.
       const [sn] = await createConnectedCohort({
-        // Same signed bundle as the shells ⇒ same author scope (cross-path parity).
-        // blockSize back to test scale so this tiny file takes the RS path across the cohort.
+        // Same signed bundle as the shells (cross-path parity); blockSize back to
+        // test scale so this tiny file takes the RS path.
         count: 1, network: net, sodium, wasm: { bundleBlob }, config: { blockSize: 1024 }, timeoutMs: TIMEOUT,
       });
       const all = [...shells, { shell: null, peerId: sn.peerId, net: sn.net, addPeer: (p) => sn.addPeer(p) }];

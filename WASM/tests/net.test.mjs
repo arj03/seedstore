@@ -4,11 +4,9 @@
 //   - a full cohort over real TCP sockets, blocks landing on holders' disks
 //   - a browser-like node reaching a server node over a real WebSocket
 //
-// The transport's own behaviour — RFC 6455 framing, the AKE, the contact-secret
-// gate — now lives in seedkernel (the transport bundle + `./net-node` export) and
-// is tested there. This file keeps only the storage-level integration on top of
-// it: nodes boot on the real NodeChannelFactory socket seam, with the signed
-// transport bundle admitting first, exactly as a shell-run node does.
+// The transport's own behaviour (RFC 6455 framing, AKE, contact-secret gate)
+// lives in seedkernel and is tested there; this file covers only the
+// storage-level integration on top of the real NodeChannelFactory socket seam.
 
 import { mkdtempSync, rmSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -77,11 +75,10 @@ export async function run(t) {
   const wasm = await loadWasmBytes();
 
   // ── FsBlobView ─────────────────────────────────────────────────────────────
-  // A pure READ view of the durable store.local layout (§12): the write half —
-  // admission, the §14 quota, the <hex>.blk/.dsc writes — belongs to the confined
-  // guest holder alone (protocol.test.mjs drives it over the real wire). So this
-  // writes the layout the way the guest does, through `fs.*`, and checks the view
-  // reads it back.
+  // A pure READ view of the durable store.local layout (§12) — the write half
+  // (admission, quota, the writes) belongs to the confined guest holder alone
+  // (protocol.test.mjs drives it over the real wire). This writes the layout
+  // the way the guest does, through `fs.*`, and checks the view reads it back.
   t.group("FsBlobView: reading back the durable store.local layout (§12)");
   {
     const dir = mkdtempSync(join(tmpdir(), "seedstore-fs-"));
