@@ -15,12 +15,11 @@
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 
-import { signManifest, hybridAuthorKeysFromSeed, packBundle, genesisHash, MANIFEST_FILE, GUEST_FILE, moduleFile }
+import { authorBundle, hybridAuthorKeysFromSeed, moduleFile }
   from "seedkernel-wasm/bundle";
 import { GUEST_ABI_VERSION } from "seedkernel-wasm/guest-seam";
 import { defaultConfig, PRODUCTION_BLOCK_SIZE } from "../build/host/core.js";
 import { STORAGE_PROTO } from "../build/host/manifest.js";
-import { toHex } from "../build/host/util.js";
 
 // The app name — the manifest `app` and the `app` component of the signing scope
 // (README §16). The shell scopes the guest's SIGN/VERIFY ops to (author, app);
@@ -78,27 +77,25 @@ export function writeStorageBundle({ path, sodium, sk, pk, build, version = 1, l
   // The loader derives each module's kernel name from `(app, name)` (seedkernel
   // §5.1), so there is no bind name to state here.
   const modSpecs = ["codec", "reputation"];
-  const files = {};
 
-  // The two pure handlers (§17); the manifest commits to each module's genesisHash.
-  const modules = modSpecs.map((name) => {
-    const wasm = new Uint8Array(readFileSync(join(build, moduleFile(name))));
-    files[moduleFile(name)] = wasm;
-    const hash = toHex(genesisHash(sodium, wasm));
-    log(`  ${name}: bytesHash ${hash}`);
-    return { name, hash };
-  });
+  // The two pure handlers (§17); authorBundle hashes each module's bytes into the
+  // signed manifest — no hash computed here.
+  const modules = modSpecs.map((name) => ({
+    name, wasm: new Uint8Array(readFileSync(join(build, moduleFile(name)))),
+  }));
 
   // Ship the comment-stripped guest (scripts/minify.mjs, `node --check`-gated) to
-  // keep the signed bundle small; the content hash below covers these exact bytes.
-  const guestText = readFileSync(join(build, "host-min", "tier2-guest.js"), "utf8");
-  files[GUEST_FILE] = new TextEncoder().encode(guestText);
+  // keep the signed bundle small; the content hash authorBundle derives covers
+  // these exact bytes.
+  const guestSource = new TextEncoder().encode(
+    readFileSync(join(build, "host-min", "tier2-guest.js"), "utf8"));
 
   // Must carry PRODUCTION geometry — defaultConfig()'s bare blockSize is
   // test-scale (256 bytes); leaking that in here once chunked a 10 MB file into
   // ~41k blocks. PRODUCTION_BLOCK_SIZE keeps this site and the CLI from drifting.
   const cfg = defaultConfig(undefined, undefined, PRODUCTION_BLOCK_SIZE);
-  const manifest = {
+
+  const { blob, manifest } = authorBundle(sodium, authorKeysFor(sodium, sk), {
     app: APP_NAME,
     // Monotonic freshness mark per (author, app): the shell refuses a downgrade
     // below its high-water mark (README §12.4). Bump on every publish.
@@ -108,26 +105,24 @@ export function writeStorageBundle({ path, sodium, sk, pk, build, version = 1, l
     // sender and receiver can't drift apart.
     protocols: [STORAGE_PROTO],
     modules,
-    guest: {
-      hash: toHex(genesisHash(sodium, files[GUEST_FILE])),
-      // Read from the runtime, not a literal, so a seam change breaks this
-      // build rather than surfacing as a wrong answer at the first host.call.
-      abi: GUEST_ABI_VERSION,
-      requires: [...STORAGE_REQUIRES],
-      // The AUTHOR's config, injected as `const APP = …` exactly as signed. The
-      // shell merges nothing into it; LOCAL (operator settings) arrives beside
-      // it and the guest's CFG picks precedence. No `quota` here — LOCAL-only.
-      config: {
-        k: cfg.k, m: cfg.m, blockSize: cfg.blockSize,
-        maxMessageBytes: cfg.maxMessageBytes,
-        fanoutWindow: cfg.fanoutWindow,
-        windowTargetBytes: cfg.windowTargetBytes,
-      },
+    guestSource,
+    // Read from the runtime, not a literal, so a seam change breaks this
+    // build rather than surfacing as a wrong answer at the first host.call.
+    guestAbi: GUEST_ABI_VERSION,
+    guestRequires: [...STORAGE_REQUIRES],
+    // The AUTHOR's config, injected as `const APP = …` exactly as signed. The
+    // shell merges nothing into it; LOCAL (operator settings) arrives beside
+    // it and the guest's CFG picks precedence. No `quota` here — LOCAL-only.
+    guestConfig: {
+      k: cfg.k, m: cfg.m, blockSize: cfg.blockSize,
+      maxMessageBytes: cfg.maxMessageBytes,
+      fanoutWindow: cfg.fanoutWindow,
+      windowTargetBytes: cfg.windowTargetBytes,
     },
-  };
+  });
+  for (const mod of manifest.modules) log(`  ${mod.name}: bytesHash ${mod.hash}`);
 
-  files[MANIFEST_FILE] = signManifest(sodium, authorKeysFor(sodium, sk), manifest);
   mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(path, packBundle(files));
+  writeFileSync(path, blob);
   return manifest;
 }
