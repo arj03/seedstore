@@ -15,11 +15,9 @@
 // `npm run build:host && npm run build:host:min`.
 
 import { mkdirSync, copyFileSync, existsSync, readdirSync, statSync, rmSync,
-         readFileSync, writeFileSync } from "node:fs";
+         readFileSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-
-import { unpackBundle, MANIFEST_FILE } from "seedkernel-wasm/bundle";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = join(__dirname, "..");
@@ -153,8 +151,8 @@ await copyJs(seedstoreHost, join(out, "host"));
 await copyJs(seedkernelHost, join(out, "seedkernel"));
 
 // ML-DSA-65, the PQ half of seedkernel's one manifest suite (§12.4). p2p.html
-// mixes it into its sodium instance so `verifyManifest` can read the cohort's
-// author id; without it no manifest verifies and the page falls back silently
+// mixes it into its sodium instance so `verifyBundle` can read the cohort's
+// author id; without it no bundle verifies and the page falls back silently
 // to the zero-author scope.
 {
   const src = join(root, "..", "..", "seedkernel", "WASM", "browser", "mldsa65.wasm");
@@ -251,28 +249,13 @@ for (const [pkg, sub, dest, files, allMjs] of VENDOR) {
   for (const n of names) await copy(join(src, n), join(dstDir, n));
 }
 
-// The signed bundle manifest, if a bundle has been built (`npm run build:bundle`).
-// p2p.html reads its author public key to auto-derive the cohort's signing
-// scope. Absent -> the page falls back to the zero-author default.
-//
-// A bundle is one blob (seedkernel §12.4); unpack it and stage ONLY the
-// manifest envelope (a standalone signed artifact `verifyManifest` checks on
-// its own) — the *.wasm payloads and guest stay on the holders.
+// The signed bundle, if one has been built (`npm run build:bundle`). ONE artifact
+// for both jobs: a browser page boots a StorageNode on it, fetching ./seedstore.skb
+// exactly like a Node node reads bundle/seedstore.skb, and reads its verified author
+// to auto-derive the cohort's signing scope. Absent -> the zero-author default.
 const bundleBlob = [join(root, "bundle", "seedstore.skb"), join(build, "bundle", "seedstore.skb")]
   .find((p) => existsSync(p));
-let bundleManifest = false;
-if (bundleBlob) {
-  // Stage the whole signed bundle too: a browser page boots a StorageNode on
-  // it, fetching ./seedstore.skb exactly like a Node node reads bundle/seedstore.skb.
-  await copy(bundleBlob, join(out, "seedstore.skb"));
-  const files = unpackBundle(new Uint8Array(readFileSync(bundleBlob)));
-  if (files[MANIFEST_FILE]) {
-    const dst = join(out, MANIFEST_FILE);
-    writeFileSync(dst, files[MANIFEST_FILE]);
-    staged.add(resolve(dst)); // unpacked, not copy()'d, so register it or prune eats it
-    bundleManifest = true;
-  }
-}
+if (bundleBlob) await copy(bundleBlob, join(out, "seedstore.skb"));
 
 // Every browser page, into the one dir.
 for (const page of ["index.html", "p2p.html"]) {
@@ -356,8 +339,8 @@ function prune(dir) {
 prune(out);
 
 console.log(`browser demo staged at ${out}  (deps vendored under ./vendor — runs offline)`);
-console.log(bundleManifest
-  ? "cohort author: p2p.html auto-reads ./manifest.bundle (bundle present)"
+console.log(bundleBlob
+  ? "cohort author: p2p.html auto-reads ./seedstore.skb (bundle present)"
   : "cohort author: no ./bundle — p2p.html defaults to zero-author scope (run `npm run build:bundle` for a seedloader cohort)");
 console.log("serve it:   npm run serve:demo        (re-stages + http-server with caching OFF)");
 console.log("  ── DO NOT use a plain `http-server` without -c-1: its default max-age=3600 makes");

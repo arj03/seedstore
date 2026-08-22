@@ -182,13 +182,13 @@ const config = { ...defaultConfig(kParam, mParam, blockSize), maxMessageBytes, f
 const peerUp = new Set();
 let onQuorum = null;
 const { bootTransportShell } = await import("../build/host/storage-node.js");
-const { shell, transport } = await bootTransportShell({
+const runtime = await bootTransportShell({
   sodium: wrapTransportSodium(sodium),
   identity,
   timeoutMs,
 });
 const net = new WsNetwork({
-  driver: transport,
+  driver: runtime.transport,
   webSocketFactory: wsFactory,
   connsPerPeer: connsN,
   onPeerUp: (pid) => { node?.addPeer(pid); peerUp.add(pid); console.log(`link up: ${pid.slice(0, 8)}…`); if (peerUp.size >= specs.length) onQuorum?.(); },
@@ -196,7 +196,7 @@ const net = new WsNetwork({
 });
 
 // `config` is this node's LOCAL — it reaches the guest with the bundle load.
-let node = await createStorageNode({ shell, transport, identity, config, quota: DEFAULT_QUOTA_BYTES, timeoutMs });
+let node = await createStorageNode({ runtime, config, quota: DEFAULT_QUOTA_BYTES, timeoutMs });
 for (const pid of peerUp) node.addPeer(pid);
 console.log(`node ready: RS(${kParam},${mParam}), ${blockSize / 1024} KiB blocks, batch ${Math.round(maxMessageBytes / 1024)} KiB, window ${windowN}, conns/peer ${connsN}, wtarget ${wtargetMB > 0 ? wtargetMB + " MB" : "4 MiB (default)"}, heap ${heapMB > 0 ? heapMB + " MB" : "64 MiB (default)"}, timeout ${timeoutMs} ms`);
 

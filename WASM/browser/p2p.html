@@ -114,12 +114,12 @@
 </div>
 <div class="row muted">
   cohort bundle author:
-  <input id="author" class="mono" type="text" style="width:28rem;max-width:100%" placeholder="auto-read from ./manifest.bundle — override with a 64-hex author id, or blank for a browser-only cohort" />
+  <input id="author" class="mono" type="text" style="width:28rem;max-width:100%" placeholder="auto-read from ./seedstore.skb — override with a 64-hex author id, or blank for a browser-only cohort" />
 </div>
 <p class="muted" style="margin:.2rem 0 0">
   Descriptor signatures are <strong>scoped to the deployment's bundle author</strong> (README §16): a holder running a
   signed bundle (a <code>seedloader</code>) only admits blocks signed under that author's scope. This is filled in for you
-  from the deployment's <code>manifest.bundle</code>; override only to join a different cohort, or clear it when every
+  from the deployment's <code>seedstore.skb</code>; override only to join a different cohort, or clear it when every
   holder is another browser tab / a default zero-author <code>StorageNode</code>. A mismatch makes holders silently decline every block.
 </p>
 <div class="row">
@@ -150,11 +150,11 @@
 <script type="module">
 import sodium from "seedkernel-wasm/libsodium";
 import { loadCrypto } from "seedkernel-wasm/crypto-browser";
-import { createStorageNode } from "./host/browser.js";
+import { createStorageNode, loadWasmBytes } from "./host/browser.js";
 import { bootTransportShell } from "./host/storage-node.js";
 import { RtcNetwork, relaySignaling } from "seedkernel-wasm/net-rtc";
 import { WsNetwork } from "seedkernel-wasm/net-ws";
-import { verifyManifest } from "seedkernel-wasm/bundle";
+import { verifyBundle } from "seedkernel-wasm/bundle";
 
 // k=1, m=1: replication r = m+1 = 2 — each block is copied to two distinct holders
 // (RS(1,·) is replication in disguise, so the guest takes the replication path, not
@@ -253,35 +253,32 @@ const log = (m) => { logEl.textContent += m + "\n"; logEl.scrollTop = logEl.scro
 const hex = (b) => [...b].map((x) => x.toString(16).padStart(2, "0")).join("");
 const fromHex = (s) => new Uint8Array(s.match(/.{1,2}/g)?.map((h) => parseInt(h, 16)) ?? []);
 
-// The cohort's signing scope is its bundle author (README §16). The demo stages the
-// deployment's manifest.bundle next to the page (build-browser-demo.mjs). Read its
-// author so a browser joining a seedloader cohort matches the holders' scope
-// automatically. Absent (no bundle staged) → null → zero-author default.
+// The cohort's signing scope is its bundle author (README §16). Read it off the
+// staged ./seedstore.skb so a browser joining a seedloader cohort matches the
+// holders' scope automatically. Absent (no bundle staged) → null → zero-author.
 //
-// `verifyManifest` rather than a slice off the front: an author id is a derivation, not
+// `verifyBundle` rather than a slice off the front: an author id is a derivation, not
 // a fixed offset (seedkernel §12.4) — a hash over BOTH of the author's public keys,
 // which no amount of slicing produces. Verifying also means the scope this page adopts
-// came from a manifest whose signature checked, not from bytes a static server happened
-// to serve.
-// Crypto (sumo libsodium + ML-DSA-65 + ML-KEM-768) readies eagerly here, shared by
-// this check and boot() below (seedkernel-wasm/crypto-browser's loadCrypto) —
-// verifyManifest needs the PQ half mixed onto sodium, and boot() needs it
-// regardless of whether a manifest.bundle is even staged.
+// came from a signature that checked, not from bytes a static server happened to serve.
+//
+// One fetch, one artifact: this promise is the SAME bundle boot() loads, and crypto
+// (sumo libsodium + ML-DSA-65 + ML-KEM-768) readies eagerly beside it — verifyBundle
+// needs the PQ half mixed onto sodium, and boot() needs it either way.
 const cryptoReady = loadCrypto(sodium, "./");
+const bundleReady = loadWasmBytes("./");
+// Marked handled: with an explicit ?author= nothing awaits this until Connect, and an
+// unstaged bundle is legal — every awaiting site has its own try/catch.
+bundleReady.catch(() => {});
 async function detectCohortAuthor() {
   try {
-    const r = await fetch("./manifest.bundle", { cache: "no-store" });
-    if (!r.ok) return null;
-    const env = new Uint8Array(await r.arrayBuffer());
-    await cryptoReady;
-    const v = verifyManifest(sodium, env);
-    if (!v) log("staged manifest.bundle did not verify — falling back to the zero-author scope.");
-    return v ? hex(v.author) : null;
+    const [{ bundleBlob }] = await Promise.all([bundleReady, cryptoReady]);
+    return hex(verifyBundle(sodium, bundleBlob).author);
   } catch (e) {
-    // A missing bundle is the ordinary case (fetch 404s, handled above); reaching here
-    // means the manifest was there and unreadable — an unsupported future suite, or a
-    // truncated file. Say so, because the fallback silently costs the user every block.
-    log(`could not read the cohort author from manifest.bundle (${e.message}) — using the zero-author scope.`);
+    // verifyBundle throws rather than returning null, so this is the one failure
+    // path: no bundle staged (the ordinary browser-only cohort), or one that did
+    // not verify. Soft — say so, because the fallback silently costs every block.
+    log(`could not read the cohort author from ./seedstore.skb (${e.message}) — using the zero-author scope.`);
     return null;
   }
 }
@@ -372,27 +369,27 @@ async function boot() {
     // reaches the shell, which also hosts the transport.
     const config = { ...CONFIG, blockSize: blockSizeFor(mode), maxMessageBytes: maxMessageBytesFor(mode),
       windowTargetBytes: windowTargetBytesFor(mode), realmMemoryBytes: realmMemoryBytesFor() };
-    const { shell, transport: transportHost } = await bootTransportShell({
+    const runtime = await bootTransportShell({
       sodium, identity, timeoutMs,
       contactSecret,
     });
     if (mode === "ws") {
       net = new WsNetwork({
-        driver: transportHost,
+        driver: runtime.transport,
         webSocketFactory: (u) => new WebSocket(u),
         connsPerPeer: connsPerPeerFor(mode),
         onPeerUp, onPeerDown,
       });
     } else {
       net = new RtcNetwork({
-        driver: transportHost,
+        driver: runtime.transport,
         rtcConfig: RTC_CONFIG, signaling: relaySignaling(relayUrl),
         peerContactFor: () => contactSecret,
         onPeerUp, onPeerDown,
       });
     }
 
-    log("loading wasm + booting the storage node on the seedkernel…");
+    log("booting the storage node on the seedkernel (the staged ./seedstore.skb)…");
     // Descriptor signatures are scoped to the cohort's bundle author (README §16). A
     // holder running a signed bundle (a seedloader) verifies under that author's scope,
     // so this node must sign under the SAME author or every block it offers is declined.
@@ -407,7 +404,7 @@ async function boot() {
       $("author").value = authorHex; // reflect the auto-detected scope in the UI
     }
     node = await createStorageNode({
-      shell, transport: transportHost, sodium, identity, baseUrl: "./", config,
+      runtime, sodium, wasm: await bundleReady, config,
       quota: 64 * 1024 * 1024, timeoutMs, signAuthor,
     });
     // Log the LIVE config the coordinator actually uses (after defaultConfig

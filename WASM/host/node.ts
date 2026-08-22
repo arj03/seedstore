@@ -41,8 +41,10 @@ export async function createStorageNode(
   const sodium = await loadSodium();
   const wasm = opts.wasm ?? (await loadWasmBytes(opts.dir));
   const { network, ...rest } = opts;
+  // Only on the build-your-own-runtime path: a prebuilt `runtime` already has a
+  // socket seam and the identity it registered under.
   let o = rest;
-  if (network) {
+  if (network && !o.runtime) {
     const identity = o.identity ?? generateKeyPair(sodium);
     o = { ...o, identity, channels: network.view(toHex(identity.publicKey)), listen: { host: "127.0.0.1", port: 0 } };
   }

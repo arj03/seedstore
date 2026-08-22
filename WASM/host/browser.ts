@@ -16,11 +16,14 @@ export interface WasmBytes {
  *  the old three (codec.wasm + reputation.wasm + tier2-guest.js). */
 export async function loadWasmBytes(baseUrl: string | URL = "./"): Promise<WasmBytes> {
   const base = typeof baseUrl === "string" ? baseUrl : baseUrl.href;
+  const url = base + "seedstore.skb";
   // no-store: the bundle is versioned together with the host JS, so a stale
   // HTTP-cached copy would silently shadow a fresh host.
-  const bundleBlob = new Uint8Array(
-    await (await fetch(base + "seedstore.skb", { cache: "no-store" })).arrayBuffer(),
-  );
+  const r = await fetch(url, { cache: "no-store" });
+  // Without this a 404's HTML body reaches the verifier and surfaces as the
+  // baffling "bundle: no manifest in the blob".
+  if (!r.ok) throw new Error(`could not fetch ${url} — HTTP ${r.status} ${r.statusText}`);
+  const bundleBlob = new Uint8Array(await r.arrayBuffer());
   return { bundleBlob };
 }
 
@@ -39,9 +42,11 @@ export async function createStorageNode(
   const wasm = opts.wasm ?? (await loadWasmBytes(opts.baseUrl));
   const { network, ...rest } = opts;
   // The in-process fabric needs the identity BEFORE the node boots (its view is
-  // keyed by peer id), so mint one here when the caller left it to the node.
+  // keyed by peer id), so mint one here when the caller left it to the node. Only
+  // on the build-your-own-runtime path: a prebuilt `runtime` already has both a
+  // socket seam and the identity it registered under.
   let o = rest;
-  if (network) {
+  if (network && !o.runtime) {
     const identity = o.identity ?? (() => { const kp = sodium.crypto_sign_keypair(); return { publicKey: kp.publicKey, privateKey: kp.privateKey }; })();
     o = { ...o, identity, channels: network.view(toHex(identity.publicKey)), listen: { host: "127.0.0.1", port: 0 } };
   }

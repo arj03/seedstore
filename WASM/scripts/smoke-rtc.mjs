@@ -80,14 +80,12 @@ const CONTACT = process.env.CONTACT
 // here — it goes on StorageNode.create, so the transport guest never sees it.
 async function makeNode(contact = CONTACT) {
   const identity = (() => { const kp = sodium.crypto_sign_keypair(); return { publicKey: kp.publicKey, privateKey: kp.privateKey }; })();
-  const entry = { identity, node: null, shell: null, transport: null };
-  const built = await bootTransportShell({
+  const entry = { node: null, runtime: null };
+  entry.runtime = await bootTransportShell({
     sodium, identity, timeoutMs: 8000, contactSecret: contact,
   });
-  entry.shell = built.shell;
-  entry.transport = built.transport;
   entry.net = new RtcNetwork({
-    driver: entry.transport,
+    driver: entry.runtime.transport,
     signaling: join(), peerConnectionFactory: pcFactory,
     peerContactFor: () => contact,
     onPeerUp: (pid) => entry.node?.addPeer(pid),
@@ -101,7 +99,7 @@ let ok = false;
 try {
   for (let i = 0; i < HOLDERS + 1; i++) {
     const e = await makeNode();
-    e.node = await StorageNode.create({ shell: e.shell, transport: e.transport, sodium, ...wasm, identity: e.identity, config, quota: 64 * 1024 * 1024, timeoutMs: 8000 });
+    e.node = await StorageNode.create({ runtime: e.runtime, sodium, ...wasm, config, quota: 64 * 1024 * 1024, timeoutMs: 8000 });
     nodes.push(e);
   }
   const owner = nodes[0];
@@ -137,7 +135,7 @@ try {
   const stranger = await makeNode(sodium.randombytes_buf(32));
   nodes.push(stranger);
   stranger.node = await StorageNode.create({
-    shell: stranger.shell, transport: stranger.transport, sodium, ...wasm, identity: stranger.identity, config, timeoutMs: 8000 });
+    runtime: stranger.runtime, sodium, ...wasm, config, timeoutMs: 8000 });
   stranger.net.join();
   const before = owner.node.cohortPeers().length;
   const t1 = Date.now();

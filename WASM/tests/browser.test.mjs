@@ -24,6 +24,7 @@ export async function run(t) {
     const path = name === "seedstore.skb" ? join(buildDir, "..", "bundle", name) : join(buildDir, name);
     const buf = readFileSync(path);
     return {
+      ok: true, status: 200, statusText: "OK",
       arrayBuffer: async () => buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength),
       text: async () => buf.toString("utf8"),
     };

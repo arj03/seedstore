@@ -5,8 +5,8 @@
 // bundles (§12.4) — first the transport bundle (§12.6), then the seedstore one.
 // Handlers arrive only via the verified bundle loader, never raw-bound.
 //
-// A caller that already stands a shell up (a WebRTC/WS node) passes it in via
-// `shell` + `transport`; StorageNode then loads only the seedstore bundle on it.
+// A caller that already stands a shell up (a WebRTC/WS node) passes the whole
+// `runtime` in; StorageNode then loads only the seedstore bundle on it.
 
 import type { Fs } from "seedkernel-wasm/fs";
 import { MemoryFs } from "seedkernel-wasm/fs-memory";
@@ -57,18 +57,26 @@ export interface PutResult {
   replicasIntended: number;
 }
 
+/** A prebuilt runtime: the shell, the channel adapter it was built on, and the
+ *  identity it registered under. One value, from `bootTransportShell()`. */
+export interface StorageRuntime {
+  shell: Shell;
+  transport: TransportHost;
+  identity: Identity;
+}
+
 export interface StorageNodeOptions {
-  /** A pre-built seedkernel shell with the transport bundle already admitted and
-   *  its listeners started (a WebRTC/WS node). Absent, StorageNode builds its own
-   *  shell from `channels`/`listen` below. */
-  shell?: Shell;
-  /** The channel adapter that shell was built on. Required alongside `shell` —
-   *  the shell itself doesn't expose it (`bootTransportShell` returns both). */
-  transport?: TransportHost;
+  /** A prebuilt runtime with the transport bundle already admitted and its
+   *  listeners started (a WebRTC/WS node), from `bootTransportShell()`. Present,
+   *  its `identity` is this node's and `opts.identity` is not read. Absent,
+   *  StorageNode builds its own from `channels`/`listen` below. */
+  runtime?: StorageRuntime;
   sodium: Sodium;
   /** The signed seedstore bundle blob (seedstore.skb), loaded through the §12.4
    *  bundle loader (verify manifest, govern policy, install handlers). */
   bundleBlob: Uint8Array;
+  /** This node's signing identity. Only read when StorageNode builds its own
+   *  runtime; minted if absent. With `runtime`, `runtime.identity` is the one. */
   identity?: Identity;
   config?: Partial<StorageConfig>;
   fs?: Fs;
@@ -97,7 +105,7 @@ export interface StorageNodeOptions {
   connsPerPeer?: number;
   /** The signed transport bundle blob. Defaults to the one shipped in the
    *  seedkernel artifact; an operator who pins a different transport author
-   *  builds their own. Only read when StorageNode builds its own shell. */
+   *  builds their own. Only read when StorageNode builds its own runtime. */
   transportBlob?: Uint8Array;
   /** Override the cohort's signing scope author: sign descriptors under this
    *  author instead of the loaded bundle's (used when joining a cohort whose
@@ -190,30 +198,33 @@ export class StorageNode {
     this.config = { ...defaultConfig(merged.k, merged.m, merged.blockSize), ...merged };
   }
 
-  /** Boot a storage node: stand up the shared shell (or take the caller's), load
-   *  the transport bundle (unless a shell was handed in), then the seedstore
-   *  bundle. Handlers arrive solely via the §12.4 bundle loader. */
+  /** Boot a storage node: take the caller's prebuilt runtime, or stand one up here
+   *  (shell + transport bundle), then load the seedstore bundle onto it. Handlers
+   *  arrive solely via the §12.4 bundle loader. */
   static async create(opts: StorageNodeOptions): Promise<StorageNode> {
     await opts.sodium.ready;
 
-    const identity = opts.identity ?? (() => {
-      const kp = opts.sodium.crypto_sign_keypair();
-      return { publicKey: kp.publicKey, privateKey: kp.privateKey };
-    })();
-
     const cohort = new Set<PeerId>();
 
-    // The shell to load onto: the caller's, or one built here. Either way the fs
-    // backend comes back on the load's handle, so host reads and guest writes share it.
-    const ownsShell = opts.shell === undefined;
-    if (opts.shell && !opts.transport) {
-      throw new Error(
-        "StorageNode: a caller-supplied `shell` must come with the `transport` adapter it was built on " +
-        "— the shell does not expose one (seedkernel §12.6); bootTransportShell() returns both.");
-    }
-    const built = opts.shell ? null : await buildShell(opts, identity);
-    const shell = opts.shell ?? built!.shell;
-    const net = opts.transport ?? built!.transport;
+    // The runtime to load onto: the caller's, or one built here — and its identity
+    // is this node's, so peerId can never drift from what the transport registered
+    // under. Either way the fs backend comes back on the load's handle, so host
+    // reads and guest writes share it.
+    const ownsShell = opts.runtime === undefined;
+    const runtime = opts.runtime ?? await bootTransportShell({
+      sodium: opts.sodium,
+      identity: opts.identity ?? (() => {
+        const kp = opts.sodium.crypto_sign_keypair();
+        return { publicKey: kp.publicKey, privateKey: kp.privateKey };
+      })(),
+      fs: opts.fs, channels: opts.channels,
+      listen: opts.listen, wsListen: opts.wsListen, networkKey: opts.networkKey,
+      contactSecret: opts.contactSecret, admitPeers: opts.admitPeers,
+      connsPerPeer: opts.connsPerPeer, timeoutMs: opts.timeoutMs,
+      transportBlob: opts.transportBlob,
+      now: opts.clock,
+    });
+    const { shell, transport: net, identity } = runtime;
 
     // Anything past this point can throw (blob verify, config check), and must not
     // leave a shell we stood up running with nothing to close it. A caller's own
@@ -390,11 +401,11 @@ export class StorageNode {
   }
 }
 
-/** Build the shell a StorageNode loads its bundles onto: the platform seam (fs,
+/** Build the runtime a StorageNode loads its bundles onto: the platform seam (fs,
  *  channel adapter, realm factory) plus the transport bundle admitted first, with
- *  listeners started. Wraps the kernel's `bootShell`; returns the shell, the
- *  `TransportHost` (the shell itself doesn't expose it), and the fs instance it
- *  was built with (for a caller with no fs of its own). */
+ *  listeners started. Wraps the kernel's `bootShell`; returns the `StorageRuntime`
+ *  StorageNode takes as `runtime` — the shell, the `TransportHost` (the shell
+ *  itself doesn't expose it), and the identity both registered under. */
 export async function bootTransportShell(
   opts: {
     sodium: Sodium; identity: Identity;
@@ -407,7 +418,7 @@ export async function bootTransportShell(
     createRealm?: RealmFactory;
     now?: () => number;
   },
-): Promise<{ shell: Shell; transport: TransportHost; fs: Fs }> {
+): Promise<StorageRuntime> {
   const fs = opts.fs ?? new MemoryFs();
   const { shell, transport } = await bootShell({
     sodium: opts.sodium, identity: opts.identity, fs,
@@ -433,20 +444,7 @@ export async function bootTransportShell(
     // the transport author pin and revocation/downgrade guard are bootShell's/the shell's.
     admit: () => true,
   });
-  return { shell, transport, fs };
-}
-
-/** Build the shell a StorageNode loads its bundles onto. Returns what
- *  `bootTransportShell` returns. */
-async function buildShell(opts: StorageNodeOptions, identity: Identity): Promise<{ shell: Shell; transport: TransportHost; fs: Fs }> {
-  return bootTransportShell({
-    sodium: opts.sodium, identity, fs: opts.fs, channels: opts.channels,
-    listen: opts.listen, wsListen: opts.wsListen, networkKey: opts.networkKey,
-    contactSecret: opts.contactSecret, admitPeers: opts.admitPeers,
-    connsPerPeer: opts.connsPerPeer, timeoutMs: opts.timeoutMs,
-    transportBlob: opts.transportBlob,
-    now: opts.clock,
-  });
+  return { shell, transport, identity: opts.identity };
 }
 
 /** This installation's settings for the storage bundle, as the `LOCAL` the guest
