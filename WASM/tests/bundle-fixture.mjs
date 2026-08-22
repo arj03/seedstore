@@ -4,7 +4,6 @@
 // producer are byte-identical and cannot drift.
 
 import { writeStorageBundle, authorKeysFor } from "../scripts/storage-bundle.mjs";
-import { hybridAuthorId } from "seedkernel-wasm/bundle";
 
 /** @param path   where to write the bundle blob (seedkernel §12.4 — one file).
  *  @param build  absolute path to seedstore's build/ dir (holds the codec wasm + the staged guest).
@@ -13,6 +12,5 @@ import { hybridAuthorId } from "seedkernel-wasm/bundle";
  *           hash, which is what a policy `authors` entry and every kernel name pin. */
 export async function buildBundle(path, author, sodium, build, version = 1) {
   const keys = authorKeysFor(sodium, author.privateKey);
-  writeStorageBundle({ path, sodium, sk: keys.ed.privateKey, pk: keys.ed.publicKey, build, version });
-  return hybridAuthorId(sodium, keys.ed.publicKey, keys.mlDsa.publicKey);
+  return writeStorageBundle({ path, sodium, sk: keys.ed.privateKey, build, version }).author;
 }

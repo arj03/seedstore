@@ -14,8 +14,8 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { loadCrypto } from "seedkernel-wasm";
-import { verifyBundle, hybridAuthorId } from "seedkernel-wasm/bundle";
-import { writeStorageBundle, authorKeysFor } from "./storage-bundle.mjs";
+import { verifyBundle } from "seedkernel-wasm/bundle";
+import { writeStorageBundle } from "./storage-bundle.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = join(__dirname, "..");
@@ -32,16 +32,15 @@ const sodium = await loadCrypto();
 // name is derived from the signed `(app, name)` pair at load time (seedkernel §5.1).
 
 // Author identity: the key the bundle is signed with (and that installs are
-// signed with). A deployment's policy lists this public key as an allowed author.
+// signed with). Policy pins the derived key-set id (§12.4), not this Ed25519 key.
 const keyPath = join(root, "seedstore-author.key");
 const versionPath = join(root, "seedstore-author.version");
-let sk, pk, mintedKey = false;
+let sk, mintedKey = false;
 if (existsSync(keyPath)) {
   sk = fromHex(readFileSync(keyPath, "utf8").trim());
-  pk = sk.slice(32);
 } else {
   const kp = sodium.crypto_sign_keypair();
-  sk = kp.privateKey; pk = kp.publicKey;
+  sk = kp.privateKey;
   writeFileSync(keyPath, toHex(sk), { mode: 0o600 });
   mintedKey = true;
   console.log(`  minted author key → ${keyPath}`);
@@ -72,7 +71,7 @@ if (existsSync(versionPath)) {
 }
 const version = prevVersion + 1;
 
-const manifest = writeStorageBundle({ path: bundlePath, sodium, sk, pk, build, version, log: console.log });
+const { manifest, author } = writeStorageBundle({ path: bundlePath, sodium, sk, build, version, log: console.log });
 
 // Record the new high-water mark beside the key, so the next publish counts on from here
 // even if bundle/ is wiped.
@@ -80,7 +79,7 @@ writeFileSync(versionPath, `${manifest.version}\n`);
 
 // The pinned id is the derived author id (the key-set hash, §12.4) — a manifest is
 // signed by both halves of the key set, so the Ed25519 key is not what policy lists.
-const authKeys = authorKeysFor(sodium, sk);
-console.log(`  author ${toHex(hybridAuthorId(sodium, authKeys.ed.publicKey, authKeys.mlDsa.publicKey))} (hybrid 0x02)`);
+// It is carried on the writeStorageBundle value, not re-derived here.
+console.log(`  author ${toHex(author)} (hybrid 0x02)`);
 console.log(`  wrote ${bundlePath} (app ${manifest.app} v${manifest.version}, ${manifest.modules.length} modules, `
   + `requires ${manifest.guest.requires.join("+")})`);

@@ -18,7 +18,7 @@ import { dirname, join } from "node:path";
 import { authorBundle, hybridAuthorKeysFromSeed, moduleFile }
   from "seedkernel-wasm/bundle";
 import { GUEST_ABI_VERSION } from "seedkernel-wasm/guest-seam";
-import { defaultConfig, PRODUCTION_BLOCK_SIZE } from "../build/host/core.js";
+import { defaultConfig, normaliseConfig, PRODUCTION_BLOCK_SIZE } from "../build/host/core.js";
 import { STORAGE_PROTO } from "../build/host/manifest.js";
 
 // The app name — the manifest `app` and the `app` component of the signing scope
@@ -65,14 +65,15 @@ const STORAGE_REQUIRES = [
  * @param {string} o.path     output bundle file (e.g. ./bundle/seedstore.skb)
  * @param {any}    o.sodium   loaded libsodium (hashes the module bytes; signs the manifest)
  * @param {Uint8Array} o.sk   author secret key — the Ed25519 half (signs the manifest)
- * @param {Uint8Array} o.pk   author public key
  * @param {string} o.build    seedstore build/ dir (holds the codec wasm + staged guest)
  * @param {number} [o.version] monotonic-per-(author,app) freshness mark (README §12.4);
  *                             the shell refuses a load below its high-water mark. Integer.
  * @param {(s:string)=>void} [o.log]  optional progress logger
- * @returns the manifest object that was signed (for logging/inspection).
+ * @returns {{blob: Uint8Array, manifest: object, author: Uint8Array}} the signed blob,
+ *  the manifest that was signed, and the derived author id — the key-set hash a policy
+ *  `authors` entry pins, on the value rather than re-derived by the caller.
  */
-export function writeStorageBundle({ path, sodium, sk, pk, build, version = 1, log = () => {} }) {
+export function writeStorageBundle({ path, sodium, sk, build, version = 1, log = () => {} }) {
   if (!Number.isInteger(version)) throw new Error("writeStorageBundle: version must be an integer");
   // The loader derives each module's kernel name from `(app, name)` (seedkernel
   // §5.1), so there is no bind name to state here.
@@ -86,16 +87,20 @@ export function writeStorageBundle({ path, sodium, sk, pk, build, version = 1, l
 
   // Ship the comment-stripped guest (scripts/minify.mjs, `node --check`-gated) to
   // keep the signed bundle small; the content hash authorBundle derives covers
-  // these exact bytes.
-  const guestSource = new TextEncoder().encode(
-    readFileSync(join(build, "host-min", "tier2-guest.js"), "utf8"));
+  // these exact bytes (the guest is authored as TEXT — what verification decodes
+  // back before re-checking, bundle.ts).
+  const guestSource = readFileSync(join(build, "host-min", "tier2-guest.js"), "utf8");
 
   // Must carry PRODUCTION geometry — defaultConfig()'s bare blockSize is
   // test-scale (256 bytes); leaking that in here once chunked a 10 MB file into
   // ~41k blocks. PRODUCTION_BLOCK_SIZE keeps this site and the CLI from drifting.
-  const cfg = defaultConfig(undefined, undefined, PRODUCTION_BLOCK_SIZE);
+  // normaliseConfig then fills the derived windowTargetBytes the SAME way boot
+  // does — without it the key copies `undefined`, which the signed manifest
+  // silently DROPS, so what is signed omits a field the author just declared
+  // (and authorBundle refuses: a non-JSON value cannot be signed).
+  const cfg = normaliseConfig(defaultConfig(undefined, undefined, PRODUCTION_BLOCK_SIZE));
 
-  const { blob, manifest } = authorBundle(sodium, authorKeysFor(sodium, sk), {
+  const { blob, manifest, author } = authorBundle(sodium, authorKeysFor(sodium, sk), {
     app: APP_NAME,
     // Monotonic freshness mark per (author, app): the shell refuses a downgrade
     // below its high-water mark (README §12.4). Bump on every publish.
@@ -124,5 +129,5 @@ export function writeStorageBundle({ path, sodium, sk, pk, build, version = 1, l
 
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, blob);
-  return manifest;
+  return { blob, manifest, author };
 }
