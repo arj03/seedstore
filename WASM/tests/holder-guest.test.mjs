@@ -59,7 +59,7 @@ export async function run(t) {
   const bundleBlob = new Uint8Array(readFileSync(bundlePath));
   const policyJson = JSON.stringify({
     authors: [toHex(authorId)],
-    grants: { link: [transportHex], route: [transportHex] },
+    grants: { link: [transportHex] },
   });
   const tmpDirs = [bundleDir];
 
@@ -222,3 +222,4 @@ if (import.meta.url === `file://${process.argv[1]}` || process.argv[1]?.endsWith
   const t = makeT();
   run(t).then(() => process.exit(t.summary() > 0 ? 1 : 0));
 }
+
