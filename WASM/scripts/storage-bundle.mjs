@@ -4,11 +4,9 @@
 // holding each module's wasm, the guest, and the signed manifest envelope; the
 // manifest commits to every module's genesisHash (seedkernel §12.4, §5.1).
 //
-// Three deliberate choices:
+// Two deliberate choices:
 //   • `requires` declares fine-grained authority NAMES, not capability domains —
 //     the shell enforces them as the exact set a guest's host.call may reach.
-//   • `abi` is read from the runtime constant (seedkernel §12.2), never a
-//     literal, so a seam change fails this build, not a node's first request.
 //   • `quota` and anything runtime-derived (e.g. the signing scope) are absent
 //     from the signed config — both are host-applied facts, never author content.
 
@@ -17,7 +15,6 @@ import { dirname, join } from "node:path";
 
 import { authorBundle, hybridAuthorKeysFromSeed, moduleFile }
   from "seedkernel-wasm/bundle";
-import { GUEST_ABI_VERSION } from "seedkernel-wasm/guest-seam";
 import { defaultConfig, normaliseConfig, PRODUCTION_BLOCK_SIZE } from "../build/host/core.js";
 import { STORAGE_PROTO } from "../build/host/manifest.js";
 
@@ -111,9 +108,6 @@ export function writeStorageBundle({ path, sodium, sk, build, version = 1, log =
     protocols: [STORAGE_PROTO],
     modules,
     guestSource,
-    // Read from the runtime, not a literal, so a seam change breaks this
-    // build rather than surfacing as a wrong answer at the first host.call.
-    guestAbi: GUEST_ABI_VERSION,
     guestRequires: [...STORAGE_REQUIRES],
     // The AUTHOR's config, injected as `const APP = …` exactly as signed. The
     // shell merges nothing into it; LOCAL (operator settings) arrives beside
