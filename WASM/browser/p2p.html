@@ -21,26 +21,28 @@
   #token { background:#f0f0f0; padding:.4rem; border-radius:4px; word-break:break-all; }
 </style>
 <!-- Browser-native, no bundler. The host imports the kernel with bare, EXTENSIONLESS
-     specifiers ("seedkernel-wasm/safe-js"), so each is mapped explicitly to its real
-     ./seedkernel/*.js file — a folder-prefix map ("seedkernel-wasm/" → "./seedkernel/")
-     can't be used because it would resolve to an extensionless path a static server
-     404s. The minified kernel tree ships as host/ + core/ (host modules import
-     ../core/* by relative path). safe-js is the QuickJS sandbox the storage node runs
-     the guest in. Its engine is the kernel's own quickjs-ng build, staged into
-     ./seedkernel/quickjs/ with its .wasm beside it — the same engine the kernel's Node
-     tests run and, at the same source pin, the Go loader; the JS layer over it
-     (quickjs-emscripten-core and the quickjs-ffi-types it names) is VENDORED into
-     ./vendor/ by scripts/build-browser-demo.mjs, so the demo runs fully offline and
-     every bare specifier in that graph has a map entry. Sumo libsodium is likewise NOT
-     vendored: it comes from the kernel as the "seedkernel-wasm/libsodium" export — the
-     prebuilt wrapper staged into ./seedkernel/ next to its core and its
-     libsodium.wasm, which is the same crypto binary the Go loader embeds. This
-     project's host is relative (./host/). -->
+     specifiers ("seedkernel-wasm/shell-core"), so each is mapped explicitly to its
+     real ./seedkernel/*.js file — a folder-prefix map ("seedkernel-wasm/" →
+     "./seedkernel/") can't be used because it would resolve to an extensionless path
+     a static server 404s. The minified kernel tree ships as host/ + core/ (host
+     modules import ../core/* by relative path). Only specifiers this page's graph
+     actually NAMES need an entry: shell-core pulls its safe-js realm and its module
+     table in by RELATIVE import, so neither is mapped. safe-js is the QuickJS sandbox
+     the storage node runs the guest in, and safe-js.js DOES name
+     "seedkernel-wasm/quickjs" — that entry is live. Its engine is the kernel's own
+     quickjs-ng build, staged into ./seedkernel/quickjs/ with its .wasm beside it — the
+     same engine the kernel's Node tests run and, at the same source pin, the Go
+     loader; the JS layer over it (quickjs-emscripten-core and the quickjs-ffi-types
+     it names) is VENDORED into ./vendor/ by scripts/build-browser-demo.mjs, so the
+     demo runs fully offline and every bare specifier in that graph has a map entry.
+     Sumo libsodium is likewise NOT vendored: it comes from the kernel as the
+     "seedkernel-wasm/libsodium" export — the prebuilt wrapper staged into
+     ./seedkernel/ next to its core and its libsodium.wasm, which is the same crypto
+     binary the Go loader embeds. This project's host is relative (./host/). -->
 <script type="importmap">
 {
   "imports": {
     "seedkernel-wasm/shell-core":     "./seedkernel/host/shell-core.js",
-    "seedkernel-wasm/module-table":   "./seedkernel/host/module-table.js",
     "seedkernel-wasm/bundle":         "./seedkernel/host/bundle.js",
     "seedkernel-wasm/crypto-browser": "./seedkernel/host/crypto-browser.js",
     "seedkernel-wasm/guest-seam":     "./seedkernel/host/guest-seam.js",
@@ -50,7 +52,6 @@
     "seedkernel-wasm/transport-bundle": "./seedkernel/host/transport-bundle.js",
     "seedkernel-wasm/net-rtc":        "./seedkernel/host/net-rtc.js",
     "seedkernel-wasm/net-ws":         "./seedkernel/host/net-ws.js",
-    "seedkernel-wasm/safe-js":        "./seedkernel/host/safe-js.js",
     "seedkernel-wasm/libsodium":      "./seedkernel/libsodium-wrappers.mjs",
     "seedkernel-wasm/quickjs":        "./seedkernel/quickjs/variant.mjs",
     "quickjs-emscripten-core":        "./vendor/quickjs-emscripten-core/index.mjs",

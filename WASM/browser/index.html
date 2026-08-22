@@ -14,27 +14,28 @@
   .muted { color: #666; }
 </style>
 <!-- The host code is platform-neutral. The kernel is imported with bare,
-     EXTENSIONLESS specifiers ("seedkernel-wasm/safe-js"), so each maps explicitly to
-     its real ./seedkernel/*.js file (a folder-prefix map would resolve to an
+     EXTENSIONLESS specifiers ("seedkernel-wasm/shell-core"), so each maps explicitly
+     to its real ./seedkernel/*.js file (a folder-prefix map would resolve to an
      extensionless path a static server 404s). The minified kernel tree ships as
      host/ + core/ (host modules import ../core/* by relative path); the seedstore
      host needs shell-core, the bundle loader, the guest seam, the transport driver +
-     the artifact transport bundle (the signed program that IS the node's network),
-     and safe-js. safe-js is the QuickJS sandbox the storage node runs the guest in.
-     Its engine is the kernel's own quickjs-ng build, staged into ./seedkernel/quickjs/
-     with its .wasm beside it; the JS layer over it (quickjs-emscripten-core and the
+     the artifact transport bundle (the signed program that IS the node's network).
+     Only specifiers this page's graph actually NAMES need an entry: shell-core pulls
+     its safe-js realm and its module table in by RELATIVE import, so neither is
+     mapped. safe-js is the QuickJS sandbox the storage node runs the guest in, and
+     safe-js.js DOES name "seedkernel-wasm/quickjs" — that entry is live. Its engine
+     is the kernel's own quickjs-ng build, staged into ./seedkernel/quickjs/ with its
+     .wasm beside it; the JS layer over it (quickjs-emscripten-core and the
      quickjs-ffi-types it names) is VENDORED into ./vendor/ by
      scripts/build-browser-demo.mjs, with a map entry per bare specifier in that graph,
-     so the demo runs fully offline. Sumo
-     libsodium is likewise NOT vendored: it comes from the kernel, as the
-     "seedkernel-wasm/libsodium" export — the prebuilt wrapper staged into
-     ./seedkernel/ next to its core and its libsodium.wasm, which is the same crypto
-     binary the Go loader embeds. -->
+     so the demo runs fully offline. Sumo libsodium is likewise NOT vendored: it comes
+     from the kernel, as the "seedkernel-wasm/libsodium" export — the prebuilt wrapper
+     staged into ./seedkernel/ next to its core and its libsodium.wasm, which is the
+     same crypto binary the Go loader embeds. -->
 <script type="importmap">
 {
   "imports": {
     "seedkernel-wasm/shell-core":     "./seedkernel/host/shell-core.js",
-    "seedkernel-wasm/module-table":   "./seedkernel/host/module-table.js",
     "seedkernel-wasm/bundle":         "./seedkernel/host/bundle.js",
     "seedkernel-wasm/crypto-browser": "./seedkernel/host/crypto-browser.js",
     "seedkernel-wasm/guest-seam":     "./seedkernel/host/guest-seam.js",
@@ -42,7 +43,6 @@
     "seedkernel-wasm/fs-memory":      "./seedkernel/host/fs-memory.js",
     "seedkernel-wasm/transport-host": "./seedkernel/host/transport-host.js",
     "seedkernel-wasm/transport-bundle": "./seedkernel/host/transport-bundle.js",
-    "seedkernel-wasm/safe-js":        "./seedkernel/host/safe-js.js",
     "seedkernel-wasm/libsodium":      "./seedkernel/libsodium-wrappers.mjs",
     "seedkernel-wasm/quickjs":        "./seedkernel/quickjs/variant.mjs",
     "quickjs-emscripten-core":        "./vendor/quickjs-emscripten-core/index.mjs",
