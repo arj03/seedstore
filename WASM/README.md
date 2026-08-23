@@ -7,10 +7,8 @@ node runs the same protocol in Node, in Bun, and in the browser.
 
 ## seed store is content, not a binary
 
-The deployable artifact is the **generic seedkernel runtime** (the "shell"). It
-exposes only **raw-byte surfaces** — the ungated `crypto/*` primitive catalog,
-the bare-name module call, the `fs`/`node`/`clock` services, raw `link` sockets
-— and knows nothing about storage. seed store ships as **signed content** that
+The deployable artifact is the **generic seedkernel runtime** (the "shell"),
+which knows nothing about storage. seed store ships as **signed content** that
 the shell loads and *becomes* a storage node:
 
 ```
@@ -30,9 +28,8 @@ quota — is **seed store's**, and lives in the bundle. The kernel only moves
 opaque bytes. So the same shell can host storage or any other signed app, and a
 storage upgrade is new content, not a new binary (spec §2.1, §17). The runtime
 side of this — the shell, the guest seam and its grants, the confinement realms,
-and the bundle format — is documented in
-[seedkernel](https://github.com/arj03/seedkernel)'s README ("The runtime as an
-app host").
+and the bundle format — is documented in [seedkernel §12](https://github.com/arj03/seedkernel/blob/main/docs/RUNTIME.md)
+and [EXPORTS](https://github.com/arj03/seedkernel/blob/main/docs/EXPORTS.md).
 
 ## What lives where, and why
 
@@ -61,65 +58,53 @@ nonce convention on top of the scoped `node/sign`/`node/verify` pair
 
 **The one realm.** Storage runs its whole guest in a single confined realm
 seedkernel provides (§12.3), over its genuinely-async seam: the initiator
-(PUT/GET/repair) fans out over `_net` and awaits *real* promises
-(`await Promise.all(...)`), and the holder side answers from local `fs` + crypto,
-both through the realm's `call()`. The fs seam is asynchronous on every backend
-(seedkernel core/fs.ts — a synchronous `get` is a shape no browser backend can
-implement), so the holder awaits its store ops exactly as the initiator awaits
-its round trips. What once kept the two roles from interleaving — a synchronous
-second entry (`callSync`) that never pumped the job queue — is now the realm's
-explicit per-realm FIFO (seedkernel realm-queue.ts): one entrypoint runs to
-completion before the next begins, so an inbound request to a node whose
-initiator is parked waits for the queue to drain — the serialization cost the
-runtime documents, and the price of a holder that may `await` its own store.
-`StorageNode` (`host/storage-node.ts`) keeps a host-side copy of both sides as the
-reference/parity path — the role the host-side classes play in the tests — but
-the **shipped** node runs the confined guest.
+(PUT/GET/repair) fans out over `_net` and awaits *real* promises, and the holder
+side answers from local `fs` + crypto, both through the realm's `call()`. The
+fs seam is asynchronous on every backend, and the realm's per-realm FIFO
+(seedkernel realm-queue.ts) runs one entrypoint to completion before the next —
+so an inbound request to a node whose initiator is parked waits for the queue to
+drain: the serialization cost the runtime documents, and the price of a holder
+that may `await` its own store. `StorageNode` (`host/storage-node.ts`) keeps a
+host-side copy of both sides as the reference/parity path — the role the
+host-side classes play in the tests — but the **shipped** node runs the confined
+guest.
 
 ## Signing scope, existence, and bundle versioning
 
-Three seedkernel runtime contracts reach into the storage code, and each has a
-seedstore-side counterpart worth pinning down. The contracts themselves are
-documented on the runtime side — the **scoped sign pair** (`node/sign`/
-`node/verify`: a guest signature is over `DOMAIN_guest ‖ scope ‖ msg`, the
-`scope` host-derived from the admitted manifest and applied on both paths; the
-pure `crypto/ed25519/verify` primitive stays raw — seedkernel §12.2),
-**existence-by-size** (no
-`FS_HAS`; a key exists iff `FS_SIZE ≥ 0`, and `./fs` is
-`get`/`put`/`size`/`list`/`delete`/`stat` — seedkernel §12.1–§12.2), and the
-**monotonic bundle `version`** that refuses a downgrade (seedkernel §12.4). The
-spec-side story is in the [seed store spec](../README.md) (§16). This section is
+Three seedkernel runtime contracts reach into the storage code, each with a
+seedstore-side counterpart worth pinning down. The contracts are documented on
+the runtime side — in [RUNTIME §12](https://github.com/arj03/seedkernel/blob/main/docs/RUNTIME.md) —
+and the spec side in the [seed store spec](../README.md) (§16); this section is
 the code map for where each lands in this repo — the guest, the host parity
 mirror, and the bundle producer:
 
-1. **Signatures are scoped on both paths**
-   (`host/tier2-guest.orchestration.js`). The descriptor envelope stays
-   `[authorPk 32][sig 64][core ..]` — the prefix is preimage-only, never stored
-   — and BOTH sides of the signature ride the kernel's scoped seam:
-   `signCore` passes the bare core to `node/sign`, which signs
-   `DOMAIN_guest ‖ scope ‖ core`, and `verifyEnv` checks the same preimage
-   through `node/verify` for the author key in the envelope. The host mirror
-   (`signDescriptor`/`verifyDescriptor` in `host/manifest.ts`) signs and verifies
-   through the same two scoped names, so the `tier2-port`/`holder-guest`
-   parity tests hold. Neither path ever reconstructs the prefix: the scope is the
-   kernel's to apply, derived from the admitted manifest's `(author, app)` — one
-   derivation, so the two cannot disagree; a
-   hand-baked copy in the signed config could, and would fail as signatures that
-   verify nowhere.
+1. **Signatures are scoped on both paths** — the scoped sign pair
+   (`node/sign`/`node/verify`: a guest signature is over
+   `DOMAIN_guest ‖ scope ‖ msg`, the `scope` host-derived from the admitted
+   manifest and applied on both paths; the raw `crypto/ed25519/verify` primitive
+   stays ungated, seedkernel §12.2). `signCore` passes the bare core to
+   `node/sign`, which signs `DOMAIN_guest ‖ scope ‖ core`, and `verifyEnv`
+   checks the same preimage through `node/verify` for the author key in the
+   envelope; the host mirror (`signDescriptor`/`verifyDescriptor` in
+   `host/manifest.ts`) rides the same two scoped names, so the parity tests
+   hold. Neither path ever reconstructs the prefix: the scope is the kernel's to
+   apply, derived from the admitted manifest's `(author, app)` — one derivation,
+   so the two cannot disagree.
 2. **The descriptor's leading byte is the signed-format tag** (spec §16). The
    descriptor core leads with `TAG_DESCRIPTOR = 0x01` (`manifest-core.ts`), and
    the Part II signed formats reserve their own values before they exist
    (`TAG_TOMBSTONE = 0x02`, `TAG_HEAD = 0x03`). The tag sits inside `core`, so
    it is already under the signature and inside the scoped preimage.
-3. **`storeHas` answers from `FS_SIZE ≥ 0`**
-   (`host/tier2-guest.orchestration.js`): the `fsSize` seam distinguishes absent
-   (the bridge's −1 sentinel) from present-but-empty, so there is no `has` call
-   to make. Same move host-side — `store-fs.ts` asks `fs.size(...) >= 0` — with
-   the seedstore `BlobStore.has` iface itself unchanged, only its backing call.
-4. **The bundle carries an integer, monotonic `version`**
-   (`scripts/storage-bundle.mjs`): guarded by `Number.isInteger` and bumped on
-   every publish, so the shell's freshness check (§12.4) has a real high-water
-   mark to enforce.
+3. **`storeHas` answers from `FS_SIZE ≥ 0`** — existence-by-size (no `FS_HAS`;
+   a key exists iff `FS_SIZE ≥ 0`, seedkernel §12.1–§12.2). The `fsSize` seam
+   distinguishes absent (the bridge's −1 sentinel) from present-but-empty, so
+   there is no `has` call to make. Same move host-side — `store-fs.ts` asks
+   `fs.size(...) >= 0` — with the seedstore `BlobStore.has` iface itself
+   unchanged, only its backing call.
+4. **The bundle carries an integer, monotonic `version`** (the monotonic
+   downgrade refusal, seedkernel §12.4; `scripts/storage-bundle.mjs`):
+   guarded by `Number.isInteger` and bumped on every publish, so the shell's
+   freshness check (§12.4) has a real high-water mark to enforce.
 5. **The tests that pin this**: `manifest` (tamper-evidence over the tagged,
    scoped preimage), `tier2-port` / `holder-guest` (parity across the scoped
    sign/verify paths), `shell-run` (bundle version freshness — a downgrade is
@@ -503,9 +488,12 @@ tests/    codec / bridges / manifest / protocol / reputation / storage
           concurrency / net / browser / shell-run / holder-guest / bundle-fixture
 ```
 
-The runtime itself — the shell, the guest seam (`host.call`), the `fs`/`node`/`clock` services, the raw sockets, the QuickJS confinement realms, the bundle format and policy — lives in
-[seedkernel](https://github.com/arj03/seedkernel); seed store consumes it as the
-`seedkernel-wasm` dependency and ships only the content above.
+The runtime itself — the shell, the guest seam, the raw-byte services, the
+QuickJS confinement realms, the bundle format and policy — lives in
+[seedkernel](https://github.com/arj03/seedkernel) ([RUNTIME §12](https://github.com/arj03/seedkernel/blob/main/docs/RUNTIME.md),
+[EXPORTS](https://github.com/arj03/seedkernel/blob/main/docs/EXPORTS.md)); seed
+store consumes it as the `seedkernel-wasm` dependency and ships only the content
+above.
 
 ## Scope
 
