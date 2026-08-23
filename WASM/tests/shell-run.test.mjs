@@ -1,7 +1,7 @@
 // The "shell runs the app" end-to-end (the runtime split). A *generic*
 // seedkernel-shell — no seedstore code — loads the signed seedstore bundle and
 // runs its zero-authority guest as the PUT/GET initiator over the
-// application-neutral cap-bridge, against real StorageNode holders on the
+// application-neutral guest seam, against real StorageNode holders on the
 // loopback fabric: proof storage rides the runtime as signed content, never
 // baked into the binary.
 //
@@ -137,7 +137,7 @@ export async function run(t) {
 
       // GET, same confined guest, reconstructing from the holders.
       const got = await shell.invoke(writeOp(Op.GET, concatBytes([key, root])), appKey);
-      t.ok(bytesEqual(got, data), "PUT → GET round-trips: the generic shell ran storage over primitive caps");
+      t.ok(bytesEqual(got, data), "PUT → GET round-trips: the generic shell ran storage over the seam's names");
 
       // A shell whose policy does not allow the bundle author refuses to load it.
       const shell2Dir = mkdtempSync(join(tmpdir(), "seedstore-shell2-"));

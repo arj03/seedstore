@@ -1,6 +1,7 @@
 // Build the seedstore app bundle: the signed content a generic seedkernel-shell
 // loads to *become* a storage node — codec.wasm + reputation.wasm +
-// tier2-guest.js + a signed manifest declaring the required caps. This script is
+// tier2-guest.js + a signed manifest declaring the guest's required services.
+// This script is
 // the offline producer holding the author key; bundle content is assembled in
 // scripts/storage-bundle.mjs (shared with the test fixture, so they can't drift).
 //
@@ -28,8 +29,9 @@ const { toHex, fromHex } = await import(new URL("../build/host/util.js", import.
 const sodium = await loadCrypto();
 // Bundle *content* is assembled below from sodium alone: it hashes the module bytes
 // (genesisHash) the manifest commits to and signs the manifest. No kernel host is needed —
-// hashing is a free `genesisHash(sodium, …)` in the bundle module now, and a module's kernel
-// name is derived from the signed `(app, name)` pair at load time (seedkernel §5.1).
+// hashing is a free `genesisHash(sodium, …)` in the bundle module now, and a module's
+// name is its bare manifest name — reached by the guest on the seam, slot-local, with
+// no bind name or global namespace (seedkernel §5.1).
 
 // Author identity: the key the bundle is signed with (and that installs are
 // signed with). Policy pins the derived key-set id (§12.4), not this Ed25519 key.

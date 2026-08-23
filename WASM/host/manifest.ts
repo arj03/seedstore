@@ -1,6 +1,6 @@
 // The one object that describes a file (README §4.3): the per-chunk *signed*
 // descriptor — no separate manifest object. Pure codecs live in manifest-core.ts
-// (shared with the guest); this module adds the two capability-needing pieces:
+// (shared with the guest); this module adds the two scoped-signature pieces:
 // signing and verifying the author signature. Verified from the author's public
 // key alone, never the read key, which preserves keyless repair (§9); a holder
 // additionally anchors that key to a peer its cohort knows (§4.3).

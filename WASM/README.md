@@ -8,19 +8,20 @@ node runs the same protocol in Node, in Bun, and in the browser.
 ## seed store is content, not a binary
 
 The deployable artifact is the **generic seedkernel runtime** (the "shell"). It
-exposes only **raw-byte capabilities** — crypto, `net.*`, `fs.*`, an
-installed-handler call, a clock — and knows nothing about storage. seed store
-ships as **signed content** that the shell loads and *becomes* a storage node:
+exposes only **raw-byte surfaces** — the ungated `crypto/*` primitive catalog,
+the bare-name module call, the `fs`/`node`/`clock` services, raw `link` sockets
+— and knows nothing about storage. seed store ships as **signed content** that
+the shell loads and *becomes* a storage node:
 
 ```
 seed store bundle (seedstore.skb — one signed blob, verified at load) ─────────────────┐
-  codec.wasm  reputation.wasm        pure RS + reputation math, declare no capabilities │
+  codec.wasm  reputation.wasm        pure RS + reputation math, declare no grants     │
   guest.js                           PUT/GET/repair (initiator) + HAVE/OFFER/STORE/      │
                                      FETCH (holder): zero-authority JS, no ambient I/O   │
-        │  reaches I/O only through ↓ the single capability seam                        │
-  cap-bridge   crypto · net · fs · module-call · clock · identity  ── generic primitives ┘
+        │  reaches I/O only through ↓ the one guest seam                                 │
+  host.call   crypto · fs · node · clock · bare module names · local service ids ──────┘
         │
-  seedkernel runtime (the shell)     bundle loader → admission policy → kernel  +  the raw-byte caps
+  seedkernel runtime (the shell)     bundle loader → admission policy → kernel  +  the raw-byte seams
 ```
 
 Everything with *structure* — content-addressing, the signed chunk descriptor,
@@ -28,8 +29,8 @@ the HAVE/OFFER/STORE/FETCH wire format, Reed–Solomon, the nonce convention, th
 quota — is **seed store's**, and lives in the bundle. The kernel only moves
 opaque bytes. So the same shell can host storage or any other signed app, and a
 storage upgrade is new content, not a new binary (spec §2.1, §17). The runtime
-side of this — the shell, the capability vocabulary, the confinement realms, and
-the bundle format — is documented in
+side of this — the shell, the guest seam and its grants, the confinement realms,
+and the bundle format — is documented in
 [seedkernel](https://github.com/arj03/seedkernel)'s README ("The runtime as an
 app host").
 
@@ -37,29 +38,30 @@ app host").
 
 The spec is explicit that the **only** cryptographic-grade algorithm in storage
 WASM is Reed–Solomon — libsodium has no erasure coding (§2, §16) — and that the
-two pure handlers (`codec`, `reputation`) declare **no capabilities** so the
+two pure modules (`codec`, `reputation`) declare **no grants** so the
 structural sandbox guarantees they touch neither disk nor network even if buggy
 (§17). Under the runtime split, *all* storage logic is confined Tier-2 content:
 
 | Component | Where it runs | Form | Spec |
 | --- | --- | --- | --- |
-| `codec` — GF(2⁸) + systematic Reed–Solomon RS(k,m) encode/decode, block-id | installed kernel handler | **WASM**, no caps (`assembly/codec`) | §4.1, §4.2, §9 |
-| `reputation` — decayed per-peer reciprocity counters | installed kernel handler | **WASM**, no caps (`assembly/reputation`) | §13 |
+| `codec` — GF(2⁸) + systematic Reed–Solomon RS(k,m) encode/decode, block-id | installed module, bare name (`host.call("codec", …)`) | **WASM**, no grants (`assembly/codec`) | §4.1, §4.2, §9 |
+| `reputation` — decayed per-peer reciprocity counters | installed module, bare name (`host.call("reputation", …)`) | **WASM**, no grants (`assembly/reputation`) | §13 |
 | coordinator (PUT/GET, placement, manifest) + cohort (have/want, verification-fetch) + repair | confined QuickJS realm — **async** `call()` | zero-authority JS (`host/tier2-guest.js`) | §5–§9 |
 | holder side — admission, sibling rule, content-addressing, quota, the store writes | the **same** realm — **async** `call()` | zero-authority JS (`host/tier2-guest.js`) | §6, §10, §14 |
-| the capability seam the guest reaches I/O through | seedkernel runtime | `cap-bridge` (generic primitives) | §16 |
-| `crypto.*`, `net.*`, `fs.*`, `clock` backends | seedkernel runtime | raw-byte capabilities | §12, §16 |
+| the seam the guest reaches I/O through | seedkernel runtime | `host.call(name, bytes)` — services, `crypto/*` primitives, module names | §16 |
+| `crypto/*`, `fs`, `node`, `clock` backends | seedkernel runtime | raw-byte services + primitive catalog | §12, §16 |
 
 Hashing, the length-preserving stream cipher (`crypto_stream_xchacha20_xor`),
 and signatures are **reused** from the runtime's libsodium (the sumo build, which
 exposes the raw stream cipher) — never bundled — exactly as §16 requires; the
-guest reaches them as generic `cap-bridge` primitives and builds its own
-descriptor envelope and nonce convention on top of the scoped `SIGN`
+guest reaches hashing and the cipher as the ungated `crypto/blake2b-256` and
+`crypto/xchacha20/xor` primitives and builds its own descriptor envelope and
+nonce convention on top of the scoped `node/sign`/`node/verify` pair
 (seedkernel §12.2) — how storage prefixes and checks it is below.
 
 **The one realm.** Storage runs its whole guest in a single confined realm
 seedkernel provides (§12.3), over its genuinely-async seam: the initiator
-(PUT/GET/repair) fans out over `net` and awaits *real* net promises
+(PUT/GET/repair) fans out over `_net` and awaits *real* promises
 (`await Promise.all(...)`), and the holder side answers from local `fs` + crypto,
 both through the realm's `call()`. The fs seam is asynchronous on every backend
 (seedkernel core/fs.ts — a synchronous `get` is a shape no browser backend can
@@ -78,9 +80,10 @@ the **shipped** node runs the confined guest.
 
 Three seedkernel runtime contracts reach into the storage code, and each has a
 seedstore-side counterpart worth pinning down. The contracts themselves are
-documented on the runtime side — the **scoped `SIGN`** op (a guest signature is
-over `DOMAIN_guest ‖ scope ‖ msg`, the `scope` host-derived from the admitted
-manifest; the pure `ed25519/verify` primitive stays raw — seedkernel §12.2),
+documented on the runtime side — the **scoped sign pair** (`node/sign`/
+`node/verify`: a guest signature is over `DOMAIN_guest ‖ scope ‖ msg`, the
+`scope` host-derived from the admitted manifest and applied on both paths; the
+pure `crypto/ed25519/verify` primitive stays raw — seedkernel §12.2),
 **existence-by-size** (no
 `FS_HAS`; a key exists iff `FS_SIZE ≥ 0`, and `./fs` is
 `get`/`put`/`size`/`list`/`delete`/`stat` — seedkernel §12.1–§12.2), and the
@@ -97,7 +100,7 @@ mirror, and the bundle producer:
    `DOMAIN_guest ‖ scope ‖ core`, and `verifyEnv` checks the same preimage
    through `node/verify` for the author key in the envelope. The host mirror
    (`signDescriptor`/`verifyDescriptor` in `host/manifest.ts`) signs and verifies
-   through the same two names on a scoped cap-bridge, so the `tier2-port`/`holder-guest`
+   through the same two scoped names, so the `tier2-port`/`holder-guest`
    parity tests hold. Neither path ever reconstructs the prefix: the scope is the
    kernel's to apply, derived from the admitted manifest's `(author, app)` — one
    derivation, so the two cannot disagree; a
@@ -324,8 +327,8 @@ path; same-machine tabs connect on host candidates without it.)
 - **codec** — exhaustive any-*k*-of-*n* recovery across every loss pattern for
   several codes, deterministic encode (keyless repair), systematic pass-through,
   block-id ≡ libsodium BLAKE2b-256, re-encode regenerates byte-identical blocks.
-- **bridges** — crypto host services, the `store.local` backend, and the
-  capability gate end-to-end via seedkernel's forwarder fixture (§8.2).
+- **bridges** — crypto primitives, the `store.local` backend, and the
+  service-gate end-to-end via seedkernel's forwarder fixture (§8.2).
 - **manifest** — descriptor/manifest round trips, author signature is
   tamper-evident, index-list encrypt round trip, and the one-shape descriptor
   math: multiplicity as the replica count, `r` = *m*+1, the placement
@@ -351,7 +354,7 @@ path; same-machine tabs connect on host candidates without it.)
   reopen, a full cohort over real TCP sockets with blocks landing on holders'
   disks, and a browser-like node reaching a server over a real WebSocket.
 - **tier2-port** — the same PUT/GET/replication/offline/repair/crypto-shredding
-  matrix driven *inside* the confined QuickJS realm over the generic `cap-bridge`,
+  matrix driven *inside* the confined QuickJS realm over the generic guest seam,
   with cross-path parity proving the confined and host-side paths are byte-compatible.
 - **shell-run** — a generic seedkernel-shell (no seed store imports) loads the
   signed bundle and runs the guest as the PUT/GET *initiator* against a cohort.
@@ -458,8 +461,8 @@ cores and the guest — it never loads a line of the host-side TypeScript:
 | `reputation.wasm` | 6.7 KB | — |
 | `guest.js` — the confined guest, shipped minified in the bundle | 29 KB | **7.6 KB** |
 
-riding on the seedkernel shell it shares with any app — the `ModuleTable` JS
-(28 KB / **5 KB gz**, handler table included: the kernel is host code, not a
+riding on the seedkernel shell it shares with any app — the shell JS
+(28 KB / **5 KB gz**, module table included: the kernel is host code, not a
 module) and the sumo libsodium (278 KB, reused not bundled). So **seedstore's own runtime
 footprint is ~15 KB of WASM + ~8 KB of gzipped JS (the guest)** (§2, §16: "logic +
 RS, tens of KB, no second copy of a crypto library").
@@ -487,10 +490,10 @@ hosts (`build/host-min`) into the demo.
 ## Layout
 
 ```
-assembly/codec/        gf256.ts, rs.ts, index.ts   — Reed–Solomon WASM handler
-assembly/reputation/   index.ts                    — decayed reciprocity WASM handler
+assembly/codec/        gf256.ts, rs.ts, index.ts   — Reed–Solomon WASM module
+assembly/reputation/   index.ts                    — decayed reciprocity WASM module
 host/  tier2-guest.js          the confined guest: the WHOLE protocol (PUT/GET/repair + holder)
-       storage-node.ts         the host that holds the handler table + drives the guest in one realm
+       storage-node.ts         the host that boots the slot + drives the guest in one realm
        manifest (+core)/crypto/protocol/store-fs/store-local/names/util  — shared helpers
        node.ts / browser.ts    Node + browser entry points (each loads the guest text)
 scripts/  build-bundle.mjs     produce the signed bundle (npm run build:bundle)
@@ -500,8 +503,7 @@ tests/    codec / bridges / manifest / protocol / reputation / storage
           concurrency / net / browser / shell-run / holder-guest / bundle-fixture
 ```
 
-The runtime itself — the shell, the `cap-bridge`, the `fs.*`/`net.*` capabilities,
-the QuickJS confinement realms, the bundle format and policy — lives in
+The runtime itself — the shell, the guest seam (`host.call`), the `fs`/`node`/`clock` services, the raw sockets, the QuickJS confinement realms, the bundle format and policy — lives in
 [seedkernel](https://github.com/arj03/seedkernel); seed store consumes it as the
 `seedkernel-wasm` dependency and ships only the content above.
 

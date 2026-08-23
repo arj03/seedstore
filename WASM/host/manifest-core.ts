@@ -1,5 +1,5 @@
-// The PURE, cap-free core of the file descriptor (README §4.3): fixed binary
-// codecs and structural validation, no crypto/capability dependency. One
+// The PURE core of the file descriptor (README §4.3): fixed binary
+// codecs and structural validation, no crypto or seam dependency. One
 // definition of the wire format, shared by manifest.ts (host) and stitched
 // verbatim into the guest bundle (scripts/build-guest.mjs). Synchronous and
 // QuickJS-safe (Uint8Array only, no TextEncoder/Buffer).

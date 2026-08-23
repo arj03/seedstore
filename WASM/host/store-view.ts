@@ -27,7 +27,7 @@ export interface StoredBlock {
 /** A read-only view of the holder's blobs. All ids are 32-byte block_ids; keys are
  *  their hex. There is no write half by design — see the header.
  *
- *  Every method is async, because the `fs.*` seam it reads through is async
+ *  Every method is async, because the `fs` seam it reads through is async
  *  (seedkernel core/fs.ts): a synchronous `get` is a shape no browser backend can
  *  implement — IndexedDB is asynchronous by construction. An in-RAM backend
  *  resolves in a microtask; a caller that needs one await. */
@@ -43,7 +43,7 @@ export interface BlobView {
   usedBytes(): Promise<number>;
 }
 
-/** The read view over the kernel's raw-byte `fs.*` capability: a node directory on
+/** The read view over the kernel's flat-key `fs` service: a node directory on
  *  a server, OPFS/IndexedDB in a browser, an in-RAM MemoryFs for tests. */
 export class FsBlobView implements BlobView {
   constructor(private readonly fs: Fs) {}

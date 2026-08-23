@@ -52,11 +52,11 @@ export async function run(t) {
   const wasm = await loadWasmBytes();
   const config = { k: 2, m: 2, blockSize: 1024 };
 
-  t.group("node boots on seedkernel: pure codec + reputation handlers installed (§19)");
+  t.group("node boots on seedkernel: pure codec + reputation modules installed (§19)");
   {
     const net = new LoopbackNetwork();
     const [node] = await createConnectedCohort({ count: 1, network: net, sodium, wasm, config, timeoutMs: TIMEOUT });
-    t.ok(node.handlersInstalled(), "codec + reputation installed as kernel handlers");
+    t.ok(node.handlersInstalled(), "codec + reputation installed as kernel modules");
     node.close();
     net.close();
   }
@@ -80,10 +80,10 @@ export async function run(t) {
     net.close();
   }
 
-  t.group("large blocks (> the 128 KB default handler scratch) round-trip (§4.1)");
+  t.group("large blocks (> the 128 KB default module scratch) round-trip (§4.1)");
   {
     // A codec request of k·blockSize bytes can exceed the kernel's 128 KB
-    // default handler scratch, so the codec must declare its larger scratch
+    // default module scratch, so the codec must declare its larger scratch
     // (exported `scratchSize`). RS(2,2) at 96 KiB puts both the encode request
     // and parity response past the default, over genuine (k>1) parity.
     const net = new LoopbackNetwork();
@@ -353,7 +353,7 @@ export async function run(t) {
     let anyPositive = false;
     for (const n of nodes) {
       if (n === owner) continue;
-      // Reputation now lives in the installed reputation handler the guest scores
+      // Reputation now lives in the installed reputation module the guest scores
       // through; the owner reads a holder's standing the same way (§13).
       if (await owner.score(n.identity.publicKey) > 0) anyPositive = true;
     }

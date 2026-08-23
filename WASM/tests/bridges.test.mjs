@@ -1,6 +1,6 @@
 // Storage host-service tests: the crypto primitives (§16). There are no
-// storage-specific kernel bridges any more — the guest reaches crypto/net/fs/
-// clock/module through seedkernel's generic cap-bridge. store.local is not
+// storage-specific kernel services — the guest reaches crypto/fs/clock/module
+// through the seam's generic names. store.local is not
 // tested here: the host only has a read view (net.test.mjs); admission/quota
 // policy is the confined holder's, covered in protocol.test.mjs.
 

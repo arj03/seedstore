@@ -60,7 +60,7 @@ async function tcpCohort({ count, sodium, wasm, config, baseDir }) {
       channels: new NodeChannelFactory(),
       listen: { host: "127.0.0.1", port: 0 },
       // Give the node a disk-backed fs; its default store view reads that same fs, so
-      // what the confined guest holder writes via fs.* lands on disk and node.store
+      // what the confined guest holder writes via `fs` lands on disk and node.store
       // reflects it (the view must read the fs the guest serves).
       fs: new NodeFs(dir),
     }));
@@ -78,7 +78,7 @@ export async function run(t) {
   // A pure READ view of the durable store.local layout (§12) — the write half
   // (admission, quota, the writes) belongs to the confined guest holder alone
   // (protocol.test.mjs drives it over the real wire). This writes the layout
-  // the way the guest does, through `fs.*`, and checks the view reads it back.
+  // the way the guest does, through `fs`, and checks the view reads it back.
   t.group("FsBlobView: reading back the durable store.local layout (§12)");
   {
     const dir = mkdtempSync(join(tmpdir(), "seedstore-fs-"));

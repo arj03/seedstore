@@ -73,11 +73,11 @@ const STORAGE_REQUIRES = [
  */
 export function writeStorageBundle({ path, sodium, sk, build, version = 1, log = () => {} }) {
   if (!Number.isInteger(version)) throw new Error("writeStorageBundle: version must be an integer");
-  // The loader derives each module's kernel name from `(app, name)` (seedkernel
-  // §5.1), so there is no bind name to state here.
+  // A module's name is its bare manifest name — the seam argument the guest
+  // passes; there is no bind name or global namespace (seedkernel §5.1, §12.4).
   const modSpecs = ["codec", "reputation"];
 
-  // The two pure handlers (§17); authorBundle hashes each module's bytes into the
+  // The two pure modules (§17); authorBundle hashes each module's bytes into the
   // signed manifest — no hash computed here.
   const modules = modSpecs.map((name) => ({
     name, wasm: new Uint8Array(readFileSync(join(build, moduleFile(name)))),

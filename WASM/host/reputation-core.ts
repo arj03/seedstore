@@ -1,4 +1,4 @@
-// The reputation handler's request framing (assembly/reputation/index.ts ABI), in
+// The reputation module's request framing (assembly/reputation/index.ts ABI), in
 // one place. The module is a PURE TRANSFORM — the caller holds per-peer
 // accumulators (serve, miss, last) and passes them in each request, since WASM
 // modules are restartable (any timeout kills the instance). Imported by the host
@@ -6,7 +6,7 @@
 
 import { writeU64BE, readU64BE } from "./util.js";
 
-// Op bytes of the installed reputation handler (assembly/reputation/index.ts).
+// Op bytes of the installed reputation module (assembly/reputation/index.ts).
 export const REP_OBSERVE = 1, REP_SCORE = 2;
 
 /** SCORE request: read a peer's decayed reciprocity standing at time `tMs` (§13).

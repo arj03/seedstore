@@ -174,7 +174,7 @@ if (offerReqs) {
   const floorMs = hashMs + verifyMs;
   console.log(`\ncrypto floor (host-side libsodium, same block size):`);
   console.log(`  BLAKE2b/block ${fmt(hashMs, 3)} ms + Ed25519 verify ${fmt(verifyMs, 3)} ms = ${fmt(floorMs, 3)} ms → ${fmt(rate(blockSize, floorMs), 0)} MB/s`);
-  console.log(`  the holder COSTS ${fmt((storeMs / Math.max(1, totalBlocks)) / floorMs, 1)}× that floor — the excess is fs + cap-bridge crossings + QuickJS,`);
+  console.log(`  the holder COSTS ${fmt((storeMs / Math.max(1, totalBlocks)) / floorMs, 1)}× that floor — the excess is fs + seam crossings + QuickJS,`);
   console.log(`  i.e. the part that is ours to fix if holder ingest ever becomes the limit.`);
 }
 

@@ -2,7 +2,7 @@
 // the Reed–Solomon codec directly — instantiating the same codec.wasm the way the
 // kernel host does: a PURE transform that imports only the AssemblyScript runtime
 // shims (env.*) and makes no host calls. The runtime never uses this: a node reaches
-// the codec as an installed kernel handler over MODULE_CALL (host/storage-node.ts),
+// the codec as an installed module, by bare name on the guest seam (host/storage-node.ts),
 // so this client lives with the tests that exercise the wasm in isolation. The ABI
 // (op-tag layout) is owned by assembly/codec/index.ts.
 

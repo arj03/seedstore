@@ -1,7 +1,8 @@
 // Focused correctness tests for the codec WASM module (Reed–Solomon over
 // GF(2^8), README §4.1). Loads build/codec.wasm directly as a PURE transform —
 // it imports only the AssemblyScript runtime shims (env.*) and makes no host
-// calls (block-ids are the guest's job via the cap-bridge hash, not the codec's).
+// calls (block-ids are the guest's job via the `crypto/blake2b-256` primitive,
+// not the codec's).
 // Exhaustive over loss patterns for small codes, randomized for the defaults.
 
 import { readFileSync } from "node:fs";

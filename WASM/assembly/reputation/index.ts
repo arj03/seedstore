@@ -1,4 +1,4 @@
-// reputation — the second pure-compute handler (README §13, §17, "no caps").
+// reputation — the second pure-compute module (README §13, §17, no grants).
 //
 // Each node keeps, per peer, a small *decayed* reciprocity balance built only
 // from things it has witnessed directly: verification-fetch passes raise the
@@ -28,7 +28,7 @@ const PASS_WEIGHT: f64 = 1.0;
 const MISS_PENALTY: f64 = 2.0;
 
 // 128 KB — the host reserves at least DEFAULT_SCRATCH_SIZE of scratch headroom
-// for an installed handler, even though our ops use only a few dozen bytes of it.
+// for an installed module, even though our ops use only a few dozen bytes of it.
 const SCRATCH_SIZE: i32 = 1 << 17;
 
 export let scratch: i32 = 0;

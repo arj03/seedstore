@@ -138,7 +138,7 @@ class LoopbackChannels implements ChannelFactoryLike {
       return dial;
     }
     // The address's host is the "far end" both sides see — it is what the
-    // half-open limiter buckets accepts by (the per-source cap; §12.6.1).
+    // half-open limiter buckets accepts by (the per-source cap; §12.6.2).
     const [dial, accepted] = LoopbackChannel.pair(addr.host, this.delayMs);
     queueMicrotask(() => onAccept(accepted));
     return dial;

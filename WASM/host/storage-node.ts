@@ -1,9 +1,9 @@
 // StorageNode — a single storage peer running *on* the seedkernel (README §19
 // bootstrap). A THIN host: the entire storage protocol lives in the confined
 // guest (host/tier2-guest.js), run in one seedkernel safe-js realm over the
-// generic capability bridge. Boots the shared `bootShell()` and loads the signed
+// generic guest seam. Boots the shared `bootShell()` and loads the signed
 // bundles (§12.4) — first the transport bundle (§12.6), then the seedstore one.
-// Handlers arrive only via the verified bundle loader, never raw-bound.
+// Modules arrive only via the verified bundle loader, never raw-bound.
 //
 // A caller that already stands a shell up (a WebRTC/WS node) passes the whole
 // `runtime` in; StorageNode then loads only the seedstore bundle on it.
@@ -74,7 +74,7 @@ export interface StorageNodeOptions {
   runtime?: StorageRuntime;
   sodium: Sodium;
   /** The signed seedstore bundle blob (seedstore.skb), loaded through the §12.4
-   *  bundle loader (verify manifest, govern policy, install handlers). */
+   *  bundle loader (verify manifest, govern policy, install modules). */
   bundleBlob: Uint8Array;
   /** This node's signing identity. Only read when StorageNode builds its own
    *  runtime; minted if absent. With `runtime`, `runtime.identity` is the one. */
@@ -332,7 +332,7 @@ export class StorageNode {
     return r.slice(1);
   }
 
-  /** Pre-warm the realm's codec + crypto caps. */
+  /** Pre-warm the realm's codec module + crypto primitives. */
   async warm(): Promise<void> {
     await this.runExclusive(() => this.invoke(Op.WARM, NO_ARG));
   }
@@ -400,7 +400,7 @@ export class StorageNode {
     this.shell.close();
   }
 
-  /** True if both pure handlers are installed on the kernel (§19). A bundle load
+  /** True if both pure modules are installed with the bundle (§19). A bundle load
    *  builds every module or none (seedkernel §12.4), so the manifest's declared
    *  names ARE the modules the guest holds. */
   handlersInstalled(): boolean {

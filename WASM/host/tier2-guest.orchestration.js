@@ -45,13 +45,13 @@ function readF64LE(b) { return new DataView(b.buffer, b.byteOffset, 8).getFloat6
 function strBytes(s) { const o = new Uint8Array(s.length); for (let i = 0; i < s.length; i++) o[i] = s.charCodeAt(i) & 255; return o; }
 function bytesToStr(b) { let s = ""; for (let i = 0; i < b.length; i++) s += String.fromCharCode(b[i]); return s; }
 
-// ── the capability seam: storage policy over GENERIC kernel caps ─────────────
-// Thin wrappers over the seam's application-neutral names (crypto/fs/module-call/
-// clock/identity, seedkernel host/guest-seam.ts). All storage STRUCTURE — nonce
+// ── the guest seam: storage policy over GENERIC kernel names ────────────────
+// Thin wrappers over the seam's application-neutral names (crypto/fs/module/
+// clock/node, seedkernel host/guest-seam.ts). All storage STRUCTURE — nonce
 // convention, signed-descriptor envelope, wire format, store layout — lives here,
-// never in the kernel. Crypto calls resolve sync; net/fs/module calls are async.
+// never in the kernel. Crypto calls resolve sync; fs/net/module calls are async.
 
-// The op bytes of the codec handler (the guest owns its ABI). The reputation handler's
+// The op bytes of the codec module (the guest owns its ABI). The reputation module's
 // op bytes + request framing (REP_OBSERVE/REP_SCORE, encodeScoreReq/encodeObserveReq)
 // come from the SHARED host/reputation-core.ts, stitched in ahead of this body — the same
 // framing StorageNode.score uses host-side, so the two agree by construction.
@@ -141,7 +141,7 @@ async function rsEncode(k, m, blockSize, dataBlocks) {
   // k or k+m" error or a chunk silently signed with the wrong shape.
   if (parity.length !== m) {
     throw new Error("rsEncode: codec returned " + parity.length + " parity blocks, expected " + m +
-      " — chunk (k=" + k + " × blockSize=" + blockSize + ") likely exceeds the codec handler's scratch");
+      " — chunk (k=" + k + " × blockSize=" + blockSize + ") likely exceeds the codec module's scratch");
   }
   return parity;
 }
@@ -161,7 +161,7 @@ async function rsDecode(k, m, blockSize, present) {
   // on the read path re-verifies the codec's output (§4.2 only checks inputs). Must error.
   if (data.length !== k) {
     throw new Error("rsDecode: codec returned " + data.length + " blocks, expected " + k +
-      " — chunk (k=" + k + " × blockSize=" + blockSize + ") likely exceeds the codec handler's scratch");
+      " — chunk (k=" + k + " × blockSize=" + blockSize + ") likely exceeds the codec module's scratch");
   }
   return data;
 }
@@ -208,9 +208,9 @@ async function repObserve(peerPk, t, pass) {
   }
 }
 
-// ── local store over fs.* (the <hex>.blk / <hex>.dsc layout) ─────────────────
-// fs/* is async, so the whole store layer is async. Existence is `size ≥ 0`
-// (there is no fs/has): raw fs/size is 0xFFFFFFFF (−1 over the bridge) only for an
+// ── local store over fs (the <hex>.blk / <hex>.dsc layout) ──────────────────
+// fs is async, so the whole store layer is async. Existence is `size ≥ 0`
+// (there is no fs/has): raw fs/size is 0xFFFFFFFF (−1 over the seam) only for an
 // absent key, so a present-but-empty value still reads as held.
 async function storeHas(id) { return (await fsSizeRaw(toHex(id) + STORE_BLK)) !== 0xffffffff; }
 async function storeGet(id) {
@@ -355,7 +355,7 @@ async function fetchBatch(peer, ids) {
 // ── descriptor ───────────────────────────────────────────────────────────────
 // The pure §4.3 codecs (parseSignedDescriptor, encode/decodeDescriptorList,
 // descriptorContains, copyTargets, BLOCK_ID_LEN) are stitched in from
-// host/manifest-core.ts. What stays here needs a capability: verify/sign.
+// host/manifest-core.ts. What stays here needs a grant: the scoped sign/verify pair.
 //
 // verifyDescriptor checks the author signature AND structurally validates the core:
 // a signed-but-malformed descriptor (bad id count) is rejected rather than parsed

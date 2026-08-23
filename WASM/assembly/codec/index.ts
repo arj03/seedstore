@@ -1,7 +1,7 @@
-// codec — the storage layer's pure-compute handler (README §17, "no caps").
+// codec — the storage layer's pure-compute module (README §17, no grants).
 //
 // It owns the one algorithm libsodium cannot provide: systematic Reed–Solomon
-// erasure coding over GF(2^8) (§4.1). A kernel handler is a PURE TRANSFORM — no
+// erasure coding over GF(2^8) (§4.1). A kernel module is a PURE TRANSFORM — no
 // host callback, no crypto, no block-ids (the guest computes those itself); the
 // codec just stages bytes -> RS blocks. So the structural sandbox guarantees
 // this module touches neither disk nor network even if compromised (§2, §17).

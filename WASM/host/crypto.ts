@@ -1,8 +1,9 @@
-// Host crypto services (README §16). Thin wrappers over the libsodium the
+// Host crypto wrappers (README §16). Thin wrappers over the libsodium the
 // kernel already loads — "storage ships no crypto of its own except Reed–
-// Solomon". These perform no I/O, so they are no-cap services (§16): a WASM
-// handler may call crypto.hash without declaring any capability, which is what
-// lets the codec stay pure (§17).
+// Solomon". These perform no I/O and hold no key, so they are the seam's
+// ungated primitives (§16): the guest reaches the hash as
+// `crypto/blake2b-256` and the stream cipher as `crypto/xchacha20/xor`, with
+// no service grant at all, which is what lets the codec stay pure (§17).
 //
 // Confidentiality is added client-side here (§4.4): a plain length-preserving
 // stream cipher with no authentication tag — integrity is content addressing's

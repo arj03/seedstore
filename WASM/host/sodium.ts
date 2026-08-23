@@ -1,7 +1,9 @@
 // libsodium access for the storage layer. Seed store reuses the kernel's
 // cryptography rather than shipping its own (README §2, §16): hashing, the
-// length-preserving stream cipher, and key-sealing are all libsodium calls
-// exposed as no-cap host services. The kernel's own crypto only needs the
+// length-preserving stream cipher, and key-sealing are all libsodium calls —
+// hashing and the cipher reachable by the guest as the ungated `crypto/*`
+// primitives, key-sealing deliberately host-side beside the seam (ibid.). The
+// kernel's own crypto only needs the
 // standard build, but the §4.4 stream cipher (crypto_stream_xchacha20_xor) is
 // a "sumo" symbol, so the storage host loads the sumo build and shares that one
 // instance with the kernel host as well.
@@ -12,7 +14,7 @@ export interface Sodium {
   // content-address hash for block_id (§4.2). Block-ids never cross into the
   // kernel, so the storage layer hashes them with BLAKE2b (crypto_generichash)
   // — fast and already in libsodium — rather than the kernel's BLAKE2b-256 genesis
-  // hash. (BLAKE2b-256 is the kernel's hash for handler-name derivation too.)
+  // hash. (BLAKE2b-256 is the kernel's hash for module-name inputs too.)
   crypto_generichash(hashLength: number, message: Uint8Array, key?: Uint8Array | null): Uint8Array;
   crypto_generichash_BYTES: number;
   // length-preserving stream cipher (§4.4): same op encrypts and decrypts
