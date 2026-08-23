@@ -65,9 +65,10 @@ const HAVE_ID_LEN = 32;      // a HAVE/FETCH request names 32-byte block_ids (§
 const FETCH_FRAME = 5;       // a present block costs [found u8][len u32] in a FETCH response (§18)
 const STORE_BLK = ".blk", STORE_DSC = ".dsc";
 // The logical names this app's own modules are installed under. The guest calls them
-// by the logical name from its manifest, straight through `host.call` — a bare name
-// (no `/`) is what makes it a module rather than a host name (seedkernel §12.2), and
-// the guest seam resolves it against this app's map, so app keys never leave the host.
+// by the logical name from its manifest, straight through `host.call` — a name this
+// realm did not declare as a local service, and that is not a host method (`service/call`),
+// is this app's module (seedkernel §12.2). The seam resolves it against this app's map,
+// so app keys never leave the host.
 const CODEC_NAME = "codec";
 const REP_NAME = "reputation";
 
@@ -238,9 +239,10 @@ async function storeList() {
 }
 
 // ── the network: one local service name, two ops ─────────────────────────────
-// The network is a bundle (the transport) claiming local service name `_net`
-// (seedkernel §12.10), reached via `host.call("_net", …)`. The host prepends this
-// app's 32-byte key as caller so the transport can attribute the request.
+// The network is a bundle (the transport) claiming `_net` under its `services`
+// list (seedkernel §12.10) — a co-resident guest's to reach, never a peer's —
+// reached via `host.call("_net", …)`. The host prepends this app's 32-byte key
+// as caller so the transport can attribute the request.
 // Wire: `[opLen u8][op][args]`. This app uses two ops, `send` and `peers`; both
 // answer on a later turn, so both are awaited.
 const NET_ID = "_net";

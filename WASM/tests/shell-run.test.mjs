@@ -115,8 +115,8 @@ export async function run(t) {
       // single-block/replicated instead of RS across the cohort).
       const loaded = await shell.loadBundle(bundlePath, { localConfig: { blockSize: 1024 } });
       // The app key rides the load's handle: a node with a network has at least two apps
-      // loaded — the storage bundle and the transport, an ordinary app serving the local
-      // service name `_net` (§12.10).
+      // loaded — the storage bundle and the transport, an ordinary app claiming `_net`
+      // under its `services` list (§12.10), a co-resident guest's to reach and never a peer's.
       const appKey = loaded.key;
       // A slot's modules are private to its guest now, so there is no table to ask what
       // landed: the load is all-or-none (seedkernel §12.4), so what proves the modules

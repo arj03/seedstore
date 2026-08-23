@@ -91,7 +91,8 @@ export async function run(t) {
     return { shell, peerId: toHex(identity.publicKey), net: transport, appKey: loaded.key };
   }
   // Dial every pair (addresses + ready). Each guest's cohort is the TRANSPORT's
-  // authenticated set (it asks `_net` for peers), so linking IS the wiring.
+  // authenticated set (it asks the transport's `_net` local service for peers),
+  // so linking IS the wiring.
   // `addPeer` stays for a StorageNode, whose cohort is its own durable app state.
   const connectAll = async (net, entries) => {
     for (const e of entries) {

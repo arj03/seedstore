@@ -5,8 +5,9 @@
 // manifest commits to every module's genesisHash (seedkernel §12.4, §5.1).
 //
 // Two deliberate choices:
-//   • `requires` declares fine-grained authority NAMES, not capability domains —
-//     the shell enforces them as the exact set a guest's host.call may reach.
+//   • `requires` declares SERVICES, not method names — the unit a manifest grants
+//     is `node`/`fs`/`clock` (and a local service id), never `node/sign` or `fs/get`.
+//     The shell gates a `host.call` by the method's SERVICE (seedkernel §12.2).
 //   • `quota` and anything runtime-derived (e.g. the signing scope) are absent
 //     from the signed config — both are host-applied facts, never author content.
 
@@ -37,20 +38,20 @@ export function authorKeysFor(sodium, edSk) {
 }
 
 // The grants the storage guest reaches, EXACTLY (`guest.requires`): a `host.call`
-// naming a grant outside this list is refused at the bridge. Two kinds: the
-// host's own authorities (`node/sign`/`node/verify` scoped to this bundle's
-// (author, app), `node/identity`, `node/random`, `fs/*`, the clock), and the one
-// local service name `_net` — the network is a bundle (the transport) claiming
-// that id, reached via one cross-realm call (§12.10), carrying no privilege.
+// naming a host method is refused unless the method's SERVICE is in this list.
+// Two kinds: the host's own services (`node` — sign/verify scoped to this bundle's
+// (author, app), identity, random; `fs`; `clock`), and the one local service id
+// `_net` — the network is a bundle (the transport) claiming that id under its
+// `services` list, reached via one cross-realm call (§12.10), carrying no privilege.
 //
 // Pure transforms (BLAKE2b, XChaCha20, and this bundle's own codec/reputation
 // modules) are not grants — ungated on the `crypto/` prefix (seedkernel §12.1)
 // and never listed here.
 const STORAGE_REQUIRES = [
-  "node/sign", "node/verify", "node/identity", "node/random",
+  "node",
   "_net",
-  "fs/get", "fs/put", "fs/list", "fs/size",
-  "clock/now",
+  "fs",
+  "clock",
 ];
 
 /**
