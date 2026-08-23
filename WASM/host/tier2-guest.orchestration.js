@@ -14,7 +14,7 @@
 "use strict";
 
 // ── byte helpers ────────────────────────────────────────────────────────────
-// toHex/fromHex/bytesEqual/concatBytes/writeU32BE/readU32BE are stitched in from
+// toHex/fromHex/bytesEqual/concatBytes/writeU32BE/readU32BE/callerOf/readOp/writeOp are stitched in from
 // host/util.ts by scripts/build-guest.mjs. Short local aliases for this body.
 const concat = concatBytes, wU32 = writeU32BE, rU32 = readU32BE;
 function splitBlocks(buf, blockSize) {
@@ -246,9 +246,9 @@ async function storeList() {
 const NET_ID = "_net";
 function netBlob(b) { const h = new Uint8Array(4); wU32(h, 0, b.length); return concat([h, b]); }
 function netOp(op, args) {
-  const out = writeOp(op, args); // seedkernel host/guest-seam.ts
+  const out = writeOp(op, args); // kernel op-frame (content) - this app's own framing
   // A rejected cross-realm call (no transport loaded, or torn down mid-flight) maps to
-  // the empty answer — same shape as an unreachable peer — so a PUT reports "no holder
+  // the empty answer - same shape as an unreachable peer - so a PUT reports "no holder
   // answered" instead of an uncaught rejection out of a fan-out.
   return host.call(NET_ID, out).then((r) => r, () => EMPTY);
 }
@@ -1218,8 +1218,9 @@ async function serveFetch(ids) {
 // parallel fan-out would race `bytesUsed` (two blocks both seeing the pre-batch
 // budget). A HAVE batch is independent reads and may fan out.
 async function doHandle(arg) {
-  // Call envelope is the guest ABI's, read via the preamble's own functions
-  // (seedkernel host/guest-seam.ts) — same shape `handle` and `shell.invoke` share.
+  // The kernel's part of the argument is exactly the 32-byte caller; everything
+  // after it is THIS app's own shape (util.ts `callerOf`/`readOp`) - same shape
+  // `handle` and the host-side `invoke` share.
   const { fromHost, body } = callerOf(arg);
   // The host's loopback (caller = 32 zero bytes) drives the initiator ops; a peer's
   // frame carries a MsgType byte instead of an op name, and the caller id tells them apart.
@@ -1300,4 +1301,9 @@ async function doWarm() {
   return EMPTY;
 }
 
-register("handle", doHandle);
+// The one entrypoint, declared top-level: the kernel invokes `handle` -
+// `[caller 32][body …]` - and nothing else (seedkernel §12.2). The call is
+// asynchronous precisely because the async host names round-trip.
+function handle(arg) {
+  return doHandle(arg);
+}

@@ -24,6 +24,7 @@ import {
   loadSodium, generateKeyPair, LoopbackNetwork, createConnectedCohort,
 } from "../build/host/node.js";
 import { toHex, bytesEqual, concatBytes, readU32BE } from "../build/host/util.js";
+import { writeOp } from "seedkernel-wasm/op-frame";
 import { Op } from "../build/host/protocol.js";
 import { buildBundle } from "./bundle-fixture.mjs";
 import { makeT } from "./harness.mjs";
@@ -113,7 +114,7 @@ export async function run(t) {
       await connectAll(net, shells);
       try {
         const data = file(12800, 7); // several blocks → the RS path, placed across the cohort
-        const r = await shells[0].shell.invoke(Op.PUT, data, shells[0].appKey);
+        const r = await shells[0].shell.invoke(writeOp(Op.PUT, data), shells[0].appKey);
         const key = r.slice(0, 32), root = r.slice(48, 48 + readU32BE(r, 44));
 
         let holding = 0;
@@ -121,7 +122,7 @@ export async function run(t) {
         t.ok(holding >= 4, "the confined holders admitted + stored blocks (fs writes via the guest)");
         t.eq((await shells[0].shell.fs.list()).length, 0, "the initiator holds nothing — durability is the cohort's");
 
-        const got = await shells[0].shell.invoke(Op.GET, concatBytes([key, root]), shells[0].appKey);
+        const got = await shells[0].shell.invoke(writeOp(Op.GET, concatBytes([key, root])), shells[0].appKey);
         t.ok(bytesEqual(got, data), "PUT → GET round-trips: a generic shell served the holder side from the confined guest");
       } finally {
         shells.forEach((e) => e.shell.close());
@@ -150,13 +151,13 @@ export async function run(t) {
         // the StorageNode places STOREs on that same shell — the shell's holder path
         // must answer (queued behind the parked initiator, served as it drains).
         const [rA, putB] = await Promise.all([
-          shells[0].shell.invoke(Op.PUT, dataA, shells[0].appKey),
+          shells[0].shell.invoke(writeOp(Op.PUT, dataA), shells[0].appKey),
           sn.put(dataB),
         ]);
         const keyA = rA.slice(0, 32), rootA = rA.slice(48, 48 + readU32BE(rA, 44));
 
         const [gotA, gotB] = await Promise.all([
-          shells[0].shell.invoke(Op.GET, concatBytes([keyA, rootA]), shells[0].appKey),
+          shells[0].shell.invoke(writeOp(Op.GET, concatBytes([keyA, rootA])), shells[0].appKey),
           sn.get(putB.root, putB.key),
         ]);
         t.ok(bytesEqual(gotA, dataA), "the shell's own file round-trips despite serving holder requests mid-PUT");

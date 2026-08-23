@@ -9,6 +9,7 @@
 // `runtime` in; StorageNode then loads only the seedstore bundle on it.
 
 import type { Fs } from "seedkernel-wasm/fs";
+import { writeOp } from "seedkernel-wasm/op-frame";
 import { MemoryFs } from "seedkernel-wasm/fs-memory";
 import type { TransportHost } from "seedkernel-wasm/transport-host";
 import { FsBlobView, type BlobView } from "./store-view.js";
@@ -284,16 +285,22 @@ export class StorageNode {
     return p;
   }
 
+  /** One local op into the guest: the op-frame composition is kernel-shipped content
+   *  (seedkernel-wasm/op-frame `writeOp`) - the shell passes bytes and never reads them. */
+  private invoke(op: string, args: Uint8Array): Promise<Uint8Array> {
+    return this.handle.invoke(writeOp(op, args));
+  }
+
   /** PUT a file (§6), orchestrated in the guest, STREAMED. */
   async put(plaintext: Uint8Array): Promise<PutResult> {
     return this.runExclusive(async () => {
-      const meta = await this.handle.invoke(Op.PUT_START, NO_ARG);
+      const meta = await this.invoke(Op.PUT_START, NO_ARG);
       const windowBytes = readU32BE(meta, 0);
       for (let off = 0; ; off += windowBytes) {
-        await this.handle.invoke(Op.PUT_WINDOW, plaintext.subarray(off, Math.min(off + windowBytes, plaintext.length)));
+        await this.invoke(Op.PUT_WINDOW, plaintext.subarray(off, Math.min(off + windowBytes, plaintext.length)));
         if (off + windowBytes >= plaintext.length) break;
       }
-      return decodePutResult(await this.handle.invoke(Op.PUT_FINISH, NO_ARG));
+      return decodePutResult(await this.invoke(Op.PUT_FINISH, NO_ARG));
     });
   }
 
@@ -302,11 +309,11 @@ export class StorageNode {
    *  variable-length root can be its tail. */
   async get(root: Uint8Array, key: Uint8Array): Promise<Uint8Array> {
     return this.runExclusive(async () => {
-      const fileSize = readU64BE(await this.handle.invoke(Op.GET_START, concatBytes([key, root])), 0);
+      const fileSize = readU64BE(await this.invoke(Op.GET_START, concatBytes([key, root])), 0);
       const out = new Uint8Array(fileSize);
       let written = 0;
       while (written < fileSize) {
-        const part = await this.handle.invoke(Op.GET_NEXT, NO_ARG);
+        const part = await this.invoke(Op.GET_NEXT, NO_ARG);
         if (part.length === 0) throw new Error(`get: stream ended ${written}/${fileSize} bytes in`);
         out.set(part, written); written += part.length;
       }
@@ -320,25 +327,25 @@ export class StorageNode {
    *  the placement engine would send. Throws if the peer was unreachable within
    *  the request window; a decline still comes back as response bytes. */
   async request(peer: PeerId, body: Uint8Array): Promise<Uint8Array> {
-    const r = await this.runExclusive(() => this.handle.invoke(Op.REQUEST, concatBytes([fromHex(peer), body])));
+    const r = await this.runExclusive(() => this.invoke(Op.REQUEST, concatBytes([fromHex(peer), body])));
     if (r[0] !== 1) throw new Error(`request: peer ${peer.slice(0, 8)}… unreachable within the request window`);
     return r.slice(1);
   }
 
   /** Pre-warm the realm's codec + crypto caps. */
   async warm(): Promise<void> {
-    await this.runExclusive(() => this.handle.invoke(Op.WARM, NO_ARG));
+    await this.runExclusive(() => this.invoke(Op.WARM, NO_ARG));
   }
 
   /** Run one repair pass over every chunk this node holds a block of (§9). */
   async runRepair(): Promise<number> {
-    return readU32BE(await this.runExclusive(() => this.handle.invoke(Op.REPAIR, NO_ARG)), 0);
+    return readU32BE(await this.runExclusive(() => this.invoke(Op.REPAIR, NO_ARG)), 0);
   }
 
   /** Decayed reciprocity score this node holds for a peer (§13), read from the
    *  guest — the same module instance the placement ranker scores against. */
   async score(peerPk: Uint8Array): Promise<number> {
-    const res = await this.handle.invoke(Op.SCORE, peerPk);
+    const res = await this.invoke(Op.SCORE, peerPk);
     if (!res || res.length < 8) return 0;
     return new DataView(res.buffer, res.byteOffset, 8).getFloat64(0, true);
   }
@@ -348,7 +355,7 @@ export class StorageNode {
    *  bytes/processing-ms as a holder. Read-and-clear — call once before and once
    *  after the measured phase. */
   async stats(): Promise<Map<number, RequestStats>> {
-    return decodeStats(await this.handle.invoke(Op.STATS, NO_ARG));
+    return decodeStats(await this.invoke(Op.STATS, NO_ARG));
   }
 
   /** Share a file: seal K to a recipient's kernel key (§4.4). */

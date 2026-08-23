@@ -27,6 +27,7 @@ import {
   loadSodium, generateKeyPair, LoopbackNetwork, createConnectedCohort,
 } from "../build/host/node.js";
 import { toHex, bytesEqual, concatBytes, readU32BE } from "../build/host/util.js";
+import { writeOp } from "seedkernel-wasm/op-frame";
 import { Op } from "../build/host/protocol.js";
 import { buildBundle } from "./bundle-fixture.mjs";
 import { makeT } from "./harness.mjs";
@@ -127,7 +128,7 @@ export async function run(t) {
 
       // PUT, orchestrated by the confined guest the shell loaded.
       const data = file(9600, 7); // > k blocks → multi-chunk RS path
-      const r = await shell.invoke(Op.PUT, data, appKey);
+      const r = await shell.invoke(writeOp(Op.PUT, data), appKey);
       const key = r.slice(0, 32), root = r.slice(48, 48 + readU32BE(r, 44));
       let holding = 0;
       for (const h of holders) if ((await h.store.list()).length > 0) holding++;
@@ -135,7 +136,7 @@ export async function run(t) {
       t.eq((await shell.fs.list()).length, 0, "the shell itself holds nothing — durability is the cohort's");
 
       // GET, same confined guest, reconstructing from the holders.
-      const got = await shell.invoke(Op.GET, concatBytes([key, root]), appKey);
+      const got = await shell.invoke(writeOp(Op.GET, concatBytes([key, root])), appKey);
       t.ok(bytesEqual(got, data), "PUT → GET round-trips: the generic shell ran storage over primitive caps");
 
       // A shell whose policy does not allow the bundle author refuses to load it.
