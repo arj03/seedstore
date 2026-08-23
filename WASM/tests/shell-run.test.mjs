@@ -18,15 +18,16 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // `bootRuntime` where the test drives the channel adapter (addresses, listeners) and
-// plain `boot` where only the shell is wanted — the adapter is the platform's now, so it
-// comes back beside the shell rather than on it.
-import { boot, bootRuntime } from "seedkernel-wasm/shell";
+// where only the shell is wanted — the adapter is the platform's now, so it comes back
+// beside the shell rather than on it.
+import { bootRuntime } from "seedkernel-wasm/shell";
 import { verifyBundle } from "seedkernel-wasm/bundle";
 import { transportBundleBytes } from "seedkernel-wasm/transport-bundle";
 import {
   loadSodium, generateKeyPair, LoopbackNetwork, createConnectedCohort,
 } from "../build/host/node.js";
 import { toHex, bytesEqual, concatBytes, readU32BE } from "../build/host/util.js";
+import { writeOp } from "seedkernel-wasm/op-frame";
 import { Op } from "../build/host/protocol.js";
 import { buildBundle } from "./bundle-fixture.mjs";
 import { makeT } from "./harness.mjs";
@@ -35,8 +36,9 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const build = join(__dirname, "..", "build");
 // The per-request deadline. Generous, and it has to be: a request now crosses two
 // confined realms on each side — the app's guest calls the transport, the transport
-// delivers to the far end's app via `route/deliver`, and that realm answers — where it
-// used to cross a host-side facade. 40 ms was a wire budget, not a realm budget.
+// returns the delivery the host routes to the far end's app, and that realm answers —
+// where it used to cross a host-side facade. 40 ms was a wire budget, not a realm
+// budget.
 const TIMEOUT = 200;
 
 function file(n, seed = 1) {
@@ -97,7 +99,7 @@ export async function run(t) {
       const rt = await bootRuntime({
         policyJson: JSON.stringify({
           authors: [toHex(authorId)],
-          grants: { link: [transportHex], route: [transportHex] },
+          grants: { link: [transportHex] },
         }),
         dir: shellDir, identity: shellIdentity,
         channels: net.view(toHex(shellIdentity.publicKey)),
@@ -126,7 +128,7 @@ export async function run(t) {
 
       // PUT, orchestrated by the confined guest the shell loaded.
       const data = file(9600, 7); // > k blocks → multi-chunk RS path
-      const r = await shell.invoke(Op.PUT, data, appKey);
+      const r = await shell.invoke(writeOp(Op.PUT, data), appKey);
       const key = r.slice(0, 32), root = r.slice(48, 48 + readU32BE(r, 44));
       let holding = 0;
       for (const h of holders) if ((await h.store.list()).length > 0) holding++;
@@ -134,24 +136,26 @@ export async function run(t) {
       t.eq((await shell.fs.list()).length, 0, "the shell itself holds nothing — durability is the cohort's");
 
       // GET, same confined guest, reconstructing from the holders.
-      const got = await shell.invoke(Op.GET, concatBytes([key, root]), appKey);
+      const got = await shell.invoke(writeOp(Op.GET, concatBytes([key, root])), appKey);
       t.ok(bytesEqual(got, data), "PUT → GET round-trips: the generic shell ran storage over primitive caps");
 
       // A shell whose policy does not allow the bundle author refuses to load it.
       const shell2Dir = mkdtempSync(join(tmpdir(), "seedstore-shell2-"));
       const shell2Id = generateKeyPair(sodium);
-      const shell2 = await boot({
+      const { shell: shell2 } = await bootRuntime({
         policyJson: JSON.stringify({
           authors: [toHex(generateKeyPair(sodium).publicKey)],
-          grants: { link: [transportHex], route: [transportHex] },
+          grants: { link: [transportHex] },
         }),
         dir: shell2Dir, identity: shell2Id, channels: net.view(toHex(shell2Id.publicKey)),
+        listen: { host: "127.0.0.1", port: 0 },
       });
       let refused = false;
       try { await shell2.loadBundle(bundlePath); } catch { refused = true; }
       t.ok(refused, "a shell whose policy omits the author refuses the bundle");
       shell2.close();
       rmSync(shell2Dir, { recursive: true, force: true });
+      rmSync(`${shell2Dir}.freshness.json`, { force: true });
     } finally {
       if (shell) shell.close();
       holders.forEach((h) => h.close());
@@ -185,7 +189,7 @@ export async function run(t) {
       const rt = await bootRuntime({
         policyJson: JSON.stringify({
           authors: [toHex(authorId)],
-          grants: { link: [transportHex], route: [transportHex] },
+          grants: { link: [transportHex] },
         }),
         dir: shellDir, identity: shellId, channels: net.view(toHex(shellId.publicKey)),
         timeoutMs: TIMEOUT,
@@ -212,3 +216,4 @@ if (import.meta.url === `file://${process.argv[1]}` || process.argv[1]?.endsWith
   const t = makeT();
   run(t).then(() => process.exit(t.summary() > 0 ? 1 : 0));
 }
+
