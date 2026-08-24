@@ -387,8 +387,8 @@ records per holder in flight. Over a 10 ms-RTT link (4 MB, RS(2,2), 32 KiB block
 
 | | time | rate | |
 |---|---:|---:|---|
-| **PUT** | ~0.72 s | ~5.6 MB/s | ships the 2× erasure overhead — RS(2,2) is 2 data + 2 parity |
-| **GET** | ~0.33 s | ~12.3 MB/s | downloads any *k* of *n* — 1× the file |
+| **PUT** | ~0.61 s | ~6.5 MB/s | ships the 2× erasure overhead — RS(2,2) is 2 data + 2 parity |
+| **GET** | ~0.30 s | ~13.4 MB/s | downloads any *k* of *n* — 1× the file |
 
 `node tests/bench-net.mjs 10 4 32 256 48 32` reproduces this in a fresh W=32
 process (omit the final `32` to sweep the window); the

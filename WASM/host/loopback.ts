@@ -41,7 +41,8 @@ export interface ChannelFactoryLike {
  *  BufferedChannel's fail() path, which is how a real channel reports the far side
  *  going away. */
 class LoopbackChannel implements RawLinkLike {
-  /** A socket pair with `send` as the boundary: one send is one delivery. */
+  /** A socket pair with `send` as the boundary. In byte-stream mode a send is
+   *  split into `chunkBytes`-sized deliveries so LENGTH framing must reassemble it. */
   readonly framing: 0 | 1;
   peer: LoopbackChannel | null = null;
   msg: ((bytes: Uint8Array) => void) | null = null;
@@ -70,15 +71,20 @@ class LoopbackChannel implements RawLinkLike {
   send(bytes: Uint8Array): void {
     if (this.dead) return;
     const p = this.peer;
-    const chunks = [];
     const step = this.chunkBytes > 0 ? this.chunkBytes : Math.max(1, bytes.length);
-    for (let off = 0; off < bytes.length; off += step) chunks.push(bytes.subarray(off, Math.min(bytes.length, off + step)));
-    for (const chunk of chunks) {
+    const deliver = (chunk: Uint8Array) => {
       if (this.delayMs > 0) {
         setTimeout(() => { if (p && !p.dead) p.msg?.(chunk); }, this.delayMs);
       } else {
         queueMicrotask(() => { if (p && !p.dead) p.msg?.(chunk); });
       }
+    };
+    if (bytes.length === 0) {
+      deliver(bytes);
+      return;
+    }
+    for (let off = 0; off < bytes.length; off += step) {
+      deliver(bytes.subarray(off, Math.min(bytes.length, off + step)));
     }
   }
   onData(cb: (bytes: Uint8Array) => void): void { this.msg = cb; }

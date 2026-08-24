@@ -23,8 +23,8 @@ function decodeRecord(record: Uint8Array): StoredBlock | null {
   const descriptorLength = readU32BE(record);
   if (descriptorLength === 0 || descriptorLength > record.length - REC_HEAD) return null;
   return {
-    descriptor: record.slice(REC_HEAD, REC_HEAD + descriptorLength),
-    bytes: record.slice(REC_HEAD + descriptorLength),
+    descriptor: record.subarray(REC_HEAD, REC_HEAD + descriptorLength),
+    bytes: record.subarray(REC_HEAD + descriptorLength),
   };
 }
 

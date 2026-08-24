@@ -237,11 +237,11 @@ function decodeStoreRecord(rec) {
   if (!rec || rec.length < STORE_REC_HEAD) return null;
   const dlen = rU32(rec, 0);
   if (dlen === 0 || dlen > rec.length - STORE_REC_HEAD) return null;
-  return { descriptor: rec.slice(STORE_REC_HEAD, STORE_REC_HEAD + dlen), bytes: rec.slice(STORE_REC_HEAD + dlen) };
+  return { descriptor: rec.subarray(STORE_REC_HEAD, STORE_REC_HEAD + dlen), bytes: rec.subarray(STORE_REC_HEAD + dlen) };
 }
 async function fsGet(keyStr) {
   const r = await host.call("fs/get", strBytes(keyStr));
-  return r[0] === 1 ? r.slice(1) : null;
+  return r[0] === 1 ? r.subarray(1) : null;
 }
 async function storeHas(id) { await ensureStoreIndex(); return heldBlocks.has(toHex(id)); }
 async function storeGet(id) {
@@ -1125,6 +1125,8 @@ async function doRepair() {
 // since the fs seam is async on every backend (seedkernel core/fs.ts).
 let bytesUsed = -1, heldBlocks = null, storeIndexPromise = null, storeIndexDirty = false;
 let activeStoreWrites = 0, resolveStoreWritesIdle = null, storeWritesIdle = Promise.resolve();
+const liveStoreReservations = new Map();
+let storeReservationVersion = 0;
 // The §14 byte budget is OPERATOR policy: read from LOCAL alone, never CFG (an
 // author-signed `quota` in CFG would let a bundle grant itself disk). No generous
 // default either — an under-injecting driver falls to 0 and FAILS CLOSED.
@@ -1132,32 +1134,39 @@ function quota() { return LOCAL.quota != null ? LOCAL.quota : 0; }
 async function fsSizeRaw(keyStr) { return rU32(await host.call("fs/size", strBytes(keyStr)), 0); }
 async function fsSize(keyStr) { const v = await fsSizeRaw(keyStr); return v === 0xffffffff ? 0 : v; }
 async function ensureStoreIndex() {
-  // If a backend failure made durable state uncertain, let every already-reserved
-  // write settle before rebuilding. New admission waits here; successful writes keep
-  // their reservations visible until the refreshed index replaces the snapshot.
-  if (storeIndexDirty && activeStoreWrites > 0) await storeWritesIdle;
-  if (storeIndexDirty) {
-    bytesUsed = -1; heldBlocks = null; storeIndexPromise = null; storeIndexDirty = false;
-  }
-  if (heldBlocks !== null && bytesUsed >= 0) return;
+  if (!storeIndexDirty && heldBlocks !== null && bytesUsed >= 0) return;
   if (storeIndexPromise === null) storeIndexPromise = (async () => {
-    const keys = await storeKeys();
-    const records = new Set(), legacy = new Set();
-    for (const key of keys) {
-      if (key.length !== 68) continue;
-      const hex = key.slice(0, 64), ext = key.slice(64);
-      if (ext === STORE_REC) records.add(hex);
-      else if (ext === STORE_BLK) legacy.add(hex);
+    // Rebuild only from a stable durable snapshot. Admission may have resumed from an
+    // earlier clean ensureStoreIndex() while storeKeys()/fsSize() are in flight, so
+    // merge its still-live reservations and retry if any reservation landed or settled
+    // across the seam calls. This keeps both quota charges and sibling exclusions.
+    for (;;) {
+      if (activeStoreWrites > 0) await storeWritesIdle;
+      const reservationVersion = storeReservationVersion;
+      const keys = await storeKeys();
+      const records = new Set(), legacy = new Set();
+      for (const key of keys) {
+        if (key.length !== 68) continue;
+        const hex = key.slice(0, 64), ext = key.slice(64);
+        if (ext === STORE_REC) records.add(hex);
+        else if (ext === STORE_BLK) legacy.add(hex);
+      }
+      const sizeKeys = [];
+      for (const hex of records) sizeKeys.push(hex + STORE_REC);
+      for (const hex of legacy) sizeKeys.push(hex + STORE_BLK, hex + STORE_DSC);
+      const sizes = await Promise.all(sizeKeys.map(fsSize));
+      if (reservationVersion !== storeReservationVersion || activeStoreWrites > 0) continue;
+      const rebuilt = new Set([...records, ...legacy]);
+      let rebuiltBytes = sizes.reduce((sum, size) => sum + size, 0);
+      for (const [hex, cost] of liveStoreReservations) {
+        if (!rebuilt.has(hex)) rebuiltBytes += cost;
+        rebuilt.add(hex);
+      }
+      heldBlocks = rebuilt;
+      bytesUsed = rebuiltBytes;
+      storeIndexDirty = false;
+      return;
     }
-    // Build once from durable state. The guest is the sole writer, so admission can
-    // enforce sibling presence from this authoritative index instead of stat'ing
-    // every candidate and sibling on every OFFER and STORE.
-    const sizeKeys = [];
-    for (const hex of records) sizeKeys.push(hex + STORE_REC);
-    for (const hex of legacy) sizeKeys.push(hex + STORE_BLK, hex + STORE_DSC);
-    const sizes = await Promise.all(sizeKeys.map(fsSize));
-    heldBlocks = new Set([...records, ...legacy]);
-    bytesUsed = sizes.reduce((sum, size) => sum + size, 0);
   })();
   try { await storeIndexPromise; } finally { storeIndexPromise = null; }
 }
@@ -1193,6 +1202,7 @@ async function storeWrite(id, bytes, descriptor) {
     throw e;
   } finally {
     activeStoreWrites--;
+    if (liveStoreReservations.delete(hex)) storeReservationVersion++;
     if (activeStoreWrites === 0 && resolveStoreWritesIdle) {
       const resolve = resolveStoreWritesIdle; resolveStoreWritesIdle = null; resolve();
     }
@@ -1255,7 +1265,12 @@ async function admitBatch(offers, reserve = false) {
     free -= cost;
     const blockHex = toHex(o.blockId);
     provisional.add(blockHex);
-    if (reserve) { bytesUsed += cost; heldBlocks.add(blockHex); }
+    if (reserve) {
+      bytesUsed += cost;
+      heldBlocks.add(blockHex);
+      liveStoreReservations.set(blockHex, cost);
+      storeReservationVersion++;
+    }
     verdicts.push(VERDICT_ACCEPTED);
   }
   return verdicts;
@@ -1275,7 +1290,7 @@ async function acceptStoreBatch(stores) {
   await Promise.all(valid.map(async ({ index, store: s }, i) => {
     if (admitted[i] !== VERDICT_ACCEPTED) { verdicts[index] = admitted[i]; return; }
     try { await storeWrite(s.blockId, s.bytes, s.descriptor); verdicts[index] = VERDICT_ACCEPTED; }
-    catch (e) { verdicts[index] = (e && e.quota) ? VERDICT_QUOTA : VERDICT_ERROR; }
+    catch { verdicts[index] = VERDICT_ERROR; }
   }));
   return verdicts;
 }

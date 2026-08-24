@@ -40,7 +40,7 @@ export class Crypto {
   }
 
   /** 12-byte nonce = [domain u8][index u32 BE][zero padding] (§4.4). One nonce
-   *  per chunk (or per manifest), so (K, nonce) never repeats for a fresh K. */
+   *  per chunk, so (K, nonce) never repeats for a fresh K. */
   nonce(domain: number, index: number): Uint8Array {
     const n = new Uint8Array(this.nonceBytes);
     n[0] = domain & 0xff;

@@ -1,5 +1,6 @@
-// Networking + filesystem integration (README §16, §12). Exercises the real
-// fabric that replaces the loopback:
+// Networking + filesystem integration (README §16, §12). Exercises both the
+// chunked loopback byte-stream model and the real socket fabric:
+//   - LENGTH framing reassembles split physical deliveries
 //   - FsBlobView reads the durable store.local layout back, across reopen
 //   - a full cohort over real TCP sockets, blocks landing on holders' disks
 //   - a browser-like node reaching a server node over a real WebSocket
@@ -12,7 +13,7 @@ import { mkdtempSync, rmSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { loadSodium, loadWasmBytes } from "../build/host/node.js";
+import { createConnectedCohort, loadSodium, loadWasmBytes, LoopbackNetwork } from "../build/host/node.js";
 import { StorageNode } from "../build/host/storage-node.js";
 import { NodeChannelFactory } from "seedkernel-wasm/net-node";
 import { FsBlobView } from "../build/host/store-view.js";
@@ -73,6 +74,25 @@ async function tcpCohort({ count, sodium, wasm, config, baseDir }) {
 export async function run(t) {
   const sodium = await loadSodium();
   const wasm = await loadWasmBytes();
+
+  t.group("PUT → GET over a LENGTH-framed loopback byte stream");
+  {
+    const net = new LoopbackNetwork(0, 4096);
+    const nodes = await createConnectedCohort({
+      count: 6, network: net, sodium, wasm,
+      config: { k: 2, m: 2, blockSize: 32 * 1024, maxMessageBytes: 256 * 1024 },
+      timeoutMs: 3000,
+    });
+    try {
+      const data = file(160 * 1024, 29);
+      const put = await nodes[0].put(data);
+      const got = await nodes[0].get(put.root, put.key);
+      t.ok(bytesEqual(got, data), "split physical deliveries reassemble into complete logical records");
+    } finally {
+      nodes.forEach((node) => node.close());
+      net.close();
+    }
+  }
 
   // ── FsBlobView ─────────────────────────────────────────────────────────────
   // A pure READ view of the durable store.local layout (§12) — the write half
