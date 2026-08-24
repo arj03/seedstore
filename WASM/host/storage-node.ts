@@ -145,8 +145,8 @@ export class StorageNode {
    *  writes is `appScope + key` on the raw backend. Tooling opening a node's
    *  directory cold must wrap it in `scopedFs(raw, appScope)` to see the same blocks. */
   readonly appScope: string;
-  /** The load's returned handle: app key + scoped fs view + loopback `invoke`,
-   *  bound together since an initiator-only app claims no protocol for `shell.invoke` to route by. */
+  /** The load's returned handle: app key + scoped fs view + the slot-bound loopback
+   *  `invoke`. Invocation needs no shell-level identity lookup. */
   private readonly handle: AppHandle;
   /** Durable cohort roster — app state independent of who's online, taught to
    *  `connect`. Does NOT feed the guest: the guest asks the TRANSPORT's `peers` op
@@ -275,9 +275,7 @@ export class StorageNode {
   // ── PUT / GET / repair / share — all local ops through the load's handle ─────
 
   /** Serialize initiator ops: each call to this app's one entrypoint (`handle`,
-   *  seedkernel §12.2) awaits the previous before running, so a StorageNode has
-   *  no need to name itself to `shell.invoke` (a node runs ≥2 apps, so "the only
-   *  loaded app" default doesn't apply) — the app key rides `this.handle` instead. */
+   *  seedkernel §12.2) awaits the previous before running through `this.handle`. */
   private runExclusive<T>(body: () => Promise<T>): Promise<T> {
     if (this.closed) return Promise.reject(new Error("storage node closed"));
     const p = this.inFlight.then(body);

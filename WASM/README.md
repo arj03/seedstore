@@ -166,7 +166,7 @@ guest, and serves the holder side (HAVE/OFFER/STORE/FETCH) over TCP (and WebSock
 for browsers):
 
 ```sh
-SHELL=../../seedkernel/WASM/build/host/main.js     # the generic runtime
+SHELL=../../seedkernel/WASM/build/host/main-node.js # the Node CLI application
 
 # a holder: admits the transport bundle + the storage bundle, then serves the
 # confined holder side

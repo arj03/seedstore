@@ -17,10 +17,10 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-// `bootRuntime` where the test drives the channel adapter (addresses, listeners) and
+// `bootNodeShell` where the test drives the channel adapter (addresses, listeners) and
 // where only the shell is wanted — the adapter is the platform's now, so it comes back
 // beside the shell rather than on it.
-import { bootRuntime } from "seedkernel-wasm/shell";
+import { bootNodeShell } from "seedkernel-wasm/shell-node";
 import { verifyBundle } from "seedkernel-wasm/bundle";
 import { transportBundleBytes } from "seedkernel-wasm/transport-bundle";
 import {
@@ -96,7 +96,7 @@ export async function run(t) {
       // since a holder anchors a descriptor's author to a peer it knows (§4.3).
       const shellIdentity = generateKeyPair(sodium);
       for (const h of holders) h.addPeer(toHex(shellIdentity.publicKey));
-      const rt = await bootRuntime({
+      const rt = await bootNodeShell({
         policyJson: JSON.stringify({
           authors: [toHex(authorId)],
           grants: { link: [transportHex] },
@@ -128,7 +128,7 @@ export async function run(t) {
 
       // PUT, orchestrated by the confined guest the shell loaded.
       const data = file(9600, 7); // > k blocks → multi-chunk RS path
-      const r = await shell.invoke(writeOp(Op.PUT, data), appKey);
+      const r = await loaded.invoke(writeOp(Op.PUT, data));
       const key = r.slice(0, 32), root = r.slice(48, 48 + readU32BE(r, 44));
       let holding = 0;
       for (const h of holders) if ((await h.store.list()).length > 0) holding++;
@@ -136,13 +136,13 @@ export async function run(t) {
       t.eq((await shell.fs.list()).length, 0, "the shell itself holds nothing — durability is the cohort's");
 
       // GET, same confined guest, reconstructing from the holders.
-      const got = await shell.invoke(writeOp(Op.GET, concatBytes([key, root])), appKey);
+      const got = await loaded.invoke(writeOp(Op.GET, concatBytes([key, root])));
       t.ok(bytesEqual(got, data), "PUT → GET round-trips: the generic shell ran storage over the seam's names");
 
       // A shell whose policy does not allow the bundle author refuses to load it.
       const shell2Dir = mkdtempSync(join(tmpdir(), "seedstore-shell2-"));
       const shell2Id = generateKeyPair(sodium);
-      const { shell: shell2 } = await bootRuntime({
+      const { shell: shell2 } = await bootNodeShell({
         policyJson: JSON.stringify({
           authors: [toHex(generateKeyPair(sodium).publicKey)],
           grants: { link: [transportHex] },
@@ -186,7 +186,7 @@ export async function run(t) {
       const authorId = await buildBundle(hiPath, author, sodium, build, 5);
       await buildBundle(loPath, author, sodium, build, 3);
       const shellId = generateKeyPair(sodium);
-      const rt = await bootRuntime({
+      const rt = await bootNodeShell({
         policyJson: JSON.stringify({
           authors: [toHex(authorId)],
           grants: { link: [transportHex] },
@@ -216,4 +216,3 @@ if (import.meta.url === `file://${process.argv[1]}` || process.argv[1]?.endsWith
   const t = makeT();
   run(t).then(() => process.exit(t.summary() > 0 ? 1 : 0));
 }
-

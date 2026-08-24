@@ -17,7 +17,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { bootRuntime } from "seedkernel-wasm/shell";
+import { bootNodeShell } from "seedkernel-wasm/shell-node";
 import { verifyBundle } from "seedkernel-wasm/bundle";
 import { transportBundleBytes } from "seedkernel-wasm/transport-bundle";
 import {
@@ -71,7 +71,7 @@ export async function run(t) {
     const dir = mkdtempSync(join(tmpdir(), "seedstore-shell-"));
     tmpDirs.push(dir);
     const identity = generateKeyPair(sodium);
-    const { shell, transport } = await bootRuntime({
+    const { shell, transport } = await bootNodeShell({
       policyJson, dir, identity,
       channels: net.view(toHex(identity.publicKey)),
       listen: { host: "127.0.0.1", port: 0 },
@@ -86,9 +86,7 @@ export async function run(t) {
     const loaded = await shell.loadBundle(bundlePath, {
       localConfig: { quota: 64 * 1024 * 1024, blockSize: 1024 },
     });
-    // The app key rides the load's handle: a node with a network runs ≥2 apps
-    // (storage + transport), so "the only loaded app" isn't unambiguous for `invoke`.
-    return { shell, peerId: toHex(identity.publicKey), net: transport, appKey: loaded.key };
+    return { shell, peerId: toHex(identity.publicKey), net: transport, app: loaded };
   }
   // Dial every pair (addresses + ready). Each guest's cohort is the TRANSPORT's
   // authenticated set (it asks the transport's `_net` local service for peers),
@@ -115,7 +113,7 @@ export async function run(t) {
       await connectAll(net, shells);
       try {
         const data = file(12800, 7); // several blocks → the RS path, placed across the cohort
-        const r = await shells[0].shell.invoke(writeOp(Op.PUT, data), shells[0].appKey);
+        const r = await shells[0].app.invoke(writeOp(Op.PUT, data));
         const key = r.slice(0, 32), root = r.slice(48, 48 + readU32BE(r, 44));
 
         let holding = 0;
@@ -123,7 +121,7 @@ export async function run(t) {
         t.ok(holding >= 4, "the confined holders admitted + stored blocks (fs writes via the guest)");
         t.eq((await shells[0].shell.fs.list()).length, 0, "the initiator holds nothing — durability is the cohort's");
 
-        const got = await shells[0].shell.invoke(writeOp(Op.GET, concatBytes([key, root])), shells[0].appKey);
+        const got = await shells[0].app.invoke(writeOp(Op.GET, concatBytes([key, root])));
         t.ok(bytesEqual(got, data), "PUT → GET round-trips: a generic shell served the holder side from the confined guest");
       } finally {
         shells.forEach((e) => e.shell.close());
@@ -152,13 +150,13 @@ export async function run(t) {
         // the StorageNode places STOREs on that same shell — the shell's holder path
         // must answer (queued behind the parked initiator, served as it drains).
         const [rA, putB] = await Promise.all([
-          shells[0].shell.invoke(writeOp(Op.PUT, dataA), shells[0].appKey),
+          shells[0].app.invoke(writeOp(Op.PUT, dataA)),
           sn.put(dataB),
         ]);
         const keyA = rA.slice(0, 32), rootA = rA.slice(48, 48 + readU32BE(rA, 44));
 
         const [gotA, gotB] = await Promise.all([
-          shells[0].shell.invoke(writeOp(Op.GET, concatBytes([keyA, rootA])), shells[0].appKey),
+          shells[0].app.invoke(writeOp(Op.GET, concatBytes([keyA, rootA]))),
           sn.get(putB.root, putB.key),
         ]);
         t.ok(bytesEqual(gotA, dataA), "the shell's own file round-trips despite serving holder requests mid-PUT");
@@ -224,4 +222,3 @@ if (import.meta.url === `file://${process.argv[1]}` || process.argv[1]?.endsWith
   const t = makeT();
   run(t).then(() => process.exit(t.summary() > 0 ? 1 : 0));
 }
-
