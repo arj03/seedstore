@@ -19,19 +19,22 @@ export async function run(t) {
     t.ok(bytesEqual(crypto.hash(data), sodium.crypto_generichash(32, data)), "hash == libsodium BLAKE2b-256");
   }
 
-  t.group("crypto.stream: length-preserving, no tag (§4.4)");
+  t.group("crypto.aead: detached tag keeps RS ciphertext length-preserving (§4.4)");
   {
     const K = crypto.randomKey();
     const plain = sodium.randombytes_buf(1000);
-    const ct = crypto.encrypt(K, LEVEL_BODY, 0, plain);
-    t.eq(ct.length, plain.length, "ciphertext is same length as plaintext (no MAC)");
-    const back = crypto.decrypt(K, LEVEL_BODY, 0, ct);
-    t.ok(bytesEqual(back, plain), "decrypt(encrypt(x)) == x");
+    const sealed = crypto.encrypt(K, LEVEL_BODY, 0, plain);
+    t.eq(sealed.ciphertext.length, plain.length, "ciphertext remains the plaintext length");
+    t.eq(sealed.authTag.length, 16, "the detached authentication tag is 16 bytes");
+    const back = crypto.decrypt(K, LEVEL_BODY, 0, sealed.ciphertext, sealed.authTag);
+    t.ok(back && bytesEqual(back, plain), "decrypt(encrypt(x)) == x");
     // A different LEVEL or chunk index → different keystream, so ciphertext differs.
-    const ctIndex = crypto.encrypt(K, LEVEL_BODY + 1, 0, plain);
-    const ctIdx1 = crypto.encrypt(K, LEVEL_BODY, 1, plain);
-    t.ok(!bytesEqual(ct, ctIndex), "the level byte separates an index stream from the body stream");
-    t.ok(!bytesEqual(ct, ctIdx1), "chunk index changes the keystream");
+    const atLevel = crypto.encrypt(K, LEVEL_BODY + 1, 0, plain);
+    const atIndex = crypto.encrypt(K, LEVEL_BODY, 1, plain);
+    t.ok(!bytesEqual(sealed.ciphertext, atLevel.ciphertext), "the level byte separates an index stream from the body stream");
+    t.ok(!bytesEqual(sealed.ciphertext, atIndex.ciphertext), "chunk index changes the keystream");
+    const badTag = sealed.authTag.slice(); badTag[0] ^= 1;
+    t.eq(crypto.decrypt(K, LEVEL_BODY, 0, sealed.ciphertext, badTag), null, "a modified tag is rejected");
   }
 
   t.group("crypto seal/open: share the key, not the bytes (§4.4)");

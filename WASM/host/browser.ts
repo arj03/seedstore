@@ -1,5 +1,5 @@
 // Browser entry point — fetches the seedstore bundle (.skb) and boots a StorageNode
-// against a caller-provided sumo libsodium. The page readies libsodium and
+// against the caller-provided core libsodium. The page readies libsodium and
 // passes it in. Browser nodes run the same protocol as long-running peers,
 // differing only in backend and default quota (§1, §8).
 
@@ -27,7 +27,7 @@ export async function loadWasmBytes(baseUrl: string | URL = "./"): Promise<WasmB
   return { bundleBlob };
 }
 
-/** Boot one storage node in the browser. Pass a readied sumo libsodium. */
+/** Boot one storage node in the browser. Pass a readied core libsodium. */
 export async function createStorageNode(
   opts: Omit<StorageNodeOptions, "bundleBlob" | "sodium"> & {
     sodium: Sodium; wasm?: WasmBytes; baseUrl?: string | URL;

@@ -17,6 +17,7 @@ import { ensureSodium, newKey, paths } from "./helpers.mjs";
 export async function run(t) {
   const sodium = await ensureSodium();
   const crypto = new Crypto(sodium);
+  const tag = () => new Uint8Array(16);
   const codec = await CodecClient.load(new Uint8Array(readFileSync(paths.codec)));
 
   t.group("CodecClient: info + RS round trip");
@@ -40,7 +41,7 @@ export async function run(t) {
   {
     const ids = [];
     for (let i = 0; i < 6; i++) ids.push(crypto.hash(new Uint8Array([i])));
-    const d = { level: 0, k: 4, m: 2, blockSize: 1024, tailBytes: 4000, blockIds: ids };
+    const d = { level: 0, k: 4, m: 2, blockSize: 1024, tailBytes: 4000, authTag: tag(), blockIds: ids };
     const core = encodeDescriptorCore(d);
     const back = decodeDescriptorCore(core);
     t.eq(back.k, 4, "k preserved");
@@ -48,6 +49,7 @@ export async function run(t) {
     t.eq(back.blockSize, 1024, "blockSize preserved");
     t.eq(back.level, 0, "level preserved");
     t.eq(back.tailBytes, 4000, "tailBytes preserved");
+    t.ok(bytesEqual(back.authTag, d.authTag), "authentication tag preserved");
     t.ok(back.blockIds.every((id, i) => bytesEqual(id, ids[i])), "block ids preserved");
     t.ok(descriptorContains(back, ids[3]), "descriptorContains finds a listed id");
     t.ok(!descriptorContains(back, crypto.hash(new Uint8Array([99]))), "rejects a non-listed id");
@@ -60,9 +62,9 @@ export async function run(t) {
 
     // n = k + m for BOTH. A coded chunk lists k+m distinct blocks; a k=1 chunk lists its
     // lone block m+1 times, and that repetition IS its replica count — no second shape.
-    const coded = { level: 0, k: 10, m: 6, blockSize: 4096, tailBytes: 40960, blockIds: ids(16) };
+    const coded = { level: 0, k: 10, m: 6, blockSize: 4096, tailBytes: 40960, authTag: tag(), blockIds: ids(16) };
     const one = id(100);
-    const repl = { level: 0, k: 1, m: 6, blockSize: 4096, tailBytes: 4096, blockIds: new Array(7).fill(one) };
+    const repl = { level: 0, k: 1, m: 6, blockSize: 4096, tailBytes: 4096, authTag: tag(), blockIds: new Array(7).fill(one) };
     t.eq(coded.blockIds.length, coded.k + coded.m, "coded: n = k+m");
     t.eq(repl.blockIds.length, repl.k + repl.m, "k=1: n = k+m too, by repeating the id");
     t.eq(copyTargets(coded).size, 16, "a coded chunk has 16 distinct blocks");
@@ -97,13 +99,13 @@ export async function run(t) {
 
     // n must be exactly k+m now — there is no second accepted id count.
     let threw = false;
-    try { encodeDescriptorCore({ level: 0, k: 1, m: 6, blockSize: 4096, tailBytes: 1, blockIds: ids(1, 200) }); } catch { threw = true; }
+    try { encodeDescriptorCore({ level: 0, k: 1, m: 6, blockSize: 4096, tailBytes: 1, authTag: tag(), blockIds: ids(1, 200) }); } catch { threw = true; }
     t.ok(threw, "a k=1 descriptor listing its id ONCE is rejected — n must be k+m");
     threw = false;
-    try { encodeDescriptorCore({ level: 0, k: 10, m: 6, blockSize: 4096, tailBytes: 1, blockIds: ids(12) }); } catch { threw = true; }
+    try { encodeDescriptorCore({ level: 0, k: 10, m: 6, blockSize: 4096, tailBytes: 1, authTag: tag(), blockIds: ids(12) }); } catch { threw = true; }
     t.ok(threw, "an id count that is not k+m is rejected");
     threw = false;
-    try { encodeDescriptorCore({ level: 0, k: 2, m: 2, blockSize: 256, tailBytes: 999, blockIds: ids(4, 300) }); } catch { threw = true; }
+    try { encodeDescriptorCore({ level: 0, k: 2, m: 2, blockSize: 256, tailBytes: 999, authTag: tag(), blockIds: ids(4, 300) }); } catch { threw = true; }
     t.ok(threw, "tailBytes past k*blockSize is rejected");
   }
 
@@ -113,7 +115,7 @@ export async function run(t) {
     const holder = newKey(); // a malicious holder
     const ids = [];
     for (let i = 0; i < 4; i++) ids.push(crypto.hash(new Uint8Array([i + 10])));
-    const d = { level: 0, k: 2, m: 2, blockSize: 256, tailBytes: 512, blockIds: ids };
+    const d = { level: 0, k: 2, m: 2, blockSize: 256, tailBytes: 512, authTag: tag(), blockIds: ids };
     // The 5th argument is the SCOPE AUTHOR — the key whose storageSignScope is the
     // deployment scope. signDescriptor/verifyDescriptor route through the kernel's
     // scoped node/sign + node/verify, which apply `DOMAIN_guest ‖ scope` host-side;
@@ -126,7 +128,7 @@ export async function run(t) {
 
     // A holder alters a block id to misdirect repair → signature breaks.
     const tampered = env.slice();
-    tampered[96 + 8] ^= 0xff; // flip a byte inside the first block id of core
+    tampered[96 + 13] ^= 0xff; // flip a byte inside the authenticated tag of the core
     t.ok(verifyDescriptor(sodium, tampered, author.publicKey) === null, "tampered descriptor rejected");
 
     // A holder re-signs with its own key → authority is bound to the author,
@@ -149,7 +151,7 @@ export async function run(t) {
     const envs = [0, 1].map((c) => {
       const ids = [];
       for (let i = 0; i < 4; i++) ids.push(crypto.hash(new Uint8Array([c, i])));
-      return signDescriptor(sodium, { level: 0, k: 2, m: 2, blockSize: 512, tailBytes: 1024, blockIds: ids },
+      return signDescriptor(sodium, { level: 0, k: 2, m: 2, blockSize: 512, tailBytes: 1024, authTag: tag(), blockIds: ids },
         author.publicKey, author.privateKey, author.publicKey);
     });
     // An index level is JUST the ordered signed descriptors — no header, no file_size, no
@@ -164,11 +166,12 @@ export async function run(t) {
     // The level goes through the SAME encrypt + content-address path a file chunk takes:
     // its nonce domain is the level (1 here), never a manifest domain.
     const K = crypto.randomKey();
-    const ct = crypto.encrypt(K, 1 /* level 1 = the first index level */, 0, plain);
-    t.eq(ct.length, plain.length, "index ciphertext is length-preserving");
-    const reread = decodeDescriptorList(crypto.decrypt(K, 1, 0, ct));
+    const sealed = crypto.encrypt(K, 1 /* level 1 = the first index level */, 0, plain);
+    t.eq(sealed.ciphertext.length, plain.length, "index ciphertext is length-preserving");
+    const opened = crypto.decrypt(K, 1, 0, sealed.ciphertext, sealed.authTag);
+    const reread = decodeDescriptorList(opened);
     t.eq(reread.length, 2, "index decrypts and reparses");
-    t.ok(bytesEqual(crypto.hash(ct), crypto.hash(ct)), "block_id = content_hash(ciphertext) is stable");
+    t.ok(bytesEqual(crypto.hash(sealed.ciphertext), crypto.hash(sealed.ciphertext)), "block_id = content_hash(ciphertext) is stable");
 
     // A truncated entry is a decode error, not a silently short list.
     let threw = false;

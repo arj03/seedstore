@@ -40,6 +40,7 @@
     "seedkernel-wasm/crypto-browser": "./seedkernel/host/crypto-browser.js",
     "seedkernel-wasm/guest-seam":     "./seedkernel/host/guest-seam.js",
     "seedkernel-wasm/fs":             "./seedkernel/core/fs.js",
+    "seedkernel-wasm/op-frame":       "./seedkernel/core/op-frame.js",
     "seedkernel-wasm/fs-memory":      "./seedkernel/host/fs-memory.js",
     "seedkernel-wasm/transport-host": "./seedkernel/host/transport-host.js",
     "seedkernel-wasm/transport-bundle": "./seedkernel/host/transport-bundle.js",
@@ -84,7 +85,7 @@ const hex = (b) => [...b].map((x) => x.toString(16).padStart(2, "0")).join("");
 let nodes, net, lastPut;
 
 (async () => {
-  log("readying crypto (sumo libsodium + ML-DSA-65 + ML-KEM-768)…");
+  log("readying crypto (core libsodium + ML-DSA-65)…");
   await loadCrypto(sodium, "./");
   log("loading wasm: kernel, codec, reputation…");
   const wasm = await loadWasmBytes("./");

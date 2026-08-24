@@ -93,9 +93,9 @@ export async function run(t) {
     // The WebRTC case: a small frame cap forces ~one block per STORE message, so
     // a big file becomes many single-block STOREs. OFFER still batches (tiny
     // descriptors); the only lever left is pipelining those per-holder STOREs.
-    const bs = 4096;                                 // block big enough to dominate a STORE message
+    const bs = 4200;                                 // block big enough to dominate a STORE message
     const Nw = 16;                                   // chunks ≫ holders, so a per-holder window can bind
-    const cap = bs + 2000;                           // one 4 KiB block + headers fits a STORE; two don't.
+    const cap = bs + 2000;                           // one ~4 KiB block + headers fits a STORE; two don't.
     const webrtcData = file(Nw * config.k * bs, 9);  // exactly Nw RS chunks
     const cfg = { ...config, blockSize: bs, maxMessageBytes: cap };
     const replicas = config.m + 1;                   // manifest copies (defaultConfig: m+1)

@@ -89,8 +89,8 @@ let hsh = performance.now() - t0;
 // ── full PUT-style pipeline: encrypt + hash every block + encode ───────────
 t0 = performance.now();
 for (let c = 0; c < numChunks; c++) {
-  const ct = crypto.encrypt(key, LEVEL_BODY, c, data.subarray(c * chunkData, (c + 1) * chunkData));
-  const dataBlocks = split(ct, 0, K, B);
+  const { ciphertext } = crypto.encrypt(key, LEVEL_BODY, c, data.subarray(c * chunkData, (c + 1) * chunkData));
+  const dataBlocks = split(ciphertext, 0, K, B);
   const parity = codec.rsEncode(K, M, B, dataBlocks);
   for (const b of dataBlocks) crypto.hash(b);
   for (const b of parity) crypto.hash(b);
@@ -101,7 +101,7 @@ const rate = (ms) => (FILE / MB / (ms / 1000)).toFixed(0);
 console.log(`\nRS(${K},${M}), B=${B / 1024} KB, ${FILE / MB} MB → ${numChunks} chunks, ${1.6}x stored\n`);
 console.log(`  WRITE`);
 console.log(`    RS encode                    ${enc.toFixed(0).padStart(6)} ms   ${rate(enc).padStart(5)} MB/s`);
-console.log(`    encrypt (xchacha20)          ${encr.toFixed(0).padStart(6)} ms   ${rate(encr).padStart(5)} MB/s`);
+console.log(`    encrypt (chacha20-poly1305)  ${encr.toFixed(0).padStart(6)} ms   ${rate(encr).padStart(5)} MB/s`);
 console.log(`    hash block-ids (BLAKE2b)  ${hsh.toFixed(0).padStart(6)} ms   ${(FILE * 1.6 / MB / (hsh / 1000)).toFixed(0).padStart(5)} MB/s   (hashes n blocks = 1.6×)  [acc ${hsum & 255}]`);
 console.log(`    encrypt+hash+encode (full)   ${full.toFixed(0).padStart(6)} ms   ${rate(full).padStart(5)} MB/s`);
 console.log(`  READ`);

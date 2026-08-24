@@ -44,9 +44,8 @@ export function authorKeysFor(sodium, edSk) {
 // `_net` — the network is a bundle (the transport) claiming that id under its
 // `services` list, reached via one cross-realm call (§12.10), carrying no privilege.
 //
-// Pure transforms (BLAKE2b, XChaCha20, and this bundle's own codec/reputation
-// modules) are not grants — ungated on the `crypto/` prefix (seedkernel §12.1)
-// and never listed here.
+// Pure transforms (BLAKE2b, ChaCha20-Poly1305, and this bundle's own
+// codec/reputation modules) are not grants and are never listed here.
 const STORAGE_REQUIRES = [
   "node",
   "_net",

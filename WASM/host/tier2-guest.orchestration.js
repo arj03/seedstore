@@ -109,11 +109,13 @@ const CFG = { ...APP, ...LOCAL };
 
 // ── crypto primitives + storage framing ──
 // Pure transforms reach the host under the `crypto/` prefix (seedkernel §12.2):
-// BLAKE2b-256 for block-ids, XChaCha20 stream XOR for the §4.4 keystream.
+// BLAKE2b-256 for block-ids and ChaCha20-Poly1305 for at-rest encryption.
 // node/sign and node/verify apply the scoped `DOMAIN_guest ‖ scope` prefix on the
 // host side — the guest never holds or reconstructs it. Every seam name answers a
 // Promise now, so every helper here is awaited by its callers.
 function hash(bytes) { return host.call("crypto/blake2b-256", bytes); }
+const P_SEAL = "crypto/chacha20poly1305-ietf/seal";
+const P_OPEN = "crypto/chacha20poly1305-ietf/open";
 function randomKey() { const n = new Uint8Array(4); wU32(n, 0, 32); return host.call("node/random", n); }
 function identity() { return host.call("node/identity", EMPTY); }
 let myPeerCache = null;
@@ -122,12 +124,22 @@ async function myPeer() {
   if (myPeerCache === null) myPeerCache = identity().then((pk) => toHex(pk));
   return myPeerCache;
 }
-// 24-byte nonce = [level u8][chunk index u32 BE][0…] (§4.4) — the guest's convention.
-function nonce(level, index) { const n = new Uint8Array(24); n[0] = level & 255; wU32(n, 1, index >>> 0); return n; }
-// crypto/xchacha20/xor takes [nonce 24][key 32][message ..] for the xchacha20/xor primitive.
-function streamXor(K, non, msg) { return host.call("crypto/xchacha20/xor", concat([non, K, msg])); }
-function encrypt(K, level, index, msg) { return streamXor(K, nonce(level, index), msg); }
-function decrypt(K, level, index, ct) { return streamXor(K, nonce(level, index), ct); }
+// 12-byte nonce = [level u8][chunk index u32 BE][0…] (§4.4). A fresh random K per
+// file makes this deterministic per-file namespace unique; level separates index data.
+function nonce(level, index) { const n = new Uint8Array(12); n[0] = level & 255; wU32(n, 1, index >>> 0); return n; }
+// The kernel's seal result is [ciphertext][tag 16]. Keep the tag in the signed
+// descriptor so the ciphertext remains exactly k·blockSize for systematic RS.
+async function encrypt(K, level, index, msg) {
+  const sealed = await host.call(P_SEAL, concat([nonce(level, index), K, msg]));
+  if (sealed.length !== msg.length + AUTH_TAG_LEN) throw new Error("encrypt: unexpected ChaCha20-Poly1305 output length");
+  return { ciphertext: sealed.slice(0, msg.length), authTag: sealed.slice(msg.length) };
+}
+async function decrypt(K, level, index, ct, authTag) {
+  if (!authTag || authTag.length !== AUTH_TAG_LEN) throw new Error("get: malformed ciphertext authentication tag");
+  const opened = await host.call(P_OPEN, concat([nonce(level, index), K, ct, authTag]));
+  if (opened.length !== ct.length + 1 || opened[0] !== 1) throw new Error("get: ciphertext authentication failed");
+  return opened.slice(1);
+}
 // Signed chunk descriptor envelope: [authorPk 32][sig 64][core] (§4.3, §16).
 // node/sign applies the scoped prefix and returns just the signature; the stored
 // envelope carries only [pk][sig][core] — the prefix is preimage-only, never sent.
@@ -466,13 +478,14 @@ async function encodeChunk(source, localCi, globalCi, K, level) {
   const c = CFG;
   const plain = source.slice(localCi * c.k * c.blockSize, (localCi + 1) * c.k * c.blockSize);
   const kc = Math.max(1, Math.ceil(plain.length / c.blockSize));
-  const ct = await encrypt(K, level, globalCi, padTo(plain, kc * c.blockSize));
+  const sealed = await encrypt(K, level, globalCi, padTo(plain, kc * c.blockSize));
+  const ct = sealed.ciphertext;
   const dataBlocks = splitBlocks(ct, c.blockSize);
   const blocks = kc === 1 ? new Array(c.m + 1).fill(dataBlocks[0])
                           : [...dataBlocks, ...await rsEncode(kc, c.m, c.blockSize, dataBlocks)];
   const ids = kc === 1 ? new Array(c.m + 1).fill(await hash(dataBlocks[0]))
                        : await Promise.all(blocks.map((b) => hash(b)));
-  const d = { level, k: kc, m: c.m, blockSize: c.blockSize, tailBytes: plain.length, blockIds: ids };
+  const d = { level, k: kc, m: c.m, blockSize: c.blockSize, tailBytes: plain.length, authTag: sealed.authTag, blockIds: ids };
   return makeChunk(d, blocks, await signChunk(d));
 }
 // THE placement engine (§6/§10). Places every job's slots with one batched OFFER
@@ -807,7 +820,7 @@ function requirePut() {
 }
 // The largest a signed descriptor gets, framed for the descriptor list: the deployment's
 // own (k, m), since a partial chunk lists fewer ids (§4.3).
-function descriptorBytes() { return 4 + 32 + 64 + 13 + (CFG.k + CFG.m) * BLOCK_ID_LEN; }
+function descriptorBytes() { return 4 + 32 + 64 + 13 + AUTH_TAG_LEN + (CFG.k + CFG.m) * BLOCK_ID_LEN; }
 // Open a stream: mint K and answer with the plaintext window the driver should feed.
 // File size is no longer an argument — each chunk signs its own `tailBytes` (§4.3).
 //
@@ -914,7 +927,7 @@ async function reconstructChunks(ds, K, chunkStart) {
     // Nonce = (this chunk's own level, its index within that level) (§4.4), matching
     // encodeChunk; tailBytes trims this chunk's zero padding, whether it is the file's
     // last chunk or an index level's.
-    const plain = await decrypt(K, d.level, chunkStart + i, await assembleChunk(d, got));
+    const plain = await decrypt(K, d.level, chunkStart + i, await assembleChunk(d, got), d.authTag);
     parts.push(plain.length === d.tailBytes ? plain : plain.subarray(0, d.tailBytes));
   }
   return concat(parts);

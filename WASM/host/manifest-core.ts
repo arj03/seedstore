@@ -11,6 +11,7 @@
 import { bytesEqual, toHex, writeU32BE, readU32BE, concatBytes } from "./util.js";
 
 export const BLOCK_ID_LEN = 32;
+export const AUTH_TAG_LEN = 16;
 
 // ── signed-format tags (README §16) ──────────────────────────────────────────
 // Every signed storage object opens with a distinct leading byte inside the
@@ -35,10 +36,12 @@ export interface Descriptor {
   m: number;            // losses this chunk survives: m parity blocks, or m extra replicas
   blockSize: number;
   tailBytes: number;    // real plaintext bytes in this chunk; the rest is zero padding
+  authTag: Uint8Array;  // ChaCha20-Poly1305 tag over this chunk's padded ciphertext
   blockIds: Uint8Array[]; // k + m ids by generator-row index; a k=1 chunk repeats its one id
 }
 
-const CORE_HEAD = 13; // tag,level,k,m (4) + blockSize (4) + tailBytes (4) + n (1)
+const FIXED_HEAD = 13; // tag,level,k,m (4) + blockSize (4) + tailBytes (4) + n (1)
+const CORE_HEAD = FIXED_HEAD + AUTH_TAG_LEN;
 
 /** The descriptor's signed core — the bytes the author signs over (§4.3). Leads with
  *  the descriptor format tag (§16). */
@@ -46,6 +49,7 @@ export function encodeDescriptorCore(d: Descriptor): Uint8Array {
   const n = d.blockIds.length;
   if (n !== d.k + d.m) throw new Error("descriptor: blockIds.length must be k+m");
   if (d.tailBytes > d.k * d.blockSize) throw new Error("descriptor: tailBytes exceeds the chunk");
+  if (d.authTag.length !== AUTH_TAG_LEN) throw new Error(`descriptor: authTag must be ${AUTH_TAG_LEN} bytes`);
   const head = new Uint8Array(CORE_HEAD);
   head[0] = TAG_DESCRIPTOR; // leading format tag (§16)
   head[1] = d.level;
@@ -54,6 +58,7 @@ export function encodeDescriptorCore(d: Descriptor): Uint8Array {
   writeU32BE(head, 4, d.blockSize);
   writeU32BE(head, 8, d.tailBytes);
   head[12] = n;
+  head.set(d.authTag, FIXED_HEAD);
   return concatBytes([head, ...d.blockIds]);
 }
 
@@ -68,9 +73,10 @@ export function decodeDescriptorCore(core: Uint8Array): Descriptor {
   const n = core[12];
   if (n !== k + m) throw new Error("descriptor: n must be k+m");
   if (core.length !== CORE_HEAD + n * BLOCK_ID_LEN) throw new Error("descriptor: truncated");
+  const authTag = core.slice(FIXED_HEAD, CORE_HEAD);
   const blockIds: Uint8Array[] = [];
   for (let i = 0; i < n; i++) blockIds.push(core.slice(CORE_HEAD + i * BLOCK_ID_LEN, CORE_HEAD + (i + 1) * BLOCK_ID_LEN));
-  return { level, k, m, blockSize, tailBytes, blockIds };
+  return { level, k, m, blockSize, tailBytes, authTag, blockIds };
 }
 
 export interface SignedDescriptor {

@@ -19,6 +19,7 @@ export { guestSignScope };
 
 export {
   BLOCK_ID_LEN,
+  AUTH_TAG_LEN,
   encodeDescriptorCore, decodeDescriptorCore, parseSignedDescriptor,
   descriptorContains, encodeDescriptorList, decodeDescriptorList,
   copyTargets, lossMargin, lowWaterMargin,

@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 
 import { loadCrypto } from "seedkernel-wasm";
 
-// One libsodium for the whole stack: the sumo instance the host bundles (§16).
+// One core libsodium instance for the whole stack (§16).
 const sodium = await loadCrypto();
 
 const __dirname = dirname(fileURLToPath(import.meta.url));

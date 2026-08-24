@@ -1,16 +1,13 @@
-// Host crypto wrappers (README §16). Thin wrappers over the libsodium the
-// kernel already loads — "storage ships no crypto of its own except Reed–
-// Solomon". These perform no I/O and hold no key, so they are the seam's
-// ungated primitives (§16): the guest reaches the hash as
-// `crypto/blake2b-256` and the stream cipher as `crypto/xchacha20/xor`, with
-// no service grant at all, which is what lets the codec stay pure (§17).
+// Host crypto wrappers (README §16). Thin wrappers over the core libsodium the
+// kernel already loads. The guest reaches the same BLAKE2b-256 and
+// ChaCha20-Poly1305 transforms through the kernel's ungated `crypto/*` table.
 //
-// Confidentiality is added client-side here (§4.4): a plain length-preserving
-// stream cipher with no authentication tag — integrity is content addressing's
-// job (§1, §4.2), so a MAC would only pad the block and risk misaligning it.
+// Confidentiality is added client-side here (§4.4). The ciphertext remains
+// length-preserving for RS geometry; its detached 16-byte authentication tag is
+// carried in the signed descriptor.
 
 import type { Sodium } from "./sodium.js";
-import { writeU32BE } from "./util.js";
+import { concatBytes, writeU32BE } from "./util.js";
 
 // The nonce's domain byte is the chunk's own index-tree LEVEL (§4.3): 0 for the
 // file's ciphertext, ℓ > 0 for the index chunks above it. Levels never share a
@@ -22,13 +19,19 @@ export const LEVEL_BODY = 0x00;
  *  fast in software and already in the libsodium the kernel loads (§16), so it
  *  ships no new bytes. (A future BLAKE3 + SIMD step is discussed in the README.) */
 export const BLOCK_ID_BYTES = 32;
+export const AUTH_TAG_BYTES = 16;
+
+export interface SealedChunk {
+  ciphertext: Uint8Array;
+  authTag: Uint8Array;
+}
 
 export class Crypto {
   readonly keyBytes: number;
   readonly nonceBytes: number;
   constructor(private readonly sodium: Sodium) {
-    this.keyBytes = sodium.crypto_stream_xchacha20_KEYBYTES;   // 32
-    this.nonceBytes = sodium.crypto_stream_xchacha20_NONCEBYTES; // 24
+    this.keyBytes = 32;
+    this.nonceBytes = 12;
   }
 
   /** Content-address hash → block_id = hash(block_bytes) (§4.2). */
@@ -36,7 +39,7 @@ export class Crypto {
     return this.sodium.crypto_generichash(BLOCK_ID_BYTES, bytes);
   }
 
-  /** 24-byte nonce = [domain u8][index u32 BE][zero padding] (§4.4). One nonce
+  /** 12-byte nonce = [domain u8][index u32 BE][zero padding] (§4.4). One nonce
    *  per chunk (or per manifest), so (K, nonce) never repeats for a fresh K. */
   nonce(domain: number, index: number): Uint8Array {
     const n = new Uint8Array(this.nonceBytes);
@@ -45,16 +48,30 @@ export class Crypto {
     return n;
   }
 
-  /** Length-preserving XOR stream — the same op encrypts and decrypts (§4.4). */
-  streamXor(key: Uint8Array, nonce: Uint8Array, message: Uint8Array): Uint8Array {
-    return this.sodium.crypto_stream_xchacha20_xor(message, nonce, key);
+  /** Seal padded chunk bytes, splitting the AEAD output so RS still sees exactly the
+   *  original ciphertext length and the signed descriptor carries the tag. */
+  encrypt(key: Uint8Array, domain: number, index: number, message: Uint8Array): SealedChunk {
+    const sealed = this.sodium.crypto_aead_chacha20poly1305_ietf_encrypt(
+      message, null, null, this.nonce(domain, index), key,
+    );
+    return {
+      ciphertext: sealed.slice(0, sealed.length - AUTH_TAG_BYTES),
+      authTag: sealed.slice(sealed.length - AUTH_TAG_BYTES),
+    };
   }
-
-  encrypt(key: Uint8Array, domain: number, index: number, message: Uint8Array): Uint8Array {
-    return this.streamXor(key, this.nonce(domain, index), message);
-  }
-  decrypt(key: Uint8Array, domain: number, index: number, ciphertext: Uint8Array): Uint8Array {
-    return this.streamXor(key, this.nonce(domain, index), ciphertext);
+  decrypt(
+    key: Uint8Array, domain: number, index: number,
+    ciphertext: Uint8Array, authTag: Uint8Array,
+  ): Uint8Array | null {
+    if (authTag.length !== AUTH_TAG_BYTES) return null;
+    try {
+      return this.sodium.crypto_aead_chacha20poly1305_ietf_decrypt(
+        null, concatBytes([ciphertext, authTag]), null,
+        this.nonce(domain, index), key,
+      );
+    } catch {
+      return null;
+    }
   }
 
   /** A fresh random per-file content key K (§4.4). */

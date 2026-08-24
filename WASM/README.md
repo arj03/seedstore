@@ -45,16 +45,15 @@ structural sandbox guarantees they touch neither disk nor network even if buggy
 | `reputation` — decayed per-peer reciprocity counters | installed module, bare name (`host.call("reputation", …)`) | **WASM**, no grants (`assembly/reputation`) | §13 |
 | coordinator (PUT/GET, placement, manifest) + cohort (have/want, verification-fetch) + repair | confined QuickJS realm — **async** `call()` | zero-authority JS (`host/tier2-guest.js`) | §5–§9 |
 | holder side — admission, sibling rule, content-addressing, quota, the store writes | the **same** realm — **async** `call()` | zero-authority JS (`host/tier2-guest.js`) | §6, §10, §14 |
-| the seam the guest reaches I/O through | seedkernel runtime | `host.call(name, bytes)` — services, `crypto/*` primitives, module names | §16 |
-| `crypto/*`, `fs`, `node`, `clock` backends | seedkernel runtime | raw-byte services + primitive catalog | §12, §16 |
+| the seam the guest reaches I/O through | seedkernel runtime | `host.call(name, bytes)` — services, residual `crypto/*` transforms, module names | §16 |
+| `crypto/*`, `fs`, `node`, `clock` backends | seedkernel runtime | raw-byte services + frozen host-transform table | §12, §16 |
 
-Hashing, the length-preserving stream cipher (`crypto_stream_xchacha20_xor`),
-and signatures are **reused** from the runtime's libsodium (the sumo build, which
-exposes the raw stream cipher) — never bundled — exactly as §16 requires; the
-guest reaches hashing and the cipher as the ungated `crypto/blake2b-256` and
-`crypto/xchacha20/xor` primitives and builds its own descriptor envelope and
-nonce convention on top of the scoped `node/sign`/`node/verify` pair
-(seedkernel §12.2) — how storage prefixes and checks it is below.
+Hashing, ChaCha20-Poly1305, and signatures are **reused** from the runtime's core
+libsodium — never bundled. The guest reaches the ungated
+`crypto/blake2b-256` and `crypto/chacha20poly1305-ietf/{seal,open}` transforms,
+keeps ciphertext length-preserving for RS, and carries each detached 16-byte tag
+inside the signed descriptor. Its nonce convention and scoped
+`node/sign`/`node/verify` use are storage policy layered on the generic seam.
 
 **The one realm.** Storage runs its whole guest in a single confined realm
 seedkernel provides (§12.3), over its genuinely-async seam: the initiator
@@ -130,7 +129,7 @@ project runs a node on it, it does not re-implement it. Build seedkernel first:
 Then, here:
 
 ```sh
-npm install        # one dependency: the sibling seedkernel-wasm (sumo libsodium + QuickJS live there)
+npm install        # one dependency: the sibling seedkernel-wasm (core libsodium + QuickJS live there)
 npm run build      # compile codec+reputation WASM, stage the guest, compile host TS
 npm test           # build + run the full test suite (Node); `bun tests/run.mjs` runs it on Bun
 ```
@@ -358,12 +357,12 @@ path; same-machine tabs connect on host candidates without it.)
 
 | | time | rate | |
 |---|---:|---:|---|
-| **write** — full (encrypt + hash + RS encode) | ~0.37 s | ~270 MB/s | |
-| &nbsp;&nbsp;↳ xchacha20 encrypt | ~0.19 s | ~550 MB/s | now the largest single piece |
-| &nbsp;&nbsp;↳ RS encode (SIMD) | ~0.07 s | ~1.45 GB/s | |
+| **write** — full (encrypt + hash + RS encode) | ~0.44 s | ~227 MB/s | |
+| &nbsp;&nbsp;↳ chacha20-poly1305 seal | ~0.26 s | ~390 MB/s | detached tag lives in the descriptor |
+| &nbsp;&nbsp;↳ RS encode (SIMD) | ~0.07 s | ~1.38 GB/s | |
 | &nbsp;&nbsp;↳ BLAKE2b block-ids | ~0.15 s | ~1.1 GB/s | hashes all *n* blocks (1.6×) |
-| **read** — all data present (systematic) | ~0.04 s | ~2.8 GB/s | common path — a concat, no GF |
-| **read** — one block missing (decode, SIMD) | ~0.06 s | ~1.6 GB/s | the common failure, §6/§21 |
+| **read** — all data present (systematic) | ~0.03 s | ~3.0 GB/s | common path — a concat, no GF |
+| **read** — one block missing (decode, SIMD) | ~0.07 s | ~1.5 GB/s | the common failure, §6/§21 |
 
 Three optimizations got here. (1) The codec multiplies via a precomputed 256×256
 GF(2⁸) table — one indexed load per byte — making encode **~26× faster** than the
@@ -372,8 +371,8 @@ naive exp/log multiply. (2) Block-ids hash with **BLAKE2b** instead of SHA-3,
 everything else, already in the libsodium the kernel loads — **no new bytes**
 (§16). (3) The RS multiply-accumulate loops use **WASM SIMD** — the GF(2⁸)
 split-table / `i8x16.swizzle` trick does 16 multiplies per instruction — for
-another **~3.4×** on encode/decode. With all three, the write is balanced across
-encrypt / hash / encode (~0.19 / ~0.15 / ~0.07 s, no single bottleneck) and reads
+another **~3.4×** on encode/decode. With all three, sealing is the largest part of
+the write (~0.26 / ~0.15 / ~0.07 s for encrypt / hash / encode), while reads
 cost nothing on the codec unless a block is actually missing. (SIMD needs a
 runtime with the WASM simd feature — Node 16+ and every current browser.) `node
 tests/bench.mjs` reproduces these.
@@ -457,7 +456,7 @@ cores and the guest — it never loads a line of the host-side TypeScript:
 
 riding on the seedkernel shell it shares with any app — the shell JS
 (28 KB / **5 KB gz**, module table included: the kernel is host code, not a
-module) and the sumo libsodium (278 KB, reused not bundled). So **seedstore's own runtime
+module) and the core libsodium (217 KB, reused not bundled). So **seedstore's own runtime
 footprint is ~15 KB of WASM + ~8 KB of gzipped JS (the guest)** (§2, §16: "logic +
 RS, tens of KB, no second copy of a crypto library").
 

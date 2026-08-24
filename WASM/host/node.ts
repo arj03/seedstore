@@ -1,5 +1,5 @@
 // Node entry point — reads the signed seedstore bundle (.skb) from disk and
-// boots a StorageNode against the sumo libsodium. Use this on Node / Bun / Deno;
+// boots a StorageNode against the kernel's core libsodium. Use this on Node / Bun / Deno;
 // for the browser see ./browser.ts.
 
 import { readFile } from "node:fs/promises";

@@ -576,7 +576,7 @@ export async function run(t) {
       const bytes = file(config.blockSize, 77);
       const bid = a.crypto.hash(bytes);
       const desc = (id, sk) => signDescriptor(
-        sodium, { level: 0, k: 1, m: 0, blockSize: config.blockSize, tailBytes: config.blockSize, blockIds: [bid] },
+        sodium, { level: 0, k: 1, m: 0, blockSize: config.blockSize, tailBytes: config.blockSize, authTag: new Uint8Array(16), blockIds: [bid] },
         id.publicKey, id.privateKey, a.signAuthor,
       );
 
@@ -590,7 +590,7 @@ export async function run(t) {
       const bytes2 = file(config.blockSize, 78);
       const bid2 = a.crypto.hash(bytes2);
       const forged = signDescriptor(
-        sodium, { level: 0, k: 1, m: 0, blockSize: config.blockSize, tailBytes: config.blockSize, blockIds: [bid2] },
+        sodium, { level: 0, k: 1, m: 0, blockSize: config.blockSize, tailBytes: config.blockSize, authTag: new Uint8Array(16), blockIds: [bid2] },
         stranger.publicKey, stranger.privateKey, a.signAuthor,
       );
       const unknown = decodeMask(await a.request(b.peerId, typed(MsgType.STORE, encodeStoreBatch([{ blockId: bid2, descriptor: forged, bytes: bytes2 }]))));
@@ -611,7 +611,7 @@ export async function run(t) {
       const bytes = file(config.blockSize, 91);
       const bid = a.crypto.hash(bytes);
       const env = signDescriptor(
-        sodium, { level: 0, k: 1, m: 2, blockSize: config.blockSize, tailBytes: config.blockSize, blockIds: [bid, bid, bid] },
+        sodium, { level: 0, k: 1, m: 2, blockSize: config.blockSize, tailBytes: config.blockSize, authTag: new Uint8Array(16), blockIds: [bid, bid, bid] },
         a.identity.publicKey, a.identity.privateKey, a.signAuthor,
       );
       const first = decodeMask(await a.request(b.peerId, typed(MsgType.STORE, encodeStoreBatch([{ blockId: bid, descriptor: env, bytes }]))));
@@ -624,8 +624,8 @@ export async function run(t) {
   // ── §4.3 the index descent is checked, not assumed ────────────────────────
   t.group("GET rejects an index level that does not descend (§4.3, §7)");
   {
-    // A reader is HANDED (root, K), and §4.4's cipher carries no tag, so the
-    // sharer chose the plaintext at every level — nothing else stops a root at
+    // A reader is HANDED (root, K), so a hostile sharer can produce valid AEAD at
+    // every level — nothing else stops a root at
     // level ℓ from naming a list also at level ℓ. Only the strict descent check does.
     const net = new LoopbackNetwork();
     const cfg = { k: 1, m: 1, blockSize: 512 };
@@ -634,9 +634,9 @@ export async function run(t) {
     try {
       const K = owner.crypto.randomKey();
       const sign = (d) => signDescriptor(sodium, d, owner.identity.publicKey, owner.identity.privateKey, owner.signAuthor);
-      const at = (level, ct, tailBytes) => {
-        const id = owner.crypto.hash(ct);
-        return { id, env: sign({ level, k: 1, m: 1, blockSize: cfg.blockSize, tailBytes, blockIds: [id, id] }) };
+      const at = (level, sealed, tailBytes) => {
+        const id = owner.crypto.hash(sealed.ciphertext);
+        return { id, ciphertext: sealed.ciphertext, env: sign({ level, k: 1, m: 1, blockSize: cfg.blockSize, tailBytes, authTag: sealed.authTag, blockIds: [id, id] }) };
       };
       // Inner: a level-1 chunk. Outer: ANOTHER level-1 chunk whose plaintext is a list
       // naming the inner one. The walk therefore goes 1 → 1 and never descends. tailBytes
@@ -646,9 +646,8 @@ export async function run(t) {
       const list = encodeDescriptorList([inner.env]);
       const outerPlain = new Uint8Array(cfg.blockSize);
       outerPlain.set(list);
-      const outerCt = owner.crypto.encrypt(K, 1, 0, outerPlain);
-      const outer = at(1, outerCt, list.length);
-      await plantBlock(nodes[1].fs, toHex(outer.id), outerCt, outer.env);
+      const outer = at(1, owner.crypto.encrypt(K, 1, 0, outerPlain), list.length);
+      await plantBlock(nodes[1].fs, toHex(outer.id), outer.ciphertext, outer.env);
 
       let err = null;
       try { await owner.get(outer.env, K); } catch (e) { err = e; }
@@ -664,13 +663,13 @@ export async function run(t) {
     // levels the roll-up takes. Squeeze the geometry so this file needs a
     // genuinely multi-level index — a single root descriptor could never cover it.
     const net = new LoopbackNetwork();
-    const cfg = { k: 2, m: 2, blockSize: 256 };            // one index chunk holds just 2 descriptors
+    const cfg = { k: 2, m: 2, blockSize: 272 };            // one index chunk holds just 2 tagged descriptors
     const nodes = await createConnectedCohort({ count: 6, network: net, sodium, wasm, config: cfg, timeoutMs: TIMEOUT });
     try {
       const data = file(cfg.k * cfg.blockSize * 9 - 77, 55); // 9 chunks → 9 → 5 → 3 → 2 → 1: four index levels
       const put = await nodes[0].put(data);
       t.eq(put.chunkCount, 9, "nine leaf chunks");
-      t.ok(put.root.length === 32 + 64 + 13 + 4 * 32, "the root is a signed descriptor envelope, not a 32-byte id");
+      t.ok(put.root.length === 32 + 64 + 13 + 16 + 4 * 32, "the root is a signed descriptor envelope, not a 32-byte id");
       t.ok(parseSignedDescriptor(put.root).descriptor.level >= 2, "the roll-up needed more than one index level");
       t.ok(bytesEqual(await nodes[0].get(put.root, put.key), data), "a multi-level index round-trips");
       // Every block placed is exactly blockSize — the old manifest block was the whole

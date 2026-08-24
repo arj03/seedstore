@@ -218,7 +218,7 @@ export async function run(t) {
       // The block travels with its author-signed chunk descriptor (§4.3) — the holder
       // verifies it before admitting, here as on any other transport. Both nodes load the
       // same bundle, so they share one signing scope (author).
-      const desc = signDescriptor(sodium, { level: 0, k: 1, m: 0, blockSize: bytes.length, tailBytes: bytes.length, blockIds: [bid] }, idB.publicKey, idB.privateKey, S.signAuthor);
+      const desc = signDescriptor(sodium, { level: 0, k: 1, m: 0, blockSize: bytes.length, tailBytes: bytes.length, authTag: new Uint8Array(16), blockIds: [bid] }, idB.publicKey, idB.privateKey, S.signAuthor);
 
       const stored = decodeMask(await B.request(S.peerId, typed(MsgType.STORE, encodeStoreBatch([{ blockId: bid, descriptor: desc, bytes }]))));
       t.eq(stored[0], VERDICT_ACCEPTED, "STORE acknowledged over ws");

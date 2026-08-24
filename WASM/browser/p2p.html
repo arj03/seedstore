@@ -47,6 +47,7 @@
     "seedkernel-wasm/crypto-browser": "./seedkernel/host/crypto-browser.js",
     "seedkernel-wasm/guest-seam":     "./seedkernel/host/guest-seam.js",
     "seedkernel-wasm/fs":             "./seedkernel/core/fs.js",
+    "seedkernel-wasm/op-frame":       "./seedkernel/core/op-frame.js",
     "seedkernel-wasm/fs-memory":      "./seedkernel/host/fs-memory.js",
     "seedkernel-wasm/transport-host": "./seedkernel/host/transport-host.js",
     "seedkernel-wasm/transport-bundle": "./seedkernel/host/transport-bundle.js",
@@ -266,7 +267,7 @@ const fromHex = (s) => new Uint8Array(s.match(/.{1,2}/g)?.map((h) => parseInt(h,
 // came from a signature that checked, not from bytes a static server happened to serve.
 //
 // One fetch, one artifact: this promise is the SAME bundle boot() loads, and crypto
-// (sumo libsodium + ML-DSA-65 + ML-KEM-768) readies eagerly beside it — verifyBundle
+// (core libsodium + ML-DSA-65) readies eagerly beside it — verifyBundle
 // needs the PQ half mixed onto sodium, and boot() needs it either way.
 const cryptoReady = loadCrypto(sodium, "./");
 const bundleReady = loadWasmBytes("./");
@@ -324,7 +325,7 @@ async function boot() {
   if (node) return; // already booted — guard against a second click stacking networks
   $("connect").disabled = true;
   try {
-    log("readying crypto (sumo libsodium + ML-DSA-65 + ML-KEM-768)…");
+    log("readying crypto (core libsodium + ML-DSA-65)…");
     await cryptoReady;
     // One identity, shared by the transport and the storage node so their peer ids
     // match (the transport registers under this id).

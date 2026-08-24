@@ -164,19 +164,10 @@ await copyJs(seedkernelHost, join(out, "seedkernel"));
   await copy(src, join(out, "mldsa65.wasm"));
 }
 
-// ML-KEM-768 rides along with ML-DSA-65 — seedkernel's crypto-browser.ts mixes
-// both onto sodium in one loadCrypto call, so the page needs both artifacts staged.
-{
-  const src = join(root, "..", "..", "seedkernel", "WASM", "browser", "mlkem768.wasm");
-  if (!existsSync(src)) {
-    console.error(`seedkernel mlkem768.wasm not found at ${src} — build it first ` +
-      "(in seedkernel/WASM:  npm run build:pq).");
-    process.exit(1);
-  }
-  await copy(src, join(out, "mlkem768.wasm"));
-}
+// ML-KEM-768 is private content of the signed transport bundle now; no loose
+// browser artifact is needed here.
 
-// ── sumo libsodium: the kernel's, not a second copy ──────────────────────────
+// ── core libsodium: the kernel's, not a second copy ──────────────────────────
 // The pages import "seedkernel-wasm/libsodium" (the kernel's published browser
 // entry) rather than the upstream npm package, so browser, Node, and the Go
 // loader all run the SAME crypto binary. These three files must land in ONE
