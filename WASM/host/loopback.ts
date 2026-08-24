@@ -12,7 +12,8 @@
 /** The structural RawLink shape this file needs (socket-seam.ts is not an
  *  exported entry). `framing` restates socket-seam.ts's `FRAMING` (0 PLATFORM,
  *  1 LENGTH, 2 WS_CLIENT, 3 WS_SERVER) as a literal union. The fabric's channels
- *  are PLATFORM: one `send` is one delivery, nothing to frame. */
+ *  are PLATFORM by default. Tests may model a chunked byte stream (LENGTH) to
+ *  exercise transports such as WebRTC that split a larger logical record. */
 export interface RawLinkLike {
   send(bytes: Uint8Array): void;
   onData(cb: (bytes: Uint8Array) => void): void;
@@ -41,7 +42,7 @@ export interface ChannelFactoryLike {
  *  going away. */
 class LoopbackChannel implements RawLinkLike {
   /** A socket pair with `send` as the boundary: one send is one delivery. */
-  readonly framing = 0 as const; // FRAMING.PLATFORM — nothing for the bundle to frame
+  readonly framing: 0 | 1;
   peer: LoopbackChannel | null = null;
   msg: ((bytes: Uint8Array) => void) | null = null;
   cls: (() => void) | null = null;
@@ -49,15 +50,18 @@ class LoopbackChannel implements RawLinkLike {
   readonly remoteAddr: string;
   /** Wire latency per delivered message (ms). 0 = the zero-latency fabric. */
   readonly delayMs: number;
+  readonly chunkBytes: number;
 
-  constructor(remoteAddr: string, delayMs = 0) {
+  constructor(remoteAddr: string, delayMs = 0, chunkBytes = 0) {
     this.remoteAddr = remoteAddr;
     this.delayMs = delayMs;
+    this.chunkBytes = chunkBytes;
+    this.framing = chunkBytes > 0 ? 1 : 0;
   }
 
-  static pair(remoteAddr: string, delayMs = 0): [LoopbackChannel, LoopbackChannel] {
-    const a = new LoopbackChannel(remoteAddr, delayMs);
-    const b = new LoopbackChannel(remoteAddr, delayMs);
+  static pair(remoteAddr: string, delayMs = 0, chunkBytes = 0): [LoopbackChannel, LoopbackChannel] {
+    const a = new LoopbackChannel(remoteAddr, delayMs, chunkBytes);
+    const b = new LoopbackChannel(remoteAddr, delayMs, chunkBytes);
     a.peer = b;
     b.peer = a;
     return [a, b];
@@ -66,10 +70,15 @@ class LoopbackChannel implements RawLinkLike {
   send(bytes: Uint8Array): void {
     if (this.dead) return;
     const p = this.peer;
-    if (this.delayMs > 0) {
-      setTimeout(() => { if (p && !p.dead) p.msg?.(bytes); }, this.delayMs);
-    } else {
-      queueMicrotask(() => { if (p && !p.dead) p.msg?.(bytes); });
+    const chunks = [];
+    const step = this.chunkBytes > 0 ? this.chunkBytes : Math.max(1, bytes.length);
+    for (let off = 0; off < bytes.length; off += step) chunks.push(bytes.subarray(off, Math.min(bytes.length, off + step)));
+    for (const chunk of chunks) {
+      if (this.delayMs > 0) {
+        setTimeout(() => { if (p && !p.dead) p.msg?.(chunk); }, this.delayMs);
+      } else {
+        queueMicrotask(() => { if (p && !p.dead) p.msg?.(chunk); });
+      }
     }
   }
   onData(cb: (bytes: Uint8Array) => void): void { this.msg = cb; }
@@ -98,9 +107,11 @@ class LoopbackChannels implements ChannelFactoryLike {
   private listeners = new Map<number, (channel: RawLinkLike) => void>();
   private nextPort = 10000;
   private readonly delayMs: number;
+  private readonly chunkBytes: number;
 
-  constructor(delayMs = 0) {
+  constructor(delayMs = 0, chunkBytes = 0) {
     this.delayMs = delayMs;
+    this.chunkBytes = chunkBytes;
   }
 
   /** The bound ports (set by a driver's start()). */
@@ -133,13 +144,13 @@ class LoopbackChannels implements ChannelFactoryLike {
       // A dial to a dead port: the channel fails immediately on the DIAL side
       // (mirroring ECONNREFUSED → the socket's error/close events), so the
       // transport forgets the link instead of holding it until the deadline.
-      const [dial] = LoopbackChannel.pair(addr.host, this.delayMs);
+      const [dial] = LoopbackChannel.pair(addr.host, this.delayMs, this.chunkBytes);
       queueMicrotask(() => dial.kill());
       return dial;
     }
     // The address's host is the "far end" both sides see — it is what the
     // half-open limiter buckets accepts by (the per-source cap; §12.6.2).
-    const [dial, accepted] = LoopbackChannel.pair(addr.host, this.delayMs);
+    const [dial, accepted] = LoopbackChannel.pair(addr.host, this.delayMs, this.chunkBytes);
     queueMicrotask(() => onAccept(accepted));
     return dial;
   }
@@ -203,8 +214,8 @@ export class LoopbackNetwork {
    *  wire-level round-trip latency (one request/response costs 2×delayMs), the model
    *  the latency/concurrency harnesses use now that the kernel's shell has no host
    *  side inbound seam to time against. */
-  constructor(delayMs = 0) {
-    this.fabric = new LoopbackChannels(delayMs);
+  constructor(delayMs = 0, chunkBytes = 0) {
+    this.fabric = new LoopbackChannels(delayMs, chunkBytes);
   }
 
   /** The peers' bound ports, for dial wiring. A node binds at most one tcp and

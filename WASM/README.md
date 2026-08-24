@@ -379,21 +379,23 @@ runtime with the WASM simd feature — Node 16+ and every current browser.) `nod
 tests/bench.mjs` reproduces these.
 
 **End to end, the link bounds throughput, not the codec.** A multi-MB file is
-many blocks, and a WebRTC data channel caps a message at ~one 32 KiB block, so a
-naïve transfer pays one round trip *per block*. The coordinator avoids that by
-**windowing** — `fanoutWindow` keeps many blocks per holder in
-flight at once — so wall-clock tracks `RTT × (chunks ÷ window)`, not `RTT ×
-blocks`. Over a 10 ms-RTT, WebRTC-capped link (4 MB, RS(2,2), 32 KiB blocks,
-window 32):
+many blocks. WebRTC physical messages stay capped at 48 KiB, while the channel
+adapter exposes a length-framed byte stream so a 256 KiB encrypted record can be
+split and reassembled without paying another request round trip per physical
+chunk. The coordinator batches blocks into those records and `fanoutWindow` keeps
+records per holder in flight. Over a 10 ms-RTT link (4 MB, RS(2,2), 32 KiB blocks,
+256 KiB logical batches split into 48 KiB physical messages, window 32):
 
 | | time | rate | |
 |---|---:|---:|---|
-| **PUT** | ~0.90 s | ~4.5 MB/s | ships the 2× erasure overhead — RS(2,2) is 2 data + 2 parity |
-| **GET** | ~0.40 s | ~10 MB/s | downloads any *k* of *n* — 1× the file |
+| **PUT** | ~0.72 s | ~5.6 MB/s | ships the 2× erasure overhead — RS(2,2) is 2 data + 2 parity |
+| **GET** | ~0.33 s | ~12.3 MB/s | downloads any *k* of *n* — 1× the file |
 
-`node tests/bench-net.mjs 10 4 32` reproduces this and sweeps the window; the
+`node tests/bench-net.mjs 10 4 32 256 48 32` reproduces this in a fresh W=32
+process (omit the final `32` to sweep the window); the
 latency is modelled at the wire — every message pays it, both directions, so one
-request/response costs the full RTT. (The old ~11/~17 MB/s figures measured a
+request/response costs the full RTT, while its physical chunks share that delivery
+delay as they do on an ordered byte stream. (The old ~11/~17 MB/s figures measured a
 host-side delay that charged only the inbound request, not the response.) Over a
 real browser↔browser WebRTC link the `p2p.html` demo reports ~13 MB/s both ways.
 

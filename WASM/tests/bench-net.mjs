@@ -10,7 +10,7 @@
 // Pass a big cap (e.g. 1024) to model a WS/TCP frame instead, where the window
 // is a near no-op.
 //
-// Run:  node tests/bench-net.mjs [rttMs] [fileMB] [blockKiB] [capKiB]
+// Run:  node tests/bench-net.mjs [rttMs] [fileMB] [blockKiB] [capKiB] [wireChunkKiB] [windows]
 //   e.g. node tests/bench-net.mjs 10 2 32       (10 ms RTT, 2 MB file, 32 KiB blocks, WebRTC cap)
 //        node tests/bench-net.mjs 10 2 32 1024  (same, but a 1 MiB WS frame cap)
 
@@ -26,6 +26,8 @@ const RTT_MS = Number(process.argv[2] ?? 10);     // round-trip latency to model
 const FILE_MB = Number(process.argv[3] ?? 2);
 const BLOCK_KIB = Number(process.argv[4] ?? 32);
 const CAP_KIB = Number(process.argv[5] ?? BLOCK_KIB + 16); // one block + headers per STORE → WebRTC
+const WIRE_CHUNK_KIB = Number(process.argv[6] ?? 0);       // 0 = platform messages; e.g. 48 = length-framed WebRTC chunks
+const WINDOWS = (process.argv[7] ?? "1,2,4,8,16,32").split(",").map(Number);
 
 const MB = 1024 * 1024;
 const blockSize = BLOCK_KIB * 1024;
@@ -47,7 +49,7 @@ for (let i = 0; i < fileBytes; i++) data[i] = (i * 2654435761) & 255;
 const timeoutMs = Math.max(2000, RTT_MS * 20);
 
 async function measure(W) {
-  const net = new LatencyNetwork(delay);
+  const net = new LatencyNetwork(delay, WIRE_CHUNK_KIB * 1024);
   // n = k + m = 4 distinct holders per chunk; give the cohort a little headroom.
   const nodes = await createConnectedCohort({
     count: 6, network: net, sodium, wasm,
@@ -86,13 +88,13 @@ async function measure(W) {
 const tput = (ms) => (FILE_MB / (ms / 1000)).toFixed(1);
 
 const blocksPerMsg = Math.max(1, Math.floor(maxMessageBytes / blockSize));
-console.log(`\nPUT/GET over a ${RTT_MS} ms-RTT cohort — RS(${config.k},${config.m}), ${BLOCK_KIB} KiB blocks, ${CAP_KIB} KiB cap (~${blocksPerMsg} block/msg), ${FILE_MB} MB → ${numChunks} chunks`);
+console.log(`\nPUT/GET over a ${RTT_MS} ms-RTT cohort — RS(${config.k},${config.m}), ${BLOCK_KIB} KiB blocks, ${CAP_KIB} KiB cap (~${blocksPerMsg} block/msg), ${FILE_MB} MB → ${numChunks} chunks${WIRE_CHUNK_KIB > 0 ? `, ${WIRE_CHUNK_KIB} KiB physical chunks` : ""}`);
 console.log(`(a serial PUT issues ~${numChunks * (config.k + config.m) * 2} request/response round trips; the window overlaps them — W is fanoutWindow)\n`);
 console.log(`   W   PUT (ms)   MB/s   peak     GET (ms)   MB/s   peak    bytes`);
 console.log(`  ──  ────────  ─────  ────    ────────  ─────  ────    ─────`);
 
 let baseline = null;
-for (const W of [1, 2, 4, 8, 16, 32]) {
+for (const W of WINDOWS) {
   const r = await measure(W);
   if (W === 1) baseline = r;
   const putX = baseline ? `${(baseline.putMs / r.putMs).toFixed(1)}×` : "";

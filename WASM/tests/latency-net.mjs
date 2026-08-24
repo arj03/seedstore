@@ -7,7 +7,7 @@
 import { LoopbackNetwork } from "../build/host/loopback.js";
 
 export class LatencyNetwork extends LoopbackNetwork {
-  constructor(delayMs = 2) {
-    super(delayMs);
+  constructor(delayMs = 2, chunkBytes = 0) {
+    super(delayMs, chunkBytes);
   }
 }

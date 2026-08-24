@@ -175,7 +175,8 @@ import { verifyBundle } from "seedkernel-wasm/bundle";
 // Each holder runs its own OFFER→STORE pipeline in parallel, so both sockets stay
 // saturated. blockSize still matters: bigger blocks = fewer chunks = less per-block
 // CPU (encrypt + RS + Ed25519) and smaller manifests. Capped by the transport —
-// WebRTC (werift) reassembles data-channel messages up to ~64 KiB → 32 KiB. On WS
+// WebRTC keeps physical data-channel messages at 48 KiB, with the kernel's length
+// framer reassembling larger encrypted records, so 32 KiB remains the block size. On WS
 // the binding cap is the HOLDER's maxMessageBytes (serveFetch bounds one FETCH
 // response by it, and the deployed bundles don't override the 1 MiB default): one
 // block + framing must fit it, or the holder silently serves the block as absent and
@@ -183,8 +184,9 @@ import { verifyBundle } from "seedkernel-wasm/bundle";
 // measures ~8% faster PUT / ~25% faster GET than 256 KiB (fewer chunks, half the
 // per-block CPU on both ends). A per-holder batch is itself split under
 // maxMessageBytes (below) into one or a few messages, so no single transfer outruns
-// the frame cap — the bug a 10 MB one-shot STORE hit on WS, and a hard break on
-// WebRTC's ~64 KiB channel. blockSize lives in the manifest, so PUT-encode and
+// the logical batch cap — the bug a 10 MB one-shot STORE hit on WS. WebRTC records
+// are split below that layer to stay inside its physical channel bound. blockSize
+// lives in the manifest, so PUT-encode and
 // GET-decode of one file always agree.
 // Live A/B tuning knobs via URL query (all optional, browser-only):
 //   ?window=<MB> streamed PUT/GET window · ?heap=<MB> guest realm heap ·
@@ -200,12 +202,12 @@ const blockSizeFor = (mode) => qNum("block", mode === "ws" ? 512 : 32) * 1024;
 // Per-transport batch cap: WS frames hold 16 MB, but this must MATCH the holders'
 // maxMessageBytes (the deployed bundles keep the 1 MiB default) — a holder serves at
 // most its own cap per FETCH response, so a client that batches wider reads the
-// overflow as "absent" and a GET can fail with every block intact. WebRTC reassembles
-// only ~64 KiB, so stay under it (one 32 KiB block + headers per message).
-const maxMessageBytesFor = (mode) => (mode === "ws" ? 1 << 20 : 48 * 1024);
+// overflow as "absent" and a GET can fail with every block intact. WebRTC uses a
+// 256 KiB logical batch; RtcChannel splits the length-framed encrypted record into
+// physical messages of at most 48 KiB.
+const maxMessageBytesFor = (mode) => (mode === "ws" ? 1 << 20 : 256 * 1024);
 // fanoutWindow windows the per-holder FETCH sub-batches on GET and the per-holder
-// STOREs on PUT. The WebRTC cap forces ~one block per STORE,
-// so without the window a file pays one serial round trip per block — visibly slower
+// STOREs on PUT. Without batching/windowing a file pays one serial round trip per block — visibly slower
 // than GET on a low-latency link. PUT and GET share one fanoutWindow (they have
 // never been tuned apart), so both holders pipeline at the same width. */
 const CONFIG = { k: 1, m: 1, blockSize: 32 * 1024, fanoutWindow: 64 };
