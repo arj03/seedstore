@@ -1,7 +1,7 @@
 // The host's READ VIEW of what this node's holder has stored (README §12).
 //
 // The confined guest holder owns store.local outright (admission, quota, the
-// `<hex>.blk`/`<hex>.dsc` layout — host/tier2-guest.orchestration.js). This
+// `<hex>.rec` layout (plus legacy `<hex>.blk`/`.dsc` reads — see the guest). This
 // module implements NONE of that policy — no put, no delete — only reads the
 // layout back for a host-side caller (tests, demo counts, operator scripts).
 // Reads the backend live rather than caching, since the guest writes out of band.
@@ -9,8 +9,24 @@
 import { toHex, fromHex } from "./util.js";
 import type { Fs } from "seedkernel-wasm/fs";
 
-const BLK = ".blk"; // ciphertext
-const DSC = ".dsc"; // author-signed chunk descriptor envelope (§4.3)
+const REC = ".rec"; // [descriptor length u32 BE][descriptor][ciphertext]
+const BLK = ".blk"; // legacy ciphertext
+const DSC = ".dsc"; // legacy author-signed descriptor envelope (§4.3)
+const REC_HEAD = 4;
+
+function readU32BE(bytes: Uint8Array): number {
+  return ((bytes[0] << 24) | (bytes[1] << 16) | (bytes[2] << 8) | bytes[3]) >>> 0;
+}
+
+function decodeRecord(record: Uint8Array): StoredBlock | null {
+  if (record.length < REC_HEAD) return null;
+  const descriptorLength = readU32BE(record);
+  if (descriptorLength === 0 || descriptorLength > record.length - REC_HEAD) return null;
+  return {
+    descriptor: record.slice(REC_HEAD, REC_HEAD + descriptorLength),
+    bytes: record.slice(REC_HEAD + descriptorLength),
+  };
+}
 
 /** What a holder keeps for one block: the ciphertext and the signed descriptor
  *  envelope its chunk travels under (§4.3). The descriptor is stored verbatim
@@ -36,8 +52,8 @@ export interface BlobView {
   has(id: Uint8Array): Promise<boolean>;
   /** All stored ids (optionally restricted to a hex prefix). */
   list(prefix?: string): Promise<Uint8Array[]>;
-  /** Committed-tier bytes on the backend (§14): every `<hex>.blk` plus its `.dsc`
-   *  sidecar. What the holder charges against its quota — but this view only
+  /** Committed-tier bytes on the backend (§14): every current `.rec` and legacy
+   *  `.blk`/`.dsc`. What the holder charges against its quota — but this view only
    *  reports it; the quota itself is the node's (operator) policy and the guest's
    *  to enforce. */
   usedBytes(): Promise<number>;
@@ -50,30 +66,36 @@ export class FsBlobView implements BlobView {
 
   async get(id: Uint8Array): Promise<StoredBlock | null> {
     const hex = toHex(id);
+    const record = await this.fs.get(hex + REC);
+    if (record) return decodeRecord(record);
     const bytes = await this.fs.get(hex + BLK);
     if (!bytes) return null;
     const descriptor = await this.fs.get(hex + DSC);
     return { bytes, descriptor: descriptor ?? null };
   }
 
-  async has(id: Uint8Array): Promise<boolean> { return (await this.fs.size(toHex(id) + BLK)) >= 0; }
+  async has(id: Uint8Array): Promise<boolean> {
+    const hex = toHex(id);
+    return (await this.fs.size(hex + REC)) >= 0 || (await this.fs.size(hex + BLK)) >= 0;
+  }
 
   async list(prefix?: string): Promise<Uint8Array[]> {
-    const out: Uint8Array[] = [];
+    const ids = new Set<string>();
     for (const key of await this.fs.list()) {
-      if (!key.endsWith(BLK)) continue;
-      const hex = key.slice(0, -BLK.length);
+      const ext = key.endsWith(REC) ? REC : key.endsWith(BLK) ? BLK : null;
+      if (!ext) continue;
+      const hex = key.slice(0, -ext.length);
       if (hex.length !== 64) continue;
       if (prefix && !hex.startsWith(prefix)) continue;
-      out.push(fromHex(hex));
+      ids.add(hex);
     }
-    return out;
+    return [...ids].map(fromHex);
   }
 
   async usedBytes(): Promise<number> {
     let used = 0;
     for (const key of await this.fs.list()) {
-      if (key.endsWith(BLK) || key.endsWith(DSC)) {
+      if (key.endsWith(REC) || key.endsWith(BLK) || key.endsWith(DSC)) {
         const sz = await this.fs.size(key);
         if (sz > 0) used += sz;
       }

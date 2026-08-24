@@ -543,12 +543,12 @@ export async function run(t) {
       channels: net.view(toHex(id.publicKey)), listen: { host: "127.0.0.1", port: 0 },
       config: { ...config, k: 1, m: 0 }, quota: 1 << 30, timeoutMs: TIMEOUT, ...extra,
     });
-    // A backend that accepts reads and refuses the block write — a full disk, near
-    // enough. The .dsc sidecar is left writable so the failure is the commit itself.
+    // A backend that accepts reads and refuses the record write — a full disk, near
+    // enough.
     const failing = new MemoryFs();
     const put0 = failing.put.bind(failing);
     failing.put = async (key, bytes) => {
-      if (key.endsWith(".blk")) throw new Error("ENOSPC: no space left on device");
+      if (key.endsWith(".rec")) throw new Error("ENOSPC: no space left on device");
       return put0(key, bytes);
     };
     const writer = await mk(writerId);

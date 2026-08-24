@@ -170,13 +170,13 @@ export async function run(t) {
       t.ok(holderIdx > 0, "located a holder with blocks");
       const idsBefore = (await nodes[holderIdx].store.list()).map(toHex).sort();
       // Cold reopen enters through the app's fs scope, exactly as the live node does
-      // (seedkernel §12.2): the holder's keys are `appScope + <hex>.blk` on the raw
+      // (seedkernel §12.2): the holder's keys are `appScope + <hex>.rec` on the raw
       // backend, so a view over the unwrapped NodeFs would list nothing.
       const cold = new FsBlobView(scopedFs(new NodeFs(dirs[holderIdx]), nodes[holderIdx].appScope));
       const idsAfter = (await cold.list()).map(toHex).sort();
       t.eq(idsAfter.join(","), idsBefore.join(","), "cold reopen sees exactly the same block ids");
-      const onDisk = readdirSync(dirs[holderIdx]).filter((f) => f.endsWith(".blk"));
-      t.eq(onDisk.length, idsBefore.length, "one .blk file per held block on disk");
+      const onDisk = readdirSync(dirs[holderIdx]).filter((f) => f.endsWith(".rec"));
+      t.eq(onDisk.length, idsBefore.length, "one .rec file per held block on disk");
     } finally {
       nodes.forEach((n) => n.close());
       rmSync(baseDir, { recursive: true, force: true });

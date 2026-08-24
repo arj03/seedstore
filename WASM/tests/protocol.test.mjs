@@ -136,6 +136,27 @@ export async function run(t) {
     } finally { a.close(); b.close(); }
   }
 
+  t.group("concurrent STORE requests cannot race the authoritative sibling rule");
+  {
+    const net = new LoopbackNetwork();
+    const [a, b] = await createConnectedCohort({ count: 2, network: net, sodium, wasm, timeoutMs: TIMEOUT });
+    try {
+      const block0 = bytes(100, 41), block1 = bytes(100, 42);
+      const id0 = b.crypto.hash(block0), id1 = b.crypto.hash(block1);
+      const env = signDescriptor(
+        sodium, { level: 0, k: 1, m: 1, blockSize: 100, tailBytes: 100, blockIds: [id0, id1] },
+        a.identity.publicKey, a.identity.privateKey, a.signAuthor,
+      );
+      const verdicts = (await Promise.all([
+        a.request(b.peerId, typed(MsgType.STORE, encodeStoreBatch([{ blockId: id0, descriptor: env, bytes: block0 }]))),
+        a.request(b.peerId, typed(MsgType.STORE, encodeStoreBatch([{ blockId: id1, descriptor: env, bytes: block1 }]))),
+      ])).map((reply) => decodeMask(reply)[0]);
+      t.eq(verdicts.filter((v) => v === VERDICT_ACCEPTED).length, 1, "exactly one concurrent sibling is accepted");
+      t.eq(verdicts.filter((v) => v === VERDICT_SIBLING).length, 1, "the other sees the atomic in-memory reservation");
+      t.eq((await b.store.list()).length, 1, "only one sibling reaches durable storage");
+    } finally { a.close(); b.close(); }
+  }
+
   // Quota reaches the holder as a sibling option, not through the typed StorageConfig —
   // but a seedkernel shell spells the same operator knob INSIDE its boot config, and
   // both drivers appear in one file (holder-guest.test.mjs). Getting it wrong here used
@@ -162,8 +183,8 @@ export async function run(t) {
     const net = new LoopbackNetwork();
     // Three unrelated one-block chunks (k=1, m=0), so the sibling rule never fires and
     // this is a pure §14 quota decision. The holder charges what it will commit — the
-    // 100-byte block plus its 136-byte descriptor sidecar = 236 each — reading the size
-    // from the signed geometry, never from the offer. Room for two, not three.
+    // 100-byte block + 141-byte descriptor + 4-byte record frame = 245 each — reading
+    // the size from signed geometry, never from the offer. Room for two, not three.
     const [a, b] = await createConnectedCohort({ count: 2, network: net, sodium, wasm, quota: 500, timeoutMs: TIMEOUT });
     try {
       const solo = (blockId) => signDescriptor(
@@ -172,8 +193,8 @@ export async function run(t) {
       const offers = [id(30), id(31), id(32)].map((blockId) => ({ blockId, descriptor: solo(blockId) }));
       t.eq(offers[0].descriptor.length, 141, "a one-block descriptor envelope is [pk 32][sig 64][core 45]");
       const mask = decodeMask(await a.request(b.peerId, typed(MsgType.OFFER, encodeOfferBatch(offers))));
-      t.eq(mask[0], VERDICT_ACCEPTED, "first block fits the quota (236 ≤ 500)");
-      t.eq(mask[1], VERDICT_ACCEPTED, "second still fits (cumulative 472 ≤ 500)");
+      t.eq(mask[0], VERDICT_ACCEPTED, "first block fits the quota (245 ≤ 500)");
+      t.eq(mask[1], VERDICT_ACCEPTED, "second still fits (cumulative 490 ≤ 500)");
       t.eq(mask[2], VERDICT_QUOTA, "third declined — the running budget is spent (§14)");
     } finally { a.close(); b.close(); }
   }

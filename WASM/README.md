@@ -69,7 +69,7 @@ host-side copy of both sides as the reference/parity path — the role the
 host-side classes play in the tests — but the **shipped** node runs the confined
 guest.
 
-## Signing scope, existence, and bundle versioning
+## Signing scope, storage index, and bundle versioning
 
 Three seedkernel runtime contracts reach into the storage code, each with a
 seedstore-side counterpart worth pinning down. The contracts are documented on
@@ -95,12 +95,13 @@ mirror, and the bundle producer:
    the Part II signed formats reserve their own values before they exist
    (`TAG_TOMBSTONE = 0x02`, `TAG_HEAD = 0x03`). The tag sits inside `core`, so
    it is already under the signature and inside the scoped preimage.
-3. **`storeHas` answers from `FS_SIZE ≥ 0`** — existence-by-size (no `FS_HAS`;
-   a key exists iff `FS_SIZE ≥ 0`, seedkernel §12.1–§12.2). The `fsSize` seam
-   distinguishes absent (the bridge's −1 sentinel) from present-but-empty, so
-   there is no `has` call to make. Same move host-side — `store-fs.ts` asks
-   `fs.size(...) >= 0` — with the seedstore `BlobStore.has` iface itself
-   unchanged, only its backing call.
+3. **The holder indexes its app-owned store once** — on first access the guest
+   rebuilds held ids and quota usage from `FS_LIST`/`FS_SIZE`, then updates that
+   authoritative index with each STORE reservation. OFFER and STORE sibling checks
+   therefore avoid repeated filesystem metadata calls. New blocks commit as one
+   `<block-id>.rec` (`[descriptor length][descriptor][ciphertext]`) instead of a
+   `.blk` plus `.dsc` pair; the guest and `FsBlobView` still read the legacy layout
+   so an existing holder upgrades in place.
 4. **The bundle carries an integer, monotonic `version`** (the monotonic
    downgrade refusal, seedkernel §12.4; `scripts/storage-bundle.mjs`):
    guarded by `Number.isInteger` and bumped on every publish, so the shell's
@@ -108,8 +109,8 @@ mirror, and the bundle producer:
 5. **The tests that pin this**: `manifest` (tamper-evidence over the tagged,
    scoped preimage), `tier2-port` / `holder-guest` (parity across the scoped
    sign/verify paths), `shell-run` (bundle version freshness — a downgrade is
-   refused), `net` (`FsBlobStore` existence via `size ≥ 0`, riding the encrypted
-   record layer transparently).
+   refused), `net` (legacy and current durable layouts across a cold reopen), and
+   `protocol` (concurrent STOREs cannot race the authoritative sibling reservation).
 
 **Purely storage-side, independent of all this:** the codec and reputation
 WASM, the HAVE/OFFER/STORE/FETCH wire format and its windowing, content
@@ -335,7 +336,7 @@ path; same-machine tabs connect on host candidates without it.)
   OFFER/STORE/FETCH are batched and windowed *per holder* rather than issued per
   block, so wall-clock tracks round-trip-count × RTT — the cost the zero-latency
   loopback hides (asserted as request counts, not just wall-clock).
-- **net** — networking + filesystem integration: `FsBlobStore` persisting across
+- **net** — networking + filesystem integration: `FsBlobView` persisting across
   reopen, a full cohort over real TCP sockets with blocks landing on holders'
   disks, and a browser-like node reaching a server over a real WebSocket.
 - **tier2-port** — the same PUT/GET/replication/offline/repair/crypto-shredding
@@ -395,6 +396,12 @@ latency is modelled at the wire — every message pays it, both directions, so o
 request/response costs the full RTT. (The old ~11/~17 MB/s figures measured a
 host-side delay that charged only the inbound request, not the response.) Over a
 real browser↔browser WebRTC link the `p2p.html` demo reports ~13 MB/s both ways.
+
+`node tests/bench-holder.mjs 16 256 1 1 disk` isolates holder admission and
+durable STORE work on a real filesystem. Its capacity comparison uses total holder
+payload over the complete PUT wall time as a conservative floor, and separately
+sums the already co-resident holders' measured rates for the active holder window;
+it does not divide by the holder count a second time.
 
 **The SIMD split-table trick (GF(2⁸) "PSHUFB").** For a fixed coefficient *c*,
 `c·x` is split into two 4-bit lookups: `c·(x & 0x0F) ⊕ c·(x >> 4)`, each a 16-byte

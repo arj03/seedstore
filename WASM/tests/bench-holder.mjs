@@ -2,22 +2,22 @@
 // compute and bench-net.mjs measures round-trip economy; neither isolates what
 // the RECEIVING side costs per block — the open question behind a live PUT
 // that fills socket buffers (receiver-limited vs. path-limited). Answer: holder
-// STORE-processing runs ~30 MB/s/holder on real disk with the all-async kernel seam;
-// two co-resident holders still clear ~2x the reference live demand on this machine.
+// STORE-processing is measured on real disk with the all-async kernel seam. The
+// verdict reports both conservative whole-process payload/wall throughput and the
+// sum of the co-resident holders' independently measured active-window rates.
 //
 // Isolates the holder by running over a zero-latency loopback and timing each
 // inbound request inside the guest's own `handle` (the `recv` half of
 // Op.STATS): admit -> hash -> verify -> fs write -> reply, no initiator work
 // and no wire.
 //
-// Per STORE'd block (acceptStore): BLAKE2b, one Ed25519 verify, the §6
-// sibling check (a storeHas fs stat per sibling), then storeWrite = 2 fsSize +
-// 2 fsPut. Geometry defaults to the live deployment's (RS(1,1), 256 KiB
-// blocks) for comparability with p2p-cli runs.
+// Per STORE'd block: BLAKE2b, one Ed25519 verify, the §6 sibling check against
+// the holder-owned index, then one framed-record fsPut. Geometry defaults to the
+// live deployment's (RS(1,1), 256 KiB blocks) for comparability with p2p-cli runs.
 //
 // NOT priced: the transport's own receive cost (loopback hands over a
-// Uint8Array directly), real disk by default (pass `disk` for a NodeFs temp
-// dir), or a weaker deployment CPU. Read the result as an upper bound on
+// Uint8Array directly), disk persistence unless `disk` is passed for a NodeFs temp
+// dir, or a weaker deployment CPU. Read the result as an upper bound on
 // holder ingest.
 //
 // Run:  node tests/bench-holder.mjs [fileMB] [blockKiB] [k] [m] [disk]
@@ -91,7 +91,7 @@ for (let i = 0; i < 1 + holders; i++) {
     channels: net.view(peerId),
     listen: { host: "127.0.0.1", port: 0 },
     config, fs,
-    // Generous: each holder takes ~fileBytes of blocks plus .dsc sidecars, and a §14-full
+    // Generous: each holder takes ~fileBytes plus descriptors and record framing; a §14-full
     // holder would silently decline instead of measuring anything.
     quota: Math.max(64 * MB, fileBytes * 4),
     timeoutMs: 20000,
@@ -124,13 +124,14 @@ const putMs = performance.now() - t0;
 // ── holder ingest ──────────────────────────────────────────────────────────
 // Each holder's guest timed every request it answered (the recv half of Op.STATS,
 // read-and-cleared). The stats read here covers exactly the PUT above.
-let storeMs = 0, storeBytes = 0, storeReqs = 0, offerMs = 0, offerReqs = 0;
+let storeMs = 0, storeBytes = 0, storeReqs = 0, offerMs = 0, offerReqs = 0, holderRateSum = 0;
 console.log("per-holder request handling (time spent inside the confined guest's `handle`):");
 for (const id of holderIds) {
   const s = await holderStats(id);
   const st = s[STORE] ?? { n: 0, ms: 0, payloadBytes: 0 };
   const of = s[OFFER] ?? { n: 0, ms: 0, payloadBytes: 0 };
   storeMs += st.ms; storeBytes += st.payloadBytes; storeReqs += st.n;
+  holderRateSum += rate(st.payloadBytes, st.ms);
   offerMs += of.ms; offerReqs += of.n;
   const parts = [STORE, OFFER, HAVE].filter((ty) => s[ty]?.n).map((ty) => {
     const b = s[ty];
@@ -142,14 +143,13 @@ for (const id of holderIds) {
 // Blocks, not messages: a ~1 MiB batch carries several 256 KiB blocks, and per-block cost
 // is what scales with the file.
 const totalBlocks = numChunks * holders;
-// Bytes and time are both summed over the holders, so the ratio is one holder's ingest
-// rate against its OWN cpu time — which is the per-holder figure, since in a deployment
-// the holders run on separate machines and their work does not queue behind each other.
+// Bytes and elapsed handler time are both summed, so this is the weighted mean of the
+// already co-resident, already contending holders — not a serialized box rate.
 const ingestMBs = rate(storeBytes, storeMs);
-console.log(`\nSTORE (the ingest path — hash + descriptor verify + sibling check + 2 fs writes per block):`);
+console.log(`\nSTORE (the ingest path — hash + descriptor verify + indexed sibling check + 1 fs write per block):`);
 console.log(`  ${storeReqs} batched requests carrying ${totalBlocks} blocks (${fmt(storeBytes / MB)} MB of payload)`);
 console.log(`  holder time total   ${fmt(storeMs)} ms  →  ${fmt(storeMs / Math.max(1, totalBlocks), 2)} ms per block`);
-console.log(`  INGEST THROUGHPUT   ${fmt(ingestMBs, 1)} MB/s per holder (bytes ÷ that holder's own cpu time)`);
+console.log(`  MEAN HOLDER RATE    ${fmt(ingestMBs, 1)} MB/s (weighted across co-resident holders)`);
 if (offerReqs) {
   console.log(`\nOFFER (admission only — same verify + sibling check, NO block hash, NO fs write):`);
   console.log(`  ${offerReqs} requests, ${fmt(offerMs)} ms total → ${fmt(offerMs / Math.max(1, totalBlocks), 2)} ms per offered block`);
@@ -196,20 +196,24 @@ console.log(`  PUT ${fmt(putMs)} ms (${fmt(rate(fileBytes, putMs), 1)} MB/s)   G
 console.log(`  holder share of PUT: ${fmt((storeMs + offerMs) / putMs * 100)}%`);
 console.log(`  bytes verified: ${bytesEqual(got, data) ? "round-trip OK" : "MISMATCH"}`);
 
-// Compare against a reference live run. The comparison that matters is per BOX, not per
-// holder: a small cohort usually runs its holders on ONE machine, so their ingest work
-// shares a CPU and the thing to beat is the PUT's whole wire rate, not one holder's share.
+// Compare against a reference live run. The old calculation divided the measured mean
+// holder rate by `holders`, even though every holder was already co-resident and
+// contending during the run. That charged contention twice. Sum their observed rates for
+// the active holder-window estimate; also report total holder payload / whole PUT wall
+// time as the deliberately conservative, whole-process comparison.
 const LIVE_WIRE_MBS = 7.2;   // 50 MB file, 100.2 MB on the wire in 13.87 s (p2p-cli, 2026-07-21)
-const boxMBs = ingestMBs / holders;  // worst case: every holder co-resident on one cpu
-const margin = boxMBs / LIVE_WIRE_MBS;
+const holderWindowMBs = holderRateSum;
+const processMBs = rate(storeBytes, putMs);
+const margin = processMBs / LIVE_WIRE_MBS;
 console.log(`\nverdict vs a reference live run (${LIVE_WIRE_MBS} MB/s of wire into ONE box running the cohort):`);
-console.log(`  per-holder ingest ${fmt(ingestMBs, 0)} MB/s → ${fmt(boxMBs, 0)} MB/s for ${holders} co-resident holders on one cpu`);
+console.log(`  whole-process floor ${fmt(processMBs, 1)} MB/s (${fmt(margin, 1)}× demand): holder payload ÷ full PUT wall time`);
+console.log(`  holder-window rate  ${fmt(holderWindowMBs, 1)} MB/s (${fmt(holderWindowMBs / LIVE_WIRE_MBS, 1)}× demand): sum of ${holders} co-resident measured rates`);
 console.log(margin > 3
-  ? `  that is ${fmt(margin, 0)}× the live demand, on THIS machine. For holder ingest to have been the limit,\n` +
+  ? `  even the conservative comparison is ${fmt(margin, 1)}× live demand on THIS machine. For holder ingest to have been the limit,\n` +
     `  the holder box would have to be ~${fmt(margin, 0)}× slower at hash+verify+write than this one — and the\n` +
     `  ${ON_DISK ? "disk cost is already priced in" : "MemoryFs caveat still applies; re-run with `disk`"}. The untimed WS receive path is the remaining unknown.\n` +
     `  To close it properly, run this same bench ON the holder box and compare.`
-  : `  that is only ${fmt(margin, 1)}× the live demand — holder processing is a plausible limiter.`);
+  : `  the conservative comparison is only ${fmt(margin, 1)}× live demand — holder processing is a plausible limiter.`);
 
 for (const d of tmpDirs) rmSync(d, { recursive: true, force: true });
 process.exit(0);

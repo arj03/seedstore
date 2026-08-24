@@ -63,7 +63,9 @@ const MSG_HAVE = 1, MSG_OFFER = 2, MSG_FETCH = 3, MSG_STORE = 4;
 const NET_PROTO = strBytes("seedstore");
 const HAVE_ID_LEN = 32;      // a HAVE/FETCH request names 32-byte block_ids (§18)
 const FETCH_FRAME = 5;       // a present block costs [found u8][len u32] in a FETCH response (§18)
-const STORE_BLK = ".blk", STORE_DSC = ".dsc";
+// New writes use one record per block: [descriptor length u32][descriptor][ciphertext].
+// The legacy two-file layout remains readable so existing holders upgrade in place.
+const STORE_REC = ".rec", STORE_BLK = ".blk", STORE_DSC = ".dsc", STORE_REC_HEAD = 4;
 // The logical names this app's own modules are installed under. The guest calls them
 // by the logical name from its manifest, straight through `host.call` — a name this
 // realm did not declare as a local service, and that is not a host method (`service/call`),
@@ -217,39 +219,50 @@ async function repObserve(peerPk, t, pass) {
   }
 }
 
-// ── local store over fs (the <hex>.blk / <hex>.dsc layout) ──────────────────
-// fs is async, so the whole store layer is async. Existence is `size ≥ 0`
-// (there is no fs/has): raw fs/size is 0xFFFFFFFF (−1 over the seam) only for an
-// absent key, so a present-but-empty value still reads as held.
-async function storeHas(id) { return (await fsSizeRaw(toHex(id) + STORE_BLK)) !== 0xffffffff; }
+// ── local store over fs ─────────────────────────────────────────────────────
+// New blocks are one <hex>.rec; legacy <hex>.blk/.dsc pairs remain readable.
+function decodeStoreRecord(rec) {
+  if (!rec || rec.length < STORE_REC_HEAD) return null;
+  const dlen = rU32(rec, 0);
+  if (dlen === 0 || dlen > rec.length - STORE_REC_HEAD) return null;
+  return { descriptor: rec.slice(STORE_REC_HEAD, STORE_REC_HEAD + dlen), bytes: rec.slice(STORE_REC_HEAD + dlen) };
+}
+async function fsGet(keyStr) {
+  const r = await host.call("fs/get", strBytes(keyStr));
+  return r[0] === 1 ? r.slice(1) : null;
+}
+async function storeHas(id) { await ensureStoreIndex(); return heldBlocks.has(toHex(id)); }
 async function storeGet(id) {
   const hex = toHex(id);
-  const blk = await host.call("fs/get", strBytes(hex + STORE_BLK));
-  if (blk[0] !== 1) return null;
-  const dsc = await host.call("fs/get", strBytes(hex + STORE_DSC));
-  return { bytes: blk.slice(1), descriptor: dsc[0] === 1 ? dsc.slice(1) : null };
+  const rec = await fsGet(hex + STORE_REC);
+  if (rec) return decodeStoreRecord(rec);
+  const blk = await fsGet(hex + STORE_BLK);
+  if (!blk) return null;
+  return { bytes: blk, descriptor: await fsGet(hex + STORE_DSC) };
 }
 async function storeGetBytes(id) {
-  const blk = await host.call("fs/get", strBytes(toHex(id) + STORE_BLK));
-  return blk[0] === 1 ? blk.slice(1) : null;
+  const hex = toHex(id);
+  const rec = await fsGet(hex + STORE_REC);
+  if (rec) { const decoded = decodeStoreRecord(rec); return decoded ? decoded.bytes : null; }
+  return fsGet(hex + STORE_BLK);
 }
-// Just the <hex>.dsc sidecar, without dragging the block ciphertext across the
-// bridge — repair audits chunk shape from the descriptor and never needs the .blk
-// bytes (it re-fetches those from holders only where healing actually places).
 async function storeGetDescriptor(id) {
-  const dsc = await host.call("fs/get", strBytes(toHex(id) + STORE_DSC));
-  return dsc[0] === 1 ? dsc.slice(1) : null;
+  const hex = toHex(id);
+  const rec = await fsGet(hex + STORE_REC);
+  if (rec) { const decoded = decodeStoreRecord(rec); return decoded ? decoded.descriptor : null; }
+  return fsGet(hex + STORE_DSC);
 }
-async function storeList() {
+async function storeKeys() {
   const r = await host.call("fs/list", EMPTY), out = [];
   let o = 0; const n = rU32(r, o); o += 4;
   for (let i = 0; i < n; i++) {
     const klen = rU32(r, o); o += 4;
     const key = bytesToStr(r.slice(o, o + klen)); o += klen;
-    if (key.length === 68 && key.slice(64) === STORE_BLK) out.push(fromHex(key.slice(0, 64)));
+    out.push(key);
   }
   return out;
 }
+async function storeList() { await ensureStoreIndex(); return [...heldBlocks].map(fromHex); }
 
 // ── the network: one local service name, two ops ─────────────────────────────
 // The network is a bundle (the transport) claiming `_net` under its `services`
@@ -1094,104 +1107,110 @@ async function doRepair() {
 
 // ── holder side (§5/§6/§7) ───────────────────────────────────────────────────
 // The request side a node serves to its cohort: admission control (§6 sibling rule
-// + §14 quota), content-addressing (§4.2), and the <hex>.blk/.dsc writes — confined
+// + §14 quota), content-addressing (§4.2), and durable record writes — confined
 // here; the host keeps only a read view (host/store-view.ts), no write path. Async,
 // since the fs seam is async on every backend (seedkernel core/fs.ts).
-let bytesUsed = -1;
+let bytesUsed = -1, heldBlocks = null, storeIndexPromise = null, storeIndexDirty = false;
+let activeStoreWrites = 0, resolveStoreWritesIdle = null, storeWritesIdle = Promise.resolve();
 // The §14 byte budget is OPERATOR policy: read from LOCAL alone, never CFG (an
 // author-signed `quota` in CFG would let a bundle grant itself disk). No generous
 // default either — an under-injecting driver falls to 0 and FAILS CLOSED.
 function quota() { return LOCAL.quota != null ? LOCAL.quota : 0; }
-// fs/size returns 0xffffffff for an absent key (−1 over the bridge).
-// fsSizeRaw preserves that sentinel — it is how existence is asked (storeHas), since
-// there is no fs/has. fsSize maps the sentinel to 0 so sizing a bare block's missing
-// .dsc adds nothing to the quota total, not ~4 GiB.
 async function fsSizeRaw(keyStr) { return rU32(await host.call("fs/size", strBytes(keyStr)), 0); }
 async function fsSize(keyStr) { const v = await fsSizeRaw(keyStr); return v === 0xffffffff ? 0 : v; }
-async function ensureUsed() {
-  if (bytesUsed >= 0) return;
-  bytesUsed = 0;
-  // Charge both the .blk ciphertext AND its .dsc sidecar (§14) — rebuilt from the
-  // fs, so a restarted holder re-derives its budget from what's actually stored.
-  const sizes = await Promise.all((await storeList()).map((id) => {
-    const hex = toHex(id);
-    return Promise.all([fsSize(hex + STORE_BLK), fsSize(hex + STORE_DSC)]);
-  }));
-  for (const [blk, dsc] of sizes) bytesUsed += blk + dsc;
+async function ensureStoreIndex() {
+  // If a backend failure made durable state uncertain, let every already-reserved
+  // write settle before rebuilding. New admission waits here; successful writes keep
+  // their reservations visible until the refreshed index replaces the snapshot.
+  if (storeIndexDirty && activeStoreWrites > 0) await storeWritesIdle;
+  if (storeIndexDirty) {
+    bytesUsed = -1; heldBlocks = null; storeIndexPromise = null; storeIndexDirty = false;
+  }
+  if (heldBlocks !== null && bytesUsed >= 0) return;
+  if (storeIndexPromise === null) storeIndexPromise = (async () => {
+    const keys = await storeKeys();
+    const records = new Set(), legacy = new Set();
+    for (const key of keys) {
+      if (key.length !== 68) continue;
+      const hex = key.slice(0, 64), ext = key.slice(64);
+      if (ext === STORE_REC) records.add(hex);
+      else if (ext === STORE_BLK) legacy.add(hex);
+    }
+    // Build once from durable state. The guest is the sole writer, so admission can
+    // enforce sibling presence from this authoritative index instead of stat'ing
+    // every candidate and sibling on every OFFER and STORE.
+    const sizeKeys = [];
+    for (const hex of records) sizeKeys.push(hex + STORE_REC);
+    for (const hex of legacy) sizeKeys.push(hex + STORE_BLK, hex + STORE_DSC);
+    const sizes = await Promise.all(sizeKeys.map(fsSize));
+    heldBlocks = new Set([...records, ...legacy]);
+    bytesUsed = sizes.reduce((sum, size) => sum + size, 0);
+  })();
+  try { await storeIndexPromise; } finally { storeIndexPromise = null; }
 }
-async function quotaFree() { await ensureUsed(); return Math.max(0, quota() - bytesUsed); }
 async function fsPut(keyStr, bytes) {
   const kb = strBytes(keyStr);
   const head = new Uint8Array(4); wU32(head, 0, kb.length);
   await host.call("fs/put", concat([head, kb, bytes]));
 }
-// The one write path into store.local: the .blk ciphertext + its .dsc sidecar,
-// under the quota budget. Throws past quota so admission refuses rather than
-// over-commits.
+async function fsPutStoreRecord(keyStr, descriptor, bytes) {
+  const kb = strBytes(keyStr);
+  const head = new Uint8Array(4); wU32(head, 0, kb.length);
+  const recordHead = new Uint8Array(STORE_REC_HEAD); wU32(recordHead, 0, descriptor.length);
+  // Frame the fs call and durable record in one pass. Building a record first and
+  // passing it through fsPut would copy every block-sized payload twice in the guest.
+  await host.call("fs/put", concat([head, kb, recordHead, descriptor, bytes]));
+}
+// The one write path into store.local: one framed record, under the quota budget.
+// Legacy two-file records are read but all new commits avoid the second metadata op.
 //
-// The quota throw is TAGGED — it's the only failure here the caller can name.
-// Everything else (full disk, backend error, realm OOM) must surface differently:
-// a holder has no console, so the verdict byte is its only way to say what happened.
-async function storeWrite(id, bytes, descriptor, knownAbsent = false) {
-  await ensureUsed();
+// Backend failures (full disk, backend error, realm OOM) surface as holder errors:
+// a holder has no console, so the verdict byte is its only way to report them.
+async function storeWrite(id, bytes, descriptor) {
   const hex = toHex(id);
-  // Charge the ciphertext AND descriptor sidecar, crediting whatever was already
-  // stored under this id — never write the .dsc for free. Batched admission has
-  // just proved a block absent from its immutable snapshot; no second fs round-trip
-  // is needed, and a stale sidecar is uncharged because ensureUsed deliberately
-  // derives ownership from .blk entries.
-  const [prevBlk, prevDsc] = knownAbsent
-    ? [0, 0]
-    : await Promise.all([fsSize(hex + STORE_BLK), fsSize(hex + STORE_DSC)]);
-  const next = bytesUsed - prevBlk - prevDsc + bytes.length + descriptor.length;
-  if (next > quota()) { const e = new Error("store: quota exceeded"); e.quota = true; throw e; }
-  // Reserve before yielding so sibling writes from this batch see the cumulative
-  // budget. If either backend write fails, force the next operation to rebuild the
-  // counter from durable state (one half may already have landed).
-  bytesUsed = next;
+  if (activeStoreWrites++ === 0) {
+    storeWritesIdle = new Promise((resolve) => { resolveStoreWritesIdle = resolve; });
+  }
   try {
-    await Promise.all([
-      fsPut(hex + STORE_BLK, bytes), fsPut(hex + STORE_DSC, descriptor),
-    ]);
-  } catch (e) { bytesUsed = -1; throw e; }
+    await fsPutStoreRecord(hex + STORE_REC, descriptor, bytes);
+  } catch (e) {
+    // A failed write may still have left a partial file. The next admission rebuilds
+    // after all concurrent commits settle instead of guessing which bytes landed.
+    storeIndexDirty = true;
+    throw e;
+  } finally {
+    activeStoreWrites--;
+    if (activeStoreWrites === 0 && resolveStoreWritesIdle) {
+      const resolve = resolveStoreWritesIdle; resolveStoreWritesIdle = null; resolve();
+    }
+  }
 }
 // Admission (§4.3 descriptor check, §6 sibling rule, §14 quota): a holder verifies
 // the signed descriptor and enforces no-two-blocks-of-a-chunk itself, so the §10
 // invariant survives a careless or malicious placer, not just an honest coordinator.
-// A single block is the one-element case of admitBatch — one implementation.
-//
 // `size` is the length of the block actually in hand (STORE only); OFFER carries
 // none on the wire and passes null.
-async function admit(descriptor, blockId, size) {
-  return (await admitBatch([{ blockId, descriptor, size }]))[0];
-}
 // Batched admission: one OFFER's worth of blocks checked cumulatively — the §14 quota
 // budget shrinks as blocks are provisionally accepted, and a block whose sibling (§6)
 // is already held OR provisionally accepted in this same batch is declined, so two
-// blocks of one chunk never both pass. STORE re-checks each block (acceptStore/admit),
+// blocks of one chunk never both pass. STORE re-checks each block with `reserve=true`,
 // so this is the advisory pre-check, never the enforcement.
 //
 // The signed descriptor is REQUIRED on every path (§4.3). Deliberately no
 // descriptor-less branch — that would let any peer push arbitrary bytes past the
 // sibling rule under quota alone.
-async function admitBatch(offers) {
+async function admitBatch(offers, reserve = false) {
   // A batch is one immutable admission snapshot. Issue its independent seam work
   // together, then apply quota + provisional-sibling decisions in wire order.
-  const [initialFree, known, signed] = await Promise.all([
-    quotaFree(), knownAuthors(), Promise.all(offers.map((o) => verifyDescriptor(o.descriptor))),
+  const [known, signed] = await Promise.all([
+    knownAuthors(), Promise.all(offers.map((o) => verifyDescriptor(o.descriptor))),
   ]);
-  let free = initialFree;
+  // Do this after crypto/roster awaits: once it returns, the quota/sibling decision
+  // and optional STORE reservations below run without yielding, making the snapshot
+  // atomic with respect to other inbound calls while disk writes remain concurrent.
+  await ensureStoreIndex();
+  let free = Math.max(0, quota() - bytesUsed);
   const provisional = new Set();
-  const heldIds = new Map();
-  for (let i = 0; i < offers.length; i++) {
-    const sd = signed[i];
-    if (!sd) continue;
-    for (const id of [offers[i].blockId, ...sd.descriptor.blockIds]) {
-      const h = toHex(id);
-      if (!heldIds.has(h)) heldIds.set(h, id);
-    }
-  }
-  const held = new Map(await Promise.all([...heldIds].map(async ([h, id]) => [h, await storeHas(id)])));
   const verdicts = [];
   for (let oi = 0; oi < offers.length; oi++) {
     const o = offers[oi], sd = signed[oi];
@@ -1206,42 +1225,31 @@ async function admitBatch(offers) {
     // is exactly blockSize bytes, so bytes in hand that disagree are not the block that
     // was offered, whatever they hash to.
     if (o.size != null && o.size !== d.blockSize) { verdicts.push(VERDICT_DESCRIPTOR); continue; }
-    // Charge what storeWrite will actually commit — the ciphertext AND its .dsc
-    // sidecar — so this pre-check answers the same question the binding write does
-    // instead of over-admitting by the descriptor's own size.
-    const cost = d.blockSize + o.descriptor.length;
+    // Charge exactly what storeWrite commits: frame + descriptor + ciphertext.
+    const cost = STORE_REC_HEAD + d.blockSize + o.descriptor.length;
     if (cost > free) { verdicts.push(VERDICT_QUOTA); continue; }
     // The sibling rule, over the whole id list. A block this holder ALREADY has counts:
     // a k=1 chunk lists its one block m+1 times, so those m+1 slots are m+1 distinct
     // peers — accepting a second copy here would silently burn one of them and leave the
     // chunk short of replicas while looking placed.
-    if (provisional.has(toHex(o.blockId)) || held.get(toHex(o.blockId))) { verdicts.push(VERDICT_SIBLING); continue; }
+    if (provisional.has(toHex(o.blockId)) || heldBlocks.has(toHex(o.blockId))) { verdicts.push(VERDICT_SIBLING); continue; }
     let sibling = false;
     for (const sib of d.blockIds) {
       if (bytesEqual(sib, o.blockId)) continue;
-      if (provisional.has(toHex(sib)) || held.get(toHex(sib))) { sibling = true; break; }
+      if (provisional.has(toHex(sib)) || heldBlocks.has(toHex(sib))) { sibling = true; break; }
     }
     if (sibling) { verdicts.push(VERDICT_SIBLING); continue; }
     free -= cost;
-    provisional.add(toHex(o.blockId));
+    const blockHex = toHex(o.blockId);
+    provisional.add(blockHex);
+    if (reserve) { bytesUsed += cost; heldBlocks.add(blockHex); }
     verdicts.push(VERDICT_ACCEPTED);
   }
   return verdicts;
 }
-async function acceptStore(blockId, descriptor, bytes) {
-  // The bytes must hash to the claimed id (§4.2) — every holder, every hop.
-  if (!bytesEqual(await hash(bytes), blockId)) return VERDICT_DECLINED;
-  const v = await admit(descriptor, blockId, bytes.length);
-  if (v !== VERDICT_ACCEPTED) return v;
-  // A tagged quota throw is the §14 budget saying no — policy, and the operator's
-  // number to raise. Anything else is this holder failing to keep a block it already
-  // admitted, which is a broken holder, not a full one: report it as such.
-  try { await storeWrite(blockId, bytes, descriptor); return VERDICT_ACCEPTED; }
-  catch (e) { return (e && e.quota) ? VERDICT_QUOTA : VERDICT_ERROR; }
-}
 async function acceptStoreBatch(stores) {
-  // Hashes are independent, and one admitBatch shares its cohort snapshot and fs
-  // existence reads across the request instead of repeating them per block.
+  // Hashes are independent. Binding admission atomically reserves quota + ids in the
+  // holder index, then the independent single-record writes can overlap safely.
   const hashes = await Promise.all(stores.map((s) => hash(s.bytes)));
   const verdicts = new Array(stores.length).fill(VERDICT_DECLINED);
   const valid = [];
@@ -1250,10 +1258,10 @@ async function acceptStoreBatch(stores) {
   }
   const admitted = await admitBatch(valid.map(({ store: s }) => ({
     blockId: s.blockId, descriptor: s.descriptor, size: s.bytes.length,
-  })));
+  })), true);
   await Promise.all(valid.map(async ({ index, store: s }, i) => {
     if (admitted[i] !== VERDICT_ACCEPTED) { verdicts[index] = admitted[i]; return; }
-    try { await storeWrite(s.blockId, s.bytes, s.descriptor, true); verdicts[index] = VERDICT_ACCEPTED; }
+    try { await storeWrite(s.blockId, s.bytes, s.descriptor); verdicts[index] = VERDICT_ACCEPTED; }
     catch (e) { verdicts[index] = (e && e.quota) ? VERDICT_QUOTA : VERDICT_ERROR; }
   }));
   return verdicts;
