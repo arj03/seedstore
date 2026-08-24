@@ -387,8 +387,8 @@ window 32):
 
 | | time | rate | |
 |---|---:|---:|---|
-| **PUT** | ~0.75 s | ~5 MB/s | ships the 2× erasure overhead — RS(2,2) is 2 data + 2 parity |
-| **GET** | ~0.34 s | ~12 MB/s | downloads any *k* of *n* — 1× the file |
+| **PUT** | ~0.90 s | ~4.5 MB/s | ships the 2× erasure overhead — RS(2,2) is 2 data + 2 parity |
+| **GET** | ~0.40 s | ~10 MB/s | downloads any *k* of *n* — 1× the file |
 
 `node tests/bench-net.mjs 10 4 32` reproduces this and sweeps the window; the
 latency is modelled at the wire — every message pays it, both directions, so one

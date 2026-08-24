@@ -11,7 +11,6 @@
 import type { Fs } from "seedkernel-wasm/fs";
 import { writeOp } from "seedkernel-wasm/op-frame";
 import { MemoryFs } from "seedkernel-wasm/fs-memory";
-import type { TransportHost } from "seedkernel-wasm/transport-host";
 import { FsBlobView, type BlobView } from "./store-view.js";
 import { Crypto } from "./crypto.js";
 import {
@@ -22,10 +21,11 @@ import { toHex, fromHex, readU32BE, readU64BE, concatBytes } from "./util.js";
 import type { ChannelFactoryLike } from "./loopback.js";
 import type { Sodium } from "./sodium.js";
 import {
-  bootShell, type AppHandle, type RealmFactory, type Shell,
+  bootShell, type AppHandle, type BootResult, type RealmFactory, type Shell,
 } from "seedkernel-wasm/shell-core";
 
 const NO_ARG = new Uint8Array(0);
+type Transport = NonNullable<BootResult["transport"]>;
 
 /** Decode the guest's PUT result — the single result format every driver reads
  *  (`encodePutResult` in tier2-guest.orchestration.js):
@@ -62,7 +62,7 @@ export interface PutResult {
  *  identity it registered under. One value, from `bootTransportShell()`. */
 export interface StorageRuntime {
   shell: Shell;
-  transport: TransportHost;
+  transport: Transport;
   identity: Identity;
 }
 
@@ -122,7 +122,7 @@ export class StorageNode {
    *  descriptors. There is no request face here any more: an app's send is a call to the
    *  id the transport claims, so requests leave from the GUEST (see `netSend` in
    *  host/tier2-guest.orchestration.js) and never through this object. */
-  readonly net: TransportHost;
+  readonly net: Transport;
   readonly fs: Fs;
   readonly store: BlobView;
   readonly quota: number;
@@ -161,7 +161,7 @@ export class StorageNode {
   private constructor(
     opts: StorageNodeOptions,
     shell: Shell,
-    net: TransportHost,
+    net: Transport,
     identity: Identity,
     loaded: AppHandle,
     cohort: Set<PeerId>,

@@ -109,12 +109,17 @@ const CFG = { ...APP, ...LOCAL };
 // Pure transforms reach the host under the `crypto/` prefix (seedkernel §12.2):
 // BLAKE2b-256 for block-ids, XChaCha20 stream XOR for the §4.4 keystream.
 // node/sign and node/verify apply the scoped `DOMAIN_guest ‖ scope` prefix on the
-// host side — the guest never holds or reconstructs it.
+// host side — the guest never holds or reconstructs it. Every seam name answers a
+// Promise now, so every helper here is awaited by its callers.
 function hash(bytes) { return host.call("crypto/blake2b-256", bytes); }
 function randomKey() { const n = new Uint8Array(4); wU32(n, 0, 32); return host.call("node/random", n); }
 function identity() { return host.call("node/identity", EMPTY); }
 let myPeerCache = null;
-function myPeer() { if (myPeerCache === null) myPeerCache = toHex(identity()); return myPeerCache; }
+async function myPeer() {
+  // Cache the in-flight Promise too: concurrent callers share one seam crossing.
+  if (myPeerCache === null) myPeerCache = identity().then((pk) => toHex(pk));
+  return myPeerCache;
+}
 // 24-byte nonce = [level u8][chunk index u32 BE][0…] (§4.4) — the guest's convention.
 function nonce(level, index) { const n = new Uint8Array(24); n[0] = level & 255; wU32(n, 1, index >>> 0); return n; }
 // crypto/xchacha20/xor takes [nonce 24][key 32][message ..] for the xchacha20/xor primitive.
@@ -124,9 +129,13 @@ function decrypt(K, level, index, ct) { return streamXor(K, nonce(level, index),
 // Signed chunk descriptor envelope: [authorPk 32][sig 64][core] (§4.3, §16).
 // node/sign applies the scoped prefix and returns just the signature; the stored
 // envelope carries only [pk][sig][core] — the prefix is preimage-only, never sent.
-function signCore(core) { return concat([identity(), host.call("node/sign", core), core]); }
-function verifyEnv(env) {
-  return host.call("node/verify", concat([env.slice(0, 32), env.slice(32, 96), env.slice(96)]))[0] === 1;
+async function signCore(core) {
+  const [pk, sig] = await Promise.all([identity(), host.call("node/sign", core)]);
+  return concat([pk, sig, core]);
+}
+async function verifyEnv(env) {
+  const v = await host.call("node/verify", concat([env.slice(0, 32), env.slice(32, 96), env.slice(96)]));
+  return v[0] === 1;
 }
 
 // ── codec + reputation ──
@@ -165,7 +174,7 @@ async function rsDecode(k, m, blockSize, present) {
   }
   return data;
 }
-function clockNow() { const b = host.call("clock/now", EMPTY); return rU32(b, 0) * 0x100000000 + rU32(b, 4); }
+async function clockNow() { const b = await host.call("clock/now", EMPTY); return rU32(b, 0) * 0x100000000 + rU32(b, 4); }
 
 // Per-peer reputation accumulators (module is a pure transform; callers hold state).
 // hex pubkey → {serve, miss, last}. Entries are created only by repObserve — a real
@@ -220,6 +229,10 @@ async function storeGet(id) {
   const dsc = await host.call("fs/get", strBytes(hex + STORE_DSC));
   return { bytes: blk.slice(1), descriptor: dsc[0] === 1 ? dsc.slice(1) : null };
 }
+async function storeGetBytes(id) {
+  const blk = await host.call("fs/get", strBytes(toHex(id) + STORE_BLK));
+  return blk[0] === 1 ? blk.slice(1) : null;
+}
 // Just the <hex>.dsc sidecar, without dragging the block ciphertext across the
 // bridge — repair audits chunk shape from the descriptor and never needs the .blk
 // bytes (it re-fetches those from holders only where healing actually places).
@@ -268,8 +281,8 @@ async function cohortPeers() { return decodePeers(await netOp("peers", EMPTY)); 
 // each distinct peer's score (by PROMISE, not settled value, so concurrent lookups
 // share one in-flight call) for its lifetime, so ranking overlapping holder subsets
 // across a round costs one bridge crossing per peer, not one per (peer, id).
-function makeRanker() {
-  const t = clockNow();
+async function makeRanker() {
+  const t = await clockNow();
   const cache = new Map(); // peerHex → Promise<decayed score>
   const scoreOf = (p) => { let s = cache.get(p); if (s === undefined) cache.set(p, s = repScore(fromHex(p), t)); return s; };
   return async (peers) => {
@@ -279,7 +292,7 @@ function makeRanker() {
   };
 }
 // One-shot ranker for callers that rank a single list (its own fresh cache).
-function rank(peers) { return makeRanker()(peers); }
+async function rank(peers) { return (await makeRanker())(peers); }
 
 // ── net (request/response over the transport; wire format here) ──
 // One round trip via the transport's `send` op:
@@ -317,7 +330,8 @@ function netSendMany(requests) {
 async function haveWant(ids) {
   const holders = new Map();
   for (const id of ids) holders.set(toHex(id), new Set());
-  for (const id of ids) if (await storeHas(id)) holders.get(toHex(id)).add(myPeer());
+  const me = await myPeer();
+  for (const id of ids) if (await storeHas(id)) holders.get(toHex(id)).add(me);
   const peers = await cohortPeers();
   // Split so one HAVE request stays under the frame cap (§18) — the request side
   // (32 B/id) is what binds since the reply is a 1-byte mask. Merge per-slice masks.
@@ -341,7 +355,7 @@ async function haveWant(ids) {
 // null for the whole batch if the peer was unreachable — so the caller can score a
 // reachable-but-didn't-serve as a §8 miss but never an unreachable peer.
 async function fetchBatch(peer, ids) {
-  if (peer === myPeer()) return Promise.all(ids.map(async (id) => { const sb = await storeGet(id); return sb ? sb.bytes : null; }));
+  if (peer === await myPeer()) return Promise.all(ids.map((id) => storeGetBytes(id)));
   const resp = await netSend(peer, MSG_FETCH, encodeFetchBatchReq(ids));
   if (resp === null) return null;
   const blocks = decodeFetchBatchRes(resp);
@@ -361,19 +375,22 @@ async function fetchBatch(peer, ids) {
 // a signed-but-malformed descriptor (bad id count) is rejected rather than parsed
 // into block-ids that sidestep the §10 sibling rule. Returns the whole envelope —
 // a valid signature is only half the check; knownAuthors below is the other half.
-function verifyDescriptor(env) {
+async function verifyDescriptor(env) {
   // Length-gate before the verify seam: the envelope is [pk 32][sig 64][core ≥13]
   // (parseSignedDescriptor's own bound), so anything shorter — an absent descriptor
   // included — is rejected here rather than handed to verify as a short buffer.
   if (!env || env.length < 32 + 64 + 13) return null;
-  if (!verifyEnv(env)) return null;
+  if (!(await verifyEnv(env))) return null;
   try { return parseSignedDescriptor(env); } catch (_e) { return null; }
 }
 // The §4.3 ANCHOR: a signature checked against a pubkey carried inside the signed
 // object only proves someone held a private key — any peer could self-sign a fresh
 // keypair. The author must also be an identity the cohort knows (§5.1), so forgery
 // costs a known peer its standing (§13) instead of nothing.
-async function knownAuthors() { const s = new Set(await cohortPeers()); s.add(myPeer()); return s; }
+async function knownAuthors() {
+  const [peers, me] = await Promise.all([cohortPeers(), myPeer()]);
+  const s = new Set(peers); s.add(me); return s;
+}
 function signChunk(d) { return signCore(encodeDescriptorCore(d)); }
 
 // ── placement + fetch (coordinator §6/§7) ────────────────────────────────────
@@ -436,13 +453,14 @@ async function encodeChunk(source, localCi, globalCi, K, level) {
   const c = CFG;
   const plain = source.slice(localCi * c.k * c.blockSize, (localCi + 1) * c.k * c.blockSize);
   const kc = Math.max(1, Math.ceil(plain.length / c.blockSize));
-  const ct = encrypt(K, level, globalCi, padTo(plain, kc * c.blockSize));
+  const ct = await encrypt(K, level, globalCi, padTo(plain, kc * c.blockSize));
   const dataBlocks = splitBlocks(ct, c.blockSize);
   const blocks = kc === 1 ? new Array(c.m + 1).fill(dataBlocks[0])
                           : [...dataBlocks, ...await rsEncode(kc, c.m, c.blockSize, dataBlocks)];
-  const ids = kc === 1 ? new Array(c.m + 1).fill(hash(dataBlocks[0])) : blocks.map(hash);
+  const ids = kc === 1 ? new Array(c.m + 1).fill(await hash(dataBlocks[0]))
+                       : await Promise.all(blocks.map((b) => hash(b)));
   const d = { level, k: kc, m: c.m, blockSize: c.blockSize, tailBytes: plain.length, blockIds: ids };
-  return makeChunk(d, blocks, signChunk(d));
+  return makeChunk(d, blocks, await signChunk(d));
 }
 // THE placement engine (§6/§10). Places every job's slots with one batched OFFER
 // per peer per round, then accepted blocks STORE'd in fanoutWindow()-deep fan-outs.
@@ -582,11 +600,11 @@ async function placeChunksBatched(jobs, what) {
 // present block, so each round resolves ≥1 — the loop CHECKS that (below) rather than
 // trusting the peer, ruling no-progress a miss instead of looping forever.
 async function runFetchTasks(byPeer, maxIds, apply) {
-  const me = myPeer();
+  const me = await myPeer();
   if (byPeer.has(me)) {
     for (const slice of sliceN(byPeer.get(me), maxIds)) {
       const ids = slice.map(fromHex);
-      apply(me, slice, ids, await fetchBatch(me, ids));
+      await apply(me, slice, ids, await fetchBatch(me, ids));
     }
   }
   const tasks = []; // { peer, slice, ids } — re-requested unanswered blocks are appended and picked up by later windows
@@ -600,7 +618,7 @@ async function runFetchTasks(byPeer, maxIds, apply) {
     const results = await netSendMany(window.map(({ peer, ids }) => ({ peer, type: MSG_FETCH, payload: encodeFetchBatchReq(ids) })));
     for (let ri = 0; ri < results.length; ri++) {
       const { peer, slice, ids } = window[ri];
-      if (!results[ri].ok) { apply(results[ri].peer, slice, ids, null); continue; } // unreachable
+      if (!results[ri].ok) { await apply(results[ri].peer, slice, ids, null); continue; } // unreachable
       const decoded = decodeFetchBatchRes(results[ri].bytes);
       // Split the holder's answers over the ids we asked: FETCH_UNANSWERED blocks (no room
       // under the holder's cap) re-queue as a fresh task; present/absent are final verdicts
@@ -618,7 +636,7 @@ async function runFetchTasks(byPeer, maxIds, apply) {
         reSlice.length = 0;
       }
       if (reSlice.length) tasks.push({ peer, slice: reSlice, ids: reIds });
-      if (aSlice.length) apply(results[ri].peer, aSlice, aIds, aBlocks);
+      if (aSlice.length) await apply(results[ri].peer, aSlice, aIds, aBlocks);
     }
   }
 }
@@ -646,7 +664,7 @@ async function gatherBlocks(descriptors, holders) {
   for (;;) {
     // One ranker for the whole round: scoring a holder crosses the bridge once, then
     // every id that shares that holder reuses the cached score (§13).
-    const rankRound = makeRanker();
+    const rankRound = await makeRanker();
     const byPeer = new Map(); // peer → [idHex]
     const queued = new Set();
     for (const d of descriptors) {
@@ -666,19 +684,22 @@ async function gatherBlocks(descriptors, holders) {
     }
     if (byPeer.size === 0) break;
 
-    const me = myPeer();
+    const me = await myPeer();
     // Apply one peer-slice's fetched blocks: verify each by hash (§4.2), record the
     // first good copy, and score the holder (§8) — self is never scored. `blocks` is
     // aligned to `ids` (bytes|null per id), or null for the whole slice if the peer
     // was unreachable (not a §8 miss).
-    const applyFetch = (peer, slice, ids, blocks) => {
+    const applyFetch = async (peer, slice, ids, blocks) => {
       const isSelf = peer === me;
-      const t = clockNow();
+      const [t, hashes] = await Promise.all([
+        clockNow(),
+        blocks === null ? [] : Promise.all(blocks.map((b) => b ? hash(b) : null)),
+      ]);
       for (let i = 0; i < slice.length; i++) {
         triedOf(slice[i]).add(peer);
         if (blocks === null) continue;            // unreachable — not a §8 miss
         const b = blocks[i];
-        if (b && bytesEqual(hash(b), ids[i])) {
+        if (b && bytesEqual(hashes[i], ids[i])) {
           if (!got.has(slice[i])) got.set(slice[i], b);
           if (!isSelf) repObserve(fromHex(peer), t, true);
         } else if (!isSelf) {
@@ -740,6 +761,8 @@ async function placeWindow(slice, baseByteOffset, K, level) {
   const baseCi = Math.floor(baseByteOffset / chunkData);
   const numChunks = Math.max(1, Math.ceil(slice.length / chunkData));
   const chunks = [];
+  // The codec module has one worker and serializes calls; keeping chunk calls in
+  // order avoids a large parked-Promise cohort without reducing codec wall time.
   for (let lc = 0; lc < numChunks; lc++) chunks.push(await encodeChunk(slice, lc, baseCi + lc, K, level));
   await placeChunksBatched(chunks, "chunk");
   return chunks;
@@ -778,13 +801,13 @@ function descriptorBytes() { return 4 + 32 + 64 + 13 + (CFG.k + CFG.m) * BLOCK_I
 // A chunk must hold at least two descriptors, or a descriptor list could never
 // shrink to a single root — checked here, once, before a byte moves. Production
 // geometry clears it ~2000×.
-function putStart() {
+async function putStart() {
   const chunkData = CFG.k * CFG.blockSize;
   if (chunkData < 2 * descriptorBytes()) {
     throw new Error("put: k·blockSize (" + chunkData + " B) must hold two chunk descriptors ("
       + descriptorBytes() + " B each) so a file's descriptor list can reach a single root — raise blockSize or k");
   }
-  putStream = { K: randomKey(), offset: 0, descriptors: [], placedIds: [], placed: 0, intended: 0 };
+  putStream = { K: await randomKey(), offset: 0, descriptors: [], placedIds: [], placed: 0, intended: 0 };
   return putWindowBytes();
 }
 // Fold placed chunks into the stream's durability accounting (§8). Counts REPLICA
@@ -843,7 +866,7 @@ function encodePutResult(root, s) {
 }
 
 // No argument → [windowBytes u32]: open the stream, report the feed size.
-function doPutStart() { const out = new Uint8Array(4); wU32(out, 0, putStart()); return out; }
+async function doPutStart() { const out = new Uint8Array(4); wU32(out, 0, await putStart()); return out; }
 // The window's plaintext, raw — no framing, since the stream holds everything else.
 async function doPutWindow(arg) { await putFeed(arg); return EMPTY; }
 // No argument — the stream is the argument.
@@ -853,7 +876,7 @@ function doPutFinish() { return putFinish(); }
 // structure of their own. Runs the same session as the streamed path; only the 1×
 // plaintext is resident.
 async function doPut(plaintext) {
-  const wb = putStart();
+  const wb = await putStart();
   for (let off = 0; ; off += wb) {
     await putFeed(plaintext.subarray(off, Math.min(off + wb, plaintext.length)));
     if (off + wb >= plaintext.length) break;
@@ -878,7 +901,7 @@ async function reconstructChunks(ds, K, chunkStart) {
     // Nonce = (this chunk's own level, its index within that level) (§4.4), matching
     // encodeChunk; tailBytes trims this chunk's zero padding, whether it is the file's
     // last chunk or an index level's.
-    const plain = decrypt(K, d.level, chunkStart + i, await assembleChunk(d, got));
+    const plain = await decrypt(K, d.level, chunkStart + i, await assembleChunk(d, got));
     parts.push(plain.length === d.tailBytes ? plain : plain.subarray(0, d.tailBytes));
   }
   return concat(parts);
@@ -953,7 +976,7 @@ async function doGet(arg) {
 // windowed by fanoutWindow(), not one round trip per (id, holder).
 async function liveHolders(ids) {
   const advertised = await haveWant(ids);
-  const me = myPeer();
+  const me = await myPeer();
   const live = new Map();
   const bytes = new Map(); // hex → first hash-verifying copy seen this audit
   for (const id of ids) live.set(toHex(id), new Set());
@@ -967,13 +990,16 @@ async function liveHolders(ids) {
       list.push(h);
     }
   }
-  const applyAudit = (peer, slice, idBytes, blocks) => { // synchronous — hash + repObserve are sync ops
+  const applyAudit = async (peer, slice, idBytes, blocks) => { // async: the hash + clock cross the seam
     const isSelf = peer === me;
-    const t = clockNow();
+    const [t, hashes] = await Promise.all([
+      clockNow(),
+      blocks === null ? [] : Promise.all(blocks.map((b) => b ? hash(b) : null)),
+    ]);
     for (let i = 0; i < slice.length; i++) {
       if (blocks === null) continue;              // unreachable — not a §8 miss
       const b = blocks[i];
-      if (b && bytesEqual(hash(b), idBytes[i])) {
+      if (b && bytesEqual(hashes[i], idBytes[i])) {
         live.get(slice[i]).add(peer);
         if (!bytes.has(slice[i])) bytes.set(slice[i], b);
         if (!isSelf) repObserve(fromHex(peer), t, true);
@@ -1006,7 +1032,7 @@ async function heal(d, descEnv, holders, verified) {
       for (let i = 0; i < all.length; i++) {
         // Re-certify against the already-signed id (§9): a mismatch means a bad
         // input/decode — drop it, never propagate (a poisoned descriptor can't mint).
-        if (bytesEqual(hash(all[i]), d.blockIds[i])) regenerated.set(toHex(d.blockIds[i]), all[i]);
+        if (bytesEqual(await hash(all[i]), d.blockIds[i])) regenerated.set(toHex(d.blockIds[i]), all[i]);
       }
     }
   }
@@ -1038,7 +1064,7 @@ async function heal(d, descEnv, holders, verified) {
 }
 // Audit and, if under-replicated, heal one chunk from its signed descriptor.
 async function repairChunk(descEnv) {
-  const sd = verifyDescriptor(descEnv);                    // forged/unsigned/malformed → null (§4.3)
+  const sd = await verifyDescriptor(descEnv);               // forged/unsigned/malformed → null (§4.3)
   if (!sd) return 0;
   const d = sd.descriptor;
   const { live: holders, bytes: verified } = await liveHolders(d.blockIds);
@@ -1056,7 +1082,7 @@ async function doRepair() {
   for (const id of await storeList()) {
     const descriptor = await storeGetDescriptor(id);
     if (!descriptor) continue;
-    const key = toHex(hash(descriptor));
+    const key = toHex(await hash(descriptor));
     if (seen.has(key)) continue;
     seen.add(key);
     replaced += await repairChunk(descriptor);
@@ -1087,7 +1113,11 @@ async function ensureUsed() {
   bytesUsed = 0;
   // Charge both the .blk ciphertext AND its .dsc sidecar (§14) — rebuilt from the
   // fs, so a restarted holder re-derives its budget from what's actually stored.
-  for (const id of await storeList()) { const hex = toHex(id); bytesUsed += await fsSize(hex + STORE_BLK) + await fsSize(hex + STORE_DSC); }
+  const sizes = await Promise.all((await storeList()).map((id) => {
+    const hex = toHex(id);
+    return Promise.all([fsSize(hex + STORE_BLK), fsSize(hex + STORE_DSC)]);
+  }));
+  for (const [blk, dsc] of sizes) bytesUsed += blk + dsc;
 }
 async function quotaFree() { await ensureUsed(); return Math.max(0, quota() - bytesUsed); }
 async function fsPut(keyStr, bytes) {
@@ -1102,18 +1132,28 @@ async function fsPut(keyStr, bytes) {
 // The quota throw is TAGGED — it's the only failure here the caller can name.
 // Everything else (full disk, backend error, realm OOM) must surface differently:
 // a holder has no console, so the verdict byte is its only way to say what happened.
-async function storeWrite(id, bytes, descriptor) {
+async function storeWrite(id, bytes, descriptor, knownAbsent = false) {
   await ensureUsed();
   const hex = toHex(id);
   // Charge the ciphertext AND descriptor sidecar, crediting whatever was already
-  // stored under this id — never write the .dsc for free.
-  const prevBlk = (await storeHas(id)) ? await fsSize(hex + STORE_BLK) : 0;
-  const prevDsc = await fsSize(hex + STORE_DSC);
+  // stored under this id — never write the .dsc for free. Batched admission has
+  // just proved a block absent from its immutable snapshot; no second fs round-trip
+  // is needed, and a stale sidecar is uncharged because ensureUsed deliberately
+  // derives ownership from .blk entries.
+  const [prevBlk, prevDsc] = knownAbsent
+    ? [0, 0]
+    : await Promise.all([fsSize(hex + STORE_BLK), fsSize(hex + STORE_DSC)]);
   const next = bytesUsed - prevBlk - prevDsc + bytes.length + descriptor.length;
   if (next > quota()) { const e = new Error("store: quota exceeded"); e.quota = true; throw e; }
-  await fsPut(hex + STORE_BLK, bytes);
-  await fsPut(hex + STORE_DSC, descriptor);
+  // Reserve before yielding so sibling writes from this batch see the cumulative
+  // budget. If either backend write fails, force the next operation to rebuild the
+  // counter from durable state (one half may already have landed).
   bytesUsed = next;
+  try {
+    await Promise.all([
+      fsPut(hex + STORE_BLK, bytes), fsPut(hex + STORE_DSC, descriptor),
+    ]);
+  } catch (e) { bytesUsed = -1; throw e; }
 }
 // Admission (§4.3 descriptor check, §6 sibling rule, §14 quota): a holder verifies
 // the signed descriptor and enforces no-two-blocks-of-a-chunk itself, so the §10
@@ -1135,12 +1175,26 @@ async function admit(descriptor, blockId, size) {
 // descriptor-less branch — that would let any peer push arbitrary bytes past the
 // sibling rule under quota alone.
 async function admitBatch(offers) {
-  let free = await quotaFree();
+  // A batch is one immutable admission snapshot. Issue its independent seam work
+  // together, then apply quota + provisional-sibling decisions in wire order.
+  const [initialFree, known, signed] = await Promise.all([
+    quotaFree(), knownAuthors(), Promise.all(offers.map((o) => verifyDescriptor(o.descriptor))),
+  ]);
+  let free = initialFree;
   const provisional = new Set();
-  const known = await knownAuthors();                        // read the roster once per batch
+  const heldIds = new Map();
+  for (let i = 0; i < offers.length; i++) {
+    const sd = signed[i];
+    if (!sd) continue;
+    for (const id of [offers[i].blockId, ...sd.descriptor.blockIds]) {
+      const h = toHex(id);
+      if (!heldIds.has(h)) heldIds.set(h, id);
+    }
+  }
+  const held = new Map(await Promise.all([...heldIds].map(async ([h, id]) => [h, await storeHas(id)])));
   const verdicts = [];
-  for (const o of offers) {
-    const sd = verifyDescriptor(o.descriptor);
+  for (let oi = 0; oi < offers.length; oi++) {
+    const o = offers[oi], sd = signed[oi];
     if (!sd) { verdicts.push(VERDICT_DESCRIPTOR); continue; }          // absent, forged, unsigned, or malformed
     // ANCHOR the signature (§4.3): the key that signed it must be one this cohort knows,
     // or the check proves nothing — the envelope carries its own pubkey, so any peer could
@@ -1161,11 +1215,11 @@ async function admitBatch(offers) {
     // a k=1 chunk lists its one block m+1 times, so those m+1 slots are m+1 distinct
     // peers — accepting a second copy here would silently burn one of them and leave the
     // chunk short of replicas while looking placed.
-    if ((await storeHas(o.blockId)) || provisional.has(toHex(o.blockId))) { verdicts.push(VERDICT_SIBLING); continue; }
+    if (provisional.has(toHex(o.blockId)) || held.get(toHex(o.blockId))) { verdicts.push(VERDICT_SIBLING); continue; }
     let sibling = false;
     for (const sib of d.blockIds) {
       if (bytesEqual(sib, o.blockId)) continue;
-      if ((await storeHas(sib)) || provisional.has(toHex(sib))) { sibling = true; break; }
+      if (provisional.has(toHex(sib)) || held.get(toHex(sib))) { sibling = true; break; }
     }
     if (sibling) { verdicts.push(VERDICT_SIBLING); continue; }
     free -= cost;
@@ -1176,7 +1230,7 @@ async function admitBatch(offers) {
 }
 async function acceptStore(blockId, descriptor, bytes) {
   // The bytes must hash to the claimed id (§4.2) — every holder, every hop.
-  if (!bytesEqual(hash(bytes), blockId)) return VERDICT_DECLINED;
+  if (!bytesEqual(await hash(bytes), blockId)) return VERDICT_DECLINED;
   const v = await admit(descriptor, blockId, bytes.length);
   if (v !== VERDICT_ACCEPTED) return v;
   // A tagged quota throw is the §14 budget saying no — policy, and the operator's
@@ -1184,6 +1238,25 @@ async function acceptStore(blockId, descriptor, bytes) {
   // admitted, which is a broken holder, not a full one: report it as such.
   try { await storeWrite(blockId, bytes, descriptor); return VERDICT_ACCEPTED; }
   catch (e) { return (e && e.quota) ? VERDICT_QUOTA : VERDICT_ERROR; }
+}
+async function acceptStoreBatch(stores) {
+  // Hashes are independent, and one admitBatch shares its cohort snapshot and fs
+  // existence reads across the request instead of repeating them per block.
+  const hashes = await Promise.all(stores.map((s) => hash(s.bytes)));
+  const verdicts = new Array(stores.length).fill(VERDICT_DECLINED);
+  const valid = [];
+  for (let i = 0; i < stores.length; i++) {
+    if (bytesEqual(hashes[i], stores[i].blockId)) valid.push({ index: i, store: stores[i] });
+  }
+  const admitted = await admitBatch(valid.map(({ store: s }) => ({
+    blockId: s.blockId, descriptor: s.descriptor, size: s.bytes.length,
+  })));
+  await Promise.all(valid.map(async ({ index, store: s }, i) => {
+    if (admitted[i] !== VERDICT_ACCEPTED) { verdicts[index] = admitted[i]; return; }
+    try { await storeWrite(s.blockId, s.bytes, s.descriptor, true); verdicts[index] = VERDICT_ACCEPTED; }
+    catch (e) { verdicts[index] = (e && e.quota) ? VERDICT_QUOTA : VERDICT_ERROR; }
+  }));
+  return verdicts;
 }
 // Serve a batched FETCH, capped at maxMsgBytes so a hostile cohort member can't name
 // one id thousands of times and force an oversized reply. A held block that won't
@@ -1195,13 +1268,14 @@ async function serveFetch(ids) {
   if (CFG.lieOnFetch) return ids.map(() => FETCH_UNANSWERED);
   const cap = maxMsgBytes();
   const out = new Array(ids.length).fill(null);
-  const seen = new Map(); // idHex → bytes|null, so a repeated id is one storeGet
+  const unique = new Map(); // idHex → id bytes, so a repeated id is one store read
+  for (const id of ids) { const h = toHex(id); if (!unique.has(h)) unique.set(h, id); }
+  const seen = new Map(await Promise.all([...unique].map(async ([h, id]) => [h, await storeGetBytes(id)])));
   let used = 4;           // the [count u32] response header
   let servedAny = false;
   for (let i = 0; i < ids.length; i++) {
     const h = toHex(ids[i]);
-    let bytes = seen.get(h);
-    if (bytes === undefined) { const sb = await storeGet(ids[i]); bytes = sb ? sb.bytes : null; seen.set(h, bytes); }
+    const bytes = seen.get(h);
     if (!bytes) continue; // genuine miss — leave it ABSENT (null)
     const framed = bytes.length + FETCH_FRAME;
     if (servedAny && used + framed > cap) { out[i] = FETCH_UNANSWERED; continue; } // held but over the byte cap → mark for re-ask
@@ -1239,7 +1313,7 @@ async function doHandle(arg) {
       case Op.REPAIR: return doRepair();
       case Op.REQUEST: return doRequest(payload);
       case Op.WARM: return doWarm();
-      case Op.SCORE: return repScoreBytes(payload, clockNow());
+      case Op.SCORE: return repScoreBytes(payload, await clockNow());
       case Op.STATS: return encodeStats();
       default: return EMPTY;
     }
@@ -1247,21 +1321,19 @@ async function doHandle(arg) {
   // A peer's wire frame: answer it, timing + counting it as holder work (the
   // `recv*` half of the STATS op, since the host has no inbound seam of its own).
   const type = body[0], payload = body.slice(1);
-  const t0 = clockNow();
+  const t0 = await clockNow();
   let out;
   if (type === MSG_HAVE) out = await encodeMask(await Promise.all(decodeHaveReq(payload).map((id) => storeHas(id))));
   else if (type === MSG_OFFER) out = await encodeMask(await admitBatch(decodeOfferBatch(payload)));
   else if (type === MSG_STORE) {
     const stores = decodeStoreBatch(payload);
-    const verdicts = [];
-    for (const s of stores) verdicts.push(await acceptStore(s.blockId, s.descriptor, s.bytes));
-    out = await encodeMask(verdicts);
+    out = await encodeMask(await acceptStoreBatch(stores));
   }
   else if (type === MSG_FETCH) out = await encodeFetchBatchRes(await serveFetch(decodeFetchBatchReq(payload)));
   else out = EMPTY;
   statsRecv[type]++;
   statsRecvBytes[type] += payload.length;
-  statsRecvMs[type] += clockNow() - t0;
+  statsRecvMs[type] += await clockNow() - t0;
   return out;
 }
 
@@ -1282,7 +1354,7 @@ async function doRequest(arg) {
 // transfer. Self-contained and idempotent; the result is discarded.
 async function doWarm() {
   const c = CFG;
-  const K = randomKey();
+  const K = await randomKey();
   const perRound = Math.max(1, c.k) * c.blockSize;
   const buf = new Uint8Array(perRound);
   // Push ~4 MB through (what a real PUT's first chunks take to JIT-tier up),
@@ -1293,7 +1365,7 @@ async function doWarm() {
     // or this becomes a two-time pad (nothing here leaves the realm, but don't copy
     // this loop as an example with a fixed counter).
     const chunk = await encodeChunk(buf, 0, r, K, LEVEL_BODY);                       // encrypt + RS-encode + hash + sign
-    const sd = verifyDescriptor(chunk.descriptor);                               // Ed25519 verify (+ §16 scope preimage)
+    const sd = await verifyDescriptor(chunk.descriptor);                         // Ed25519 verify (+ §16 scope preimage)
     // Warm the decode seam too, at k ≥ 2 only — a k=1 deployment never reaches the
     // codec on PUT/GET/repair, so there's no cold-JIT tax there to pay down.
     if (sd && sd.descriptor.k > 1) {

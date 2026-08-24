@@ -2,7 +2,8 @@
 // compute and bench-net.mjs measures round-trip economy; neither isolates what
 // the RECEIVING side costs per block — the open question behind a live PUT
 // that fills socket buffers (receiver-limited vs. path-limited). Answer: holder
-// STORE-processing runs ~96 MB/s/holder on real disk, ~7x live demand — not the bottleneck.
+// STORE-processing runs ~30 MB/s/holder on real disk with the all-async kernel seam;
+// two co-resident holders still clear ~2x the reference live demand on this machine.
 //
 // Isolates the holder by running over a zero-latency loopback and timing each
 // inbound request inside the guest's own `handle` (the `recv` half of
