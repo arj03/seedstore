@@ -14,7 +14,7 @@
 import { loadSodium, loadWasmBytes } from "../build/host/node.js";
 import { StorageNode } from "../build/host/storage-node.js";
 import { RtcNetwork, relaySignaling } from "seedkernel-wasm/net-rtc";
-import { weriftPeerConnectionFactory } from "seedkernel-wasm/net-rtc-node";
+import { weriftPeerConnectionFactory } from "./werift-pc.mjs";
 import { toHex } from "../build/host/util.js";
 
 if (typeof WebSocket === "undefined") {

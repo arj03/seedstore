@@ -23,7 +23,8 @@
     "test": "npm run build && node tests/run.mjs"
   },
   "dependencies": {
-    "seedkernel-wasm": "file:../../seedkernel/WASM"
+    "seedkernel-wasm": "file:../../seedkernel/WASM",
+    "werift": "^0.24.4"
   },
   "devDependencies": {
     "@types/node": "^20.11.0",

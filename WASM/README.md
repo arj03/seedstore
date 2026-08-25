@@ -285,7 +285,8 @@ can copy a holder's endpoint you do not need it. The relay is app-neutral and sh
 [seedchat](https://github.com/arj03/seedchat) (`npm run relay` there); seed store runs
 none of its own. The cohort is either **3+ tabs** in one room, or one tab plus **console
 holders** — the same `RtcNetwork`, driven on the Node/Bun side by werift's pure-JS
-WebRTC (§12.6):
+WebRTC through this project's own `scripts/werift-pc.mjs` (§12.6). The kernel owns the
+seam and depends on no ICE/DTLS stack; the console peer-connection is ours:
 
 ```sh
 cd ../../seedchat && npm run relay   # signaling rendezvous, ws://localhost:8080

@@ -12,7 +12,7 @@ import { StorageNode, bootTransportShell } from "../build/host/storage-node.js";
 import { MsgType, encodeHaveReq, decodeMask } from "../build/host/protocol.js";
 import { bytesEqual } from "../build/host/util.js";
 import { RtcNetwork, relaySignaling } from "seedkernel-wasm/net-rtc";
-import { weriftPeerConnectionFactory } from "seedkernel-wasm/net-rtc-node";
+import { weriftPeerConnectionFactory } from "./werift-pc.mjs";
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
