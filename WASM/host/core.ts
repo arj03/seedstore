@@ -62,11 +62,19 @@ export const DEFAULT_QUOTA_BYTES = 64 * 1024 * 1024;
  *  picks its own per-transport size instead and does not use this. */
 export const PRODUCTION_BLOCK_SIZE = 256 * 1024;
 
-/** NB the bare blockSize default is TEST-SCALE — 256 bytes, so unit tests exercise
- *  multi-block chunking on tiny payloads. Anything producing a deployed config (the
- *  bundle producer, a demo page) must pass a real block size (PRODUCTION_BLOCK_SIZE);
- *  baking this default into a deployment chunks a 10 MB file into ~41k blocks. */
-export function defaultConfig(k = 2, m = 2, blockSize = 256): StorageConfig {
+/** The block size TESTS use — small enough that a few-kB payload still exercises
+ *  multi-block chunking, a real RS encode/decode and an index level, which is the
+ *  cheapest coverage there is. Named for the same reason the production size is, so
+ *  the two geometries are told apart at a glance rather than by magnitude. */
+export const TEST_BLOCK_SIZE = 256;
+
+/** `blockSize` is REQUIRED, and leads because of it: it is the one field whose wrong
+ *  value is catastrophic rather than merely suboptimal — test geometry in a deployed
+ *  config chunks a 10 MB file into ~41k blocks — so it must not be reachable by
+ *  omission. Every caller names the geometry it means (PRODUCTION_BLOCK_SIZE or
+ *  TEST_BLOCK_SIZE) and forgetting is a type error. `k`/`m` keep defaults because
+ *  either value only trades redundancy against cost. */
+export function defaultConfig(blockSize: number, k = 2, m = 2): StorageConfig {
   return {
     k,
     m,
@@ -79,9 +87,10 @@ export function defaultConfig(k = 2, m = 2, blockSize = 256): StorageConfig {
 
 /** Every key a StorageConfig may carry, at runtime. Derived from defaultConfig() so
  *  the required set cannot drift from the interface as fields are added; only the
- *  OPTIONAL ones (which a default cannot show) are named here. */
+ *  OPTIONAL ones (which a default cannot show) are named here. The geometry passed
+ *  in is immaterial — only the KEYS of the result are read. */
 const CONFIG_KEYS: ReadonlySet<string> = new Set([
-  ...Object.keys(defaultConfig()), "realmMemoryBytes", "windowTargetBytes", "lieOnFetch",
+  ...Object.keys(defaultConfig(TEST_BLOCK_SIZE)), "realmMemoryBytes", "windowTargetBytes", "lieOnFetch",
 ]);
 
 /** Reject unknown keys in a caller-supplied config (StorageConfig is a closed

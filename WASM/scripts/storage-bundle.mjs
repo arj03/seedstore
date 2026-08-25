@@ -88,14 +88,13 @@ export function writeStorageBundle({ path, sodium, sk, build, version = 1, log =
   // back before re-checking, bundle.ts).
   const guestSource = readFileSync(join(build, "host-min", "tier2-guest.js"), "utf8");
 
-  // Must carry PRODUCTION geometry — defaultConfig()'s bare blockSize is
-  // test-scale (256 bytes); leaking that in here once chunked a 10 MB file into
-  // ~41k blocks. PRODUCTION_BLOCK_SIZE keeps this site and the CLI from drifting.
-  // normaliseConfig then fills the derived windowTargetBytes the SAME way boot
-  // does — without it the key copies `undefined`, which the signed manifest
-  // silently DROPS, so what is signed omits a field the author just declared
-  // (and authorBundle refuses: a non-JSON value cannot be signed).
-  const cfg = normaliseConfig(defaultConfig(undefined, undefined, PRODUCTION_BLOCK_SIZE));
+  // This is a DEPLOYED config, so it carries production geometry; one named constant
+  // keeps this site and the CLI from drifting apart. normaliseConfig then fills the
+  // derived windowTargetBytes the SAME way boot does — without it the key copies
+  // `undefined`, which the signed manifest silently DROPS, so what is signed omits a
+  // field the author just declared (and authorBundle refuses: a non-JSON value
+  // cannot be signed).
+  const cfg = normaliseConfig(defaultConfig(PRODUCTION_BLOCK_SIZE));
 
   const { blob, manifest, author } = authorBundle(sodium, authorKeysFor(sodium, sk), {
     app: APP_NAME,

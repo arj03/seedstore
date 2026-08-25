@@ -15,6 +15,7 @@ import { FsBlobView, type BlobView } from "./store-view.js";
 import { Crypto } from "./crypto.js";
 import {
   type Identity, type PeerId, type StorageConfig, defaultConfig, assertStorageConfig, normaliseConfig, DEFAULT_QUOTA_BYTES,
+  TEST_BLOCK_SIZE,
 } from "./core.js";
 import { Op, decodeStats, type RequestStats } from "./protocol.js";
 import { toHex, fromHex, readU32BE, readU64BE, concatBytes } from "./util.js";
@@ -196,7 +197,11 @@ export class StorageNode {
     assertStorageConfig(override);
     const signed = (loaded.manifest.guest?.config ?? {}) as unknown as Partial<StorageConfig>;
     const merged: Partial<StorageConfig> = { ...signed, ...override };
-    this.config = { ...defaultConfig(merged.k, merged.m, merged.blockSize), ...merged };
+    // A deployed bundle always signs its geometry into guest.config, so the fallback
+    // is reachable only from a synthetic bundle that declared none — a test. Spelled
+    // out rather than defaulted, so the one site that can still land on test geometry
+    // says so.
+    this.config = { ...defaultConfig(merged.blockSize ?? TEST_BLOCK_SIZE, merged.k, merged.m), ...merged };
   }
 
   /** Boot a storage node: take the caller's prebuilt runtime, or stand one up here

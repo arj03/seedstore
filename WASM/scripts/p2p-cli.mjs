@@ -171,7 +171,7 @@ console.log("signing scope: derived from the loaded seedstore bundle author");
 // Base on defaultConfig so every guest knob is set (a partial config would feed
 // the strict guest an undefined one). realmMemoryBytes is host-only and split
 // back out by createStorageNode as the load's realm bound.
-const config = { ...defaultConfig(kParam, mParam, blockSize), maxMessageBytes, fanoutWindow: windowN,
+const config = { ...defaultConfig(blockSize, kParam, mParam), maxMessageBytes, fanoutWindow: windowN,
   ...(wtargetMB > 0 ? { windowTargetBytes: Math.round(wtargetMB * 1024 * 1024) } : {}),
   ...(heapMB > 0 ? { realmMemoryBytes: Math.round(heapMB * 1024 * 1024) } : {}) };
 
