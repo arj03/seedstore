@@ -99,7 +99,7 @@ export interface StorageNodeOptions {
    *  boundary, not a gate; §12.6). Absent ⇒ the public network. */
   networkKey?: Uint8Array;
   /** Optional peer whitelist — 32-byte channel keys this node will talk to,
-   *  applied by the transport at init (seedkernel §12.6.3). A lint, not a gate.
+   *  supplied to the transport in LOCAL (seedkernel §12.6.3). A lint, not a gate.
    *  Absent ⇒ admit every peer that completes the handshake. */
   admitPeers?: Uint8Array[];
   /** Parallel connections per dialed peer (default 1) — the transport's dial
