@@ -454,7 +454,7 @@ export async function bootTransportShell(
     // the transport author pin and revocation/downgrade guard are bootShell's/the shell's.
     admit: () => true,
   });
-  return { shell, transport, identity: opts.identity };
+  return { shell, transport: transport!, identity: opts.identity };
 }
 
 /** This installation's settings for the storage bundle, as the `LOCAL` the guest
