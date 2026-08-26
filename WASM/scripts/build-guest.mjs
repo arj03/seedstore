@@ -14,10 +14,7 @@
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-// The app's loopback framing - one definition, shipped by the kernel as CONTENT
-// (host/op-frame.ts): never the guest preamble, never the ABI, just the flat block
-// this app's tooling prepends to its own guest (seedkernel §12.2).
-import { guestOpFraming } from "seedkernel-wasm/op-frame";
+import { guestOpFraming } from "seedkernel-wasm/bundle-author";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = join(__dirname, "..");
