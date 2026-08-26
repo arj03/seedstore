@@ -14,8 +14,9 @@
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 
-import { authorBundle, hybridAuthorKeysFromSeed, moduleFile }
-  from "seedkernel-wasm/bundle";
+import { authorBundle, hybridAuthorKeysFromSeed }
+  from "seedkernel-wasm/bundle-author";
+import { moduleFile } from "seedkernel-wasm/bundle";
 import { defaultConfig, normaliseConfig, PRODUCTION_BLOCK_SIZE } from "../build/host/core.js";
 import { STORAGE_PROTO } from "../build/host/manifest.js";
 
