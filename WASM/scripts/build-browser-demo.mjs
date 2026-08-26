@@ -27,6 +27,7 @@ const seedstoreHost = join(build, "host-min");
 // The kernel's minified tree: build-min (host/ + core/ subdirs) — its minifier
 // moved the output there from the old build/host-min.
 const seedkernelHost = join(root, "..", "..", "seedkernel", "WASM", "build-min");
+const seedRelayRoot = join(root, "..", "..", "seedrelay");
 
 if (!existsSync(join(seedstoreHost, "browser.js"))) {
   console.error("seedstore build/host-min not found — run `npm run build` first.");
@@ -35,6 +36,10 @@ if (!existsSync(join(seedstoreHost, "browser.js"))) {
 if (!existsSync(join(seedkernelHost, "host", "shell-core.js"))) {
   console.error(`seedkernel minified host not found at ${seedkernelHost} — build seedkernel first ` +
     "(in seedkernel/WASM:  npm run build).");
+  process.exit(1);
+}
+if (!existsSync(join(seedRelayRoot, "client.js"))) {
+  console.error(`seedrelay client not found at ${seedRelayRoot} — check it out beside seedstore and seedkernel.`);
   process.exit(1);
 }
 
@@ -240,6 +245,14 @@ for (const [pkg, sub, dest, files, allMjs] of VENDOR) {
   for (const n of names) await copy(join(src, n), join(dstDir, n));
 }
 
+// The app-neutral relay adapter is its own sibling package, not kernel surface.
+// Stage its single browser module under the import map's vendor path.
+{
+  const dstDir = join(out, "vendor", "seedrelay");
+  mkdirSync(dstDir, { recursive: true });
+  await copy(join(seedRelayRoot, "client.js"), join(dstDir, "client.js"));
+}
+
 // The signed bundle, if one has been built (`npm run build:bundle`). ONE artifact
 // for both jobs: a browser page boots a StorageNode on it, fetching ./seedstore.skb
 // exactly like a Node node reads bundle/seedstore.skb, and reads its verified author
@@ -338,4 +351,4 @@ console.log("  ── DO NOT use a plain `http-server` without -c-1: its default
 console.log("     the browser keep a STALE codec.wasm after a rebuild → confusing errors.");
 console.log("  in-page cohort:        http://localhost:3000/index.html");
 console.log("  real P2P (direct WS):  seedloader --ws-listen nodes, endpoints pasted in → http://localhost:3000/p2p.html");
-console.log("  real P2P (relay+STUN): seedchat's `npm run relay`  +  npm run serve:rtc-holder  → same page, WebRTC transport");
+console.log("  real P2P (relay+STUN): `seedrelay` (or seedchat's `npm run relay`) + npm run serve:rtc-holder");

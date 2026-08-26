@@ -281,15 +281,16 @@ seedloader --ws-listen 0.0.0.0:47210 …   # one per holder; disk-backed store
 then talk directly, peer-to-peer: the relay only introduces peers, STUN punches the path
 through NAT, and no server sits in the data path. What it buys over a direct dial is
 exactly that NAT traversal — reaching holders with no port you could paste — so if you
-can copy a holder's endpoint you do not need it. The relay is app-neutral and ships with
-[seedchat](https://github.com/arj03/seedchat) (`npm run relay` there); seed store runs
-none of its own. The cohort is either **3+ tabs** in one room, or one tab plus **console
+can copy a holder's endpoint you do not need it. The app-neutral server and reconnectable
+client live in `seedrelay`; [seedchat](https://github.com/arj03/seedchat) keeps the familiar
+`npm run relay` command as a wrapper around its CLI. Seed store runs no server of its own.
+The cohort is either **3+ tabs** in one room, or one tab plus **console
 holders** — the same `RtcNetwork`, driven on the Node/Bun side by werift's pure-JS
 WebRTC through this project's own `scripts/werift-pc.mjs` (§12.6). The kernel owns the
 seam and depends on no ICE/DTLS stack; the console peer-connection is ours:
 
 ```sh
-cd ../../seedchat && npm run relay   # signaling rendezvous, ws://localhost:8080
+cd ../../seedchat && npm run relay   # seedrelay rendezvous, ws://localhost:8080
 npm run serve:rtc-holder             # a real StorageNode joining the room (Bun); run two
 #   then open p2p.html, pick WebRTC  (relay ws://localhost:8080, room "seedstore-demo")
 ```

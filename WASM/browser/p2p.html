@@ -55,6 +55,7 @@
     "seedkernel-wasm/net-ws":         "./seedkernel/host/net-ws.js",
     "seedkernel-wasm/libsodium":      "./seedkernel/libsodium-wrappers.mjs",
     "seedkernel-wasm/quickjs":        "./seedkernel/quickjs/variant.mjs",
+    "seedrelay":                      "./vendor/seedrelay/client.js",
     "quickjs-emscripten-core":        "./vendor/quickjs-emscripten-core/index.mjs",
     "@jitl/quickjs-ffi-types":        "./vendor/quickjs-ffi-types/index.mjs"
   }
@@ -89,8 +90,8 @@
   <label><input type="radio" name="transport" value="rtc" /> WebRTC (relay + STUN)</label>
 </div>
 <div id="rtcConfig" style="display:none">
-  <p class="muted">Needs a signaling relay, which ships with seedchat — <code>npm run relay</code>
-    there (it is app-neutral; seed store does not run one of its own). Then open this page in
+  <p class="muted">Needs the app-neutral <code>seedrelay</code> server; from seedchat,
+    <code>npm run relay</code> starts it. Then open this page in
     <strong>3+ tabs</strong> using the same room, or one tab plus console holders
     (<code>npm run serve:rtc-holder</code>).</p>
   <div class="row">
@@ -154,9 +155,10 @@ import sodium from "seedkernel-wasm/libsodium";
 import { loadCrypto } from "seedkernel-wasm/crypto-browser";
 import { createStorageNode, loadWasmBytes } from "./host/browser.js";
 import { bootTransportShell } from "./host/storage-node.js";
-import { RtcNetwork, relaySignaling } from "seedkernel-wasm/net-rtc";
+import { RtcNetwork } from "seedkernel-wasm/net-rtc";
 import { WsNetwork } from "seedkernel-wasm/net-ws";
 import { verifyBundle } from "seedkernel-wasm/bundle";
+import { createRelaySignaling } from "seedrelay";
 
 // k=1, m=1: replication r = m+1 = 2 — each block is copied to two distinct holders
 // (RS(1,·) is replication in disguise, so the guest takes the replication path, not
@@ -385,9 +387,25 @@ async function boot() {
         onPeerUp, onPeerDown,
       });
     } else {
+      const relay = createRelaySignaling({
+        webSocketFactory: (url) => new WebSocket(url),
+        onStateChange: ({ state }) => {
+          if (state === "connecting") {
+            $("status").textContent = "relay connecting"; $("status").className = "pill";
+          } else if (state === "connected") {
+            $("status").textContent = "relay connected"; $("status").className = "pill ok";
+          } else if (state === "error") {
+            $("status").textContent = "relay error"; $("status").className = "pill warn";
+            log(`relay error — is one running at ${relayUrl}?`);
+          } else if (state === "disconnected") {
+            $("status").textContent = "relay disconnected"; $("status").className = "pill warn";
+          }
+        },
+      });
+      relay.connect(relayUrl);
       net = new RtcNetwork({
         driver: runtime.transport,
-        rtcConfig: RTC_CONFIG, signaling: relaySignaling(relayUrl),
+        rtcConfig: RTC_CONFIG, signaling: relay.signaling,
         peerContactFor: () => contactSecret,
         onPeerUp, onPeerDown,
       });
@@ -433,7 +451,6 @@ async function boot() {
       dialWs(); // reads the peers box, dials, and arms the unreachable-peer watchdog
     } else {
       net.join(); // announce into the room — peers begin the WebRTC handshake
-      $("status").textContent = "relay connected"; $("status").className = "pill ok";
       log("waiting for peers — open this page in more tabs (same room).");
     }
     refreshPeers();

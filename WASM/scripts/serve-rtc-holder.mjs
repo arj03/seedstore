@@ -7,18 +7,19 @@
 //   bun scripts/serve-rtc-holder.mjs                 (npm run serve:rtc-holder)
 //   RELAY=ws://localhost:8080 ROOM=seedstore-demo bun scripts/serve-rtc-holder.mjs
 //
-// Needs a global WebSocket (relaySignaling) → run on Bun (or Node >=22). Start the
+// Needs a global WebSocket (seedrelay client) → run on Bun (or Node >=22). Start the
 // relay first, on NODE not Bun (Bun's http upgrade swallows writes):
 //   cd ../../seedchat && npm run relay
 
 import { loadSodium, loadWasmBytes } from "../build/host/node.js";
 import { StorageNode } from "../build/host/storage-node.js";
-import { RtcNetwork, relaySignaling } from "seedkernel-wasm/net-rtc";
+import { RtcNetwork } from "seedkernel-wasm/net-rtc";
+import { createRelaySignaling } from "seedrelay";
 import { weriftPeerConnectionFactory } from "./werift-pc.mjs";
 import { toHex } from "../build/host/util.js";
 
 if (typeof WebSocket === "undefined") {
-  console.error("relaySignaling needs a global WebSocket — run on Bun (`bun scripts/serve-rtc-holder.mjs`) or Node ≥22.");
+  console.error("seedrelay needs a global WebSocket — run on Bun (`bun scripts/serve-rtc-holder.mjs`) or Node ≥22.");
   process.exit(1);
 }
 
@@ -66,10 +67,12 @@ const runtime = await bootTransportShell({
 });
 
 let node = null;
+const relay = createRelaySignaling({ webSocketFactory: (relayUrl) => new WebSocket(relayUrl) });
+relay.connect(url);
 const net = new RtcNetwork({
   driver: runtime.transport,
   rtcConfig: RTC_CONFIG,
-  signaling: relaySignaling(url),
+  signaling: relay.signaling,
   peerContactFor: () => contactSecret,
   // werift's RTCPeerConnection: pure-JS, no native addon (bundles into `bun --compile`).
   peerConnectionFactory: weriftPeerConnectionFactory(),

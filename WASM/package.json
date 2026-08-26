@@ -24,6 +24,7 @@
   },
   "dependencies": {
     "seedkernel-wasm": "file:../../seedkernel/WASM",
+    "seedrelay": "file:../../seedrelay",
     "werift": "^0.24.4"
   },
   "devDependencies": {

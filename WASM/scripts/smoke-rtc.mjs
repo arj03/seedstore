@@ -3,7 +3,7 @@
 // WebSocket), connect over real WebRTC (ICE -> DTLS -> SCTP on loopback) and
 // PUT -> GET a file. Node-parity of the relay + STUN path browser/p2p.html runs —
 // the same RtcNetwork + StorageNode, with loopback candidates standing in for
-// STUN-punched ones; the real demo just swaps in `relaySignaling(relay/room)`.
+// STUN-punched ones; the real demo swaps in seedrelay's WebSocket adapter.
 //
 //   node scripts/smoke-rtc.mjs            (or: bun scripts/smoke-rtc.mjs)   HOLDERS=n
 
@@ -11,7 +11,8 @@ import { loadSodium, loadWasmBytes } from "../build/host/node.js";
 import { StorageNode, bootTransportShell } from "../build/host/storage-node.js";
 import { MsgType, encodeHaveReq, decodeMask } from "../build/host/protocol.js";
 import { bytesEqual } from "../build/host/util.js";
-import { RtcNetwork, relaySignaling } from "seedkernel-wasm/net-rtc";
+import { RtcNetwork } from "seedkernel-wasm/net-rtc";
+import { createRelaySignaling } from "seedrelay";
 import { weriftPeerConnectionFactory } from "./werift-pc.mjs";
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -24,7 +25,7 @@ function typed(type, data) {
 const HOLDERS = Number(process.env.HOLDERS) || 3;
 
 // Two modes. Default: an in-process signaling hub (offline, Node or Bun). With
-// RELAY=ws://host:port set: the REAL relaySignaling path against a running relay —
+// RELAY=ws://host:port set: the REAL seedrelay path against a running server —
 // the exact transport serve-rtc-holder.mjs + p2p.html use. That needs a global
 // WebSocket, so run it on Bun:  RELAY=ws://127.0.0.1:8080 bun scripts/smoke-rtc.mjs
 const RELAY = process.env.RELAY ? process.env.RELAY.replace(/\/+$/, "") : null;
@@ -61,8 +62,12 @@ function makeSignalingHub() {
 const sodium = await loadSodium();
 const wasm = await loadWasmBytes();
 // `join()` mints one signaling endpoint per node — the in-process hub by default, or
-// a fresh relay WebSocket (same room) in RELAY mode.
-const join = RELAY ? () => relaySignaling(`${RELAY}/${encodeURIComponent(ROOM)}`) : makeSignalingHub();
+// a fresh seedrelay client (same room) in RELAY mode.
+const join = RELAY ? () => {
+  const relay = createRelaySignaling({ webSocketFactory: (url) => new WebSocket(url) });
+  relay.connect(`${RELAY}/${encodeURIComponent(ROOM)}`);
+  return relay.signaling;
+} : makeSignalingHub();
 // Loopback host candidate so every pair connects with no STUN (the smoke is offline).
 const pcFactory = weriftPeerConnectionFactory({ iceAdditionalHostAddresses: ["127.0.0.1"] });
 // Small file, replicated to every holder; 48 KiB stays under werift's 64 KiB
