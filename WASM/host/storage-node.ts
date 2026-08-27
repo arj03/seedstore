@@ -438,12 +438,22 @@ export async function bootTransportShell(
     createRealm: opts.createRealm, now: opts.now,
     transport: {
       contactSecret: opts.contactSecret,
-      requestDeadlineMs: opts.timeoutMs,
-      connsPerPeer: opts.connsPerPeer,
-      admitPeers: opts.admitPeers,
       channels: opts.channels,
       listen: opts.listen,
       wsListen: opts.wsListen,
+    },
+    // These are policies of the signed transport program, not socket-driver facts.
+    // LOCAL is JSON, so omit absent values and spell peer ids as hex strings.
+    transportConfig: {
+      ...(opts.timeoutMs === undefined
+        ? {}
+        : { requestDeadlineMs: opts.timeoutMs }),
+      ...(opts.connsPerPeer === undefined
+        ? {}
+        : { connsPerPeer: opts.connsPerPeer }),
+      ...(opts.admitPeers === undefined
+        ? {}
+        : { admitPeers: opts.admitPeers.map(toHex) }),
     },
     // Also PINS the transport slot to this blob's own author — no other
     // transport-role bundle may claim the slot on this node. Defaults to the
