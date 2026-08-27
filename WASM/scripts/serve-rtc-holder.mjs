@@ -57,32 +57,27 @@ const sodium = await loadSodium();
 const wasm = await loadWasmBytes();
 const identity = (() => { const kp = sodium.crypto_sign_keypair(); return { publicKey: kp.publicKey, privateKey: kp.privateKey }; })();
 
-// A browser-edge-style node — no TCP/WS listeners; links arrive through the
-// driver's openLink. The room's contact secret gates the accepting side (the
-// driver's), and `peerContactFor` presents the same value when dialing.
-const { bootTransportShell } = await import("../build/host/storage-node.js");
-const runtime = await bootTransportShell({
-  sodium, identity, timeoutMs: 6000, contactSecret,
-  // No app config here — it travels with the storage bundle's own load below.
-});
-
-let node = null;
+// A browser-edge-style node — no TCP/WS listeners. RtcNetwork is the node's
+// ChannelFactory, so construct it before the transport host and pass it at boot.
+// Same-room RTC links use this node's own contact secret on both ends.
 const relay = createRelaySignaling({ webSocketFactory: (relayUrl) => new WebSocket(relayUrl) });
 relay.connect(url);
 const net = new RtcNetwork({
-  driver: runtime.transport,
+  peerId: toHex(identity.publicKey),
   rtcConfig: RTC_CONFIG,
   signaling: relay.signaling,
-  peerContactFor: () => contactSecret,
   // werift's RTCPeerConnection: pure-JS, no native addon (bundles into `bun --compile`).
   peerConnectionFactory: weriftPeerConnectionFactory(),
-  onPeerUp: (pid) => { node?.addPeer(pid); console.log(`· peer linked: ${short(pid)} (in-channel AUTH; relay = signaling only)`); },
-  onPeerDown: (pid) => { node?.removePeer(pid); console.log(`· peer dropped: ${short(pid)}`); },
+});
+const { bootTransportShell } = await import("../build/host/storage-node.js");
+const runtime = await bootTransportShell({
+  sodium, identity, timeoutMs: 6000, contactSecret, channels: net,
+  // No app config here — it travels with the storage bundle's own load below.
 });
 
 // A real StorageNode serving HAVE / OFFER / STORE / FETCH over the P2P links. Default
 // store.local is an in-RAM fs, read back through the node's FsBlobView.
-node = await StorageNode.create({ runtime, sodium, ...wasm, config, quota: 64 * 1024 * 1024, timeoutMs: 6000 });
+const node = await StorageNode.create({ runtime, sodium, ...wasm, config, quota: 64 * 1024 * 1024, timeoutMs: 6000 });
 net.join(); // announce into the room → present peers begin the WebRTC handshake
 
 console.log(`\nseed store RTC holder ${short(node.peerId)} ready — handlers installed: ${node.handlersInstalled()}`);

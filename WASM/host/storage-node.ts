@@ -87,8 +87,9 @@ export interface StorageNodeOptions {
   clock?: () => number;
   timeoutMs?: number;
   /** The socket seam the transport driver dials/listens through (seedkernel
-   *  §12.6): an in-process fabric for tests, or a NodeChannelFactory for TCP.
-   *  Absent for a host-managed transport (WebRTC/browser WS). */
+   *  §12.6): an in-process fabric for tests, a NodeChannelFactory for TCP, or a
+   *  browser WebSocket/WebRTC factory. A WebRTC factory has no `connect`; its
+   *  links arrive through signaling and the factory's `listen` sink. */
   channels?: ChannelFactoryLike;
   listen?: { host: string; port: number };
   wsListen?: { host: string; port: number };
@@ -149,10 +150,6 @@ export class StorageNode {
   /** The load's returned handle: app key + scoped fs view + the slot-bound loopback
    *  `invoke`. Invocation needs no shell-level identity lookup. */
   private readonly handle: AppHandle;
-  /** Durable cohort roster — app state independent of who's online, taught to
-   *  `connect`. Does NOT feed the guest: the guest asks the TRANSPORT's `peers` op
-   *  for the authenticated set instead, to avoid two copies of one fact drifting. */
-  readonly cohort: Set<PeerId>;
   private repairLoopOn = false;
   private repairTimer: ReturnType<typeof setTimeout> | null = null;
   private inFlight: Promise<unknown> = Promise.resolve();
@@ -165,7 +162,6 @@ export class StorageNode {
     net: Transport,
     identity: Identity,
     loaded: AppHandle,
-    cohort: Set<PeerId>,
     ownsShell: boolean,
   ) {
     this.sodium = opts.sodium;
@@ -181,7 +177,6 @@ export class StorageNode {
     this.clockFn = opts.clock ?? (() => Date.now());
     this.crypto = new Crypto(opts.sodium);
     this.net = net;
-    this.cohort = cohort;
     this.ownsShell = ownsShell;
     this.handle = loaded;
 
@@ -209,8 +204,6 @@ export class StorageNode {
    *  arrive solely via the §12.4 bundle loader. */
   static async create(opts: StorageNodeOptions): Promise<StorageNode> {
     await opts.sodium.ready;
-
-    const cohort = new Set<PeerId>();
 
     // The runtime to load onto: the caller's, or one built here — and its identity
     // is this node's, so peerId can never drift from what the transport registered
@@ -247,7 +240,7 @@ export class StorageNode {
 
       // The guest writes through `loaded.fs` (a scopedFs view, seedkernel §12.2);
       // the host read view reuses the same handle rather than re-deriving the scope.
-      return new StorageNode({ ...opts, fs: loaded.fs }, shell, net, identity, loaded, cohort, ownsShell);
+      return new StorageNode({ ...opts, fs: loaded.fs }, shell, net, identity, loaded, ownsShell);
     } catch (err) {
       if (ownsShell) shell.close();
       throw err;
@@ -256,22 +249,17 @@ export class StorageNode {
 
   // ── cohort membership (§5.1) ───────────────────────────────────────────
   now(): number { return this.clockFn(); }
-  cohortPeers(): PeerId[] { return [...this.cohort]; }
 
-  addPeer(peerId: PeerId): void {
-    this.cohort.add(peerId);
-  }
-  removePeer(peerId: PeerId): void {
-    this.cohort.delete(peerId);
-  }
+  /** The transport's authenticated peers right now. Link state belongs to the
+   *  signed transport guest, so this is an async question rather than callbacks
+   *  maintained by the WebSocket/WebRTC channel factory. */
+  linkedPeers(): Promise<PeerId[]> { return this.net.linkedPeers(); }
 
-  /** Connect two nodes into one cohort: add each to the other's cohort set AND
-   *  teach each driver the other's address, then dial (the transport's `ready`
+  /** Connect two nodes into one cohort: teach each driver the other's address,
+   *  then dial (the transport's `ready`
    *  fires the handshake and resolves once every known peer authenticated or its
    *  deadline passed). Async — links must be up before PUT/GET reach the peer. */
   static async connect(a: StorageNode, b: StorageNode): Promise<void> {
-    a.addPeer(b.peerId);
-    b.addPeer(a.peerId);
     a.net.addPeerAddr(b.peerId, { host: "127.0.0.1", port: b.net.port, transport: "tcp" });
     b.net.addPeerAddr(a.peerId, { host: "127.0.0.1", port: a.net.port, transport: "tcp" });
     await Promise.all([a.net.ready(), b.net.ready()]);
@@ -412,7 +400,7 @@ export class StorageNode {
 }
 
 /** Build the runtime a StorageNode loads its bundles onto: the platform seam (fs,
- *  channel adapter, realm factory) plus the transport bundle admitted first, with
+ *  channel factory, realm factory) plus the transport bundle admitted first, with
  *  listeners started. Wraps the kernel's `bootShell`; returns the `StorageRuntime`
  *  StorageNode takes as `runtime` — the shell, the `TransportHost` (the shell
  *  itself doesn't expose it), and the identity both registered under. */

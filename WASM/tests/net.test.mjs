@@ -221,8 +221,6 @@ export async function run(t) {
       sodium, ...wasm, identity: idB, timeoutMs: 3000,
       channels: new NodeChannelFactory(),
     });
-    B.addPeer(S.peerId);
-    S.addPeer(B.peerId);
     B.net.addPeerAddr(S.peerId,
       { host: "127.0.0.1", port: S.net.wsPort, transport: "ws", contactSecret: secretS });
     await B.net.ready(8000);

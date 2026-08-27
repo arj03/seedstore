@@ -11,8 +11,8 @@
 //
 // The whole job is an impedance match: werift speaks an rxjs-style `.subscribe()` API,
 // delivers Buffers, wants explicit createOffer/createAnswer and exposes no `binaryType`.
-// The facade means the kernel needs zero werift-specific code — it owes `openLink` a byte
-// duplex, and this is one implementation of that duplex. The transport's in-channel
+// The facade means the kernel needs zero werift-specific code — its ChannelFactory owes
+// the transport a byte duplex, and this is one implementation. The transport's in-channel
 // handshake still does the real authentication; werift's DTLS only has to bring up *a*
 // channel, so nothing here carries security weight.
 //

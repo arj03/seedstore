@@ -91,12 +91,10 @@ export async function run(t) {
   // Dial every pair (addresses + ready). Each guest's cohort is the TRANSPORT's
   // authenticated set (it asks the transport's `_net` local service for peers),
   // so linking IS the wiring.
-  // `addPeer` stays for a StorageNode, whose cohort is its own durable app state.
   const connectAll = async (net, entries) => {
     for (const e of entries) {
       for (const o of entries) {
         if (e === o) continue;
-        e.addPeer?.(o.peerId);
         e.net.addPeerAddr(o.peerId, { host: "127.0.0.1", port: o.net.port, transport: "tcp" });
       }
     }
@@ -142,7 +140,7 @@ export async function run(t) {
         // test scale so this tiny file takes the RS path.
         count: 1, network: net, sodium, wasm: { bundleBlob }, config: { blockSize: 1024 }, timeoutMs: TIMEOUT,
       });
-      const all = [...shells, { shell: null, peerId: sn.peerId, net: sn.net, addPeer: (p) => sn.addPeer(p) }];
+      const all = [...shells, { shell: null, peerId: sn.peerId, net: sn.net }];
       await connectAll(net, all);
       try {
         const dataA = file(12800, 11), dataB = file(12800, 12);
@@ -186,7 +184,6 @@ export async function run(t) {
         count: 1, network: net, sodium, wasm: { bundleBlob }, config: { blockSize: 1024 }, timeoutMs: TIMEOUT,
       });
       for (const e of shells) {
-        sn.addPeer(e.peerId);
         sn.net.addPeerAddr(e.peerId, { host: "127.0.0.1", port: e.net.port, transport: "tcp" });
         e.net.addPeerAddr(sn.peerId, { host: "127.0.0.1", port: sn.net.port, transport: "tcp" });
       }

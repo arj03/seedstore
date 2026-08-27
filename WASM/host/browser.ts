@@ -32,8 +32,8 @@ export async function createStorageNode(
   opts: Omit<StorageNodeOptions, "bundleBlob" | "sodium"> & {
     sodium: Sodium; wasm?: WasmBytes; baseUrl?: string | URL;
     /** An in-process fabric to join: each node binds its own loopback port and
-     *  dials through it (the in-page cohort). Absent, the node has no socket
-     *  seam — a browser edge, whose links arrive via the driver's openLink. */
+     *  dials through it (the in-page cohort). Browser WebSocket/WebRTC callers
+     *  instead pass a prebuilt runtime whose ChannelFactory was installed at boot. */
     network?: LoopbackNetwork;
   },
 ): Promise<StorageNode> {

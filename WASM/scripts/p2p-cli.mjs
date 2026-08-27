@@ -29,6 +29,7 @@ import { readFile } from "node:fs/promises";
 import { randomBytes } from "node:crypto";
 
 import { WsNetwork } from "seedkernel-wasm/net-ws";
+import { parsePeerSpec } from "seedkernel-wasm/peer-addr";
 import { createStorageNode, loadSodium, defaultConfig, PRODUCTION_BLOCK_SIZE, toHex } from "../build/host/node.js";
 import { DEFAULT_QUOTA_BYTES } from "../build/host/core.js";
 
@@ -175,37 +176,38 @@ const config = { ...defaultConfig(blockSize, kParam, mParam), maxMessageBytes, f
   ...(wtargetMB > 0 ? { windowTargetBytes: Math.round(wtargetMB * 1024 * 1024) } : {}),
   ...(heapMB > 0 ? { realmMemoryBytes: Math.round(heapMB * 1024 * 1024) } : {}) };
 
-// The transport is a signed bundle: boot the shared shell with it admitted, then
-// put the WS socket seam under the driver. Wrapped sodium rides into the shell so
-// record-layer AEAD costs stay instrumented. Storage geometry does NOT ride here
-// — it goes to createStorageNode below, so the transport guest never sees it.
-const peerUp = new Set();
-let onQuorum = null;
+// The transport is a signed bundle: build the WS ChannelFactory first, then boot
+// the shared shell with it installed. Wrapped sodium rides into the shell so
+// record-layer AEAD costs stay instrumented. Storage geometry does NOT ride here.
 const { bootTransportShell } = await import("../build/host/storage-node.js");
+const net = new WsNetwork({ webSocketFactory: wsFactory });
 const runtime = await bootTransportShell({
   sodium: wrapTransportSodium(sodium),
   identity,
   timeoutMs,
-});
-const net = new WsNetwork({
-  driver: runtime.transport,
-  webSocketFactory: wsFactory,
+  channels: net,
   connsPerPeer: connsN,
-  onPeerUp: (pid) => { node?.addPeer(pid); peerUp.add(pid); console.log(`link up: ${pid.slice(0, 8)}…`); if (peerUp.size >= specs.length) onQuorum?.(); },
-  onPeerDown: (pid) => { node?.removePeer(pid); peerUp.delete(pid); console.log(`link DOWN: ${pid.slice(0, 8)}…`); },
 });
 
 // `config` is this node's LOCAL — it reaches the guest with the bundle load.
 let node = await createStorageNode({ runtime, config, quota: DEFAULT_QUOTA_BYTES, timeoutMs });
-for (const pid of peerUp) node.addPeer(pid);
 console.log(`node ready: RS(${kParam},${mParam}), ${blockSize / 1024} KiB blocks, batch ${Math.round(maxMessageBytes / 1024)} KiB, window ${windowN}, conns/peer ${connsN}, wtarget ${wtargetMB > 0 ? wtargetMB + " MB" : "4 MiB (default)"}, heap ${heapMB > 0 ? heapMB + " MB" : "64 MiB (default)"}, timeout ${timeoutMs} ms`);
 
-for (const spec of specs) net.connect(spec);
-await new Promise((res, rej) => {
-  const t = setTimeout(() => rej(new Error(`only ${peerUp.size}/${specs.length} peers linked after 10 s`)), 10000);
-  onQuorum = () => { clearTimeout(t); res(); };
-  if (peerUp.size >= specs.length) onQuorum();
-});
+const expected = new Set();
+for (const spec of specs) {
+  const { peerId, addr } = parsePeerSpec(spec, "ws");
+  expected.add(peerId);
+  runtime.transport.addPeerAddr(peerId, addr);
+}
+// The signed transport owns dialing, fan-out, retries and the readiness deadline.
+// ready() is best-effort and resolves on its timeout, so inspect its source-of-truth
+// peer set once afterward to turn a partial CLI startup into a useful error.
+await runtime.transport.ready(10000);
+const peerUp = new Set(await node.linkedPeers());
+for (const pid of peerUp) console.log(`link up: ${pid.slice(0, 8)}…`);
+if (![...expected].every((pid) => peerUp.has(pid))) {
+  throw new Error(`only ${[...expected].filter((pid) => peerUp.has(pid)).length}/${expected.size} peers linked after 10 s`);
+}
 console.log(`${peerUp.size} peer(s) linked\n`);
 
 // Pay the codec + crypto cold-JIT tax now (throwaway encode/decode, no network), so

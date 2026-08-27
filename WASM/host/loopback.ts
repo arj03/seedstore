@@ -22,11 +22,16 @@ export interface RawLinkLike {
   readonly framing: 0 | 1 | 2 | 3;
   readonly authority?: string;
   readonly remoteAddr?: string;
+  readonly weDialed?: boolean;
+  readonly expectPeerId?: string;
 }
 
 /** The structural ChannelFactory shape (socket-seam.ts `ChannelFactory`). */
 export interface ChannelFactoryLike {
-  connect(addr: { host: string; port: number; transport: "tcp" | "ws"; contactSecret?: Uint8Array }): RawLinkLike;
+  connect?(addr: {
+    host: string; port: number; transport: "tcp" | "ws";
+    contactSecret?: Uint8Array; path?: string;
+  }): RawLinkLike;
   listen(
     tcp: { host: string; port: number } | undefined,
     ws: { host: string; port: number } | undefined,
@@ -243,7 +248,7 @@ export class LoopbackNetwork {
     return {
       connect: (addr) => {
         if (addr.transport === "tcp" && net.isOfflinePort(addr.port)) return deadChannel();
-        const ch = inner.connect(addr);
+        const ch = inner.connect!(addr); // this fabric is dial-capable; ChannelFactory need not be
         net.track(peerId, ch);
         return ch;
       },
