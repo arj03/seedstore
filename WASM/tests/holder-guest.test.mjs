@@ -25,6 +25,7 @@ import {
 } from "../build/host/node.js";
 import { toHex, bytesEqual, concatBytes, readU32BE } from "../build/host/util.js";
 import { writeOp } from "seedkernel-wasm/op-frame";
+import { netAddr, netReady } from "../build/host/storage-node.js";
 import { Op } from "../build/host/protocol.js";
 import { buildBundle } from "./bundle-fixture.mjs";
 import { makeT } from "./harness.mjs";
@@ -95,10 +96,10 @@ export async function run(t) {
     for (const e of entries) {
       for (const o of entries) {
         if (e === o) continue;
-        e.net.addr(o.peerId, `tcp://127.0.0.1:${o.net.port}`);
+        await netAddr(e.shell, o.peerId, `tcp://127.0.0.1:${o.net.port}`);
       }
     }
-    await Promise.all(entries.map((e) => e.net.ready()));
+    await Promise.all(entries.map((e) => netReady(e.shell)));
     void net;
   };
 
@@ -140,7 +141,7 @@ export async function run(t) {
         // test scale so this tiny file takes the RS path.
         count: 1, network: net, sodium, wasm: { bundleBlob }, config: { blockSize: 1024 }, timeoutMs: TIMEOUT,
       });
-      const all = [...shells, { shell: null, peerId: sn.peerId, net: sn.net }];
+      const all = [...shells, { shell: sn.shell, peerId: sn.peerId, net: sn.net }];
       await connectAll(net, all);
       try {
         const dataA = file(12800, 11), dataB = file(12800, 12);
@@ -184,10 +185,10 @@ export async function run(t) {
         count: 1, network: net, sodium, wasm: { bundleBlob }, config: { blockSize: 1024 }, timeoutMs: TIMEOUT,
       });
       for (const e of shells) {
-        sn.net.addr(e.peerId, `tcp://127.0.0.1:${e.net.port}`);
-        e.net.addr(sn.peerId, `tcp://127.0.0.1:${sn.net.port}`);
+        await netAddr(sn.shell, e.peerId, `tcp://127.0.0.1:${e.net.port}`);
+        await netAddr(e.shell, sn.peerId, `tcp://127.0.0.1:${sn.net.port}`);
       }
-      await Promise.all([sn.net.ready(), ...shells.map((e) => e.net.ready())]);
+      await Promise.all([netReady(sn.shell), ...shells.map((e) => netReady(e.shell))]);
       try {
         // Written by the trusted host-side path, served entirely by confined shells.
         const data = file(12800, 21);

@@ -28,6 +28,7 @@ import {
 } from "../build/host/node.js";
 import { toHex, bytesEqual, concatBytes, readU32BE } from "../build/host/util.js";
 import { writeOp } from "seedkernel-wasm/op-frame";
+import { netAddr, netReady } from "../build/host/storage-node.js";
 import { Op } from "../build/host/protocol.js";
 import { buildBundle } from "./bundle-fixture.mjs";
 import { makeT } from "./harness.mjs";
@@ -57,10 +58,10 @@ function transportAuthorHex(sodium) {
 /** Wire one shell's channel adapter to one storage node's (destinations + dial).
  *  The adapter is the platform's — the shell does not carry one — so it is
  *  passed in beside the peer id it belongs to. */
-async function link(shellNet, shellPeerId, node) {
-  node.net.addr(shellPeerId, `tcp://127.0.0.1:${shellNet.port}`);
-  shellNet.addr(node.peerId, `tcp://127.0.0.1:${node.net.port}`);
-  await Promise.all([shellNet.ready(), node.net.ready()]);
+async function link(shell, shellNet, shellPeerId, node) {
+  await netAddr(node.shell, shellPeerId, `tcp://127.0.0.1:${shellNet.port}`);
+  await netAddr(shell, node.peerId, `tcp://127.0.0.1:${node.net.port}`);
+  await Promise.all([netReady(shell), netReady(node.shell)]);
 }
 
 export async function run(t) {
@@ -105,7 +106,7 @@ export async function run(t) {
       });
       shell = rt.shell;
       await rt.transport.start();
-      for (const h of holders) await link(rt.transport, toHex(shellIdentity.publicKey), h);
+      for (const h of holders) await link(shell, rt.transport, toHex(shellIdentity.publicKey), h);
       // This installation's settings ride WITH the load (seedkernel §12.4), reaching the
       // guest as `LOCAL`, which its `CFG` lets win: blockSize back to test scale (the
       // bundle ships the PRODUCTION 256 KiB, which would make this tiny file

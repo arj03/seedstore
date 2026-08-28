@@ -17,6 +17,7 @@ import { dirname, join } from "node:path";
 import { authorBundle, hybridAuthorKeysFromSeed }
   from "seedkernel-wasm/bundle-author";
 import { moduleFile } from "seedkernel-wasm/bundle";
+import { TRANSPORT_SERVICE } from "seedkernel-wasm/transport-bundle";
 import { defaultConfig, normaliseConfig, PRODUCTION_BLOCK_SIZE } from "../build/host/core.js";
 import { STORAGE_PROTO } from "../build/host/manifest.js";
 
@@ -38,20 +39,26 @@ export function authorKeysFor(sodium, edSk) {
   return hybridAuthorKeysFromSeed(sodium, edSk.slice(0, 32));
 }
 
-// The grants the storage guest reaches, EXACTLY (`guest.requires`): a `host.call`
-// naming a host method is refused unless the method's SERVICE is in this list.
-// Two kinds: the host's own services (`node` — sign/verify scoped to this bundle's
-// (author, app), identity, random; `fs`; `clock`), and the one local service id
-// `_net` — the network is a bundle (the transport) claiming that id under its
-// `services` list, reached via one cross-realm call (§12.10), carrying no privilege.
+// The HOST services the storage guest reaches, EXACTLY (`guest.requires`): a
+// `host.call` naming a host method is refused unless the method's SERVICE is in this
+// list. Each one is a privilege an operator grants — `node` (sign/verify scoped to this
+// bundle's (author, app), identity, random), `fs`, `clock`.
 //
 // Pure transforms (BLAKE2b, ChaCha20-Poly1305, and this bundle's own
 // codec/reputation modules) are not grants and are never listed here.
 const STORAGE_REQUIRES = [
   "node",
-  "_net",
   "fs",
   "clock",
+];
+
+// The co-resident guests this one calls, EXACTLY (`guest.calls`, §12.10): the network
+// is a bundle (the transport) claiming `_net` under its own `services` list, reached
+// over the same `host.call` by one cross-realm call. Separate from the requires above
+// because it carries no privilege — and it is also what tells a bare `host.call` name
+// from one of this bundle's own module names.
+const STORAGE_CALLS = [
+  TRANSPORT_SERVICE,
 ];
 
 /**
@@ -109,6 +116,7 @@ export function writeStorageBundle({ path, sodium, sk, build, version = 1, log =
     modules,
     guestSource,
     guestRequires: [...STORAGE_REQUIRES],
+    guestCalls: [...STORAGE_CALLS],
     // The AUTHOR's config, injected as `const APP = …` exactly as signed. The
     // shell merges nothing into it; LOCAL (operator settings) arrives beside
     // it and the guest's CFG picks precedence. No `quota` here — LOCAL-only.

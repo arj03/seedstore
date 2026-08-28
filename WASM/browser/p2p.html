@@ -155,7 +155,7 @@
 import sodium from "seedkernel-wasm/libsodium";
 import { loadCrypto } from "seedkernel-wasm/crypto-browser";
 import { createStorageNode, loadWasmBytes } from "./host/browser.js";
-import { bootTransportShell } from "./host/storage-node.js";
+import { bootTransportShell, netAddr, netReady } from "./host/storage-node.js";
 import { RtcNetwork } from "seedkernel-wasm/net-rtc";
 import { WsNetwork } from "seedkernel-wasm/net-ws";
 import { parsePeerRef } from "seedkernel-wasm/peer-addr";
@@ -481,13 +481,14 @@ function dialWs() {
   for (const spec of specs) {
     try {
       const { peerId, contactSecret, dest } = parsePeerRef(spec, "ws");
-      runtime.transport.addr(peerId, dest, contactSecret);
+      void netAddr(runtime.shell, peerId, dest, contactSecret)
+        .catch((e) => log(`  peer "${spec}" not taught: ${e?.message ?? e}`));
     } catch (e) { log(`  bad peer "${spec}": ${e?.message ?? e}`); }
   }
   // `addr` only TEACHES the destination; the signed guest dials on `ready`, which tops
   // every known peer up to connsPerPeer. Fire-and-forget — it settles on its own deadline
   // whether or not the peers came up, and the watchdog reports what actually landed.
-  void runtime.transport.ready(8000).catch(() => {});
+  void netReady(runtime.shell, 8000).catch(() => {});
   armDialWatchdog();
 }
 

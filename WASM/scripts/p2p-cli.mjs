@@ -179,7 +179,7 @@ const config = { ...defaultConfig(blockSize, kParam, mParam), maxMessageBytes, f
 // The transport is a signed bundle: build the WS ChannelFactory first, then boot
 // the shared shell with it installed. Wrapped sodium rides into the shell so
 // record-layer AEAD costs stay instrumented. Storage geometry does NOT ride here.
-const { bootTransportShell } = await import("../build/host/storage-node.js");
+const { bootTransportShell, netAddr, netReady } = await import("../build/host/storage-node.js");
 const net = new WsNetwork({ webSocketFactory: wsFactory });
 const runtime = await bootTransportShell({
   sodium: wrapTransportSodium(sodium),
@@ -197,12 +197,12 @@ const expected = new Set();
 for (const spec of specs) {
   const { peerId, contactSecret, dest } = parsePeerRef(spec, "ws");
   expected.add(peerId);
-  runtime.transport.addr(peerId, dest, contactSecret);
+  await netAddr(runtime.shell, peerId, dest, contactSecret);
 }
 // The signed transport owns dialing, fan-out, retries and the readiness deadline.
 // ready() is best-effort and resolves on its timeout, so inspect its source-of-truth
 // peer set once afterward to turn a partial CLI startup into a useful error.
-await runtime.transport.ready(10000);
+await netReady(runtime.shell, 10000);
 const peerUp = new Set(await node.linkedPeers());
 for (const pid of peerUp) console.log(`link up: ${pid.slice(0, 8)}…`);
 if (![...expected].every((pid) => peerUp.has(pid))) {

@@ -57,6 +57,7 @@ export { StorageNode } from "./storage-node.js";
 export { LoopbackNetwork } from "./loopback.js";
 export { createConnectedCohort } from "./cluster.js";
 export type { StorageNodeOptions } from "./storage-node.js";
+export { netAddr, netReady, netPeers } from "./storage-node.js";
 export type { StorageConfig, Identity } from "./core.js";
 export { defaultConfig } from "./core.js";
 // A browser node joining a cohort of bundle-running holders must verify

@@ -9,7 +9,8 @@
 // `runtime` in; StorageNode then loads only the seedstore bundle on it.
 
 import type { Fs } from "seedkernel-wasm/fs";
-import { writeOp } from "seedkernel-wasm/op-frame";
+import { writeOp, OpArgs } from "seedkernel-wasm/op-frame";
+import { TRANSPORT_SERVICE } from "seedkernel-wasm/transport-bundle";
 import { MemoryFs } from "seedkernel-wasm/fs-memory";
 import { FsBlobView, type BlobView } from "./store-view.js";
 import { Crypto } from "./crypto.js";
@@ -26,7 +27,54 @@ import {
 } from "seedkernel-wasm/shell-core";
 
 const NO_ARG = new Uint8Array(0);
+/** "no contact secret" on the wire: the transport reads all-zero as an open peer. */
+const ZERO32 = new Uint8Array(32);
 type Transport = NonNullable<BootResult["transport"]>;
+
+// ── the host's door into the transport bundle (seedkernel §12.10) ────────────
+//
+// Peers and cohort readiness are the transport GUEST's — its address book dies with
+// its realm — so they are claim calls on the id that bundle claims, through the same
+// door a co-resident guest reaches with `host.call`. `OpArgs` is that bundle's own
+// framing, which the shell passes through and never reads.
+
+/** One op to the transport, with the shell's caller-id prefix. Throws when nothing
+ *  claims the id — a node with no transport bundle, which is a legitimate
+ *  configuration and so has to be an answer rather than a promise that never settles. */
+function transportOp(shell: Pick<Shell, "call">, args: OpArgs): Promise<Uint8Array> {
+  const answer = shell.call(TRANSPORT_SERVICE, args.build());
+  if (!answer) throw new Error(`transport: no bundle claims ${TRANSPORT_SERVICE}`);
+  return answer;
+}
+
+/** Teach this node's transport one peer: where to reach it, and the contact secret
+ *  THAT peer gates its door with (absent ⇒ an open peer). Straight into the guest's
+ *  own address book — nothing is retained host-side — so a node whose transport is
+ *  replaced must be taught its peers again. */
+export function netAddr(
+  shell: Pick<Shell, "call">, peerId: PeerId, dest: string, contactSecret?: Uint8Array,
+): Promise<Uint8Array> {
+  return transportOp(shell, new OpArgs("addr")
+    .blob(fromHex(peerId))
+    .blob(contactSecret ?? ZERO32)
+    .text(dest));
+}
+
+/** Dial every peer the transport knows of and resolve once each authenticated, or the
+ *  deadline passes. Best-effort by construction: the op settles either way, so it
+ *  bounds a boot rather than deciding anything — read `netPeers` for what landed. */
+export function netReady(shell: Pick<Shell, "call">, timeoutMs = 5000): Promise<Uint8Array> {
+  return transportOp(shell, new OpArgs("ready").u32(timeoutMs));
+}
+
+/** The peers this node holds at least one authenticated link to. A fact about links,
+ *  and links are the guest's, so it is a question rather than a field. */
+export async function netPeers(shell: Pick<Shell, "call">): Promise<PeerId[]> {
+  const bytes = await transportOp(shell, new OpArgs("peers"));
+  const out: PeerId[] = [];
+  for (let off = 0; off + 32 <= bytes.length; off += 32) out.push(toHex(bytes.slice(off, off + 32)));
+  return out;
+}
 
 /** Decode the guest's PUT result — the single result format every driver reads
  *  (`encodePutResult` in tier2-guest.orchestration.js):
@@ -119,11 +167,11 @@ export interface StorageNodeOptions {
 export class StorageNode {
   readonly peerId: PeerId;
   readonly identity: Identity;
-  /** The channel adapter — sockets, addresses, listeners, and nothing else. The
-   *  transport itself is a signed bundle; this is the host side that hands it
-   *  descriptors. There is no request face here any more: an app's send is a call to the
-   *  id the transport claims, so requests leave from the GUEST (see `netSend` in
-   *  host/tier2-guest.orchestration.js) and never through this object. */
+  /** The channel adapter — sockets and listeners, and nothing else. The transport
+   *  itself is a signed bundle; this is the host side that hands it descriptors. Neither
+   *  the address book nor the request face is here: peers are the guest's (`netAddr`,
+   *  `netReady`, `netPeers` above) and a send is the guest's call to the id the transport
+   *  claims (see `netSend` in host/tier2-guest.orchestration.js). */
   readonly net: Transport;
   readonly fs: Fs;
   readonly store: BlobView;
@@ -253,7 +301,7 @@ export class StorageNode {
   /** The transport's authenticated peers right now. Link state belongs to the
    *  signed transport guest, so this is an async question rather than callbacks
    *  maintained by the WebSocket/WebRTC channel factory. */
-  linkedPeers(): Promise<PeerId[]> { return this.net.linkedPeers(); }
+  linkedPeers(): Promise<PeerId[]> { return netPeers(this.shell); }
 
   /** Connect two nodes into one cohort: teach each transport the other's destination,
    *  then dial (the transport's `ready` fires the handshake and resolves once every known
@@ -262,9 +310,11 @@ export class StorageNode {
    *  its realm (seedkernel §12.10), so a node whose transport is replaced must be
    *  connected again. */
   static async connect(a: StorageNode, b: StorageNode): Promise<void> {
-    a.net.addr(b.peerId, `tcp://127.0.0.1:${b.net.port}`);
-    b.net.addr(a.peerId, `tcp://127.0.0.1:${a.net.port}`);
-    await Promise.all([a.net.ready(), b.net.ready()]);
+    await Promise.all([
+      netAddr(a.shell, b.peerId, `tcp://127.0.0.1:${b.net.port}`),
+      netAddr(b.shell, a.peerId, `tcp://127.0.0.1:${a.net.port}`),
+    ]);
+    await Promise.all([netReady(a.shell), netReady(b.shell)]);
   }
 
   // ── PUT / GET / repair / share — all local ops through the load's handle ─────
@@ -426,29 +476,33 @@ export async function bootTransportShell(
     // the shell's link signing scope (seedkernel §12.6).
     networkKey: opts.networkKey,
     createRealm: opts.createRealm, now: opts.now,
+    // This node's network, whole (seedkernel §12.6): the sockets AND the signed
+    // program that drives them, one object because they are one decision — the blob
+    // whose author is PINNED is the blob that gets loaded.
     transport: {
       contactSecret: opts.contactSecret,
       channels: opts.channels,
       listen: opts.listen,
       wsListen: opts.wsListen,
+      // Also PINS the transport slot to this blob's own author — no other
+      // transport-role bundle may claim the slot on this node. Defaults to the
+      // kernel-shipped artifact.
+      bundle: opts.transportBlob,
+      // Policies of the signed transport program, not socket-driver facts, so they
+      // ride the LOAD as its LOCAL config. JSON, so omit absent values and spell peer
+      // ids as hex strings.
+      config: {
+        ...(opts.timeoutMs === undefined
+          ? {}
+          : { requestDeadlineMs: opts.timeoutMs }),
+        ...(opts.connsPerPeer === undefined
+          ? {}
+          : { connsPerPeer: opts.connsPerPeer }),
+        ...(opts.admitPeers === undefined
+          ? {}
+          : { admitPeers: opts.admitPeers.map(toHex) }),
+      },
     },
-    // These are policies of the signed transport program, not socket-driver facts.
-    // LOCAL is JSON, so omit absent values and spell peer ids as hex strings.
-    transportConfig: {
-      ...(opts.timeoutMs === undefined
-        ? {}
-        : { requestDeadlineMs: opts.timeoutMs }),
-      ...(opts.connsPerPeer === undefined
-        ? {}
-        : { connsPerPeer: opts.connsPerPeer }),
-      ...(opts.admitPeers === undefined
-        ? {}
-        : { admitPeers: opts.admitPeers.map(toHex) }),
-    },
-    // Also PINS the transport slot to this blob's own author — no other
-    // transport-role bundle may claim the slot on this node. Defaults to the
-    // kernel-shipped artifact.
-    transportBundle: opts.transportBlob,
     // The one admission branch that's ours: the operator handing us a bundle IS
     // the trust decision (manifest sig + module hashes are still verified);
     // the transport author pin and revocation/downgrade guard are bootShell's/the shell's.

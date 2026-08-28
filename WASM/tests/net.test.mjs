@@ -14,7 +14,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { createConnectedCohort, loadSodium, loadWasmBytes, LoopbackNetwork } from "../build/host/node.js";
-import { StorageNode } from "../build/host/storage-node.js";
+import { StorageNode, netAddr, netReady } from "../build/host/storage-node.js";
 import { NodeChannelFactory } from "seedkernel-wasm/net-node";
 import { FsBlobView } from "../build/host/store-view.js";
 import { NodeFs } from "seedkernel-wasm/fs-node";
@@ -164,7 +164,7 @@ export async function run(t) {
       // frames are the transport's now, and the host holds only sockets. What proves the same
       // thing — that this ran over real sockets rather than in-process — is the transport's
       // own authenticated set, which only a completed AKE over a live channel fills.
-      const linked = await Promise.all(nodes.map((n) => n.net.linkedPeers()));
+      const linked = await Promise.all(nodes.map((n) => n.linkedPeers()));
       t.ok(linked.some((peers) => peers.length > 0), "links authenticated over real sockets");
     } finally {
       nodes.forEach((n) => n.close());
@@ -221,8 +221,8 @@ export async function run(t) {
       sodium, ...wasm, identity: idB, timeoutMs: 3000,
       channels: new NodeChannelFactory(),
     });
-    B.net.addr(S.peerId, `ws://127.0.0.1:${S.net.wsPort}`, secretS);
-    await B.net.ready(8000);
+    await netAddr(B.shell, S.peerId, `ws://127.0.0.1:${S.net.wsPort}`, secretS);
+    await netReady(B.shell, 8000);
     await sleep(50);
 
     try {
@@ -247,7 +247,7 @@ export async function run(t) {
       const fetched = await B.request(S.peerId, typed(MsgType.FETCH, encodeFetchBatchReq([bid])));
       const back = decodeFetchBatchRes(fetched)[0];
       t.ok(back && bytesEqual(back, bytes), "FETCH returns the bytes over ws");
-      t.ok((await S.net.linkedPeers()).length > 0, "the server holds an authenticated link over the websocket");
+      t.ok((await S.linkedPeers()).length > 0, "the server holds an authenticated link over the websocket");
     } finally {
       S.close(); B.close();
     }
