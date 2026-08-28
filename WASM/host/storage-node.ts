@@ -255,10 +255,10 @@ export class StorageNode {
    *  maintained by the WebSocket/WebRTC channel factory. */
   linkedPeers(): Promise<PeerId[]> { return this.net.linkedPeers(); }
 
-  /** Connect two nodes into one cohort: teach each driver the other's address,
-   *  then dial (the transport's `ready`
-   *  fires the handshake and resolves once every known peer authenticated or its
-   *  deadline passed). Async — links must be up before PUT/GET reach the peer. */
+  /** Connect two nodes into one cohort: teach each driver the other's address, then
+   *  dial (the transport's `ready` fires the handshake and resolves once every known
+   *  peer authenticated or its deadline passed). Async — links must be up before
+   *  PUT/GET reach the peer. */
   static async connect(a: StorageNode, b: StorageNode): Promise<void> {
     a.net.addPeerAddr(b.peerId, { host: "127.0.0.1", port: b.net.port, transport: "tcp" });
     b.net.addPeerAddr(a.peerId, { host: "127.0.0.1", port: a.net.port, transport: "tcp" });

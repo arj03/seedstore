@@ -327,6 +327,14 @@ async function refreshPeers() {
   }
 }
 
+// There is no host-side link callback any more, so the peer count is polled. Each tick is
+// a realm round trip, so the next is armed only after the last RETURNS: a plain interval
+// would queue `peers` ops behind a realm busy with a PUT and never catch up.
+function startPeerPolling() {
+  const tick = async () => { await refreshPeers(); setTimeout(tick, 300); };
+  void tick();
+}
+
 async function boot() {
   if (node) return; // already booted — guard against a second click stacking networks
   $("connect").disabled = true;
@@ -438,7 +446,7 @@ async function boot() {
     // transfer. Awaited before enabling PUT so it can't overlap a real initiator call.
     log("warming codec + crypto (first-PUT JIT)…");
     await node.warm();
-    setInterval(() => { void refreshPeers(); }, 300);
+    startPeerPolling();
 
     $("file").disabled = false;
     lockTransportChoice(); // the network + rendezvous are fixed once the node is up
@@ -449,7 +457,6 @@ async function boot() {
       net.join(); // announce into the room — peers begin the WebRTC handshake
       log("waiting for peers — open this page in more tabs (same room).");
     }
-    await refreshPeers();
   } catch (e) {
     log("ERROR: " + (e?.message ?? e));
     $("status").textContent = "error"; $("status").className = "pill warn";
@@ -476,6 +483,10 @@ function dialWs() {
       runtime.transport.addPeerAddr(peerId, addr);
     } catch (e) { log(`  bad peer "${spec}": ${e?.message ?? e}`); }
   }
+  // `addPeerAddr` only TEACHES the address; the signed guest dials on `ready`, which tops
+  // every known peer up to connsPerPeer. Fire-and-forget — it settles on its own deadline
+  // whether or not the peers came up, and the watchdog reports what actually landed.
+  void runtime.transport.ready(8000).catch(() => {});
   armDialWatchdog();
 }
 
