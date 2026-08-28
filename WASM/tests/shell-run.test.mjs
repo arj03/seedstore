@@ -54,12 +54,12 @@ function transportAuthorHex(sodium) {
   return toHex(verifyBundle(sodium, bytes).author);
 }
 
-/** Wire one shell's channel adapter to one storage node's (addresses + dial).
+/** Wire one shell's channel adapter to one storage node's (destinations + dial).
  *  The adapter is the platform's — the shell does not carry one — so it is
  *  passed in beside the peer id it belongs to. */
 async function link(shellNet, shellPeerId, node) {
-  node.net.addPeerAddr(shellPeerId, { host: "127.0.0.1", port: shellNet.port, transport: "tcp" });
-  shellNet.addPeerAddr(node.peerId, { host: "127.0.0.1", port: node.net.port, transport: "tcp" });
+  node.net.addr(shellPeerId, `tcp://127.0.0.1:${shellNet.port}`);
+  shellNet.addr(node.peerId, `tcp://127.0.0.1:${node.net.port}`);
   await Promise.all([shellNet.ready(), node.net.ready()]);
 }
 

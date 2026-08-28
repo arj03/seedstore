@@ -95,7 +95,7 @@ export async function run(t) {
     for (const e of entries) {
       for (const o of entries) {
         if (e === o) continue;
-        e.net.addPeerAddr(o.peerId, { host: "127.0.0.1", port: o.net.port, transport: "tcp" });
+        e.net.addr(o.peerId, `tcp://127.0.0.1:${o.net.port}`);
       }
     }
     await Promise.all(entries.map((e) => e.net.ready()));
@@ -184,8 +184,8 @@ export async function run(t) {
         count: 1, network: net, sodium, wasm: { bundleBlob }, config: { blockSize: 1024 }, timeoutMs: TIMEOUT,
       });
       for (const e of shells) {
-        sn.net.addPeerAddr(e.peerId, { host: "127.0.0.1", port: e.net.port, transport: "tcp" });
-        e.net.addPeerAddr(sn.peerId, { host: "127.0.0.1", port: sn.net.port, transport: "tcp" });
+        sn.net.addr(e.peerId, `tcp://127.0.0.1:${e.net.port}`);
+        e.net.addr(sn.peerId, `tcp://127.0.0.1:${sn.net.port}`);
       }
       await Promise.all([sn.net.ready(), ...shells.map((e) => e.net.ready())]);
       try {

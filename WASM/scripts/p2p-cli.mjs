@@ -29,7 +29,7 @@ import { readFile } from "node:fs/promises";
 import { randomBytes } from "node:crypto";
 
 import { WsNetwork } from "seedkernel-wasm/net-ws";
-import { parsePeerSpec } from "seedkernel-wasm/peer-addr";
+import { parsePeerRef } from "seedkernel-wasm/peer-addr";
 import { createStorageNode, loadSodium, defaultConfig, PRODUCTION_BLOCK_SIZE, toHex } from "../build/host/node.js";
 import { DEFAULT_QUOTA_BYTES } from "../build/host/core.js";
 
@@ -195,9 +195,9 @@ console.log(`node ready: RS(${kParam},${mParam}), ${blockSize / 1024} KiB blocks
 
 const expected = new Set();
 for (const spec of specs) {
-  const { peerId, addr } = parsePeerSpec(spec, "ws");
+  const { peerId, contactSecret, dest } = parsePeerRef(spec, "ws");
   expected.add(peerId);
-  runtime.transport.addPeerAddr(peerId, addr);
+  runtime.transport.addr(peerId, dest, contactSecret);
 }
 // The signed transport owns dialing, fan-out, retries and the readiness deadline.
 // ready() is best-effort and resolves on its timeout, so inspect its source-of-truth

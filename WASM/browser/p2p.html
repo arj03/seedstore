@@ -158,7 +158,7 @@ import { createStorageNode, loadWasmBytes } from "./host/browser.js";
 import { bootTransportShell } from "./host/storage-node.js";
 import { RtcNetwork } from "seedkernel-wasm/net-rtc";
 import { WsNetwork } from "seedkernel-wasm/net-ws";
-import { parsePeerSpec } from "seedkernel-wasm/peer-addr";
+import { parsePeerRef } from "seedkernel-wasm/peer-addr";
 import { verifyBundle } from "seedkernel-wasm/bundle";
 import { createRelaySignaling } from "seedrelay";
 
@@ -465,8 +465,9 @@ async function boot() {
 }
 
 // First click boots the node + network; in WebSocket mode every later click re-announces
-// the (still-editable) peers box to the transport address book. Its signed guest tops each
-// peer up to connsPerPeer and re-dials dead links. This is the recovery path: an unreachable
+// the (still-editable) peers box to the transport's address book — which lives in the
+// signed transport's own realm now (seedkernel §12.10), so this is the only thing that
+// puts a peer there. Its guest tops each peer up to connsPerPeer and re-dials dead links. This is the recovery path: an unreachable
 // node no longer wedges the page behind a permanently-disabled Connect button.
 $("connect").onclick = async () => {
   if (!node) { await boot(); return; }
@@ -479,11 +480,11 @@ function dialWs() {
   log(`dialing ${specs.length} node(s) — links come up as each authenticates…`);
   for (const spec of specs) {
     try {
-      const { peerId, addr } = parsePeerSpec(spec, "ws");
-      runtime.transport.addPeerAddr(peerId, addr);
+      const { peerId, contactSecret, dest } = parsePeerRef(spec, "ws");
+      runtime.transport.addr(peerId, dest, contactSecret);
     } catch (e) { log(`  bad peer "${spec}": ${e?.message ?? e}`); }
   }
-  // `addPeerAddr` only TEACHES the address; the signed guest dials on `ready`, which tops
+  // `addr` only TEACHES the destination; the signed guest dials on `ready`, which tops
   // every known peer up to connsPerPeer. Fire-and-forget — it settles on its own deadline
   // whether or not the peers came up, and the watchdog reports what actually landed.
   void runtime.transport.ready(8000).catch(() => {});
