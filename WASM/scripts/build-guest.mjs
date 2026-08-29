@@ -57,6 +57,11 @@ for (const f of coreFiles) {
 const orch = readFileSync(orchestration, "utf8").replace(/^\s*"use strict";\s*\n/, "");
 out += `\n// ===== orchestration: host/tier2-guest.orchestration.js =====\n${orch}`;
 
+// LF, always: this text is HASHED and SIGNED into the bundle, and the shared core is
+// checked out CRLF on Windows and LF elsewhere — without this the same commit signs
+// different bytes on different machines. Only comments carry a raw newline here.
+out = out.replace(/\r\n/g, "\n");
+
 const dest = join(build, "tier2-guest.js");
 writeFileSync(dest, out);
 console.log(`build-guest: stitched ${coreFiles.length} core module(s) + orchestration → build/host/tier2-guest.js (${out.length} bytes)`);
