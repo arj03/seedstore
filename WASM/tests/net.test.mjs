@@ -1,13 +1,14 @@
 // Networking + filesystem integration (README §16, §12). Exercises both the
 // chunked loopback byte-stream model and the real socket fabric:
-//   - LENGTH framing reassembles split physical deliveries
+//   - guest-owned stream framing reassembles split physical deliveries
 //   - FsBlobView reads the durable store.local layout back, across reopen
 //   - a full cohort over real TCP sockets, blocks landing on holders' disks
 //   - a browser-like node reaching a server node over a real WebSocket
 //
-// The transport's own behaviour (RFC 6455 framing, AKE, contact-secret gate)
-// lives in seedkernel and is tested there; this file covers only the
-// storage-level integration on top of the real NodeChannelFactory socket seam.
+// The transport's own behaviour (the RFC 6455 codec, AKE, the contact gate) is
+// seedkernel's and is tested there; what is covered here is the seam this host
+// presents to it — which listener label and dial scheme our fabric hands out, and
+// that a gate rotated through the local-service door reaches the guest.
 
 import { mkdtempSync, rmSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -75,7 +76,7 @@ export async function run(t) {
   const sodium = await loadSodium();
   const wasm = await loadWasmBytes();
 
-  t.group("PUT → GET over a LENGTH-framed loopback byte stream");
+  t.group("PUT → GET over a guest-framed loopback byte stream");
   {
     const net = new LoopbackNetwork(0, 4096);
     const nodes = await createConnectedCohort({
@@ -91,6 +92,44 @@ export async function run(t) {
     } finally {
       nodes.forEach((node) => node.close());
       net.close();
+    }
+  }
+
+  // The dial scheme picks the DIALER's codec and the listener label picks the
+  // acceptor's, so a `ws://` dial into the fabric's ws port is the pairing that makes
+  // both ends agree — and it runs the guest's RFC 6455 codec over an in-process pair,
+  // chunked, with no real socket underneath.
+  t.group("guest ws framing over the loopback fabric's ws listener");
+  {
+    const net = new LoopbackNetwork(0, 4096);
+    const idS = newKey(sodium), idB = newKey(sodium);
+    const S = await StorageNode.create({
+      sodium, ...wasm, identity: idS, timeoutMs: 3000,
+      channels: net.view(toHex(idS.publicKey)),
+      wsListen: { host: "127.0.0.1", port: 0 },
+    });
+    const B = await StorageNode.create({
+      sodium, ...wasm, identity: idB, timeoutMs: 3000,
+      channels: net.view(toHex(idB.publicKey)),
+    });
+    try {
+      t.eq(net.view("nobody").connect("wss://127.0.0.1:1"), null,
+        "wss is not a route this fabric has — no TLS under an in-process pair");
+
+      await netAddr(B.shell, S.peerId, `ws://127.0.0.1:${S.net.wsPort}`);
+      await netReady(B.shell, 5000);
+      t.ok((await B.linkedPeers()).includes(S.peerId),
+        "a ws:// dial into the fabric's ws listener authenticates");
+
+      const bytes = file(8192, 33);
+      const bid = S.crypto.hash(bytes);
+      const desc = signDescriptor(sodium, { level: 0, k: 1, m: 0, blockSize: bytes.length, tailBytes: bytes.length, authTag: new Uint8Array(16), blockIds: [bid] }, idB.publicKey, idB.privateKey, S.signAuthor);
+      const stored = decodeMask(await B.request(S.peerId, typed(MsgType.STORE, encodeStoreBatch([{ blockId: bid, descriptor: desc, bytes }]))));
+      t.eq(stored[0], VERDICT_ACCEPTED, "STORE lands through the ws codec");
+      const back = decodeFetchBatchRes(await B.request(S.peerId, typed(MsgType.FETCH, encodeFetchBatchReq([bid]))))[0];
+      t.ok(back && bytesEqual(back, bytes), "FETCH returns the bytes — ws frames reassembled from 4 KiB slices");
+    } finally {
+      S.close(); B.close(); net.close();
     }
   }
 
@@ -248,6 +287,29 @@ export async function run(t) {
       const back = decodeFetchBatchRes(fetched)[0];
       t.ok(back && bytesEqual(back, bytes), "FETCH returns the bytes over ws");
       t.ok((await S.linkedPeers()).length > 0, "the server holds an authenticated link over the websocket");
+
+      // A gate is only rotated if BOTH halves moved, and only links opened after the
+      // rotation see it — the one already authenticated above must survive untouched.
+      const secret2 = sodium.randombytes_buf(32);
+      await S.setContactSecret(secret2);
+      t.ok((await S.linkedPeers()).length > 0,
+        "rotating the guest-owned contact gate preserves an existing link");
+
+      // A fresh dialer per attempt: the gate is read at the handshake, so what it
+      // answers can only be seen by a link that has not been made yet.
+      const dialsWith = async (secret, deadlineMs) => {
+        const n = await StorageNode.create({
+          sodium, ...wasm, identity: newKey(sodium), timeoutMs: 3000,
+          channels: new NodeChannelFactory(),
+        });
+        try {
+          await netAddr(n.shell, S.peerId, `ws://127.0.0.1:${S.net.wsPort}`, secret);
+          await netReady(n.shell, deadlineMs);
+          return (await n.linkedPeers()).includes(S.peerId);
+        } finally { n.close(); }
+      };
+      t.ok(!(await dialsWith(secretS, 1500)), "the retired secret no longer opens the door");
+      t.ok(await dialsWith(secret2, 8000), "the rotated secret does");
     } finally {
       S.close(); B.close();
     }

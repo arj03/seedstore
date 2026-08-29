@@ -60,6 +60,16 @@ export function netAddr(
     .text(dest));
 }
 
+/** Rotate this node's inbound contact secret without replacing the transport. Omit it
+ *  to make the node open — all-zero, spelled the same way `netAddr` spells an open
+ *  peer. Contact policy belongs to the signed transport guest, so this is an ordinary
+ *  local-service call rather than a driver option. */
+export function netContact(
+  shell: Pick<Shell, "call">, contactSecret?: Uint8Array,
+): Promise<Uint8Array> {
+  return transportOp(shell, new OpArgs("contact").blob(contactSecret ?? ZERO32));
+}
+
 /** Dial every peer the transport knows of and resolve once each authenticated, or the
  *  deadline passes. Best-effort by construction: the op settles either way, so it
  *  bounds a boot rather than deciding anything — read `netPeers` for what landed. */
@@ -142,7 +152,8 @@ export interface StorageNodeOptions {
   listen?: { host: string; port: number };
   wsListen?: { host: string; port: number };
   /** Optional deployment secret — the gate a caller must produce before this
-   *  node's inbound side opens (seedkernel §12.6.3). */
+   *  node's inbound side opens (seedkernel §12.6.3). It is installation-local
+   *  transport guest config; call `setContactSecret` to rotate it after boot. */
   contactSecret?: Uint8Array;
   /** Optional network key — which network this node belongs to (an isolation
    *  boundary, not a gate; §12.6). Absent ⇒ the public network. */
@@ -302,6 +313,12 @@ export class StorageNode {
    *  signed transport guest, so this is an async question rather than callbacks
    *  maintained by the WebSocket/WebRTC channel factory. */
   linkedPeers(): Promise<PeerId[]> { return netPeers(this.shell); }
+
+  /** Rotate the inbound contact gate without reloading the transport or dropping
+   *  existing links. Omit the secret to make this node open. */
+  setContactSecret(contactSecret?: Uint8Array): Promise<Uint8Array> {
+    return netContact(this.shell, contactSecret);
+  }
 
   /** Connect two nodes into one cohort: teach each transport the other's destination,
    *  then dial (the transport's `ready` fires the handshake and resolves once every known
@@ -480,7 +497,6 @@ export async function bootTransportShell(
     // program that drives them, one object because they are one decision — the blob
     // whose author is PINNED is the blob that gets loaded.
     transport: {
-      contactSecret: opts.contactSecret,
       channels: opts.channels,
       listen: opts.listen,
       wsListen: opts.wsListen,
@@ -492,6 +508,9 @@ export async function bootTransportShell(
       // ride the LOAD as its LOCAL config. JSON, so omit absent values and spell peer
       // ids as hex strings.
       config: {
+        ...(opts.contactSecret === undefined
+          ? {}
+          : { contactSecret: toHex(opts.contactSecret) }),
         ...(opts.timeoutMs === undefined
           ? {}
           : { requestDeadlineMs: opts.timeoutMs }),

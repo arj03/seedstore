@@ -11,22 +11,25 @@
 
 // A destination is opaque to everything above the factory (seedkernel §12.10), so the
 // kernel's own parser takes one apart here rather than a second copy of the grammar:
-// this fabric routes `tcp://host:port` and nothing else.
+// this fabric routes `tcp://` and `ws://` by port, and nothing else (`wss://` asks
+// for a TLS stack no in-process pair has).
 import { parseDest } from "seedkernel-wasm/peer-addr";
 
 /** The structural RawLink shape this file needs (socket-seam.ts is not an
- *  exported entry). `framing` restates socket-seam.ts's `FRAMING` (0 PLATFORM,
- *  1 LENGTH, 2 WS_CLIENT, 3 WS_SERVER) as a literal union. The fabric's channels
- *  are PLATFORM by default. Tests may model a chunked byte stream (LENGTH) to
- *  exercise transports such as WebRTC that split a larger logical record. */
+ *  exported entry). The fabric preserves message boundaries by default. Tests
+ *  may instead model a chunked byte stream, which the transport guest frames. */
 export interface RawLinkLike {
   send(bytes: Uint8Array): void;
   onData(cb: (bytes: Uint8Array) => void): void;
   onClose(cb: () => void): void;
-  close(graceful: boolean): void;
-  readonly framing: 0 | 1 | 2 | 3;
-  readonly authority?: string;
+  close(graceful?: boolean): void;
+  readonly stream?: boolean;
   readonly remoteAddr?: string;
+}
+
+/** Metadata for a platform-opened channel (socket-seam.ts `Arrival`). */
+export interface ArrivalLike {
+  readonly listener?: string;
   readonly weDialed?: boolean;
   readonly expectPeerId?: string;
 }
@@ -37,7 +40,7 @@ export interface ChannelFactoryLike {
   listen(
     tcp: { host: string; port: number } | undefined,
     ws: { host: string; port: number } | undefined,
-    onAccept: (channel: RawLinkLike) => void,
+    onAccept: (channel: RawLinkLike, arrival?: ArrivalLike) => void,
   ): Promise<{ port: number; wsPort: number }>;
   close(): void;
 }
@@ -49,8 +52,8 @@ export interface ChannelFactoryLike {
  *  going away. */
 class LoopbackChannel implements RawLinkLike {
   /** A socket pair with `send` as the boundary. In byte-stream mode a send is
-   *  split into `chunkBytes`-sized deliveries so LENGTH framing must reassemble it. */
-  readonly framing: 0 | 1;
+   *  split into `chunkBytes`-sized deliveries for the guest to reassemble. */
+  readonly stream: boolean;
   peer: LoopbackChannel | null = null;
   msg: ((bytes: Uint8Array) => void) | null = null;
   cls: (() => void) | null = null;
@@ -64,7 +67,7 @@ class LoopbackChannel implements RawLinkLike {
     this.remoteAddr = remoteAddr;
     this.delayMs = delayMs;
     this.chunkBytes = chunkBytes;
-    this.framing = chunkBytes > 0 ? 1 : 0;
+    this.stream = chunkBytes > 0;
   }
 
   static pair(remoteAddr: string, delayMs = 0, chunkBytes = 0): [LoopbackChannel, LoopbackChannel] {
@@ -134,11 +137,13 @@ class LoopbackChannels implements ChannelFactoryLike {
   async listen(
     tcp: { host: string; port: number } | undefined,
     ws: { host: string; port: number } | undefined,
-    onAccept: (channel: RawLinkLike) => void,
+    onAccept: (channel: RawLinkLike, arrival?: ArrivalLike) => void,
   ): Promise<{ port: number; wsPort: number }> {
     let port = 0, wsPort = 0;
-    if (tcp) { port = this.bind(tcp.port, onAccept); }
-    if (ws) { wsPort = this.bind(ws.port, onAccept); }
+    // These labels match seedkernel's LISTENER values. Framing selection belongs
+    // to the transport guest; the socket factory says only which listener accepted.
+    if (tcp) { port = this.bind(tcp.port, (ch) => onAccept(ch, { listener: "tcp" })); }
+    if (ws) { wsPort = this.bind(ws.port, (ch) => onAccept(ch, { listener: "ws" })); }
     this.port = port;
     this.wsPort = wsPort;
     return { port, wsPort };
@@ -152,10 +157,13 @@ class LoopbackChannels implements ChannelFactoryLike {
   }
 
   /** Dial an opaque destination, as a real `ChannelFactory` does: this fabric speaks
-   *  `tcp://host:port`, and anything else is a destination it cannot route. */
+   *  `tcp://host:port` and `ws://host:port`, and anything else it cannot route. The
+   *  scheme is the DIALER's half of the framing decision (the acceptor's is the
+   *  listener label `listen` hands out), so a ws dial has to name the ws port — the
+   *  two ends would otherwise pick different codecs for the same pipe. */
   connect(dest: string): RawLinkLike | null {
     const d = parseDest(dest);
-    if (!d || d.scheme !== "tcp") return null;
+    if (!d || (d.scheme !== "tcp" && d.scheme !== "ws")) return null;
     const onAccept = this.listeners.get(d.port);
     if (!onAccept) {
       // A dial to a dead port: the channel fails immediately on the DIAL side
@@ -214,7 +222,6 @@ function deadChannel(): RawLinkLike {
     onData: () => {},
     onClose: (cb) => { cbHolder.cb = cb; },
     close: () => {},
-    framing: 0, // FRAMING.PLATFORM — it dies before a byte crosses either way
     remoteAddr: "offline",
   };
 }
@@ -254,7 +261,9 @@ export class LoopbackNetwork {
     return {
       connect: (dest) => {
         const d = parseDest(dest);
-        if (d?.scheme === "tcp" && net.isOfflinePort(d.port)) return deadChannel();
+        // Any port this fabric bound, under whichever scheme names it — only ports it
+        // owns are in `portOf`, so a destination it cannot route still falls through.
+        if (d && net.isOfflinePort(d.port)) return deadChannel();
         const ch = inner.connect!(dest); // this fabric is dial-capable; ChannelFactory need not be
         // A destination the fabric does not route opened nothing, so there is no
         // channel to hold against this peer's offline switch.
@@ -262,9 +271,9 @@ export class LoopbackNetwork {
         return ch;
       },
       listen: async (tcp, ws, onAccept) => {
-        const r = await inner.listen(tcp, ws, (ch) => {
+        const r = await inner.listen(tcp, ws, (ch, arrival) => {
           net.track(peerId, ch);
-          onAccept(ch);
+          onAccept(ch, arrival);
         });
         if (r.port) net.portOf.set(r.port, peerId);
         if (r.wsPort) net.portOf.set(r.wsPort, peerId);
