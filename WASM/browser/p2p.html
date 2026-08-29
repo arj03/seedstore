@@ -48,6 +48,7 @@
     "seedkernel-wasm/guest-seam":     "./seedkernel/host/guest-seam.js",
     "seedkernel-wasm/fs":             "./seedkernel/core/fs.js",
     "seedkernel-wasm/op-frame":       "./seedkernel/host/op-frame.js",
+    "seedkernel-wasm/peer-addr":      "./seedkernel/host/peer-addr.js",
     "seedkernel-wasm/fs-memory":      "./seedkernel/host/fs-memory.js",
     "seedkernel-wasm/transport-host": "./seedkernel/host/transport-host.js",
     "seedkernel-wasm/transport-bundle": "./seedkernel/host/transport-bundle.js",
@@ -154,9 +155,10 @@
 import sodium from "seedkernel-wasm/libsodium";
 import { loadCrypto } from "seedkernel-wasm/crypto-browser";
 import { createStorageNode, loadWasmBytes } from "./host/browser.js";
-import { bootTransportShell } from "./host/storage-node.js";
+import { bootTransportShell, netAddr, netReady } from "./host/storage-node.js";
 import { RtcNetwork } from "seedkernel-wasm/net-rtc";
 import { WsNetwork } from "seedkernel-wasm/net-ws";
+import { parsePeerRef } from "seedkernel-wasm/peer-addr";
 import { verifyBundle } from "seedkernel-wasm/bundle";
 import { createRelaySignaling } from "seedrelay";
 
@@ -296,7 +298,7 @@ const urlAuthor = params.get("author")?.trim();
 if (urlAuthor) $("author").value = urlAuthor;
 else detectCohortAuthor().then((a) => { if (a && !$("author").value.trim()) $("author").value = a; });
 
-let node = null, net = null, dialTimer = null;
+let node = null, net = null, runtime = null, dialTimer = null;
 
 const transport = () => document.querySelector('input[name="transport"]:checked').value;
 
@@ -309,8 +311,10 @@ for (const r of document.querySelectorAll('input[name="transport"]')) {
   };
 }
 
-function refreshPeers() {
-  const n = node ? node.cohortPeers().length : 0;
+async function refreshPeers() {
+  // Presentation only: the authenticated set lives in the signed transport guest.
+  // Read it; never mirror or synthesize link transitions in this page.
+  const n = node ? (await node.linkedPeers().catch(() => [])).length : 0;
   $("peers").textContent = String(n);
   const enough = n >= REQUIRED_PEERS;
   const more = transport() === "ws" ? "dial more nodes" : "open more tabs in this room";
@@ -321,6 +325,14 @@ function refreshPeers() {
     $("status").textContent = "connected"; $("status").className = "pill ok";
     if (dialTimer) { clearTimeout(dialTimer); dialTimer = null; } // quorum reached — no warning needed
   }
+}
+
+// There is no host-side link callback any more, so the peer count is polled. Each tick is
+// a realm round trip, so the next is armed only after the last RETURNS: a plain interval
+// would queue `peers` ops behind a realm busy with a PUT and never catch up.
+function startPeerPolling() {
+  const tick = async () => { await refreshPeers(); setTimeout(tick, 300); };
+  void tick();
 }
 
 async function boot() {
@@ -334,11 +346,6 @@ async function boot() {
     const identity = sodium.crypto_sign_keypair();
     $("me").textContent = hex(identity.publicKey).slice(0, 16) + "…";
 
-    // Both networks expose the same cohort-membership callbacks; only the bottom
-    // (WebRTC vs WebSocket) and the rendezvous (relay join vs direct dial) differ.
-    const onPeerUp = (pid) => { node?.addPeer(pid); log(`P2P link up: ${pid.slice(0, 8)}…`); refreshPeers(); };
-    const onPeerDown = (pid) => { node?.removePeer(pid); log(`P2P link down: ${pid.slice(0, 8)}…`); refreshPeers(); };
-
     const mode = transport();
     // The request timeout is a STALL bound (the transport re-arms it on every frame
     // from the peer), so it only needs to cover the longest silence, ≈ one
@@ -346,10 +353,10 @@ async function boot() {
     // ~50 KB/s and brief WiFi stalls; WebRTC's 48 KiB messages keep gaps tiny.
     const timeoutMs = mode === "ws" ? 20000 : 5000;
 
-    // The transport is now a signed bundle: boot the shared shell with it admitted
-    // (the node's network standing), then put the WS/WebRTC socket seam under the
-    // driver. The room's contact secret gates the ACCEPTING side, so it is the
-    // driver's (the shell's platform); `peerContactFor` presents it when dialing.
+    // The transport is now a signed bundle. Build the WS/WebRTC ChannelFactory
+    // first, then boot the shared shell with that factory and the bundle admitted.
+    // WebRTC links are same-deployment links, so both ends use the node's own room
+    // contact secret; direct WS peers carry THEIR secret in each parsed address.
     // The geometry does NOT ride in here: app config travels with the bundle load that
     // wants it, so it goes on createStorageNode below.
     let contactSecret;
@@ -375,16 +382,9 @@ async function boot() {
     // reaches the shell, which also hosts the transport.
     const config = { ...CONFIG, blockSize: blockSizeFor(mode), maxMessageBytes: maxMessageBytesFor(mode),
       windowTargetBytes: windowTargetBytesFor(mode), realmMemoryBytes: realmMemoryBytesFor() };
-    const runtime = await bootTransportShell({
-      sodium, identity, timeoutMs,
-      contactSecret,
-    });
     if (mode === "ws") {
       net = new WsNetwork({
-        driver: runtime.transport,
         webSocketFactory: (u) => new WebSocket(u),
-        connsPerPeer: connsPerPeerFor(mode),
-        onPeerUp, onPeerDown,
       });
     } else {
       const relay = createRelaySignaling({
@@ -404,12 +404,15 @@ async function boot() {
       });
       relay.connect(relayUrl);
       net = new RtcNetwork({
-        driver: runtime.transport,
+        peerId: hex(identity.publicKey),
         rtcConfig: RTC_CONFIG, signaling: relay.signaling,
-        peerContactFor: () => contactSecret,
-        onPeerUp, onPeerDown,
       });
     }
+    runtime = await bootTransportShell({
+      sodium, identity, timeoutMs, contactSecret,
+      channels: net,
+      connsPerPeer: connsPerPeerFor(mode),
+    });
 
     log("booting the storage node on the seedkernel (the staged ./seedstore.skb)…");
     // Descriptor signatures are scoped to the cohort's bundle author (README §16). A
@@ -443,6 +446,7 @@ async function boot() {
     // transfer. Awaited before enabling PUT so it can't overlap a real initiator call.
     log("warming codec + crypto (first-PUT JIT)…");
     await node.warm();
+    startPeerPolling();
 
     $("file").disabled = false;
     lockTransportChoice(); // the network + rendezvous are fixed once the node is up
@@ -453,7 +457,6 @@ async function boot() {
       net.join(); // announce into the room — peers begin the WebRTC handshake
       log("waiting for peers — open this page in more tabs (same room).");
     }
-    refreshPeers();
   } catch (e) {
     log("ERROR: " + (e?.message ?? e));
     $("status").textContent = "error"; $("status").className = "pill warn";
@@ -461,12 +464,11 @@ async function boot() {
   }
 }
 
-// First click boots the node + network; in WebSocket mode every later click re-dials the
-// (still-editable) peers box. net.connect() is an idempotent top-up — a fully-linked peer
-// is a no-op, a peer that lost some of its parallel flows re-opens just the missing ones,
-// and a fully-dead peer is redialed. This is the recovery path: a dial that can't reach a
-// node (or a flow that dropped mid-session) no longer wedges the page behind a
-// permanently-disabled Connect button or a silently-degraded connection.
+// First click boots the node + network; in WebSocket mode every later click re-announces
+// the (still-editable) peers box to the transport's address book — which lives in the
+// signed transport's own realm now (seedkernel §12.10), so this is the only thing that
+// puts a peer there. Its guest tops each peer up to connsPerPeer and re-dials dead links. This is the recovery path: an unreachable
+// node no longer wedges the page behind a permanently-disabled Connect button.
 $("connect").onclick = async () => {
   if (!node) { await boot(); return; }
   if (transport() === "ws") dialWs();
@@ -476,21 +478,31 @@ function dialWs() {
   const specs = $("wsPeers").value.split(/[\n,]/).map((s) => s.trim()).filter(Boolean);
   if (specs.length === 0) { log("add at least one pubkey@host:port peer, then Dial."); return; }
   log(`dialing ${specs.length} node(s) — links come up as each authenticates…`);
-  for (const spec of specs) { try { net.connect(spec); } catch (e) { log(`  bad peer "${spec}": ${e?.message ?? e}`); } }
+  for (const spec of specs) {
+    try {
+      const { peerId, contactSecret, dest } = parsePeerRef(spec, "ws");
+      void netAddr(runtime.shell, peerId, dest, contactSecret)
+        .catch((e) => log(`  peer "${spec}" not taught: ${e?.message ?? e}`));
+    } catch (e) { log(`  bad peer "${spec}": ${e?.message ?? e}`); }
+  }
+  // `addr` only TEACHES the destination; the signed guest dials on `ready`, which tops
+  // every known peer up to connsPerPeer. Fire-and-forget — it settles on its own deadline
+  // whether or not the peers came up, and the watchdog reports what actually landed.
+  void netReady(runtime.shell, 8000).catch(() => {});
   armDialWatchdog();
 }
 
 // A WebSocket that can't reach a node fails silently — no peer-up, no link, no error here
-// (the drop happens before the identity handshake, so onPeerDown never fires). Without a
-// nudge the page just sits at "dialing". So after each dial, if we still lack a quorum a
+// (the drop happens before the identity handshake, so it never enters linkedPeers). Without
+// a nudge the page just sits at "dialing". So after each dial, if we still lack a quorum a
 // few seconds on, say what to check and leave Connect enabled as a "Re-dial".
 function armDialWatchdog() {
   if (dialTimer) clearTimeout(dialTimer);
   $("connect").disabled = false;
   $("connect").textContent = "Re-dial";
-  dialTimer = setTimeout(() => {
+  dialTimer = setTimeout(async () => {
     dialTimer = null;
-    const n = node ? node.cohortPeers().length : 0;
+    const n = node ? (await node.linkedPeers().catch(() => [])).length : 0;
     if (n < REQUIRED_PEERS) {
       log(`only ${n}/${REQUIRED_PEERS} peer(s) linked — unreachable nodes are dropped silently. ` +
           `Check each pubkey@host:port (node up with --ws-listen? right host/port? firewall open?), then Re-dial.`);
@@ -513,7 +525,8 @@ $("store").onclick = async () => {
     const f = $("file").files?.[0];
     if (!f) { log("pick a file first."); return; }
     const data = new Uint8Array(await f.arrayBuffer());
-    log(`\nPUT "${f.name}" (${data.length} B) across ${node.cohortPeers().length} peer(s)…`);
+    const peerCount = (await node.linkedPeers().catch(() => [])).length;
+    log(`\nPUT "${f.name}" (${data.length} B) across ${peerCount} peer(s)…`);
     const t0 = performance.now();
     const r = await node.put(data);
     const ms = performance.now() - t0;
@@ -578,7 +591,7 @@ $("store").onclick = async () => {
       // is a round trip through the realm and has to be awaited. A node with no transport
       // standing has nothing to ask, and that is a diagnosis too: read it as 0 links
       // rather than letting a rejection replace the report we are in the middle of.
-      const links = net ? (await net.linkedPeers().catch(() => [])).length : 0;
+      const links = node ? (await node.linkedPeers().catch(() => [])).length : 0;
       $("status").textContent = "no holder answered"; $("status").className = "pill warn";
       log("  ⚠ NOT a decline: no holder returned a verdict, so nothing was refused —");
       log(`    quota and signing scope are both unproven here. Transport reports ${links} authenticated link(s).`);

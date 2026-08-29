@@ -10,7 +10,7 @@
 import { loadSodium, loadWasmBytes } from "../build/host/node.js";
 import { StorageNode, bootTransportShell } from "../build/host/storage-node.js";
 import { MsgType, encodeHaveReq, decodeMask } from "../build/host/protocol.js";
-import { bytesEqual } from "../build/host/util.js";
+import { bytesEqual, toHex } from "../build/host/util.js";
 import { RtcNetwork } from "seedkernel-wasm/net-rtc";
 import { createRelaySignaling } from "seedrelay";
 import { weriftPeerConnectionFactory } from "./werift-pc.mjs";
@@ -85,16 +85,13 @@ const CONTACT = process.env.CONTACT
 // here — it goes on StorageNode.create, so the transport guest never sees it.
 async function makeNode(contact = CONTACT) {
   const identity = (() => { const kp = sodium.crypto_sign_keypair(); return { publicKey: kp.publicKey, privateKey: kp.privateKey }; })();
-  const entry = { node: null, runtime: null };
-  entry.runtime = await bootTransportShell({
-    sodium, identity, timeoutMs: 8000, contactSecret: contact,
-  });
+  const entry = { node: null, runtime: null, net: null };
   entry.net = new RtcNetwork({
-    driver: entry.runtime.transport,
+    peerId: toHex(identity.publicKey),
     signaling: join(), peerConnectionFactory: pcFactory,
-    peerContactFor: () => contact,
-    onPeerUp: (pid) => entry.node?.addPeer(pid),
-    onPeerDown: (pid) => entry.node?.removePeer(pid),
+  });
+  entry.runtime = await bootTransportShell({
+    sodium, identity, timeoutMs: 8000, contactSecret: contact, channels: entry.net,
   });
   return entry;
 }
@@ -114,18 +111,22 @@ try {
 
   // Wait for the owner to link every holder (werift's pure-JS DTLS/SCTP is slow).
   const t0 = Date.now();
-  while (owner.node.cohortPeers().length < HOLDERS && Date.now() - t0 < 30000) await sleep(150);
-  if (owner.node.cohortPeers().length < HOLDERS) {
-    throw new Error(`owner linked only ${owner.node.cohortPeers().length}/${HOLDERS} holders in time`);
+  let ownerPeers = await owner.node.linkedPeers();
+  while (ownerPeers.length < HOLDERS && Date.now() - t0 < 30000) {
+    await sleep(150);
+    ownerPeers = await owner.node.linkedPeers();
+  }
+  if (ownerPeers.length < HOLDERS) {
+    throw new Error(`owner linked only ${ownerPeers.length}/${HOLDERS} holders in time`);
   }
 
   const data = new Uint8Array(1000);
   for (let i = 0; i < data.length; i++) data[i] = (i * 7 + 3) & 255;
   const r = await owner.node.put(data);
-  console.log(`\nowner PUT ${data.length} B → ${r.chunkCount} chunk(s), ${r.blockIds.length} block(s) across ${owner.node.cohortPeers().length} holder(s)`);
+  console.log(`\nowner PUT ${data.length} B → ${r.chunkCount} chunk(s), ${r.blockIds.length} block(s) across ${ownerPeers.length} holder(s)`);
 
   let onAll = true;
-  for (const p of owner.node.cohortPeers()) {
+  for (const p of ownerPeers) {
     const res = await owner.node.request(p, typed(MsgType.HAVE, encodeHaveReq(r.blockIds)));
     const held = decodeMask(res).filter((v) => v === 1).length;
     console.log(`  ${p.slice(0, 8)}…  ${held}/${r.blockIds.length} blocks`);
@@ -142,13 +143,18 @@ try {
   stranger.node = await StorageNode.create({
     runtime: stranger.runtime, sodium, ...wasm, config, timeoutMs: 8000 });
   stranger.net.join();
-  const before = owner.node.cohortPeers().length;
+  const before = (await owner.node.linkedPeers()).length;
   const t1 = Date.now();
-  while (stranger.node.cohortPeers().length === 0 && Date.now() - t1 < 30000) await sleep(150);
-  const gated = stranger.node.cohortPeers().length === 0 && owner.node.cohortPeers().length === before;
+  let strangerPeers = await stranger.node.linkedPeers();
+  while (strangerPeers.length === 0 && Date.now() - t1 < 30000) {
+    await sleep(150);
+    strangerPeers = await stranger.node.linkedPeers();
+  }
+  const ownerAfter = (await owner.node.linkedPeers()).length;
+  const gated = strangerPeers.length === 0 && ownerAfter === before;
   console.log(gated
     ? `\ngate holds — a peer with the wrong contact secret linked 0 nodes in 30 s (refused in silence)`
-    : `\nGATE FAILED — stranger linked ${stranger.node.cohortPeers().length}, owner cohort ${before} → ${owner.node.cohortPeers().length}`);
+    : `\nGATE FAILED — stranger linked ${strangerPeers.length}, owner links ${before} → ${ownerAfter}`);
 
   ok = roundTrip && onAll && gated;
   console.log(ok

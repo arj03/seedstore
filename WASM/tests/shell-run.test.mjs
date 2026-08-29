@@ -28,6 +28,7 @@ import {
 } from "../build/host/node.js";
 import { toHex, bytesEqual, concatBytes, readU32BE } from "../build/host/util.js";
 import { writeOp } from "seedkernel-wasm/op-frame";
+import { netAddr, netReady } from "../build/host/storage-node.js";
 import { Op } from "../build/host/protocol.js";
 import { buildBundle } from "./bundle-fixture.mjs";
 import { makeT } from "./harness.mjs";
@@ -54,14 +55,13 @@ function transportAuthorHex(sodium) {
   return toHex(verifyBundle(sodium, bytes).author);
 }
 
-/** Wire one shell's channel adapter to one storage node's (addresses + dial) and
- *  add the node to the shell's cohort view. The adapter is the platform's — the shell
- *  does not carry one — so it is passed in beside the peer id it belongs to. */
-async function link(shellNet, shellPeerId, node, cohortSet) {
-  node.net.addPeerAddr(shellPeerId, { host: "127.0.0.1", port: shellNet.port, transport: "tcp" });
-  shellNet.addPeerAddr(node.peerId, { host: "127.0.0.1", port: node.net.port, transport: "tcp" });
-  cohortSet.add(node.peerId);
-  await Promise.all([shellNet.ready(), node.net.ready()]);
+/** Wire one shell's channel adapter to one storage node's (destinations + dial).
+ *  The adapter is the platform's — the shell does not carry one — so it is
+ *  passed in beside the peer id it belongs to. */
+async function link(shell, shellNet, shellPeerId, node) {
+  await netAddr(node.shell, shellPeerId, `tcp://127.0.0.1:${shellNet.port}`);
+  await netAddr(shell, node.peerId, `tcp://127.0.0.1:${node.net.port}`);
+  await Promise.all([netReady(shell), netReady(node.shell)]);
 }
 
 export async function run(t) {
@@ -91,11 +91,9 @@ export async function run(t) {
         count: 6, network: net, sodium, wasm: { bundleBlob }, config: { blockSize: 1024 }, timeoutMs: TIMEOUT,
       });
 
-      // The shell knows only its policy + the kernel; storage arrives as
-      // content. A cohort is MUTUAL: the holders must know the shell too,
-      // since a holder anchors a descriptor's author to a peer it knows (§4.3).
+      // The shell knows only its policy + the kernel; storage arrives as content.
+      // A cohort is mutual, so both sides receive an address and authenticate.
       const shellIdentity = generateKeyPair(sodium);
-      for (const h of holders) h.addPeer(toHex(shellIdentity.publicKey));
       const rt = await bootNodeShell({
         policyJson: JSON.stringify({
           authors: [toHex(authorId)],
@@ -108,7 +106,7 @@ export async function run(t) {
       });
       shell = rt.shell;
       await rt.transport.start();
-      for (const h of holders) await link(rt.transport, toHex(shellIdentity.publicKey), h, new Set());
+      for (const h of holders) await link(shell, rt.transport, toHex(shellIdentity.publicKey), h);
       // This installation's settings ride WITH the load (seedkernel §12.4), reaching the
       // guest as `LOCAL`, which its `CFG` lets win: blockSize back to test scale (the
       // bundle ships the PRODUCTION 256 KiB, which would make this tiny file

@@ -9,6 +9,11 @@
 // requests then fail within the transport's stall window like a real offline peer.
 // There is no re-online in the tests, so going back online is a bookkeeping toggle.
 
+// A destination is opaque to everything above the factory (seedkernel §12.10), so the
+// kernel's own parser takes one apart here rather than a second copy of the grammar:
+// this fabric routes `tcp://host:port` and nothing else.
+import { parseDest } from "seedkernel-wasm/peer-addr";
+
 /** The structural RawLink shape this file needs (socket-seam.ts is not an
  *  exported entry). `framing` restates socket-seam.ts's `FRAMING` (0 PLATFORM,
  *  1 LENGTH, 2 WS_CLIENT, 3 WS_SERVER) as a literal union. The fabric's channels
@@ -22,11 +27,13 @@ export interface RawLinkLike {
   readonly framing: 0 | 1 | 2 | 3;
   readonly authority?: string;
   readonly remoteAddr?: string;
+  readonly weDialed?: boolean;
+  readonly expectPeerId?: string;
 }
 
 /** The structural ChannelFactory shape (socket-seam.ts `ChannelFactory`). */
 export interface ChannelFactoryLike {
-  connect(addr: { host: string; port: number; transport: "tcp" | "ws"; contactSecret?: Uint8Array }): RawLinkLike;
+  connect?(dest: string): RawLinkLike | null;
   listen(
     tcp: { host: string; port: number } | undefined,
     ws: { host: string; port: number } | undefined,
@@ -144,19 +151,23 @@ class LoopbackChannels implements ChannelFactoryLike {
     return port;
   }
 
-  connect(addr: { host: string; port: number }): RawLinkLike {
-    const onAccept = this.listeners.get(addr.port);
+  /** Dial an opaque destination, as a real `ChannelFactory` does: this fabric speaks
+   *  `tcp://host:port`, and anything else is a destination it cannot route. */
+  connect(dest: string): RawLinkLike | null {
+    const d = parseDest(dest);
+    if (!d || d.scheme !== "tcp") return null;
+    const onAccept = this.listeners.get(d.port);
     if (!onAccept) {
       // A dial to a dead port: the channel fails immediately on the DIAL side
       // (mirroring ECONNREFUSED → the socket's error/close events), so the
       // transport forgets the link instead of holding it until the deadline.
-      const [dial] = LoopbackChannel.pair(addr.host, this.delayMs, this.chunkBytes);
+      const [dial] = LoopbackChannel.pair(d.host, this.delayMs, this.chunkBytes);
       queueMicrotask(() => dial.kill());
       return dial;
     }
-    // The address's host is the "far end" both sides see — it is what the
+    // The destination's host is the "far end" both sides see — it is what the
     // half-open limiter buckets accepts by (the per-source cap; §12.6.2).
-    const [dial, accepted] = LoopbackChannel.pair(addr.host, this.delayMs, this.chunkBytes);
+    const [dial, accepted] = LoopbackChannel.pair(d.host, this.delayMs, this.chunkBytes);
     queueMicrotask(() => onAccept(accepted));
     return dial;
   }
@@ -172,7 +183,7 @@ class LoopbackChannels implements ChannelFactoryLike {
     const fabric = this;
     const mine: number[] = [];
     return {
-      connect: (addr) => fabric.connect(addr),
+      connect: (dest) => fabric.connect(dest),
       async listen(tcp, ws, onAccept) {
         const r = await fabric.listen(tcp, ws, onAccept);
         if (r.port) mine.push(r.port);
@@ -241,10 +252,13 @@ export class LoopbackNetwork {
     const inner = this.fabric.view();
     const net = this;
     return {
-      connect: (addr) => {
-        if (addr.transport === "tcp" && net.isOfflinePort(addr.port)) return deadChannel();
-        const ch = inner.connect(addr);
-        net.track(peerId, ch);
+      connect: (dest) => {
+        const d = parseDest(dest);
+        if (d?.scheme === "tcp" && net.isOfflinePort(d.port)) return deadChannel();
+        const ch = inner.connect!(dest); // this fabric is dial-capable; ChannelFactory need not be
+        // A destination the fabric does not route opened nothing, so there is no
+        // channel to hold against this peer's offline switch.
+        if (ch) net.track(peerId, ch);
         return ch;
       },
       listen: async (tcp, ws, onAccept) => {
