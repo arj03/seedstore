@@ -431,7 +431,20 @@ function fetchMaxIds() { return Math.max(1, Math.floor(maxMsgBytes() / (CFG.bloc
 // sub-batches one Promise.all round fires at once. PUT and GET share it — it bounds
 // STORE messages PER PEER and FETCH messages TOTAL across the cohort, pipelining a
 // holder's many small messages instead of one round trip apiece. core.ts homes the default.
-function fanoutWindow() { return CFG.fanoutWindow; }
+//
+// Clamped to what the host will actually admit. Every message in a round is one unresolved
+// `host.call`, and the kernel charges each one's copied input against a per-realm ceiling it
+// advertises to us (`HOST.maxOutstandingHostCallBytes`) — plus, briefly, the response's own
+// bytes where they overlap the request, hence the factor of two. Windowing to that budget is
+// how a configured window becomes backpressure: past it the kernel refuses the call outright,
+// which fails the PUT rather than pacing it. A host that advertises nothing is an older
+// kernel, and the configured window stands.
+function fanoutWindow() {
+  const budget = typeof HOST === "object" && HOST ? HOST.maxOutstandingHostCallBytes : 0;
+  if (!(typeof budget === "number" && budget > 0)) return CFG.fanoutWindow;
+  const affordable = Math.floor(budget / (2 * maxMsgBytes()));
+  return Math.max(1, Math.min(CFG.fanoutWindow, affordable));
+}
 function sliceN(arr, size) {
   if (arr.length <= size) return [arr];
   const out = [];
