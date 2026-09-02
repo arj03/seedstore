@@ -321,16 +321,18 @@ async function rank(peers) { return (await makeRanker())(peers); }
 
 // ── net (request/response over the transport; wire format here) ──
 // One round trip via the transport's `send` op:
-//   [noReply u8][deadlineMs u32][to blob][proto blob][payload blob]
-// Zero deadline = the host's own default. Answer is `[ok u8][response]`; an
-// unreachable peer comes back `[0]`, mapped to null below. `proto` is the routing
-// id (§12.10); the storage message type leads the payload, opaque in between.
+//   [noReply u8][to blob][proto blob][payload blob]
+// No deadline field: the round trip runs under THIS invocation's remaining segment,
+// which the kernel carries across every handoff (seedkernel §12.3) — a caller naming
+// its own would be minting time. Answer is `[ok u8][response]`; an unreachable peer
+// comes back `[0]`, mapped to null below. `proto` is the routing id (§12.10); the
+// storage message type leads the payload, opaque in between.
 async function netSend(peer, type, payload) {
   statsSent[type]++;
   statsInFlight[type]++;
   if (statsInFlight[type] > statsPeak[type]) statsPeak[type] = statsInFlight[type];
   try {
-    const head = new Uint8Array(5); // noReply=0, deadline=0 (the node's default)
+    const head = Uint8Array.of(0); // noReply = 0 — a reply is what this call is for
     const body = new Uint8Array(1 + payload.length);
     body[0] = type;
     body.set(payload, 1);

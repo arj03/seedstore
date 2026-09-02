@@ -513,7 +513,7 @@ export async function bootTransportShell(
           : { contactSecret: toHex(opts.contactSecret) }),
         ...(opts.timeoutMs === undefined
           ? {}
-          : { requestDeadlineMs: opts.timeoutMs }),
+          : { requestTimeoutMs: opts.timeoutMs }),
         ...(opts.connsPerPeer === undefined
           ? {}
           : { connsPerPeer: opts.connsPerPeer }),
