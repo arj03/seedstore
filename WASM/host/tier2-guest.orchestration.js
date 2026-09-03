@@ -622,7 +622,7 @@ async function placeChunksBatched(jobs, what) {
       // expiry or unreachable peers), so no holder ever judged anything — saying
       // "holders declined" here would point at the wrong place.
       const why = parts.length
-        ? "holders declined (" + total + " holders: " + parts.join(", ") + "). Check quota (--app-config), signing scope (§16), or connect more holders"
+        ? "holders declined (" + total + " holders: " + parts.join(", ") + "). Check quota (--local-config), signing scope (§16), or connect more holders"
         : "no holder returned a verdict — the requests timed out or the peers were unreachable rather than refusing. Raise the request deadline if a large PUT is queueing past it (p2p-cli --timeout, loader --request-deadline)";
       throw new Error("put: " + what + " landed " + distinct.size + "/" + ch.floor + " distinct blocks — " + why);
     }
