@@ -160,8 +160,9 @@ async function rsEncode(k, m, blockSize, dataBlocks) {
   const head = new Uint8Array(7);
   head[0] = CODEC_ENCODE; head[1] = k; head[2] = m; wU32(head, 3, blockSize);
   const parity = splitBlocks(await host.call(CODEC_NAME, concat([head, ...dataBlocks])), blockSize);
-  // Fail here, where the cause is, rather than as a far-away "blockIds.length must be
-  // k or k+m" error or a chunk silently signed with the wrong shape.
+  // A trapped or over-length codec rejects at the seam (seedkernel §12.2); this catches
+  // the well-formed answer of the wrong shape, where the cause is, rather than as a
+  // far-away "blockIds.length must be k or k+m" error or a chunk silently signed wrong.
   if (parity.length !== m) {
     throw new Error("rsEncode: codec returned " + parity.length + " parity blocks, expected " + m +
       " — chunk (k=" + k + " × blockSize=" + blockSize + ") likely exceeds the codec module's scratch");
@@ -179,9 +180,9 @@ async function rsDecode(k, m, blockSize, present) {
   const idx = new Uint8Array(use.length);
   for (let i = 0; i < use.length; i++) idx[i] = use[i].index;
   const data = splitBlocks(await host.call(CODEC_NAME, concat([head, idx, ...use.map((p) => p.bytes)])), blockSize);
-  // A short/empty answer here (scratch too small for this descriptor's k·blockSize)
-  // would otherwise silently reassemble from fewer blocks than the chunk has — nothing
-  // on the read path re-verifies the codec's output (§4.2 only checks inputs). Must error.
+  // A short answer would otherwise silently reassemble from fewer blocks than the chunk
+  // has — nothing on the read path re-verifies the codec's output (§4.2 only checks
+  // inputs). Must error.
   if (data.length !== k) {
     throw new Error("rsDecode: codec returned " + data.length + " blocks, expected " + k +
       " — chunk (k=" + k + " × blockSize=" + blockSize + ") likely exceeds the codec module's scratch");
@@ -202,10 +203,13 @@ async function repScore(peerPk, t) {
 }
 // Call the reputation module's SCORE op with the peer's accumulator at time t, or the
 // zero accumulator for a peer never observed. Read-only: never touches peerReps.
+// A score is advisory — it orders peers, it does not decide correctness — so a module
+// failure (seedkernel §12.2) answers as an unscored peer rather than failing the PUT or
+// GET that was only ranking. That translation is this layer's policy, not the seam's.
 async function repScoreBytes(peerPk, t) {
   const rep = peerReps.get(toHex(peerPk)) ?? ZERO_REP;
   const req = encodeScoreReq(rep.serve, rep.miss, rep.last, t);
-  return host.call(REP_NAME, req);
+  return host.call(REP_NAME, req).catch(() => EMPTY);
 }
 
 // Record a witnessed pass/fail for a peer, awaiting the module call so the Map
