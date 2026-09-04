@@ -144,6 +144,12 @@ export interface StorageNodeOptions {
   quota?: number;
   clock?: () => number;
   timeoutMs?: number;
+  /** The realm's invocation budget (seedkernel §12.3): queue wait + guest execution +
+   *  a deferred answer. A DIFFERENT clock from `timeoutMs`, which is the per-request
+   *  stall window a silent peer is given — that one is deliberately short (a cohort
+   *  wants an offline peer written off fast), and the same number as a realm budget
+   *  starves a large-block encode before it can finish. Omitted ⇒ the kernel default. */
+  guestDeadlineMs?: number;
   /** The socket seam the transport driver dials/listens through (seedkernel
    *  §12.6): an in-process fabric for tests, a NodeChannelFactory for TCP, or a
    *  browser WebSocket/WebRTC factory. A WebRTC factory has no `connect`; its
@@ -295,7 +301,7 @@ export class StorageNode {
       const loaded = await shell.loadBundleBlob(opts.bundleBlob, {
         localConfig: localConfigFor(opts),
         realmMemoryBytes: normaliseConfig(opts.config ?? {}).realmMemoryBytes,
-        guestDeadlineMs: opts.timeoutMs,
+        guestDeadlineMs: opts.guestDeadlineMs,
       });
 
       // The guest writes through `loaded.fs` (a scopedFs view, seedkernel §12.2);

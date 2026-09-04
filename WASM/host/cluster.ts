@@ -22,6 +22,7 @@ export interface CohortOptions {
   config?: Partial<StorageConfig>;
   quota?: number;
   timeoutMs?: number;
+  guestDeadlineMs?: number;
 }
 
 /** Create `count` storage nodes on `network` and connect them into one cohort. */
@@ -40,6 +41,7 @@ export async function createConnectedCohort(opts: CohortOptions): Promise<Storag
       config: opts.config,
       quota: opts.quota,
       timeoutMs: opts.timeoutMs,
+      guestDeadlineMs: opts.guestDeadlineMs,
       // Each node dials/listens through its own view of the shared fabric.
       channels: opts.network.view(peerId),
       listen: { host: "127.0.0.1", port: 0 },
