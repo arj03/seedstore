@@ -16,7 +16,8 @@
 // Usage (Node ≥20 needs the WebSocket global):
 //   node --experimental-websocket scripts/p2p-cli.mjs \
 //     --peers "pk[.secret]@host:port,…" [--size 10] [--file path] \
-//     [--puts 1] [--gets 1] [--author hex|none] [--block 256] [--batch 1024] [--window 64]
+//     [--puts 1] [--gets 1] [--author hex|none] [--block 256] [--batch 1024] [--window 64] \
+//     [--timeout 5000] [--guest-deadline 60000]
 //
 // `.secret` is THAT PEER's contact secret (its credential, not ours — we only dial).
 // Omit for an open peer; a wrong secret draws silence, not an error, so "never
@@ -72,6 +73,7 @@ const windowN = num("window", 64);
 const wtargetMB = num("wtarget", 24);
 const heapMB = num("heap", 256);
 const timeoutMs = num("timeout", 5000);
+const guestDeadlineMs = args.has("guest-deadline") ? num("guest-deadline", 0) : undefined;
 
 const hex = toHex; // toHex/fromHex come from the host build (node.js) — one hex pair, not a re-decl
 const now = () => performance.now();
@@ -190,8 +192,8 @@ const runtime = await bootTransportShell({
 });
 
 // `config` is this node's LOCAL — it reaches the guest with the bundle load.
-let node = await createStorageNode({ runtime, config, quota: DEFAULT_QUOTA_BYTES, timeoutMs });
-console.log(`node ready: RS(${kParam},${mParam}), ${blockSize / 1024} KiB blocks, batch ${Math.round(maxMessageBytes / 1024)} KiB, window ${windowN}, conns/peer ${connsN}, wtarget ${wtargetMB > 0 ? wtargetMB + " MB" : "4 MiB (default)"}, heap ${heapMB > 0 ? heapMB + " MB" : "64 MiB (default)"}, timeout ${timeoutMs} ms`);
+let node = await createStorageNode({ runtime, config, quota: DEFAULT_QUOTA_BYTES, timeoutMs, guestDeadlineMs });
+console.log(`node ready: RS(${kParam},${mParam}), ${blockSize / 1024} KiB blocks, batch ${Math.round(maxMessageBytes / 1024)} KiB, window ${windowN}, conns/peer ${connsN}, wtarget ${wtargetMB > 0 ? wtargetMB + " MB" : "4 MiB (default)"}, heap ${heapMB > 0 ? heapMB + " MB" : "64 MiB (default)"}, timeout ${timeoutMs} ms, guest deadline ${guestDeadlineMs ?? "kernel default"}${guestDeadlineMs == null ? "" : " ms"}`);
 
 const expected = new Set();
 for (const spec of specs) {

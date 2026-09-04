@@ -6,7 +6,7 @@
 // is admitted, on the wire or in the holder; tests below cover both refusals.
 
 import {
-  encodeOfferBatch, decodeOfferBatch, encodeMask, decodeMask,
+  encodeOfferBatch, decodeOfferBatch, encodeMask, decodeMask, encodeHaveReq,
   encodeStoreBatch, decodeStoreBatch,
   encodeFetchBatchReq, decodeFetchBatchReq, encodeFetchBatchRes, decodeFetchBatchRes,
   FETCH_UNANSWERED, MsgType,
@@ -16,7 +16,7 @@ import { signDescriptor } from "../build/host/manifest.js";
 import {
   loadSodium, loadWasmBytes, LoopbackNetwork, createConnectedCohort,
 } from "../build/host/node.js";
-import { bytesEqual, toHex } from "../build/host/util.js";
+import { bytesEqual, fromHex, toHex } from "../build/host/util.js";
 import { plantBlock } from "./helpers.mjs";
 
 const TIMEOUT = 200;
@@ -118,6 +118,25 @@ export async function run(t) {
   // ── holder-side batched admission (StorageNode.admitBatch over the transport) ──
   const sodium = await loadSodium();
   const wasm = await loadWasmBytes();
+
+  t.group("a cold holder indexes more records than the host-call concurrency cap");
+  {
+    const net = new LoopbackNetwork();
+    const [a, b] = await createConnectedCohort({ count: 2, network: net, sodium, wasm, timeoutMs: TIMEOUT });
+    try {
+      // The kernel admits 256 unresolved host calls per realm. The old cold-index
+      // path launched one fs/size call per record in a single Promise.all, so record
+      // 257 made initialization throw and every HAVE/OFFER returned an empty reply.
+      for (let i = 0; i < 257; i++) {
+        await b.fs.put(i.toString(16).padStart(64, "0") + ".rec", new Uint8Array(4));
+      }
+      const known = fromHex((256).toString(16).padStart(64, "0"));
+      const absent = new Uint8Array(32).fill(255);
+      const mask = decodeMask(await a.request(b.peerId, typed(MsgType.HAVE, encodeHaveReq([known, absent]))));
+      t.eq(mask[0], VERDICT_ACCEPTED, "the 257th record is indexed after a bounded second fs/size round");
+      t.eq(mask[1], VERDICT_DECLINED, "the holder returns a complete HAVE mask after the cold rebuild");
+    } finally { a.close(); b.close(); net.close(); }
+  }
 
   t.group("a holder evaluates the sibling rule over the whole OFFER batch");
   {

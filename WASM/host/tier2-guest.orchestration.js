@@ -1152,6 +1152,22 @@ let storeReservationVersion = 0;
 function quota() { return LOCAL.quota != null ? LOCAL.quota : 0; }
 async function fsSizeRaw(keyStr) { return rU32(await host.call("fs/size", strBytes(keyStr)), 0); }
 async function fsSize(keyStr) { const v = await fsSizeRaw(keyStr); return v === 0xffffffff ? 0 : v; }
+// Rebuilding a cold holder's index can require thousands of fs/size calls. Launching
+// all of them in one Promise.all crosses the kernel's per-realm outstanding-call cap
+// as soon as the store has more than 256 records, and the holder then answers HAVE /
+// OFFER with an empty error response. Consume the advertised cap in bounded rounds,
+// reserving the one slot still held by the host call whose answer resumed this guest
+// continuation; 64 is a conservative window for older kernels that did not advertise one.
+async function fsSizes(keyStrs) {
+  const advertised = typeof HOST === "object" && HOST ? HOST.maxOutstandingHostCalls : 0;
+  const window = (typeof advertised === "number" && advertised > 0)
+    ? Math.max(1, Math.floor(advertised) - 1) : 64;
+  const out = [];
+  for (let i = 0; i < keyStrs.length; i += window) {
+    out.push(...await Promise.all(keyStrs.slice(i, i + window).map(fsSize)));
+  }
+  return out;
+}
 async function ensureStoreIndex() {
   if (!storeIndexDirty && heldBlocks !== null && bytesUsed >= 0) return;
   if (storeIndexPromise === null) storeIndexPromise = (async () => {
@@ -1173,7 +1189,7 @@ async function ensureStoreIndex() {
       const sizeKeys = [];
       for (const hex of records) sizeKeys.push(hex + STORE_REC);
       for (const hex of legacy) sizeKeys.push(hex + STORE_BLK, hex + STORE_DSC);
-      const sizes = await Promise.all(sizeKeys.map(fsSize));
+      const sizes = await fsSizes(sizeKeys);
       if (reservationVersion !== storeReservationVersion || activeStoreWrites > 0) continue;
       const rebuilt = new Set([...records, ...legacy]);
       let rebuiltBytes = sizes.reduce((sum, size) => sum + size, 0);
