@@ -295,6 +295,7 @@ export class StorageNode {
       const loaded = await shell.loadBundleBlob(opts.bundleBlob, {
         localConfig: localConfigFor(opts),
         realmMemoryBytes: normaliseConfig(opts.config ?? {}).realmMemoryBytes,
+        guestDeadlineMs: opts.timeoutMs,
       });
 
       // The guest writes through `loaded.fs` (a scopedFs view, seedkernel §12.2);
