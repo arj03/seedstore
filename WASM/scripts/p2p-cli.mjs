@@ -64,7 +64,13 @@ const mParam = num("m", 1);
 // against a single flow.
 const connsN = num("conns", 16);
 const blockSize = num("block", PRODUCTION_BLOCK_SIZE / 1024) * 1024;
-const maxMessageBytes = num("batch", 1024) * 1024;
+// Per-message cap, and the real lever on a wire-bound link: a streaming window holds a
+// fixed number of blocks, so SMALLER messages put more of them in flight to feed the
+// holders' sockets. Measured to iola: GET 10.3 MB/s at 1024 KiB, ~13 at 512 and 256.
+// Those two are the SAME shape at the 256 KiB production block — two framed blocks miss a
+// 512 KiB cap by ten bytes, so both carry one — but at 256 every message overruns its own
+// cap onto the over-cap fallback, so 512 is that shape's honest spelling.
+const maxMessageBytes = num("batch", 512) * 1024;
 const windowN = num("window", 64);
 // Streamed PUT/GET window (--wtarget MB): bigger windows mean fewer inter-window
 // barriers but a larger guest heap footprint (peak ~3x window at RS(1,1)), so raise
