@@ -148,7 +148,9 @@ async function signCore(core) {
   return concat([pk, sig, core]);
 }
 async function verifyEnv(env) {
-  const v = await host.call("node/verify", concat([env.slice(0, 32), env.slice(32, 96), env.slice(96)]));
+  // The seam's argument IS the envelope — [pk 32][sig 64][msg] concatenated is
+  // `env` back. Splitting and rejoining it copied every descriptor four times over.
+  const v = await host.call("node/verify", env);
   return v[0] === 1;
 }
 
@@ -288,14 +290,11 @@ async function storeList() { await ensureStoreIndex(); return [...heldBlocks].ma
 // Wire: `[opLen u8][op][args]`. This app uses two ops, `send` and `peers`; both
 // answer on a later turn, so both are awaited.
 const NET_ID = "_net";
-function netBlob(b) { const h = new Uint8Array(4); wU32(h, 0, b.length); return concat([h, b]); }
-function netOp(op, args) {
-  const out = writeOp(op, args); // kernel op-frame (content) - this app's own framing
-  // A rejected cross-realm call (no transport loaded, or torn down mid-flight) maps to
-  // the empty answer - same shape as an unreachable peer - so a PUT reports "no holder
-  // answered" instead of an uncaught rejection out of a fan-out.
-  return host.call(NET_ID, out).then((r) => r, () => EMPTY);
-}
+// A rejected cross-realm call (no transport loaded, or torn down mid-flight) maps to
+// the empty answer - same shape as an unreachable peer - so a PUT reports "no holder
+// answered" instead of an uncaught rejection out of a fan-out.
+function netCall(frame) { return host.call(NET_ID, frame).then((r) => r, () => EMPTY); }
+function netOp(op, args) { return netCall(writeOp(op, args)); } // kernel op-frame (content) - this app's own framing
 
 // ── peers + ranking by reciprocity (§13) ──
 // The `peers` answer is the raw 32-byte keys back to back — the peers the transport holds at
@@ -331,17 +330,38 @@ async function rank(peers) { return (await makeRanker())(peers); }
 // its own would be minting time. Answer is `[ok u8][response]`; an unreachable peer
 // comes back `[0]`, mapped to null below. `proto` is the routing id (§12.10); the
 // storage message type leads the payload, opaque in between.
+const NET_SEND_OP = strBytes("send");
+// The whole frame in ONE allocation — op envelope, blobs and payload written straight
+// in. Nesting the buffers instead (payload → body → blob → args → op frame) copied a
+// STORE batch five times before it left the realm; `parts` also lets the caller pass
+// the batch's pieces uncopied, so a block's bytes land in the frame directly off the
+// codec. The result must stay a WHOLE buffer: host.call copies any view it is handed.
+function netSendFrame(to, type, parts) {
+  let payloadLen = 0;
+  for (const p of parts) payloadLen += p.length;
+  const bodyLen = 1 + payloadLen; // [type u8][payload]
+  const out = new Uint8Array(1 + NET_SEND_OP.length + 1 + 4 + to.length + 4 + NET_PROTO.length + 4 + bodyLen);
+  let o = 0;
+  out[o++] = NET_SEND_OP.length;
+  out.set(NET_SEND_OP, o); o += NET_SEND_OP.length;
+  out[o++] = 0; // noReply = 0 — a reply is what this call is for
+  wU32(out, o, to.length); o += 4; out.set(to, o); o += to.length;
+  wU32(out, o, NET_PROTO.length); o += 4; out.set(NET_PROTO, o); o += NET_PROTO.length;
+  wU32(out, o, bodyLen); o += 4;
+  out[o++] = type;
+  for (const p of parts) { out.set(p, o); o += p.length; }
+  return out;
+}
+// `payload` is one buffer or an array of pieces to frame in order (encodeStoreBatchParts).
 async function netSend(peer, type, payload) {
   statsSent[type]++;
   statsInFlight[type]++;
   if (statsInFlight[type] > statsPeak[type]) statsPeak[type] = statsInFlight[type];
   try {
-    const head = Uint8Array.of(0); // noReply = 0 — a reply is what this call is for
-    const body = new Uint8Array(1 + payload.length);
-    body[0] = type;
-    body.set(payload, 1);
-    const r = await netOp("send", concat([head, netBlob(fromHex(peer)), netBlob(NET_PROTO), netBlob(body)]));
-    return r[0] === 1 ? r.slice(1) : null; // null = peer unreachable within the window
+    const r = await netCall(netSendFrame(fromHex(peer), type, Array.isArray(payload) ? payload : [payload]));
+    // A view, not a copy: the caller decodes it (and keeps only what it needs) before
+    // the answer goes out of scope. null = peer unreachable within the window.
+    return r[0] === 1 ? r.subarray(1) : null;
   } finally {
     statsInFlight[type]--;
   }
@@ -593,7 +613,9 @@ async function placeChunksBatched(jobs, what) {
       for (const [peer, groups] of storeGroups) {
         for (let s = base; s < base + putW && s < groups.length; s++) {
           const group = groups[s];
-          reqs.push({ peer, type: MSG_STORE, payload: encodeStoreBatch(group.map(({ ch, i }) => ({ blockId: ch.slotIds[i], descriptor: ch.descriptor, bytes: ch.slotBlocks[i] }))) });
+          // Parts, not a concatenated batch: netSend writes the blocks into the
+          // outgoing frame itself, so the ciphertext is never copied to a second buffer.
+          reqs.push({ peer, type: MSG_STORE, payload: encodeStoreBatchParts(group.map(({ ch, i }) => ({ blockId: ch.slotIds[i], descriptor: ch.descriptor, bytes: ch.slotBlocks[i] }))) });
           groupOf.push(group);
         }
       }
@@ -1391,7 +1413,7 @@ async function doHandle(arg) {
   }
   // A peer's wire frame: answer it, timing + counting it as holder work (the
   // `recv*` half of the STATS op, since the host has no inbound seam of its own).
-  const type = body[0], payload = body.slice(1);
+  const type = body[0], payload = body.subarray(1); // a view — the decoders below own no bytes
   const t0 = await clockNow();
   let out;
   if (type === MSG_HAVE) out = await encodeMask(await Promise.all(decodeHaveReq(payload).map((id) => storeHas(id))));
@@ -1414,7 +1436,7 @@ async function doHandle(arg) {
 // the placement engine drives, exposed as a local op (Op.REQUEST) rather than a
 // second entrypoint. Answers `[ok u8][response]`; unreachable is `[0]`.
 async function doRequest(arg) {
-  const resp = await netSend(toHex(arg.slice(0, 32)), arg[32], arg.slice(33));
+  const resp = await netSend(toHex(arg.subarray(0, 32)), arg[32], arg.subarray(33));
   return resp === null ? Uint8Array.from([0]) : concat([Uint8Array.from([1]), resp]);
 }
 

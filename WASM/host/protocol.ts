@@ -103,7 +103,7 @@ export function decodeHaveReq(buf: Uint8Array): Uint8Array[] {
   const need = 4 + count * 32;
   if (buf.length < need) throw new Error("protocol: decodeHaveReq truncated");
   const out: Uint8Array[] = [];
-  for (let i = 0; i < count; i++) out.push(buf.slice(4 + i * 32, 4 + (i + 1) * 32));
+  for (let i = 0; i < count; i++) out.push(buf.subarray(4 + i * 32, 4 + (i + 1) * 32));
   return out;
 }
 // The HAVE response ("of those, here is what I hold") is a plain held-mask —
@@ -140,11 +140,11 @@ export function decodeOfferBatch(buf: Uint8Array): Offer[] {
   let o = 4;
   for (let i = 0; i < count; i++) {
     if (o + 36 > buf.length) throw new Error("protocol: decodeOfferBatch truncated entry");
-    const blockId = buf.slice(o, o + 32);
+    const blockId = buf.subarray(o, o + 32);
     const dlen = readU32BE(buf, o + 32);
     if (dlen === 0) throw new Error("protocol: decodeOfferBatch missing descriptor");
     if (o + 36 + dlen > buf.length) throw new Error("protocol: decodeOfferBatch truncated descriptor");
-    out.push({ blockId, descriptor: buf.slice(o + 36, o + 36 + dlen) });
+    out.push({ blockId, descriptor: buf.subarray(o + 36, o + 36 + dlen) });
     o += 36 + dlen;
   }
   return out;
@@ -173,7 +173,10 @@ export interface StoreReq {
   descriptor: Uint8Array; // signed chunk-descriptor envelope (§4.3) — never absent, as for OFFER
   bytes: Uint8Array;
 }
-export function encodeStoreBatch(stores: StoreReq[]): Uint8Array {
+// The batch as its PARTS (headers + the caller's own block buffers, uncopied).
+// The sender concatenates these straight into its outgoing net frame, so a block
+// is copied once — into the frame — instead of once here and again per framing layer.
+export function encodeStoreBatchParts(stores: StoreReq[]): Uint8Array[] {
   const head = new Uint8Array(4);
   writeU32BE(head, 0, stores.length);
   const parts: Uint8Array[] = [head];
@@ -184,8 +187,14 @@ export function encodeStoreBatch(stores: StoreReq[]): Uint8Array {
     writeU32BE(h, 36, s.bytes.length);
     parts.push(h, s.descriptor, s.bytes);
   }
-  return concatBytes(parts);
+  return parts;
 }
+export function encodeStoreBatch(stores: StoreReq[]): Uint8Array {
+  return concatBytes(encodeStoreBatchParts(stores));
+}
+// Entries are read-only VIEWS of `buf` — the holder hashes, verifies and writes
+// them while the inbound frame is still live, so copying each block here would
+// only double the batch's footprint in the guest heap.
 export function decodeStoreBatch(buf: Uint8Array): StoreReq[] {
   const count = readU32BE(buf, 0);
   if (buf.length < 4) throw new Error("protocol: decodeStoreBatch truncated header");
@@ -193,13 +202,13 @@ export function decodeStoreBatch(buf: Uint8Array): StoreReq[] {
   let o = 4;
   for (let i = 0; i < count; i++) {
     if (o + 40 > buf.length) throw new Error("protocol: decodeStoreBatch truncated entry");
-    const blockId = buf.slice(o, o + 32);
+    const blockId = buf.subarray(o, o + 32);
     const dlen = readU32BE(buf, o + 32);
     const blen = readU32BE(buf, o + 36);
     if (dlen === 0) throw new Error("protocol: decodeStoreBatch missing descriptor");
     if (o + 40 + dlen + blen > buf.length) throw new Error("protocol: decodeStoreBatch truncated data");
-    const descriptor = buf.slice(o + 40, o + 40 + dlen);
-    const bytes = buf.slice(o + 40 + dlen, o + 40 + dlen + blen);
+    const descriptor = buf.subarray(o + 40, o + 40 + dlen);
+    const bytes = buf.subarray(o + 40 + dlen, o + 40 + dlen + blen);
     out.push({ blockId, descriptor, bytes });
     o += 40 + dlen + blen;
   }
@@ -235,7 +244,7 @@ export function decodeFetchBatchReq(buf: Uint8Array): Uint8Array[] {
   const need = 4 + count * 32;
   if (buf.length < need) throw new Error("protocol: decodeFetchBatchReq truncated");
   const out: Uint8Array[] = [];
-  for (let i = 0; i < count; i++) out.push(buf.slice(4 + i * 32, 4 + (i + 1) * 32));
+  for (let i = 0; i < count; i++) out.push(buf.subarray(4 + i * 32, 4 + (i + 1) * 32));
   return out;
 }
 export function encodeFetchBatchRes(blocks: FetchEntry[]): Uint8Array {
@@ -265,6 +274,8 @@ export function decodeFetchBatchRes(buf: Uint8Array): FetchEntry[] {
     if (o + 4 > buf.length) throw new Error("protocol: decodeFetchBatchRes truncated len");
     const len = readU32BE(buf, o); o += 4;
     if (o + len > buf.length) throw new Error("protocol: decodeFetchBatchRes truncated block");
+    // Copied, not viewed: the reader HOLDS these blocks until the chunk assembles,
+    // and a view would pin the whole response frame for one block's sake.
     out.push(buf.slice(o, o + len)); o += len;
   }
   return out;
