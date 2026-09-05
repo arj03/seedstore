@@ -74,8 +74,14 @@ export class ReputationClient {
     }
   }
 
-  /** Record a verification-fetch outcome for a peer (§8, §13). */
+  /** Record a verification-fetch outcome for a peer (§8, §13). The op takes counts —
+   *  one batch of independently checked blocks sharing an observation time — so a
+   *  single outcome is the 1/0 case of it. */
   observe(peerPk, nowMs, pass) {
+    return this.observeCounts(peerPk, nowMs, pass ? 1 : 0, pass ? 0 : 1);
+  }
+
+  observeCounts(peerPk, nowMs, passes, misses) {
     const hex = this.peerHex(peerPk);
     let rep = this.peers.get(hex);
     if (rep === undefined) {
@@ -84,14 +90,15 @@ export class ReputationClient {
       this.peers.set(hex, rep);
     }
 
-    // Build request: [op u8][serve f64 LE][miss f64 LE][last u64 BE][now u64 BE][result u8]
-    const req = new Uint8Array(1 + 8 + 8 + 8 + 8 + 1);
+    // Build request: [op u8][serve f64 LE][miss f64 LE][last u64 BE][now u64 BE][passes u32 LE][misses u32 LE]
+    const req = new Uint8Array(1 + 8 + 8 + 8 + 8 + 4 + 4);
     req[0] = OP_OBSERVE;
     this.f64le(req, 1, rep.serve);
     this.f64le(req, 9, rep.miss);
     this.u64be(req, 17, rep.last);
     this.u64be(req, 25, nowMs);
-    req[33] = pass ? 1 : 0;
+    new DataView(req.buffer, req.byteOffset + 33, 4).setUint32(0, passes, true);
+    new DataView(req.buffer, req.byteOffset + 37, 4).setUint32(0, misses, true);
 
     this.exports.handle(this.write(req));
 

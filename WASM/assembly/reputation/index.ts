@@ -11,10 +11,13 @@
 // call, since a WASM module is a restartable transform that discards its
 // memory on any timeout.
 //   request  = [op u8] [args ...]
-//   OP_OBSERVE (1) [serve f64 LE][miss f64 LE][last u64 BE][now u64 BE][result u8]
+//   OP_OBSERVE (1) [serve f64 LE][miss f64 LE][last u64 BE][now u64 BE][passes u32 LE][misses u32 LE]
 //     → [serve f64 LE][miss f64 LE][last u64 BE][score f64 LE]
 //   OP_SCORE   (2) [serve f64 LE][miss f64 LE][last u64 BE][now u64 BE]
 //     → [score f64 LE]
+// OBSERVE takes COUNTS, not one flag: a verification batch's blocks are each checked
+// independently but share an observation time, so one fan-out is one call — not one
+// per block against the caller's outstanding-host-call budget.
 
 const OP_OBSERVE: i32 = 1;
 const OP_SCORE: i32 = 2;
@@ -89,22 +92,23 @@ export function handle(input_len: i32): i32 {
   const op = load<u8>(scratch) as i32;
 
   if (op == OP_OBSERVE) {
-    // Input: [op u8][serve f64 LE][miss f64 LE][last u64 BE][now u64 BE][result u8]
+    // Input: [op u8][serve f64 LE][miss f64 LE][last u64 BE][now u64 BE][passes u32 LE][misses u32 LE]
     // Output: [serve f64 LE][miss f64 LE][last u64 BE][score f64 LE]
-    if (input_len < 1 + 8 + 8 + 8 + 8 + 1) return 0;
+    if (input_len < 1 + 8 + 8 + 8 + 8 + 4 + 4) return 0;
     let serve = readF64(scratch + 1);
     let miss = readF64(scratch + 9);
     let last = readU64BE(scratch + 17);
     const now = readU64BE(scratch + 25);
-    const result = load<u8>(scratch + 33) as i32;
+    const passes = load<u32>(scratch + 33);
+    const misses = load<u32>(scratch + 37);
 
     const decayed = decayTo(serve, miss, last, now);
     serve = decayed[0];
     miss = decayed[1];
     last = decayed[2];
 
-    if (result != 0) serve = serve + 1.0;
-    else miss = miss + 1.0;
+    serve += passes as f64;
+    miss += misses as f64;
 
     const score = scoreOf(serve, miss);
 

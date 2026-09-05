@@ -10,11 +10,16 @@
 // Pass a big cap (e.g. 1024) to model a WS/TCP frame instead, where the window
 // is a near no-op.
 //
-// Run:  node tests/bench-net.mjs [rttMs] [fileMB] [blockKiB] [capKiB] [wireChunkKiB] [windows]
+// Run:  node tests/bench-net.mjs [rttMs] [fileMB] [blockKiB] [capKiB] [wireChunkKiB] [windows] [streamMiB]
 //   e.g. node tests/bench-net.mjs 10 2 32       (10 ms RTT, 2 MB file, 32 KiB blocks, WebRTC cap)
 //        node tests/bench-net.mjs 10 2 32 1024  (same, but a 1 MiB WS frame cap)
+//        node tests/bench-net.mjs 10 50 32 256 48 32 4 (50 MiB, fixed 4 MiB stream window)
+// Set SEEDSTORE_BENCH_BUNDLE to a saved .skb to compare a baseline artifact.
+// Rebuild with `npm run build`: the bundle packages build/host-min, not build/host.
 
 import { performance } from "node:perf_hooks";
+import { readFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { loadWasmBytes, loadSodium, createConnectedCohort } from "../build/host/node.js";
 import { bytesEqual } from "../build/host/util.js";
 import { MsgType } from "../build/host/protocol.js";
@@ -28,6 +33,10 @@ const BLOCK_KIB = Number(process.argv[4] ?? 32);
 const CAP_KIB = Number(process.argv[5] ?? BLOCK_KIB + 16); // one block + headers per STORE → WebRTC
 const WIRE_CHUNK_KIB = Number(process.argv[6] ?? 0);       // 0 = platform messages; e.g. 48 = length-framed WebRTC chunks
 const WINDOWS = (process.argv[7] ?? "1,2,4,8,16,32").split(",").map(Number);
+const STREAM_MIB = process.argv[8] === undefined ? undefined : Number(process.argv[8]);
+if (STREAM_MIB !== undefined && (!Number.isFinite(STREAM_MIB) || STREAM_MIB <= 0)) {
+  throw new Error("streamMiB must be a positive finite number");
+}
 
 const MB = 1024 * 1024;
 const blockSize = BLOCK_KIB * 1024;
@@ -35,10 +44,15 @@ const fileBytes = Math.round(FILE_MB * MB);
 const delay = RTT_MS / 2;                          // one request = two sends
 const maxMessageBytes = CAP_KIB * 1024;
 const config = { k: 2, m: 2, blockSize, maxMessageBytes };
+if (STREAM_MIB !== undefined) config.windowTargetBytes = Math.round(STREAM_MIB * MB);
 const numChunks = Math.ceil(Math.ceil(fileBytes / blockSize) / config.k);
 
 const sodium = await loadSodium();
-const wasm = await loadWasmBytes();
+// Pin a saved artifact for before/after runs without replacing the working build.
+const wasm = process.env.SEEDSTORE_BENCH_BUNDLE
+  ? { bundleBlob: new Uint8Array(await readFile(process.env.SEEDSTORE_BENCH_BUNDLE)) }
+  : await loadWasmBytes();
+console.log(`bundle SHA-256: ${createHash("sha256").update(wasm.bundleBlob).digest("hex")}`);
 
 // A pseudo-random file (content is irrelevant to the round-trip count; a cheap
 // deterministic fill avoids a slow byte-by-byte RNG).
@@ -64,6 +78,9 @@ async function measure(W) {
   let t0 = performance.now();
   const put = await owner.put(data);
   const putMs = performance.now() - t0;
+  if (put.replicasLanded !== put.replicasIntended) {
+    throw new Error(`incomplete PUT: ${put.replicasLanded}/${put.replicasIntended} replica placements`);
+  }
   let s = await owner.stats();
   const putPeak = Math.max(s.get(OFFER)?.sentPeak ?? 0, s.get(STORE)?.sentPeak ?? 0); // the "work" types (HAVE excluded)
   const putReqs = (s.get(OFFER)?.sent ?? 0) + (s.get(STORE)?.sent ?? 0);
@@ -90,6 +107,7 @@ const tput = (ms) => (FILE_MB / (ms / 1000)).toFixed(1);
 const blocksPerMsg = Math.max(1, Math.floor(maxMessageBytes / blockSize));
 console.log(`\nPUT/GET over a ${RTT_MS} ms-RTT cohort — RS(${config.k},${config.m}), ${BLOCK_KIB} KiB blocks, ${CAP_KIB} KiB cap (~${blocksPerMsg} block/msg), ${FILE_MB} MB → ${numChunks} chunks${WIRE_CHUNK_KIB > 0 ? `, ${WIRE_CHUNK_KIB} KiB physical chunks` : ""}`);
 console.log(`(a serial PUT issues ~${numChunks * (config.k + config.m) * 2} request/response round trips; the window overlaps them — W is fanoutWindow)\n`);
+if (STREAM_MIB !== undefined) console.log(`streaming window: ${STREAM_MIB} MiB\n`);
 console.log(`   W   PUT (ms)   MB/s   peak     GET (ms)   MB/s   peak    bytes`);
 console.log(`  ──  ────────  ─────  ────    ────────  ─────  ────    ─────`);
 
@@ -106,6 +124,6 @@ for (const W of WINDOWS) {
   if (!r.ok) { console.error("byte mismatch — aborting"); process.exit(1); }
 }
 
-console.log(`\nSpeedup tracks W until W ≈ chunks (${numChunks}); past that the file has no more`);
-console.log(`independent chunks to overlap, so the curve flattens — the point to stop raising W.`);
+console.log(`\nW is bounded by the realm's host-call budget; useful concurrency also depends on`);
+console.log(`the number of batches in each streaming window, not just the whole file's ${numChunks} chunks.`);
 process.exit(0);

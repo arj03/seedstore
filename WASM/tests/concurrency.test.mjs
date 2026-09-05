@@ -237,6 +237,44 @@ export async function run(t) {
       `windowed PUT+GET saved the pipelined round trips: ${saved.toFixed(0)} ms (≥ ${floor} = half of ${Nw - 1} × RTT per phase, two phases)`);
   }
 
+  t.group("large streaming windows respect host-call budgets and account for every fetched block");
+  {
+    const bs = 16 * 1024, chunks = 300, cap = 256 * 1024;
+    const data = file(chunks * 2 * bs, 31);
+    const net = new LatencyNetwork(5, 48 * 1024);
+    const nodes = await createConnectedCohort({ count: 6, network: net, sodium, wasm, timeoutMs: TIMEOUT,
+      config: { k: 2, m: 2, blockSize: bs, maxMessageBytes: cap,
+        fanoutWindow: 32, windowTargetBytes: data.length } });
+    try {
+      const owner = nodes[0];
+      const put = await owner.put(data);
+      t.eq(put.replicasLanded, put.replicasIntended, "large-window PUT places every intended replica");
+      const putStats = await owner.stats();
+      // Assert the BYTES, not a message count. A count bound just re-encodes whatever the
+      // clamp happens to compute, so it stays green while the window silently shrinks — which
+      // is how a 2× over-charge cut the production window from 8 to 3 under a "≤ 32" test.
+      const KERNEL_BUDGET = 16 * 1024 * 1024;              // seedkernel DEFAULT_MAX_OUTSTANDING_HOST_CALL_BYTES
+      const chargeOf = (msg) => msg + 32 * Math.ceil(msg / bs) + 128;
+      const blockMsg = Math.floor(cap / (bs + 5)) * (bs + 5); // STORE/FETCH pack whole framed blocks
+      const storePeak = putStats.get(STORE)?.sentPeak ?? 0, offerPeak = putStats.get(OFFER)?.sentPeak ?? 0;
+      const offerBytes = offerPeak * chargeOf(cap), storeBytes = storePeak * chargeOf(blockMsg);
+      t.ok(storePeak > 0 && offerPeak > 0 && offerBytes <= KERNEL_BUDGET && storeBytes <= KERNEL_BUDGET,
+        `each type's fan-out fits the realm-wide byte budget (OFFER ${(offerBytes / 1048576).toFixed(1)} + STORE ${(storeBytes / 1048576).toFixed(1)} MiB, each ≤ 16 MiB)`);
+      t.ok(bytesEqual(await owner.get(put.root, put.key), data), "large-window PUT/GET is byte-identical over 10 ms RTT");
+      // Ids ASKED FOR, which equals ids verified only because a healthy cohort answers
+      // every one: an absent block or a re-asked FETCH_UNANSWERED would count twice here.
+      let fetched = 0, score = 0;
+      for (const holder of nodes.slice(1)) {
+        const stats = (await holder.stats()).get(FETCH);
+        if (stats) fetched += (stats.recvBytes - 4 * stats.recv) / 32;
+        score += await owner.score(holder.identity.publicKey);
+      }
+      t.ok(fetched >= chunks * 2, "GET fetched all data blocks and the index");
+      t.ok(Math.abs(score - fetched) < 0.01,
+        `every verified block contributes to reputation (${score.toFixed(3)} for ${fetched} blocks, allowing clock decay)`);
+    } finally { nodes.forEach((node) => node.close()); net.close(); }
+  }
+
   t.group("overlapping PUT/GET operations on one node don't clobber the guest's stream state");
   {
     // The guest keeps a streamed PUT's state in realm state, so exactly one

@@ -28,17 +28,20 @@ export function decodeScoreResp(buf: Uint8Array): number {
   return new DataView(buf.buffer, buf.byteOffset, 8).getFloat64(0, true);
 }
 
-/** OBSERVE request: record a witnessed pass/fail for a peer at time `tMs` (§8).
- *  Input: [op u8][serve f64 LE][miss f64 LE][last u64 BE][now u64 BE][result u8]
+/** OBSERVE request: record COUNTS of witnessed outcomes for a peer at time `tMs` (§8).
+ *  One verification batch's blocks are each hash-checked independently but share an
+ *  observation time, so they travel as counts — one call, not one per block.
+ *  Input: [op u8][serve f64 LE][miss f64 LE][last u64 BE][now u64 BE][passes u32 LE][misses u32 LE]
  *  Output: [serve f64 LE][miss f64 LE][last u64 BE][score f64 LE] */
-export function encodeObserveReq(serve: number, miss: number, lastMs: number, nowMs: number, pass: boolean): Uint8Array {
-  const req = new Uint8Array(1 + 8 + 8 + 8 + 8 + 1);
+export function encodeObserveReq(serve: number, miss: number, lastMs: number, nowMs: number, passes: number, misses: number): Uint8Array {
+  const req = new Uint8Array(1 + 8 + 8 + 8 + 8 + 4 + 4);
   req[0] = REP_OBSERVE;
   new DataView(req.buffer, req.byteOffset + 1, 8).setFloat64(0, serve, true);
   new DataView(req.buffer, req.byteOffset + 9, 8).setFloat64(0, miss, true);
   writeU64BE(req, 17, lastMs);
   writeU64BE(req, 25, nowMs);
-  req[33] = pass ? 1 : 0;
+  new DataView(req.buffer, req.byteOffset + 33, 4).setUint32(0, passes, true);
+  new DataView(req.buffer, req.byteOffset + 37, 4).setUint32(0, misses, true);
   return req;
 }
 

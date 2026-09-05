@@ -4,12 +4,36 @@ import { readFileSync } from "node:fs";
 
 import { ReputationClient } from "./reputation-client.mjs";
 import { ensureSodium, newKey, paths } from "./helpers.mjs";
+import { encodeObserveReq, decodeObserveResp } from "../build/host/reputation-core.js";
 
 const DAY = 24 * 3600 * 1000;
 
 export async function run(t) {
   await ensureSodium();
   const rep = await ReputationClient.load(new Uint8Array(readFileSync(paths.reputation)));
+
+  t.group("reputation: batched outcomes equal sequential observations, including decay");
+  {
+    const peer = newKey().publicKey;
+    const start = 1_000_000_000_000;
+    for (const [passes, misses, elapsed] of [[7, 3, 0], [300, 5, 7 * DAY], [0, 9, 28 * DAY]]) {
+      rep.reset();
+      for (let i = 0; i < 8; i++) rep.observe(peer, start, true);
+      for (let i = 0; i < 2; i++) rep.observe(peer, start, false);
+      const now = start + elapsed;
+      for (let i = 0; i < passes; i++) rep.observe(peer, now, true);
+      for (let i = 0; i < misses; i++) rep.observe(peer, now, false);
+      const expected = rep.peers.get(rep.peerHex(peer));
+      const req = encodeObserveReq(8, 2, start, now, passes, misses);
+      t.eq(rep.exports.handle(rep.write(req)), 32, "batched observation returns the full state");
+      const actual = decodeObserveResp(new Uint8Array(rep.exports.memory.buffer, rep.scratch, 32));
+      t.ok(Math.abs(actual.serve - expected.serve) < 1e-10 && Math.abs(actual.miss - expected.miss) < 1e-10,
+        `${passes} passes and ${misses} misses retain every observation after decay`);
+      t.eq(actual.last, now, "batch records its observation time");
+      t.ok(Math.abs(actual.score - rep.score(peer, now)) < 1e-10, "batch and sequential scores agree");
+      t.eq(rep.exports.handle(rep.write(req.subarray(0, 40))), 0, "a truncated batch is rejected");
+    }
+  }
 
   t.group("reputation: passes raise, misses penalize (§13.1)");
   {

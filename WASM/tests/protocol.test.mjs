@@ -138,6 +138,30 @@ export async function run(t) {
     } finally { a.close(); b.close(); net.close(); }
   }
 
+  t.group("large OFFER batches preserve admission decisions across verification windows");
+  {
+    const net = new LoopbackNetwork();
+    const [a, b] = await createConnectedCohort({ count: 2, network: net, sodium, wasm, timeoutMs: 2000 });
+    try {
+      const offers = Array.from({ length: 300 }, (_, i) => {
+        const blockId = fromHex(i.toString(16).padStart(64, "0"));
+        const descriptor = signDescriptor(sodium,
+          { level: 0, k: 1, m: 0, blockSize: 100, tailBytes: 100, authTag: authTag(), blockIds: [blockId] },
+          a.identity.publicKey, a.identity.privateKey, a.signAuthor);
+        return { blockId, descriptor };
+      });
+      offers.push(offers[0]); // provisional sibling state must span every verification window
+      const forged = { blockId: offers[1].blockId, descriptor: offers[1].descriptor.slice() };
+      forged.descriptor[32] ^= 1;
+      offers.push(forged);
+      const mask = decodeMask(await a.request(b.peerId, typed(MsgType.OFFER, encodeOfferBatch(offers))));
+      t.eq(mask.length, 302, "more than 256 descriptors receive a complete verdict mask");
+      t.ok(mask.slice(0, 300).every((v) => v === VERDICT_ACCEPTED), "every independent signed block is admitted");
+      t.eq(mask[300], VERDICT_SIBLING, "a duplicate in a later verification window is declined");
+      t.eq(mask[301], VERDICT_DESCRIPTOR, "a forged descriptor in the final window is rejected");
+    } finally { a.close(); b.close(); net.close(); }
+  }
+
   t.group("a holder evaluates the sibling rule over the whole OFFER batch");
   {
     const net = new LoopbackNetwork();

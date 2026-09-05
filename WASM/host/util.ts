@@ -1,13 +1,10 @@
 // Small byte helpers shared across the storage host. No dependencies.
 
 const HEX_CHARS = "0123456789abcdef";
+const HEX_BYTES = Array.from({ length: 256 }, (_, b) => HEX_CHARS[b >> 4] + HEX_CHARS[b & 15]);
 export function toHex(b: Uint8Array): string {
-  const chars: string[] = new Array(b.length * 2);
-  for (let i = 0; i < b.length; i++) {
-    const h = b[i];
-    chars[i * 2] = HEX_CHARS[(h >> 4) & 0xf];
-    chars[i * 2 + 1] = HEX_CHARS[h & 0xf];
-  }
+  const chars: string[] = new Array(b.length);
+  for (let i = 0; i < b.length; i++) chars[i] = HEX_BYTES[b[i]];
   return chars.join("");
 }
 
