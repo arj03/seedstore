@@ -24,7 +24,7 @@ import {
   MsgType, encodeHaveReq, decodeMask, encodeStoreBatch, encodeFetchBatchReq, decodeFetchBatchRes,
   VERDICT_ACCEPTED, VERDICT_DECLINED,
 } from "../build/host/protocol.js";
-import { signDescriptor } from "../build/host/manifest.js";
+import { signDescriptor } from "../build/host/descriptor.js";
 import { toHex, fromHex, bytesEqual } from "../build/host/util.js";
 import { plantBlock } from "./helpers.mjs";
 

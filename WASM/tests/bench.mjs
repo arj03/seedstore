@@ -9,7 +9,7 @@
 import { readFileSync } from "node:fs";
 import { performance } from "node:perf_hooks";
 import { Crypto, LEVEL_BODY } from "../build/host/crypto.js";
-import { blockHashInput } from "../build/host/manifest-core.js";
+import { blockHashInput } from "../build/host/descriptor-core.js";
 import { CodecClient } from "./codec-client.mjs";
 import { loadCrypto } from "seedkernel-wasm";
 

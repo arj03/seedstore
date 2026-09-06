@@ -12,7 +12,7 @@ import {
   FETCH_UNANSWERED, MsgType,
   VERDICT_ACCEPTED, VERDICT_DECLINED, VERDICT_QUOTA, VERDICT_SIBLING, VERDICT_DESCRIPTOR,
 } from "../build/host/protocol.js";
-import { signDescriptor } from "../build/host/manifest.js";
+import { signDescriptor } from "../build/host/descriptor.js";
 import {
   loadSodium, loadWasmBytes, LoopbackNetwork, createConnectedCohort,
 } from "../build/host/node.js";

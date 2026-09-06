@@ -450,7 +450,7 @@ async function fetchBatch(peer, ids) {
 // ── descriptor ───────────────────────────────────────────────────────────────
 // The pure §4.3 codecs (parseSignedDescriptor, encode/decodeDescriptorList,
 // descriptorContains, copyTargets, BLOCK_ID_LEN) are stitched in from
-// host/manifest-core.ts. What stays here needs a grant: the scoped sign/verify pair.
+// host/descriptor-core.ts. What stays here needs a grant: the scoped sign/verify pair.
 //
 // verifyDescriptor checks the author signature AND structurally validates the core:
 // a signed-but-malformed descriptor (bad id count) is rejected rather than parsed

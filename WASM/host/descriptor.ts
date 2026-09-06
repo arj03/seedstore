@@ -1,5 +1,5 @@
 // The one object that describes a file (README §4.3): the per-chunk *signed*
-// descriptor — no separate manifest object. Pure codecs live in manifest-core.ts
+// descriptor — no separate manifest object. Pure codecs live in descriptor-core.ts
 // (shared with the guest); this module adds the two scoped-signature pieces:
 // signing and verifying the author signature. Verified from the author's public
 // key alone, never the read key, which preserves keyless repair (§9); a holder
@@ -8,7 +8,7 @@
 import type { Sodium } from "./sodium.js";
 import {
   encodeDescriptorCore, parseSignedDescriptor, type Descriptor, type SignedDescriptor,
-} from "./manifest-core.js";
+} from "./descriptor-core.js";
 import { concatBytes } from "./util.js";
 import { appSigner, guestSignScope } from "seedkernel-wasm/guest-seam";
 
@@ -23,8 +23,8 @@ export {
   encodeDescriptorCore, decodeDescriptorCore, parseSignedDescriptor,
   descriptorContains, encodeDescriptorList, decodeDescriptorList,
   copyTargets, lossMargin, lowWaterMargin,
-} from "./manifest-core.js";
-export type { Descriptor, SignedDescriptor } from "./manifest-core.js";
+} from "./descriptor-core.js";
+export type { Descriptor, SignedDescriptor } from "./descriptor-core.js";
 
 // ── scoped signing (README §16, seedkernel §12.2/§14) ────────────────────────
 // The guest's SIGN/VERIFY ops are both *scoped*: the kernel signs and verifies
@@ -56,7 +56,7 @@ function storageSigner(sodium: Sodium, authorPk: Uint8Array, authorSk: Uint8Arra
 }
 
 /** A signed chunk descriptor as stored alongside every block and listed in the
- *  manifest (§4.3): [authorPk 32][sig 64][core ...]. Signing stays sender-side
+ *  file's index (§4.3): [authorPk 32][sig 64][core ...]. Signing stays sender-side
  *  in the host (§16) — this mirrors what the guest's scoped `node/sign` seam does
  *  (Ed25519 over `DOMAIN_guest ‖ scope ‖ core`). `scopeAuthor` is the deployment's
  *  signing-scope author — the key whose `storageSignScope` is the cohort scope,

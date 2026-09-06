@@ -9,7 +9,7 @@ import {
   signDescriptor, verifyDescriptor, descriptorContains,
   copyTargets, lossMargin, lowWaterMargin,
   encodeDescriptorList, decodeDescriptorList,
-} from "../build/host/manifest.js";
+} from "../build/host/descriptor.js";
 import { bytesEqual } from "../build/host/util.js";
 
 import { ensureSodium, newKey, paths } from "./helpers.mjs";

@@ -15,7 +15,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const modules = [
   "./codec.test.mjs",
   "./bridges.test.mjs",
-  "./manifest.test.mjs",
+  "./descriptor.test.mjs",
   "./protocol.test.mjs",
   "./reputation.test.mjs",
   "./storage.test.mjs",

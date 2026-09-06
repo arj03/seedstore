@@ -8,7 +8,7 @@
 
 import type { Sodium } from "./sodium.js";
 import { concatBytes, writeU32BE } from "./util.js";
-import { blockHashInput } from "./manifest-core.js";
+import { blockHashInput } from "./descriptor-core.js";
 
 // The nonce's domain byte is the chunk's own index-tree LEVEL (§4.3): 0 for the
 // file's ciphertext, ℓ > 0 for the index chunks above it. Levels never share a

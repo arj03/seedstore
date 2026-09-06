@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import vm from "node:vm";
 import { Crypto } from "../build/host/crypto.js";
-import { signDescriptor, verifyDescriptor, parseSignedDescriptor } from "../build/host/manifest.js";
+import { signDescriptor, verifyDescriptor, parseSignedDescriptor } from "../build/host/descriptor.js";
 import { encodeStoreBatch, encodeFetchBatchRes, MsgType, VERDICT_ACCEPTED } from "../build/host/protocol.js";
 import { loadSodium, loadWasmBytes, LoopbackNetwork, createConnectedCohort } from "../build/host/node.js";
 import { bytesEqual, writeU32BE } from "../build/host/util.js";

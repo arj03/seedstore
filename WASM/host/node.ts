@@ -61,5 +61,5 @@ export type { StorageNodeOptions, PutResult } from "./storage-node.js";
 export { netAddr, netContact, netReady, netPeers } from "./storage-node.js";
 export type { StorageConfig, Identity } from "./core.js";
 export { defaultConfig, PRODUCTION_BLOCK_SIZE, TEST_BLOCK_SIZE } from "./core.js";
-export { STORAGE_APP, STORAGE_PROTO, storageSignScope } from "./manifest.js";
+export { STORAGE_APP, STORAGE_PROTO, storageSignScope } from "./descriptor.js";
 export { toHex, fromHex } from "./util.js";

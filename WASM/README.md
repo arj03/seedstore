@@ -43,7 +43,7 @@ structural sandbox guarantees they touch neither disk nor network even if buggy
 | --- | --- | --- | --- |
 | `codec` — GF(2⁸) + systematic Reed–Solomon RS(k,m) encode/decode, block-id | installed module, bare name (`host.call("codec", …)`) | **WASM**, no grants (`assembly/codec`) | §4.1, §4.2, §9 |
 | `reputation` — decayed per-peer reciprocity counters | installed module, bare name (`host.call("reputation", …)`) | **WASM**, no grants (`assembly/reputation`) | §13 |
-| coordinator (PUT/GET, placement, manifest) + cohort (have/want, verification-fetch) + repair | confined QuickJS realm — **async** `call()` | zero-authority JS (`host/tier2-guest.js`) | §5–§9 |
+| coordinator (PUT/GET, placement, the index tree) + cohort (have/want, verification-fetch) + repair | confined QuickJS realm — **async** `call()` | zero-authority JS (`host/tier2-guest.js`) | §5–§9 |
 | holder side — admission, sibling rule, content-addressing, quota, the store writes | the **same** realm — **async** `call()` | zero-authority JS (`host/tier2-guest.js`) | §6, §10, §14 |
 | the seam the guest reaches I/O through | seedkernel runtime | `host.call(name, bytes)` — services, residual `crypto/*` transforms, module names | §16 |
 | `crypto/*`, `fs`, `node`, `clock` backends | seedkernel runtime | raw-byte services + frozen host-transform table | §12, §16 |
@@ -89,12 +89,12 @@ mirror, and the bundle producer:
    `node/sign`, which signs `DOMAIN_guest ‖ scope ‖ core`, and `verifyEnv`
    checks the same preimage through `node/verify` for the author key in the
    envelope; the host mirror (`signDescriptor`/`verifyDescriptor` in
-   `host/manifest.ts`) rides the same two scoped names, so the parity tests
+   `host/descriptor.ts`) rides the same two scoped names, so the parity tests
    hold. Neither path ever reconstructs the prefix: the scope is the kernel's to
    apply, derived from the admitted manifest's `(author, app)` — one derivation,
    so the two cannot disagree.
 2. **The descriptor's leading byte is the signed-format tag** (spec §16). The
-   descriptor core leads with `TAG_DESCRIPTOR = 0x01` (`manifest-core.ts`), and
+   descriptor core leads with `TAG_DESCRIPTOR = 0x01` (`descriptor-core.ts`), and
    the Part II signed formats reserve their own values before they exist
    (`TAG_TOMBSTONE = 0x02`, `TAG_HEAD = 0x03`). The tag sits inside `core`, so
    it is already under the signature and inside the scoped preimage.
@@ -109,7 +109,7 @@ mirror, and the bundle producer:
    downgrade refusal, seedkernel §12.4; `scripts/storage-bundle.mjs`):
    guarded by `Number.isInteger` and bumped on every publish, so the shell's
    freshness check (§12.4) has a real high-water mark to enforce.
-5. **The tests that pin this**: `manifest` (tamper-evidence over the tagged,
+5. **The tests that pin this**: `descriptor` (tamper-evidence over the tagged,
    scoped preimage), `tier2-port` / `holder-guest` (parity across the scoped
    sign/verify paths), `shell-run` (bundle version freshness — a downgrade is
    refused), `net` (legacy and current durable layouts across a cold reopen), and
@@ -237,8 +237,8 @@ const net = new LoopbackNetwork();
 const nodes = await createConnectedCohort({ count: 6, network: net, sodium, wasm, config: { k: 2, m: 2, blockSize: 64 } });
 
 const data = new TextEncoder().encode("hello, cohort");
-const put = await nodes[0].put(data);                 // chunk → encrypt → RS → place → manifest
-const got = await nodes[0].get(put.manifestId, put.key); // locate → fetch any k → decode → decrypt
+const put = await nodes[0].put(data);              // chunk → encrypt → RS → place → root
+const got = await nodes[0].get(put.root, put.key); // locate → fetch any k → decode → decrypt
 ```
 
 `LoopbackNetwork` (host/loopback.ts) wires nodes in one process: the real
@@ -320,7 +320,7 @@ path; same-machine tabs connect on host candidates without it.)
   block-id ≡ libsodium BLAKE2b-256, re-encode regenerates byte-identical blocks.
 - **bridges** — crypto primitives, the `store.local` backend, and the
   service-gate end-to-end via seedkernel's forwarder fixture (§8.2).
-- **manifest** — descriptor/manifest round trips, author signature is
+- **descriptor** — descriptor round trips, author signature is
   tamper-evident, index-list encrypt round trip, and the one-shape descriptor
   math: multiplicity as the replica count, `r` = *m*+1, the placement
   slots, and the loss margin agreeing for both kinds at production geometry.
@@ -443,7 +443,7 @@ Source — the storage layer itself:
 |---|---:|
 | **codec** WASM — GF(2⁸) + Reed–Solomon (`gf256` + `rs` + `index`) | 417 |
 | **reputation** WASM — decayed reciprocity | 152 |
-| **host** TypeScript — crypto.hash bridge, crypto, manifest (+core), protocol, store, storage-node, node (15 files) | 1,292 |
+| **host** TypeScript — crypto.hash bridge, crypto, descriptor (+core), protocol, store, storage-node, node (15 files) | 1,292 |
 | **tier2-guest.js** — the confined PUT/GET/repair + holder guest (the whole protocol) | 896 |
 | **total** | **2,757** |
 
@@ -493,12 +493,12 @@ assembly/codec/        gf256.ts, rs.ts, index.ts   — Reed–Solomon WASM modul
 assembly/reputation/   index.ts                    — decayed reciprocity WASM module
 host/  tier2-guest.js          the confined guest: the WHOLE protocol (PUT/GET/repair + holder)
        storage-node.ts         the host that boots the slot + drives the guest in one realm
-       manifest (+core)/crypto/protocol/store-fs/store-local/names/util  — shared helpers
+       descriptor (+core)/crypto/protocol/store-fs/store-local/names/util — shared helpers
        node.ts / browser.ts    Node + browser entry points (each loads the guest text)
 scripts/  build-bundle.mjs     produce the signed bundle (npm run build:bundle)
           build-browser-demo               — stage all browser pages → build/browser-demo
           serve-rtc-holder + smoke-rtc        — relay-signaled P2P over RtcNetwork + STUN
-tests/    codec / bridges / manifest / protocol / reputation / storage
+tests/    codec / bridges / descriptor / protocol / reputation / storage
           concurrency / net / browser / shell-run / holder-guest / bundle-fixture
 ```
 
@@ -545,7 +545,7 @@ distinct listed blocks, and repair is one audit against one health number — th
 **loss margin**, `Σ min(live, multiplicity) − k` — healed back to whatever the
 chunk's own signed descriptor asks for. Nothing about durability is injected
 config: *r* and the low-water mark ⌈*m*/2⌉ are read off the descriptor
-(`copyTargets` / `lowWaterMargin` in `manifest-core.ts`), so a repairer needs no
+(`copyTargets` / `lowWaterMargin` in `descriptor-core.ts`), so a repairer needs no
 deployment config and a mixed-geometry cohort heals each chunk to the count its
 author signed. The browser demos run *k*=1 deliberately — surviving the loss of a
 holder in a two- or three-node cohort means replication, not coding.

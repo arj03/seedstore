@@ -1,11 +1,11 @@
 // The PURE core of the file descriptor (README §4.3): fixed binary
 // codecs and structural validation, no crypto or seam dependency. One
-// definition of the wire format, shared by manifest.ts (host) and stitched
+// definition of the wire format, shared by descriptor.ts (host) and stitched
 // verbatim into the guest bundle (scripts/build-guest.mjs). Synchronous and
 // QuickJS-safe (Uint8Array only, no TextEncoder/Buffer).
 //
 // There is no manifest object: a file's index is an ordered list of these same
-// descriptors (§4.3). Signing/verifying lives in manifest.ts, not here — the
+// descriptors (§4.3). Signing/verifying lives in descriptor.ts, not here — the
 // author signature is checked from the public key alone, preserving keyless repair (§9).
 
 import { bytesEqual, toHex, writeU32BE, readU32BE, concatBytes } from "./util.js";

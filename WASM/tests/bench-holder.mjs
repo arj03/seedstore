@@ -32,7 +32,7 @@ import { performance } from "node:perf_hooks";
 import { StorageNode, loadWasmBytes, loadSodium, PRODUCTION_BLOCK_SIZE } from "../build/host/node.js";
 import { LoopbackNetwork } from "../build/host/loopback.js";
 import { toHex, bytesEqual } from "../build/host/util.js";
-import { blockHashInput } from "../build/host/manifest-core.js";
+import { blockHashInput } from "../build/host/descriptor-core.js";
 import { NodeFs } from "seedkernel-wasm/fs-node";
 
 const FILE_MB = Number(process.argv[2] ?? 16);
