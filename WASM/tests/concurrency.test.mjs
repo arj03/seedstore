@@ -15,6 +15,8 @@ import { loadWasmBytes, loadSodium, createConnectedCohort } from "../build/host/
 import { bytesEqual, toHex } from "../build/host/util.js";
 import { MsgType } from "../build/host/protocol.js";
 import { LatencyNetwork } from "./latency-net.mjs";
+import { readFileSync } from "node:fs";
+import vm from "node:vm";
 
 const DELAY = 2;        // ms per send → ~4 ms per request/response round trip
 const TIMEOUT = 2000;   // generous: requests succeed, so this never fires
@@ -291,5 +293,38 @@ export async function run(t) {
     t.ok(r.result.got.every((got, i) => bytesEqual(got, files[i])), "three concurrent multi-window PUT/GETs each round-trip their own bytes");
     t.ok(r.result.puts.every((p) => p.chunkCount === N), `each PUT sealed a manifest over its own ${N} chunks — no window folded into another's stream`);
     t.eq(new Set(r.result.puts.map((p) => toHex(p.root))).size, 3, "the three files got three distinct manifests");
+  }
+
+  t.group("a windowed FETCH plan finishes its own re-asks instead of handing them back a round later");
+  {
+    // A holder whose cap is smaller than ours serves one block and marks the rest
+    // UNANSWERED (§18). Those re-asks are appended to the running task list, so the
+    // window loop must (a) re-ask at the width the holder has shown it can fill and
+    // (b) advance by what each window actually took — stepping by the window WIDTH
+    // over a short first window skips the tasks appended behind it, leaving the caller
+    // to re-plan them, which is what made a cap mismatch cost a round trip per block.
+    const source = readFileSync(new URL("../build/host/tier2-guest.js", import.meta.url), "utf8");
+    const ctx = vm.createContext({ APP: { k: 2, m: 2, blockSize: 1024, maxMessageBytes: 65536, fanoutWindow: 16 }, LOCAL: {}, Uint8Array });
+    vm.runInContext(source, ctx);
+    const r = await vm.runInContext(`(async () => {
+      for (const name of ["runFetchTasks", "netSendMany", "myPeer"]) {
+        if (typeof globalThis[name] !== "function") throw new Error("fault injection: the guest no longer defines " + name);
+      }
+      globalThis.myPeer = async () => "self";
+      let rounds = 0, messages = 0;
+      globalThis.netSendMany = async (reqs) => {
+        rounds++; messages += reqs.length;
+        return reqs.map((r) => ({ peer: r.peer, ok: true,   // a smaller-capped holder: one block per reply
+          bytes: encodeFetchBatchRes(decodeFetchBatchReq(r.payload).map((id, i) => i === 0 ? new Uint8Array(1024) : FETCH_UNANSWERED)) }));
+      };
+      const ids = Array.from({ length: 32 }, (_, i) => { const b = new Uint8Array(32); b[0] = i; return toHex(b); });
+      let applied = 0;
+      await runFetchTasks(new Map([["peerA", ids]]), fetchMaxIds(), async (peer, slice, ids2, blocks) => {
+        if (blocks) for (const b of blocks) if (b) applied++;
+      });
+      return { rounds, messages, applied, window: fanoutWindow(1, blockMsgBytes()) };
+    })()`, ctx);
+    t.eq(r.applied, 32, `one pass fetches every block the plan asked for (${r.applied}/32, ${r.messages} messages in ${r.rounds} rounds)`);
+    t.ok(r.rounds <= 1 + Math.ceil(32 / r.window), `the re-asks ride the fan-out window rather than one per round (${r.rounds} rounds, window ${r.window})`);
   }
 }

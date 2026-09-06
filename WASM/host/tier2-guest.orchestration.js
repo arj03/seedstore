@@ -758,8 +758,12 @@ async function runFetchTasks(byPeer, maxIds, apply) {
     for (const slice of sliceN(byPeer.get(peer), maxIds)) tasks.push({ peer, slice, ids: slice.map(fromHex) });
   }
   const getW = fanoutWindow(1, blockMsgBytes());  // one flat cohort-wide list, block-bearing
-  for (let base = 0; base < tasks.length; base += getW) {
+  // Advance by what the window actually took, not by getW: a partial window (the last
+  // one, before re-asks were appended behind it) would otherwise step over the tasks
+  // appended into the gap, leaving the caller to re-plan them a whole round later.
+  for (let base = 0; base < tasks.length; ) {
     const window = tasks.slice(base, base + getW);
+    base += window.length;
     const results = await netSendMany(window.map(({ peer, ids }) => ({ peer, type: MSG_FETCH, payload: encodeFetchBatchReq(ids) })));
     for (let ri = 0; ri < results.length; ri++) {
       const { peer, slice, ids } = window[ri];
@@ -787,7 +791,16 @@ async function runFetchTasks(byPeer, maxIds, apply) {
         for (let i = 0; i < reSlice.length; i++) { aSlice.push(reSlice[i]); aIds.push(reIds[i]); aBlocks.push(null); }
         reSlice.length = 0;
       }
-      if (reSlice.length) tasks.push({ peer, slice: reSlice, ids: reIds });
+      // Re-ask in slices this holder has SHOWN it can fill, not the width we asked at:
+      // fetchMaxIds sizes a request by OUR cap, so against a smaller-capped holder the
+      // original width re-asks the whole tail every round — n ids costing n round trips.
+      // Nothing served is no capacity signal (the tail was unread, not capped): keep the width.
+      if (reSlice.length) {
+        let served = 0;
+        for (const b of aBlocks) if (b) served++;
+        const w = served > 0 ? served : reSlice.length;
+        for (let i = 0; i < reSlice.length; i += w) tasks.push({ peer, slice: reSlice.slice(i, i + w), ids: reIds.slice(i, i + w) });
+      }
       if (aSlice.length) await apply(results[ri].peer, aSlice, aIds, aBlocks);
     }
   }
@@ -1460,23 +1473,47 @@ async function acceptStoreBatch(stores) {
 // one id thousands of times and force an oversized reply. A held block that won't
 // fit is tagged FETCH_UNANSWERED (re-requested by runFetchTasks); the FIRST present
 // block is always served even alone over cap, so every request makes progress.
+//
+// The READS are bounded by that same cap, not by the request: an id costs 32 bytes to
+// ask for and a whole block to look up, so reading every id first let one message pull
+// far more off the store than any reply can carry — n ids re-asked n times cost n²/2
+// reads, and enough concurrent reads to exceed what the kernel's outstanding-call
+// budget admits. An id never read answers UNANSWERED, exactly as an over-cap one does.
+const FETCH_READS_IN_FLIGHT = 64;   // concurrent store reads; `room` already bounds their BYTES
+const FETCH_MISS_ALLOWANCE = 256;   // reads past one full reply's worth, since a miss costs no reply bytes
 async function serveFetch(ids) {
   // Misbehaving-peer simulator (StorageConfig.lieOnFetch): answer UNANSWERED for
   // everything, exercising the reader's §18 no-progress invariant in tests.
   if (CFG.lieOnFetch) return ids.map(() => FETCH_UNANSWERED);
   const cap = maxMsgBytes();
-  const out = new Array(ids.length).fill(null);
-  const unique = new Map(); // idHex → id bytes, so a repeated id is one store read
-  for (const id of ids) { const h = toHex(id); if (!unique.has(h)) unique.set(h, id); }
-  const seen = new Map(await Promise.all([...unique].map(async ([h, id]) => [h, await storeGetBytes(id)])));
-  let used = 4;           // the [count u32] response header
-  let servedAny = false;
+  // Unread ids answer UNANSWERED: "ask again" is the only honest verdict for one we
+  // never looked up. A genuine miss (read, not held) overwrites it with null → ABSENT.
+  const out = new Array(ids.length).fill(FETCH_UNANSWERED);
+  const order = [], queued = new Set(); // distinct ids in ask order, so a repeat is one read
+  for (const id of ids) { const h = toHex(id); if (!queued.has(h)) { queued.add(h); order.push([h, id]); } }
+  const maxReads = Math.min(order.length, fetchMaxIds() + FETCH_MISS_ALLOWANCE);
+  const seen = new Map();  // idHex → bytes | null, for the ids read so far
+  let used = 4;            // the [count u32] response header
+  let servedAny = false, read = 0;
   for (let i = 0; i < ids.length; i++) {
     const h = toHex(ids[i]);
+    if (!seen.has(h)) {
+      if (read >= maxReads) break;  // read enough to fill a reply; the tail re-asks
+      // Read ahead by what the REMAINING budget could still hold, at OUR blockSize — a
+      // foreign author's may differ, so this sizes the read, never the cap check below.
+      const room = Math.max(1, Math.floor((cap - used) / (CFG.blockSize + FETCH_FRAME)));
+      const upto = Math.min(maxReads, read + Math.min(room, FETCH_READS_IN_FLIGHT));
+      const batch = order.slice(read, upto);
+      const bytes = await Promise.all(batch.map(([, id]) => storeGetBytes(id)));
+      for (let j = 0; j < batch.length; j++) seen.set(batch[j][0], bytes[j]);
+      read = upto;
+    }
     const bytes = seen.get(h);
-    if (!bytes) continue; // genuine miss — leave it ABSENT (null)
+    if (!bytes) { out[i] = null; continue; } // genuine miss — ABSENT
     const framed = bytes.length + FETCH_FRAME;
-    if (servedAny && used + framed > cap) { out[i] = FETCH_UNANSWERED; continue; } // held but over the byte cap → mark for re-ask
+    // Full: stop here rather than scanning on for a smaller block that still fits —
+    // reading the rest is the amplification, and this id re-asks either way.
+    if (servedAny && used + framed > cap) break;
     out[i] = bytes;
     used += framed;
     servedAny = true;

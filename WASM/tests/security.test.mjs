@@ -127,6 +127,52 @@ export async function run(t) {
     t.eq(result.repaired, 2, "malformed response " + i + ": repair restores missing replicas");
     t.ok(result.misses > 0, "malformed response " + i + ": the bad holder receives misses");
   }
+
+  t.group("security: a FETCH cannot pull more out of a holder's store than one reply carries");
+  {
+    // A FETCH id costs 32 bytes to ask for and a whole block to look up, so an
+    // unbounded read-ahead let one message pull far more off the store than any
+    // reply can carry — and re-asking the unanswered tail paid it again per round.
+    // serveFetch reads only as far as the cap, so ids it never reached answer
+    // UNANSWERED (re-asked), exactly as a held-but-over-cap block does.
+    const ctx = vm.createContext({ APP: { k: 1, m: 2, blockSize: 1024, maxMessageBytes: 4096, fanoutWindow: 4 }, LOCAL: {}, Uint8Array });
+    vm.runInContext(source, ctx);
+    const r = await vm.runInContext(`(async () => {
+      for (const name of ["serveFetch", "storeGetBytes"]) {
+        if (typeof globalThis[name] !== "function") throw new Error("fault injection: the guest no longer defines " + name);
+      }
+      const ids = (n) => Array.from({ length: n }, (_, i) => { const b = new Uint8Array(32); b[0] = i & 255; b[1] = (i >> 8) & 255; return b; });
+      let reads = 0;
+      const holding = async () => { reads++; return new Uint8Array(1024); };
+      const missing = async () => { reads++; return null; };
+
+      globalThis.storeGetBytes = holding;
+      const held = await serveFetch(ids(64));            // 64 ids held, cap fits 3
+      const heldReads = reads; reads = 0;
+
+      globalThis.storeGetBytes = missing;
+      const absent = await serveFetch(ids(1000));        // a miss costs no reply bytes, but still a read
+      const missReads = reads; reads = 0;
+
+      globalThis.storeGetBytes = holding;
+      await serveFetch([ids(1)[0], ids(1)[0], ids(1)[0]]); // one id named three times
+      return {
+        served: held.filter((b) => b !== null && b !== FETCH_UNANSWERED).length,
+        unanswered: held.filter((b) => b === FETCH_UNANSWERED).length,
+        heldReads, missReads,
+        missAbsent: absent.filter((b) => b === null).length,
+        missUnanswered: absent.filter((b) => b === FETCH_UNANSWERED).length,
+        repeatReads: reads,
+      };
+    })()`, ctx);
+    t.eq(r.served, 3, "the reply is still filled to the cap (3 × 1024 B blocks under 4096)");
+    t.eq(r.unanswered, 61, "every id past the cap is UNANSWERED, so the reader re-asks it");
+    t.ok(r.heldReads <= r.served + 1, `reads are bounded by the reply, not the request (${r.heldReads} for 64 ids)`);
+    t.ok(r.missReads < 1000 && r.missAbsent === r.missReads && r.missUnanswered === 1000 - r.missReads,
+      `a request of misses is bounded too, and still resolves what it read (${r.missAbsent} ABSENT, ${r.missUnanswered} re-asked)`);
+    t.ok(r.missAbsent > 0, "every request decides at least one id, so a re-ask always makes progress");
+    t.eq(r.repeatReads, 1, "a repeated id is one store read");
+  }
 }
 
 if (process.argv[1]?.endsWith("security.test.mjs")) {

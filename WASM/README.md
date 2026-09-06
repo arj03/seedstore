@@ -363,12 +363,12 @@ path; same-machine tabs connect on host candidates without it.)
 
 | | time | rate | |
 |---|---:|---:|---|
-| **write** — full (encrypt + hash + RS encode) | ~0.44 s | ~227 MB/s | |
-| &nbsp;&nbsp;↳ chacha20-poly1305 seal | ~0.26 s | ~390 MB/s | detached tag lives in the descriptor |
-| &nbsp;&nbsp;↳ RS encode (SIMD) | ~0.07 s | ~1.38 GB/s | |
-| &nbsp;&nbsp;↳ BLAKE2b block-ids | ~0.15 s | ~1.1 GB/s | hashes all *n* blocks (1.6×) |
-| **read** — all data present (systematic) | ~0.03 s | ~3.0 GB/s | common path — a concat, no GF |
-| **read** — one block missing (decode, SIMD) | ~0.07 s | ~1.5 GB/s | the common failure, §6/§21 |
+| **write** — full (encrypt + hash + RS encode) | ~0.52 s | ~194 MB/s | |
+| &nbsp;&nbsp;↳ chacha20-poly1305 seal | ~0.25 s | ~405 MB/s | detached tag lives in the descriptor |
+| &nbsp;&nbsp;↳ RS encode (SIMD) | ~0.07 s | ~1.5 GB/s | |
+| &nbsp;&nbsp;↳ BLAKE2b block-ids | ~0.21 s | ~752 MB/s | hashes all *n* blocks (1.6×) |
+| **read** — all data present (systematic) | ~0.03 s | ~3.2 GB/s | common path — a concat, no GF |
+| **read** — one block missing (decode, SIMD) | ~0.06 s | ~1.7 GB/s | the common failure, §6/§21 |
 
 Three optimizations got here. (1) The codec multiplies via a precomputed 256×256
 GF(2⁸) table — one indexed load per byte — making encode **~26× faster** than the
@@ -378,7 +378,7 @@ everything else, already in the libsodium the kernel loads — **no new bytes**
 (§16). (3) The RS multiply-accumulate loops use **WASM SIMD** — the GF(2⁸)
 split-table / `i8x16.swizzle` trick does 16 multiplies per instruction — for
 another **~3.4×** on encode/decode. With all three, sealing is the largest part of
-the write (~0.26 / ~0.15 / ~0.07 s for encrypt / hash / encode), while reads
+the write (~0.25 / ~0.21 / ~0.07 s for encrypt / hash / encode), while reads
 cost nothing on the codec unless a block is actually missing. (SIMD needs a
 runtime with the WASM simd feature — Node 16+ and every current browser.) `node
 tests/bench.mjs` reproduces these.
@@ -393,8 +393,8 @@ records per holder in flight. Over a 10 ms-RTT link (4 MB, RS(2,2), 32 KiB block
 
 | | time | rate | |
 |---|---:|---:|---|
-| **PUT** | ~0.61 s | ~6.5 MB/s | ships the 2× erasure overhead — RS(2,2) is 2 data + 2 parity |
-| **GET** | ~0.30 s | ~13.4 MB/s | downloads any *k* of *n* — 1× the file |
+| **PUT** | ~0.53 s | ~7.5 MB/s | ships the 2× erasure overhead — RS(2,2) is 2 data + 2 parity |
+| **GET** | ~0.26 s | ~15.3 MB/s | downloads any *k* of *n* — 1× the file |
 
 `node tests/bench-net.mjs 10 4 32 256 48 32` reproduces this in a fresh W=32
 process (omit the final `32` to sweep the window); the
