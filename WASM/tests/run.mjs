@@ -19,6 +19,7 @@ const modules = [
   "./protocol.test.mjs",
   "./reputation.test.mjs",
   "./storage.test.mjs",
+  "./security.test.mjs",
   "./concurrency.test.mjs",
   "./net.test.mjs",
   "./browser.test.mjs",

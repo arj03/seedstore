@@ -8,6 +8,7 @@
 
 import type { Sodium } from "./sodium.js";
 import { concatBytes, writeU32BE } from "./util.js";
+import { blockHashInput } from "./manifest-core.js";
 
 // The nonce's domain byte is the chunk's own index-tree LEVEL (§4.3): 0 for the
 // file's ciphertext, ℓ > 0 for the index chunks above it. Levels never share a
@@ -34,9 +35,14 @@ export class Crypto {
     this.nonceBytes = 12;
   }
 
-  /** Content-address hash → block_id = hash(block_bytes) (§4.2). */
+  /** General BLAKE2b-256 byte hash. A block's id is blockId() below, not this. */
   hash(bytes: Uint8Array): Uint8Array {
     return this.sodium.crypto_generichash(BLOCK_ID_BYTES, bytes);
+  }
+
+  /** Current block identity, bound to the descriptor's author. */
+  blockId(authorPk: Uint8Array, bytes: Uint8Array): Uint8Array {
+    return this.hash(blockHashInput(authorPk, bytes));
   }
 
   /** 12-byte nonce = [domain u8][index u32 BE][zero padding] (§4.4). One nonce

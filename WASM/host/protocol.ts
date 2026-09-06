@@ -261,16 +261,18 @@ export function encodeFetchBatchRes(blocks: FetchEntry[]): Uint8Array {
   }
   return concatBytes(parts);
 }
-export function decodeFetchBatchRes(buf: Uint8Array): FetchEntry[] {
+export function decodeFetchBatchRes(buf: Uint8Array, expectedCount?: number): FetchEntry[] {
   const count = readU32BE(buf, 0);
   if (buf.length < 4) throw new Error("protocol: decodeFetchBatchRes truncated header");
+  if (expectedCount !== undefined && count !== expectedCount) throw new Error("protocol: decodeFetchBatchRes wrong count");
   const out: FetchEntry[] = [];
   let o = 4;
   for (let i = 0; i < count; i++) {
     if (o >= buf.length) throw new Error("protocol: decodeFetchBatchRes truncated found");
     const found = buf[o]; o += 1;
     if (found === FETCH_UNANSWERED) { out.push(FETCH_UNANSWERED); continue; }
-    if (found !== FETCH_PRESENT) { out.push(null); continue; }
+    if (found === FETCH_ABSENT) { out.push(null); continue; }
+    if (found !== FETCH_PRESENT) throw new Error("protocol: decodeFetchBatchRes invalid status");
     if (o + 4 > buf.length) throw new Error("protocol: decodeFetchBatchRes truncated len");
     const len = readU32BE(buf, o); o += 4;
     if (o + len > buf.length) throw new Error("protocol: decodeFetchBatchRes truncated block");
@@ -278,5 +280,6 @@ export function decodeFetchBatchRes(buf: Uint8Array): FetchEntry[] {
     // and a view would pin the whole response frame for one block's sake.
     out.push(buf.slice(o, o + len)); o += len;
   }
+  if (o !== buf.length) throw new Error("protocol: decodeFetchBatchRes trailing bytes");
   return out;
 }

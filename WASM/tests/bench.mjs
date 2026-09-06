@@ -2,12 +2,14 @@
 // Not part of the test suite. Run: node tests/bench.mjs
 //
 // Measures pure RS work (the WASM codec + the JS<->WASM boundary copies), and
-// for context the full PUT-style pipeline cost of also hashing (block_id) and
-// stream-encrypting every block.
+// for context the full PUT-style pipeline cost of also naming (block_id, §4.2)
+// and stream-encrypting every block. The block-id section prices the author
+// binding against the bare content hash it replaced.
 
 import { readFileSync } from "node:fs";
 import { performance } from "node:perf_hooks";
 import { Crypto, LEVEL_BODY } from "../build/host/crypto.js";
+import { blockHashInput } from "../build/host/manifest-core.js";
 import { CodecClient } from "./codec-client.mjs";
 import { loadCrypto } from "seedkernel-wasm";
 
@@ -75,35 +77,55 @@ t0 = performance.now();
 for (let c = 0; c < numChunks; c++) crypto.encrypt(key, LEVEL_BODY, c, data.subarray(c * chunkData, (c + 1) * chunkData));
 let encr = performance.now() - t0;
 
-// Hash the n blocks of every chunk (data + parity = 1.6× the file).
-let hsum = 0;
-t0 = performance.now();
-for (let c = 0; c < numChunks; c++) {
-  for (let bl = 0; bl < K + M; bl++) {
-    const off = c * chunkData + (bl % K) * B;
-    hsum ^= crypto.hash(data.subarray(off, off + B))[0];
+// Name the n blocks of every chunk (data + parity = 1.6× the file). A block id is
+// BLAKE2b over ASCII domain ‖ authorPk ‖ ciphertext (§4.2), so it costs one
+// block-sized copy on top of the bare hash. Priced three ways: the copy alone, the
+// bare hash the id replaced, and the id itself.
+const authorPk = crypto.randomKey();
+const eachBlock = (fn) => {
+  let sum = 0;
+  const t = performance.now();
+  for (let c = 0; c < numChunks; c++) {
+    for (let bl = 0; bl < K + M; bl++) {
+      const off = c * chunkData + (bl % K) * B;
+      sum ^= fn(data.subarray(off, off + B))[0];
+    }
   }
-}
-let hsh = performance.now() - t0;
+  return { ms: performance.now() - t, sum };
+};
+const cpy = eachBlock((b) => blockHashInput(authorPk, b));
+const bare = eachBlock((b) => crypto.hash(b));
+const bound = eachBlock((b) => crypto.blockId(authorPk, b));
+let hsh = bound.ms, hsum = bound.sum;
 
-// ── full PUT-style pipeline: encrypt + hash every block + encode ───────────
-t0 = performance.now();
-for (let c = 0; c < numChunks; c++) {
-  const { ciphertext } = crypto.encrypt(key, LEVEL_BODY, c, data.subarray(c * chunkData, (c + 1) * chunkData));
-  const dataBlocks = split(ciphertext, 0, K, B);
-  const parity = codec.rsEncode(K, M, B, dataBlocks);
-  for (const b of dataBlocks) crypto.hash(b);
-  for (const b of parity) crypto.hash(b);
-}
-let full = performance.now() - t0;
+// ── full PUT-style pipeline: encrypt + name every block + encode ───────────
+// Run it both ways: `full` is what PUT does now, `fullBare` what it cost when a
+// block id was the bare content hash — the difference is the binding's price.
+const pipeline = (nameBlock) => {
+  const t = performance.now();
+  for (let c = 0; c < numChunks; c++) {
+    const { ciphertext } = crypto.encrypt(key, LEVEL_BODY, c, data.subarray(c * chunkData, (c + 1) * chunkData));
+    const dataBlocks = split(ciphertext, 0, K, B);
+    const parity = codec.rsEncode(K, M, B, dataBlocks);
+    for (const b of dataBlocks) nameBlock(b);
+    for (const b of parity) nameBlock(b);
+  }
+  return performance.now() - t;
+};
+let fullBare = pipeline((b) => crypto.hash(b));
+let full = pipeline((b) => crypto.blockId(authorPk, b));
 
 const rate = (ms) => (FILE / MB / (ms / 1000)).toFixed(0);
 console.log(`\nRS(${K},${M}), B=${B / 1024} KB, ${FILE / MB} MB → ${numChunks} chunks, ${1.6}x stored\n`);
 console.log(`  WRITE`);
 console.log(`    RS encode                    ${enc.toFixed(0).padStart(6)} ms   ${rate(enc).padStart(5)} MB/s`);
 console.log(`    encrypt (chacha20-poly1305)  ${encr.toFixed(0).padStart(6)} ms   ${rate(encr).padStart(5)} MB/s`);
-console.log(`    hash block-ids (BLAKE2b)  ${hsh.toFixed(0).padStart(6)} ms   ${(FILE * 1.6 / MB / (hsh / 1000)).toFixed(0).padStart(5)} MB/s   (hashes n blocks = 1.6×)  [acc ${hsum & 255}]`);
-console.log(`    encrypt+hash+encode (full)   ${full.toFixed(0).padStart(6)} ms   ${rate(full).padStart(5)} MB/s`);
+const blockRate = (ms) => (FILE * 1.6 / MB / (ms / 1000)).toFixed(0).padStart(5);
+console.log(`    block-ids (BLAKE2b)          ${hsh.toFixed(0).padStart(6)} ms   ${blockRate(hsh)} MB/s   (names n blocks = 1.6×)  [acc ${hsum & 255}]`);
+console.log(`      ├ bare content hash        ${bare.ms.toFixed(0).padStart(6)} ms   ${blockRate(bare.ms)} MB/s   ← what the author binding replaced`);
+console.log(`      └ domain‖pk‖bytes copy     ${cpy.ms.toFixed(0).padStart(6)} ms   ${blockRate(cpy.ms)} MB/s   ← the binding's added work`);
+console.log(`    encrypt+id+encode (full)     ${full.toFixed(0).padStart(6)} ms   ${rate(full).padStart(5)} MB/s`);
+console.log(`      └ same, bare hash          ${fullBare.toFixed(0).padStart(6)} ms   ${rate(fullBare).padStart(5)} MB/s   ← ${((full / fullBare - 1) * 100).toFixed(1)}% cheaper without the binding`);
 console.log(`  READ`);
 console.log(`    all data present (concat)    ${sysRead.toFixed(0).padStart(6)} ms   ${rate(sysRead).padStart(5)} MB/s   ← common path, no GF`);
 console.log(`    one block missing (decode)   ${dec.toFixed(0).padStart(6)} ms   ${rate(dec).padStart(5)} MB/s   ← common failure (§21)`);

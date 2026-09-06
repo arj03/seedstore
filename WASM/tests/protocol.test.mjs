@@ -186,7 +186,7 @@ export async function run(t) {
     const [a, b] = await createConnectedCohort({ count: 2, network: net, sodium, wasm, timeoutMs: TIMEOUT });
     try {
       const block0 = bytes(100, 41), block1 = bytes(100, 42);
-      const id0 = b.crypto.hash(block0), id1 = b.crypto.hash(block1);
+      const id0 = b.crypto.blockId(a.identity.publicKey, block0), id1 = b.crypto.blockId(a.identity.publicKey, block1);
       const env = signDescriptor(
         sodium, { level: 0, k: 1, m: 1, blockSize: 100, tailBytes: 100, authTag: authTag(), blockIds: [id0, id1] },
         a.identity.publicKey, a.identity.privateKey, a.signAuthor,
@@ -250,7 +250,7 @@ export async function run(t) {
     const [a, b] = await createConnectedCohort({ count: 2, network: net, sodium, wasm, quota: 1500, timeoutMs: TIMEOUT });
     try {
       const b0 = bytes(1000, 1), b1 = bytes(1000, 2);
-      const i0 = b.crypto.hash(b0), i1 = b.crypto.hash(b1); // content-addressed (acceptStore hashes)
+      const i0 = b.crypto.blockId(a.identity.publicKey, b0), i1 = b.crypto.blockId(a.identity.publicKey, b1);
       const solo = (blockId) => signDescriptor(
         sodium, { level: 0, k: 1, m: 0, blockSize: 1000, tailBytes: 1000, authTag: authTag(), blockIds: [blockId] }, a.identity.publicKey, a.identity.privateKey, a.signAuthor,
       );
@@ -274,7 +274,7 @@ export async function run(t) {
     const [a, b] = await createConnectedCohort({ count: 2, network: net, sodium, wasm, timeoutMs: TIMEOUT });
     try {
       const junk = bytes(100, 8);
-      const jid = b.crypto.hash(junk); // correctly content-addressed — only the descriptor is bad
+      const jid = b.crypto.blockId(a.identity.publicKey, junk);
       const stored = decodeMask(await a.request(b.peerId, typed(MsgType.STORE, encodeStoreBatch([
         { blockId: jid, descriptor: bytes(136, 1), bytes: junk }, // unsigned garbage of descriptor shape
       ]))));
@@ -307,7 +307,7 @@ export async function run(t) {
       // Correctly signed descriptor, correct blockSize, but the BYTES don't hash to the
       // claimed blockId — a content-address mismatch the holder checks before admission (§4.2).
       const goodDesc = signDescriptor(
-        sodium, { level: 0, k: 1, m: 0, blockSize: 100, tailBytes: 100, authTag: authTag(), blockIds: [b.crypto.hash(junk)] }, a.identity.publicKey, a.identity.privateKey, a.signAuthor,
+        sodium, { level: 0, k: 1, m: 0, blockSize: 100, tailBytes: 100, authTag: authTag(), blockIds: [jid] }, a.identity.publicKey, a.identity.privateKey, a.signAuthor,
       );
       const stored4 = decodeMask(await a.request(b.peerId, typed(MsgType.STORE, encodeStoreBatch([
         { blockId: id(99), descriptor: goodDesc, bytes: junk }, // blockId ≠ hash(bytes)

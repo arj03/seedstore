@@ -171,7 +171,9 @@ export async function run(t) {
     const opened = crypto.decrypt(K, 1, 0, sealed.ciphertext, sealed.authTag);
     const reread = decodeDescriptorList(opened);
     t.eq(reread.length, 2, "index decrypts and reparses");
-    t.ok(bytesEqual(crypto.hash(sealed.ciphertext), crypto.hash(sealed.ciphertext)), "block_id = content_hash(ciphertext) is stable");
+    const indexId = crypto.blockId(author.publicKey, sealed.ciphertext);
+    t.ok(bytesEqual(indexId, crypto.blockId(author.publicKey, sealed.ciphertext)), "block_id = block_hash(author, ciphertext) is stable");
+    t.ok(!bytesEqual(indexId, crypto.blockId(newKey().publicKey, sealed.ciphertext)), "…and names its author, not the bytes alone (§4.2)");
 
     // A truncated entry is a decode error, not a silently short list.
     let threw = false;

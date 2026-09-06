@@ -32,6 +32,7 @@ import { performance } from "node:perf_hooks";
 import { StorageNode, loadWasmBytes, loadSodium, PRODUCTION_BLOCK_SIZE } from "../build/host/node.js";
 import { LoopbackNetwork } from "../build/host/loopback.js";
 import { toHex, bytesEqual } from "../build/host/util.js";
+import { blockHashInput } from "../build/host/manifest-core.js";
 import { NodeFs } from "seedkernel-wasm/fs-node";
 
 const FILE_MB = Number(process.argv[2] ?? 16);
@@ -166,15 +167,22 @@ if (offerReqs) {
   const kp = sodium.crypto_sign_keypair();
   const sig = sodium.crypto_sign_detached(msg, kp.privateKey);
   const reps = Math.min(totalBlocks, 400);
+  // The holder names a block by hashing domain ‖ authorPk ‖ bytes (§4.2), not the
+  // bytes alone — price both, so the binding's share of the floor is visible.
   let h0 = performance.now();
   for (let i = 0; i < reps; i++) sodium.crypto_generichash(32, block);
+  const bareHashMs = (performance.now() - h0) / reps;
+  h0 = performance.now();
+  for (let i = 0; i < reps; i++) sodium.crypto_generichash(32, blockHashInput(kp.publicKey, block));
   const hashMs = (performance.now() - h0) / reps;
   h0 = performance.now();
   for (let i = 0; i < reps; i++) sodium.crypto_sign_verify_detached(sig, msg, kp.publicKey);
   const verifyMs = (performance.now() - h0) / reps;
   const floorMs = hashMs + verifyMs;
   console.log(`\ncrypto floor (host-side libsodium, same block size):`);
-  console.log(`  BLAKE2b/block ${fmt(hashMs, 3)} ms + Ed25519 verify ${fmt(verifyMs, 3)} ms = ${fmt(floorMs, 3)} ms → ${fmt(rate(blockSize, floorMs), 0)} MB/s`);
+  console.log(`  block-id/block ${fmt(hashMs, 3)} ms + Ed25519 verify ${fmt(verifyMs, 3)} ms = ${fmt(floorMs, 3)} ms → ${fmt(rate(blockSize, floorMs), 0)} MB/s`);
+  console.log(`  (the id's author binding is ${fmt(hashMs - bareHashMs, 3)} ms of that — a bare content hash would be ${fmt(bareHashMs, 3)} ms,`);
+  console.log(`   i.e. ${fmt((hashMs - bareHashMs) / (storeMs / Math.max(1, totalBlocks)) * 100, 1)}% of what the holder actually spends per block)`);
   console.log(`  the holder COSTS ${fmt((storeMs / Math.max(1, totalBlocks)) / floorMs, 1)}× that floor — the excess is fs + seam crossings + QuickJS,`);
   console.log(`  i.e. the part that is ours to fix if holder ingest ever becomes the limit.`);
 }

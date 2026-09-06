@@ -574,7 +574,7 @@ export async function run(t) {
     const [a, b] = await createConnectedCohort({ count: 2, network: net, sodium, wasm, config, timeoutMs: TIMEOUT });
     try {
       const bytes = file(config.blockSize, 77);
-      const bid = a.crypto.hash(bytes);
+      const bid = a.crypto.blockId(a.identity.publicKey, bytes);
       const desc = (id, sk) => signDescriptor(
         sodium, { level: 0, k: 1, m: 0, blockSize: config.blockSize, tailBytes: config.blockSize, authTag: new Uint8Array(16), blockIds: [bid] },
         id.publicKey, id.privateKey, a.signAuthor,
@@ -588,7 +588,7 @@ export async function run(t) {
       // scope. The signature verifies perfectly; the author is a stranger.
       const stranger = newKey();
       const bytes2 = file(config.blockSize, 78);
-      const bid2 = a.crypto.hash(bytes2);
+      const bid2 = a.crypto.blockId(stranger.publicKey, bytes2);
       const forged = signDescriptor(
         sodium, { level: 0, k: 1, m: 0, blockSize: config.blockSize, tailBytes: config.blockSize, authTag: new Uint8Array(16), blockIds: [bid2] },
         stranger.publicKey, stranger.privateKey, a.signAuthor,
@@ -609,7 +609,7 @@ export async function run(t) {
     const [a, b] = await createConnectedCohort({ count: 2, network: net, sodium, wasm, config, timeoutMs: TIMEOUT });
     try {
       const bytes = file(config.blockSize, 91);
-      const bid = a.crypto.hash(bytes);
+      const bid = a.crypto.blockId(a.identity.publicKey, bytes);
       const env = signDescriptor(
         sodium, { level: 0, k: 1, m: 2, blockSize: config.blockSize, tailBytes: config.blockSize, authTag: new Uint8Array(16), blockIds: [bid, bid, bid] },
         a.identity.publicKey, a.identity.privateKey, a.signAuthor,
@@ -635,7 +635,7 @@ export async function run(t) {
       const K = owner.crypto.randomKey();
       const sign = (d) => signDescriptor(sodium, d, owner.identity.publicKey, owner.identity.privateKey, owner.signAuthor);
       const at = (level, sealed, tailBytes) => {
-        const id = owner.crypto.hash(sealed.ciphertext);
+        const id = owner.crypto.blockId(owner.identity.publicKey, sealed.ciphertext);
         return { id, ciphertext: sealed.ciphertext, env: sign({ level, k: 1, m: 1, blockSize: cfg.blockSize, tailBytes, authTag: sealed.authTag, blockIds: [id, id] }) };
       };
       // Inner: a level-1 chunk. Outer: ANOTHER level-1 chunk whose plaintext is a list

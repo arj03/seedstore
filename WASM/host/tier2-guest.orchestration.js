@@ -114,6 +114,7 @@ const CFG = { ...APP, ...LOCAL };
 // host side — the guest never holds or reconstructs it. Every seam name answers a
 // Promise now, so every helper here is awaited by its callers.
 function hash(bytes) { return host.call("crypto/blake2b-256", bytes); }
+function blockHash(d, bytes) { return hash(blockHashInput(d.authorPk, bytes)); }
 const P_SEAL = "crypto/chacha20poly1305-ietf/seal";
 const P_OPEN = "crypto/chacha20poly1305-ietf/open";
 function randomKey() { const n = new Uint8Array(4); wU32(n, 0, 32); return host.call("node/random", n); }
@@ -593,8 +594,9 @@ async function encodeChunk(source, localCi, globalCi, K, level) {
   const dataBlocks = splitBlocks(ct, c.blockSize);
   const blocks = kc === 1 ? new Array(c.m + 1).fill(dataBlocks[0])
                           : [...dataBlocks, ...await rsEncode(kc, c.m, c.blockSize, dataBlocks)];
-  const ids = kc === 1 ? new Array(c.m + 1).fill(await hash(dataBlocks[0]))
-                       : await Promise.all(blocks.map((b) => hash(b)));
+  const authorPk = await identity();
+  const ids = kc === 1 ? new Array(c.m + 1).fill(await hash(blockHashInput(authorPk, dataBlocks[0])))
+                       : await Promise.all(blocks.map((b) => hash(blockHashInput(authorPk, b))));
   const d = { level, k: kc, m: c.m, blockSize: c.blockSize, tailBytes: plain.length, authTag: sealed.authTag, blockIds: ids };
   return makeChunk(d, blocks, await signChunk(d));
 }
@@ -762,10 +764,17 @@ async function runFetchTasks(byPeer, maxIds, apply) {
     for (let ri = 0; ri < results.length; ri++) {
       const { peer, slice, ids } = window[ri];
       if (!results[ri].ok) { await apply(results[ri].peer, slice, ids, null); continue; } // unreachable
-      const decoded = decodeFetchBatchRes(results[ri].bytes);
+      let decoded;
+      try { decoded = decodeFetchBatchRes(results[ri].bytes, ids.length); }
+      catch {
+        // A bad response is this holder's miss, not a failure of the whole read
+        // or repair pass. Mark it tried and let the caller use healthy holders.
+        await apply(peer, slice, ids, new Array(ids.length).fill(null));
+        continue;
+      }
       // Split the holder's answers over the ids we asked: FETCH_UNANSWERED blocks (no room
       // under the holder's cap) re-queue as a fresh task; present/absent are final verdicts
-      // for `apply`. A short/malformed response leaves an id undefined, ruled absent.
+      // for `apply`. Malformed responses were rejected as a whole above.
       const reSlice = [], reIds = [], aSlice = [], aIds = [], aBlocks = [];
       for (let i = 0; i < slice.length; i++) {
         if (decoded[i] === FETCH_UNANSWERED) { reSlice.push(slice[i]); reIds.push(ids[i]); }
@@ -789,6 +798,8 @@ async function runFetchTasks(byPeer, maxIds, apply) {
 async function gatherBlocks(descriptors, holders) {
   const c = CFG;
   const got = new Map();
+  const descriptorOf = new Map();
+  for (const d of descriptors) for (const id of d.blockIds) descriptorOf.set(toHex(id), d);
   const tried = new Map();
   const triedOf = (h) => { let s = tried.get(h); if (!s) tried.set(h, (s = new Set())); return s; };
   // Bound a FETCH sub-batch by the RESPONSE size: each present block is blockSize +
@@ -836,7 +847,7 @@ async function gatherBlocks(descriptors, holders) {
     const applyFetch = async (peer, slice, ids, blocks) => {
       const isSelf = peer === me;
       let passes = 0, misses = 0;
-      const hashes = blocks === null ? [] : await Promise.all(blocks.map((b) => b ? hash(b) : null));
+      const hashes = blocks === null ? [] : await Promise.all(blocks.map((b, i) => b ? blockHash(descriptorOf.get(slice[i]), b) : null));
       for (let i = 0; i < slice.length; i++) {
         triedOf(slice[i]).add(peer);
         if (blocks === null) continue;            // unreachable — not a §8 miss
@@ -1071,13 +1082,12 @@ let getStream = null;
 // what it describes: 0 is the file's ciphertext, ℓ > 0 an index over level ℓ−1.
 // Walk to the leaves, then sum their signed tailBytes for the file size.
 //
-// No signature check here — content-addressed block ids (§4.2) already guarantee a
-// tampered index fails its hash before being parsed. The author signature is what a
-// HOLDER checks at admission (§4.3).
+// The root has no authenticated parent. Verify its signature before trusting its
+// size, geometry or block ids; AEAD authenticates ciphertext, not tailBytes.
 async function getStart(rootEnv, K) {
-  let ds;
-  try { ds = [parseSignedDescriptor(rootEnv).descriptor]; }
-  catch (_e) { throw new Error("get: malformed root descriptor"); }
+  const root = await verifyDescriptor(rootEnv);
+  if (!root) throw new Error("get: invalid root descriptor signature or format");
+  let ds = [root.descriptor];
   while (ds[0].level > 0) {
     const above = ds[0].level;
     ds = decodeDescriptorList(await reconstructChunks(ds, K, 0)).map((env) => parseSignedDescriptor(env).descriptor);
@@ -1131,7 +1141,8 @@ async function doGet(arg) {
 // { live: Map hex → Set(peer), bytes: Map hex → one verified copy }; healing
 // re-places from `bytes` instead of re-fetching. Batched one FETCH per holder,
 // windowed by fanoutWindow(), not one round trip per (id, holder).
-async function liveHolders(ids) {
+async function liveHolders(d) {
+  const ids = d.blockIds;
   const advertised = await haveWant(ids);
   const me = await myPeer();
   const live = new Map();
@@ -1151,7 +1162,7 @@ async function liveHolders(ids) {
   const applyAudit = async (peer, slice, idBytes, blocks) => { // async: the hashes cross the seam
     const isSelf = peer === me;
     let passes = 0, misses = 0;
-    const hashes = blocks === null ? [] : await Promise.all(blocks.map((b) => b ? hash(b) : null));
+    const hashes = blocks === null ? [] : await Promise.all(blocks.map((b) => b ? blockHash(d, b) : null));
     for (let i = 0; i < slice.length; i++) {
       if (blocks === null) continue;              // unreachable — not a §8 miss
       const b = blocks[i];
@@ -1190,7 +1201,7 @@ async function heal(d, descEnv, holders, verified) {
       for (let i = 0; i < all.length; i++) {
         // Re-certify against the already-signed id (§9): a mismatch means a bad
         // input/decode — drop it, never propagate (a poisoned descriptor can't mint).
-        if (bytesEqual(await hash(all[i]), d.blockIds[i])) regenerated.set(toHex(d.blockIds[i]), all[i]);
+        if (bytesEqual(await blockHash(d, all[i]), d.blockIds[i])) regenerated.set(toHex(d.blockIds[i]), all[i]);
       }
     }
   }
@@ -1225,7 +1236,7 @@ async function repairChunk(descEnv) {
   const sd = await verifyDescriptor(descEnv);               // forged/unsigned/malformed → null (§4.3)
   if (!sd) return 0;
   const d = sd.descriptor;
-  const { live: holders, bytes: verified } = await liveHolders(d.blockIds);
+  const { live: holders, bytes: verified } = await liveHolders(d);
   // Chunk health is one number (§8, §9): loss margin against low-water mark ⌈m/2⌉,
   // both derived from the SIGNED descriptor — a mixed-geometry cohort (§4.1) repairs
   // each chunk to the count its own author signed.
@@ -1426,11 +1437,14 @@ async function admitBatch(offers, reserve = false) {
 async function acceptStoreBatch(stores) {
   // Hashes are independent. Binding admission atomically reserves quota + ids in the
   // holder index, then the independent single-record writes can overlap safely.
-  const hashes = await Promise.all(stores.map((s) => hash(s.bytes)));
-  const verdicts = new Array(stores.length).fill(VERDICT_DECLINED);
+  const parsed = stores.map((s) => {
+    try { return parseSignedDescriptor(s.descriptor).descriptor; } catch { return null; }
+  });
+  const hashes = await Promise.all(stores.map((s, i) => parsed[i] ? blockHash(parsed[i], s.bytes) : null));
+  const verdicts = parsed.map((d) => d ? VERDICT_DECLINED : VERDICT_DESCRIPTOR);
   const valid = [];
   for (let i = 0; i < stores.length; i++) {
-    if (bytesEqual(hashes[i], stores[i].blockId)) valid.push({ index: i, store: stores[i] });
+    if (hashes[i] && bytesEqual(hashes[i], stores[i].blockId)) valid.push({ index: i, store: stores[i] });
   }
   const admitted = await admitBatch(valid.map(({ store: s }) => ({
     blockId: s.blockId, descriptor: s.descriptor, size: s.bytes.length,

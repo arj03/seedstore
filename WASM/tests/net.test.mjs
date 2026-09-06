@@ -122,7 +122,7 @@ export async function run(t) {
         "a ws:// dial into the fabric's ws listener authenticates");
 
       const bytes = file(8192, 33);
-      const bid = S.crypto.hash(bytes);
+      const bid = S.crypto.blockId(idB.publicKey, bytes);
       const desc = signDescriptor(sodium, { level: 0, k: 1, m: 0, blockSize: bytes.length, tailBytes: bytes.length, authTag: new Uint8Array(16), blockIds: [bid] }, idB.publicKey, idB.privateKey, S.signAuthor);
       const stored = decodeMask(await B.request(S.peerId, typed(MsgType.STORE, encodeStoreBatch([{ blockId: bid, descriptor: desc, bytes }]))));
       t.eq(stored[0], VERDICT_ACCEPTED, "STORE lands through the ws codec");
@@ -266,7 +266,7 @@ export async function run(t) {
 
     try {
       const bytes = file(64, 21);
-      const bid = S.crypto.hash(bytes);
+      const bid = S.crypto.blockId(idB.publicKey, bytes);
 
       const have0 = await B.request(S.peerId, typed(MsgType.HAVE, encodeHaveReq([bid])));
       t.eq(decodeMask(have0)[0], VERDICT_DECLINED, "HAVE → false before the block exists (over ws)");

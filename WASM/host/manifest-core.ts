@@ -31,6 +31,9 @@ export const TAG_HEAD = 0x03;      // reserved: the §27.3 mutable file head (no
 // nonce domain (§4.4). `tailBytes` is how much of the chunk's plaintext is real —
 // replaces the old manifest `file_size`; each chunk trims by its own signed number.
 export interface Descriptor {
+  /** The author, filled in by parseSignedDescriptor from the envelope — the core
+   *  never carries it. Absent until there is an envelope to take it from. */
+  authorPk?: Uint8Array;
   level: number;        // 0 = file body, ℓ > 0 = index over level ℓ−1 (also the nonce domain)
   k: number;            // data blocks (0..k are data rows)
   m: number;            // losses this chunk survives: m parity blocks, or m extra replicas
@@ -91,7 +94,18 @@ export function parseSignedDescriptor(env: Uint8Array): SignedDescriptor {
   const authorPk = env.slice(0, 32);
   const sig = env.slice(32, 96);
   const core = env.slice(96);
-  return { authorPk, sig, core, descriptor: decodeDescriptorCore(core) };
+  const descriptor = decodeDescriptorCore(core);
+  descriptor.authorPk = authorPk;
+  return { authorPk, sig, core, descriptor };
+}
+
+/** Domain-separated block identity. The author is inseparable from the bytes,
+ *  so re-signing someone else's descriptor cannot claim their stored ids. */
+export function blockHashInput(authorPk: Uint8Array, bytes: Uint8Array): Uint8Array {
+  if (authorPk.length !== 32) throw new Error("block id: author key must be 32 bytes");
+  // ASCII "seedstore:block\0" followed by a fixed-size public key and ciphertext.
+  const domain = new Uint8Array([115,101,101,100,115,116,111,114,101,58,98,108,111,99,107,0]);
+  return concatBytes([domain, authorPk, bytes]);
 }
 
 /** Does this chunk's descriptor list the given block_id? Every peer that

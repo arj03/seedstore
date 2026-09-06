@@ -54,6 +54,10 @@ libsodium — never bundled. The guest reaches the ungated
 keeps ciphertext length-preserving for RS, and carries each detached 16-byte tag
 inside the signed descriptor. Its nonce convention and scoped
 `node/sign`/`node/verify` use are storage policy layered on the generic seam.
+A block id hashes the descriptor's author alongside the bytes (§4.2) —
+`BLAKE2b-256(ASCII("seedstore:block\0") ‖ authorPk[32] ‖ ciphertext)`, the author
+read from the signed envelope. `Crypto.hash` is the plain byte hash;
+`Crypto.blockId(authorPk, bytes)` is what names a block.
 
 **The one realm.** Storage runs its whole guest in a single confined realm
 seedkernel provides (§12.3), over its genuinely-async seam: the initiator
