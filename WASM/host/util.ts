@@ -4,19 +4,36 @@ const HEX_CHARS = "0123456789abcdef";
 const HEX_BYTES = Array.from({ length: 256 }, (_, b) => HEX_CHARS[b >> 4] + HEX_CHARS[b & 15]);
 export function toHex(b: Uint8Array): string {
   let out = "", i = 0;
-  // Convert four bytes per string operation. The multiplication keeps the high
-  // byte unsigned, including values above 0x7fffffff; pad preserves leading zeros.
-  for (; i + 4 <= b.length; i += 4) {
-    const word = b[i] * 0x1000000 + (b[i + 1] << 16) + (b[i + 2] << 8) + b[i + 3];
-    out += word.toString(16).padStart(8, "0");
-  }
+  // A table lookup per byte, four bytes per append. Cheaper than formatting an unsigned
+  // word with toString(16) and padStart, and the unroll is what carries it — QuickJS pays
+  // per append, not per lookup, so the same table one byte at a time is slower than either.
+  for (; i + 4 <= b.length; i += 4)
+    out += HEX_BYTES[b[i]] + HEX_BYTES[b[i + 1]] + HEX_BYTES[b[i + 2]] + HEX_BYTES[b[i + 3]];
   for (; i < b.length; i++) out += HEX_BYTES[b[i]];
   return out;
 }
 
+/** Nibble value PLUS ONE per ASCII code, so both 0 and the `undefined` an out-of-range
+ *  character reads back as mean "not a hex digit". A table rather than `parseInt` over a
+ *  two-character slice, which allocated a string per byte to decode every block id and
+ *  key the store handles. */
+const NIBBLE = (() => {
+  const t = new Uint8Array(128), upper = HEX_CHARS.toUpperCase();
+  for (let i = 0; i < 16; i++) {
+    t[HEX_CHARS.charCodeAt(i)] = i + 1;
+    t[upper.charCodeAt(i)] = i + 1;
+  }
+  return t;
+})();
+
 export function fromHex(hex: string): Uint8Array {
-  const out = new Uint8Array(hex.length >> 1);
-  for (let i = 0; i < out.length; i++) out[i] = parseInt(hex.substr(i * 2, 2), 16);
+  const n = hex.length >> 1, out = new Uint8Array(n);
+  // Carry a cursor rather than multiplying the index by two per byte: this runs in the
+  // guest, and QuickJS charges enough per arithmetic op for that to be worth ~15%.
+  for (let i = 0, j = 0; i < n; i++, j += 2) {
+    const hi = NIBBLE[hex.charCodeAt(j)], lo = NIBBLE[hex.charCodeAt(j + 1)];
+    out[i] = hi && lo ? ((hi - 1) << 4) | (lo - 1) : 0;
+  }
   return out;
 }
 
