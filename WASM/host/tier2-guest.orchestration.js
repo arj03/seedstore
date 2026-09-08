@@ -549,6 +549,30 @@ function sliceN(arr, size) {
   for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
   return out;
 }
+// Run each peer's groups down `width` lanes drawing from one cursor — the peer's whole
+// admitted width stays on the wire, and one slow acknowledgement holds up only its own
+// lane instead of a whole round. Refilling in COUPLED batches was measured 22% slower to
+// the live holders, and its slow tail ran windows past the 5 s handoff deadline (§12.3),
+// failing whole PUTs; one request per lane is the finest refill that same width allows.
+async function runStoreBatches(byPeer, width, send) {
+  const workers = [];
+  let failed = false, failure;
+  for (const [peer, groups] of byPeer) {
+    let next = 0;
+    for (let lane = 0; lane < Math.min(width, groups.length); lane++) {
+      workers.push((async () => {
+        while (!failed && next < groups.length) {
+          const group = groups[next++];
+          try { await send(peer, group); }
+          catch (err) { if (!failed) { failed = true; failure = err; } }
+        }
+      })());
+    }
+  }
+  // Drain started lanes even on error; none may outlive this placement phase.
+  await Promise.all(workers);
+  if (failed) throw failure;
+}
 // Group items so each group's summed sizeOf stays under `maxBytes` (a single
 // over-cap item still gets its own group). Used to bound a batched STORE message.
 function batchBytes(items, sizeOf, maxBytes) {
@@ -639,8 +663,8 @@ async function placeChunksBatched(jobs, what) {
     if (byPeer.size === 0) break;
 
     // Lock-step fan-out: ALL of this round's OFFERs complete before its STOREs (no
-    // optimistic STORE — §6). STORE phase windows fanoutWindow() sub-batches per peer
-    // (peers concurrent → peak W·peers) so a holder's many capped messages pipeline.
+    // optimistic STORE — §6). STORE lanes then replenish independently within
+    // fanoutWindow() per peer (peers concurrent → peak W·peers).
 
     // ── OFFER phase ── every peer's slices form ONE cohort-wide list, windowed like the
     // FETCH plan: an OFFER slice is a full-cap message too, so peers × slices in flight
@@ -678,39 +702,33 @@ async function placeChunksBatched(jobs, what) {
       }
     }
 
-    // ── STORE phase ── the accepted blocks, byte-bounded per peer, fanned out in
-    // windows of fanoutWindow() per peer: each round packs up to W of a peer's STORE
-    // sub-batches into one netSendMany (all peers concurrent → peak W·peers).
+    // ── STORE phase ── the accepted blocks, byte-bounded per peer, then one request
+    // per lane across fanoutWindow() lanes per peer, each lane refilling on its own
+    // ack. Peak is still W per peer, inside the realm-wide byte AND call ceilings.
     const storeGroups = new Map(); // peer → [group]
+    const storeEntryBytes = ({ ch, i }) => 40 + ch.descriptor.length + ch.slotBlocks[i].length;
+    let storeMsgBytes = 0;
     for (const [peer, accepted] of acceptedByPeer) {
-      storeGroups.set(peer, batchBytes(accepted, ({ ch, i }) => 40 + ch.descriptor.length + ch.slotBlocks[i].length, maxBytes));
+      const groups = batchBytes(accepted, storeEntryBytes, maxBytes);
+      storeGroups.set(peer, groups);
+      for (const group of groups) storeMsgBytes = Math.max(storeMsgBytes, 4 + group.reduce((sum, entry) => sum + storeEntryBytes(entry), 0));
     }
-    const putW = fanoutWindow(storeGroups.size, blockMsgBytes());
-    for (let base = 0; ; base += putW) {
-      const reqs = [], groupOf = [];
-      for (const [peer, groups] of storeGroups) {
-        for (let s = base; s < base + putW && s < groups.length; s++) {
-          const group = groups[s];
-          // Parts, not a concatenated batch: netSend writes the blocks into the
-          // outgoing frame itself, so the ciphertext is never copied to a second buffer.
-          reqs.push({ peer, type: MSG_STORE, payload: encodeStoreBatchParts(group.map(({ ch, i }) => ({ blockId: ch.slotIds[i], descriptor: ch.descriptor, bytes: ch.slotBlocks[i] }))) });
-          groupOf.push(group);
-        }
+    const callBudget = typeof HOST === "object" && HOST ? HOST.maxOutstandingHostCalls : 0;
+    const callWidth = callBudget > 0 ? Math.max(1, Math.floor((callBudget - 1) / Math.max(1, storeGroups.size))) : CFG.fanoutWindow;
+    const putW = Math.min(fanoutWindow(storeGroups.size, storeMsgBytes), callWidth);
+    await runStoreBatches(storeGroups, putW, async (peer, group) => {
+      // Parts, not a concatenated batch: netSend writes the blocks into the outgoing
+      // frame itself, so the ciphertext is never copied to a second buffer.
+      const bytes = await netSend(peer, MSG_STORE, encodeStoreBatchParts(group.map(({ ch, i }) => ({ blockId: ch.slotIds[i], descriptor: ch.descriptor, bytes: ch.slotBlocks[i] }))));
+      const stored = bytes !== null ? decodeMask(bytes) : [];
+      for (let j = 0; j < group.length; j++) {
+        if (stored[j] === VERDICT_ACCEPTED) { group[j].ch.placedPeer[group[j].i] = peer; }
+        else if (stored[j] === VERDICT_QUOTA) diag.quota++;
+        else if (stored[j] === VERDICT_SIBLING) diag.sibling++;
+        else if (stored[j] === VERDICT_DESCRIPTOR) diag.descriptor++;
+        else if (stored[j] === VERDICT_ERROR) diag.error++;
       }
-      if (reqs.length === 0) break;
-      const results = await netSendMany(reqs);
-      for (let ri = 0; ri < results.length; ri++) {
-        const group = groupOf[ri];
-        const stored = results[ri].ok ? decodeMask(results[ri].bytes) : [];
-        for (let j = 0; j < group.length; j++) {
-          if (stored[j] === VERDICT_ACCEPTED) { group[j].ch.placedPeer[group[j].i] = results[ri].peer; }
-          else if (stored[j] === VERDICT_QUOTA) diag.quota++;
-          else if (stored[j] === VERDICT_SIBLING) diag.sibling++;
-          else if (stored[j] === VERDICT_DESCRIPTOR) diag.descriptor++;
-          else if (stored[j] === VERDICT_ERROR) diag.error++;
-        }
-      }
-    }
+    });
   }
 
   for (const ch of jobs) {

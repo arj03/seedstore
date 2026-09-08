@@ -36,6 +36,54 @@ function file(n, seed = 1) {
 }
 
 export async function run(t) {
+  t.group("STORE lanes keep the whole width in flight and refill independently");
+  {
+    const source = readFileSync(new URL("../build/host/tier2-guest.js", import.meta.url), "utf8");
+    const ctx = vm.createContext({ APP: {}, LOCAL: {}, Uint8Array });
+    vm.runInContext(source, ctx);
+    const groups = new Map(["slow", "fast"].map(peer => [peer, Array.from({ length: 80 }, (_, i) => i)]));
+    const active = new Map(), peak = new Map(), seen = new Map();
+    let release;
+    const gate = new Promise(resolve => { release = resolve; });
+    const done = ctx.runStoreBatches(groups, 15, async (peer, group) => {
+      active.set(peer, (active.get(peer) ?? 0) + 1);
+      peak.set(peer, Math.max(peak.get(peer) ?? 0, active.get(peer)));
+      const items = seen.get(peer) ?? []; items.push(group); seen.set(peer, items);
+      if (peer === "slow" && group === 0) await gate;
+      else await Promise.resolve();
+      active.set(peer, active.get(peer) - 1);
+    });
+    try {
+      for (let i = 0; i < 100; i++) await Promise.resolve();
+      // The point of the lanes: concurrency is the admitted width, not one request.
+      t.ok([...peak.values()].every(n => n === 15), "every holder keeps its whole admitted width in flight at once");
+      t.ok(seen.get("slow").length > 15, "lanes refill past the width while one lane on the same holder is stalled");
+      t.eq(seen.get("fast").length, 80, "another holder finishes without waiting for the stalled holder");
+    } finally { release(); await done; }
+    t.ok([...seen.values()].every(items => items.length === 80 && new Set(items).size === 80), "every group is sent exactly once");
+  }
+
+  t.group("STORE failures stop refill and drain already-started lanes");
+  {
+    const source = readFileSync(new URL("../build/host/tier2-guest.js", import.meta.url), "utf8");
+    const ctx = vm.createContext({ APP: {}, LOCAL: {}, Uint8Array });
+    vm.runInContext(source, ctx);
+    let fail, release, started = 0, settled = false;
+    const fault = new Error("injected STORE failure");
+    const failing = new Promise((_, reject) => { fail = reject; });
+    const pending = new Promise(resolve => { release = resolve; });
+    const done = ctx.runStoreBatches(new Map([["holder", Array.from({ length: 80 }, (_, i) => i)]]), 15, async (_, group) => {
+      started++;
+      await (group === 0 ? failing : pending);
+    }).then(() => { settled = true; return null; }, err => { settled = true; return err; });
+    fail(fault);
+    for (let i = 0; i < 20; i++) await Promise.resolve();
+    t.ok(!settled, "failure waits for the other started lanes to finish");
+    release();
+    t.eq(await done, fault, "the original failure reaches the caller");
+    t.eq(started, 15, "a failed placement does not refill pending work");
+  }
+
   const sodium = await loadSodium();
   const wasm = await loadWasmBytes();
   // RS(2,2): every chunk places n = k + m = 4 distinct blocks; a 6-node cohort

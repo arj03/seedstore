@@ -25,9 +25,16 @@
 //
 // NOTE each PUT permanently costs every holder ~fileSize bytes of its §14 quota (no
 // dedup on re-put). Keep --puts low against live nodes.
+//
+// NOTE one streamed window is ONE guest invocation, bounded by the kernel's 5 s
+// handoff deadline (guest execution AND every handoff's wall clock). A 24 MB window
+// at ~10 MB/s runs ~3.4 s against it, so a slow link fails the PUT with "handoff
+// deadline exhausted" — raise --guest-deadline, NOT --timeout, which is a different
+// clock. Lift it before any throughput A/B: it kills slow runs, and an arm whose slow
+// runs disappear looks FASTER than one that completes them.
 
 import { readFile } from "node:fs/promises";
-import { randomBytes } from "node:crypto";
+import { randomBytes, timingSafeEqual } from "node:crypto";
 
 import { WsNetwork } from "seedkernel-wasm/net-ws";
 import { parsePeerRef } from "seedkernel-wasm/peer-addr";
@@ -261,8 +268,8 @@ for (let i = 0; i < gets && tokens.length; i++) {
   try {
     const out = await node.get(tok.root, tok.key);
     const ms = now() - t0;
-    const ok = out.length === data.length;
-    console.log(`GET #${i + 1}: ${ms.toFixed(0)} ms — ${mbs(out.length, ms)} MB/s ${ok ? "(bytes match)" : "(LENGTH MISMATCH!)"}`);
+    const ok = out.length === data.length && timingSafeEqual(out, data);
+    console.log(`GET #${i + 1}: ${ms.toFixed(0)} ms — ${mbs(out.length, ms)} MB/s ${ok ? "(bytes match)" : "(CONTENT MISMATCH!)"}`);
     report(e, ms, "recv");
   } catch (err) {
     console.log(`GET #${i + 1} FAILED after ${(now() - t0).toFixed(0)} ms: ${err?.message ?? err}`);

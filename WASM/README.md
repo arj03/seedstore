@@ -367,7 +367,7 @@ path; same-machine tabs connect on host candidates without it.)
 | &nbsp;&nbsp;↳ chacha20-poly1305 seal | ~0.25 s | ~405 MB/s | detached tag lives in the descriptor |
 | &nbsp;&nbsp;↳ RS encode (SIMD) | ~0.07 s | ~1.5 GB/s | |
 | &nbsp;&nbsp;↳ BLAKE2b block-ids | ~0.21 s | ~752 MB/s | hashes all *n* blocks (1.6×) |
-| **read** — all data present (systematic) | ~0.03 s | ~3.2 GB/s | common path — a concat, no GF |
+| **read** — all data present (systematic) | ~0.04 s | ~2.7 GB/s | common path — a concat, no GF |
 | **read** — one block missing (decode, SIMD) | ~0.06 s | ~1.7 GB/s | the common failure, §6/§21 |
 
 Three optimizations got here. (1) The codec multiplies via a precomputed 256×256
@@ -387,14 +387,16 @@ tests/bench.mjs` reproduces these.
 many blocks. WebRTC physical messages stay capped at 48 KiB, while the channel
 adapter exposes a length-framed byte stream so a 256 KiB encrypted record can be
 split and reassembled without paying another request round trip per physical
-chunk. The coordinator batches blocks into those records and `fanoutWindow` keeps
-records per holder in flight. Over a 10 ms-RTT link (4 MB, RS(2,2), 32 KiB blocks,
-256 KiB logical batches split into 48 KiB physical messages, window 32):
+chunk. The coordinator batches blocks into those records; `fanoutWindow` sets how
+many records per holder ride at once, and each of those slots refills on **its
+own** acknowledgement rather than waiting on a round of siblings (see the WAN note
+below). Over a 10 ms-RTT link (4 MB, RS(2,2), 32 KiB blocks, 256 KiB logical
+batches split into 48 KiB physical messages, window 32):
 
 | | time | rate | |
 |---|---:|---:|---|
-| **PUT** | ~0.53 s | ~7.5 MB/s | ships the 2× erasure overhead — RS(2,2) is 2 data + 2 parity |
-| **GET** | ~0.26 s | ~15.3 MB/s | downloads any *k* of *n* — 1× the file |
+| **PUT** | ~0.51 s | ~7.9 MB/s | ships the 2× erasure overhead — RS(2,2) is 2 data + 2 parity |
+| **GET** | ~0.24 s | ~16.6 MB/s | downloads any *k* of *n* — 1× the file |
 
 `node tests/bench-net.mjs 10 4 32 256 48 32` reproduces this in a fresh W=32
 process (omit the final `32` to sweep the window); the
@@ -403,6 +405,40 @@ request/response costs the full RTT, while its physical chunks share that delive
 delay as they do on an ordered byte stream. (The old ~11/~17 MB/s figures measured a
 host-side delay that charged only the inbound request, not the response.) Over a
 real browser↔browser WebRTC link the `p2p.html` demo reports ~13 MB/s both ways.
+
+Over a real WAN link — two remote holders, RS(1,1), 256 KiB blocks, 512 KiB batches,
+16 connections per holder, 24 MB streaming window, 50 MB per run:
+
+| | rate | |
+|---|---:|---|
+| **PUT** | ~10.3 MB/s wire | 5.1 MB/s of file — RS(1,1) ships 2× |
+| **GET** | ~14 MB/s | |
+
+`node --experimental-websocket scripts/p2p-cli.mjs --peers … --size 50 --timeout 30000`
+reproduces it against live nodes.
+
+The lever there is not the window's *width* — 31 messages per peer at that geometry,
+clamped by the realm's outstanding-call byte budget — but how its slots **refill**.
+Lock-step rounds let one slow holder idle every other slot in the round; giving each slot
+its own lane over a shared cursor (`runStoreBatches`) measured **+22%**, paired and
+order-interleaved on the same holders, and removed a slow tail that was failing whole PUTs
+on the deadline below.
+
+**The two benches answer different questions.** `bench-net.mjs` models a fixed per-message
+delay with no bandwidth limit or loss, so every message costs one RTT and a round of *W*
+lands together — refill discipline pays only where acknowledgement times *vary*, and a
+fixed delay has no stragglers to strand a round. What it does see is guest CPU, at close
+to full value: the table above moved **+7% PUT / +10% GET on the `toHex` work alone**
+(revert `host/util.ts` and rebuild to check), which the live link does not show. Price
+guest CPU here; judge wire behaviour on a live cohort.
+
+**A streamed window is one guest invocation, and it is deadline-bound.** seedkernel gives
+each invocation `DEFAULT_GUEST_DEADLINE_MS` (5 s), covering guest execution *and* every
+handoff's wall clock. A 24 MB window at ~10 MB/s runs ~3.4 s against it; overrunning fails
+the whole PUT with `guest: handoff deadline exhausted before host.call`. That is not the
+request timeout — raise `guestDeadlineMs` (p2p-cli `--guest-deadline`), not `--timeout`.
+Nothing derives the window from it (`windowTargetBytes` comes from `realmMemoryBytes`,
+~/3), so widening the window or running a slower link needs the deadline raised to match.
 
 `node tests/bench-holder.mjs 16 256 1 1 disk` isolates holder admission and
 durable STORE work on a real filesystem. Its capacity comparison uses total holder
