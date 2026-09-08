@@ -5,13 +5,24 @@
 // policy is the confined holder's, covered in protocol.test.mjs.
 
 import { Crypto, LEVEL_BODY } from "../build/host/crypto.js";
-import { bytesEqual } from "../build/host/util.js";
+import { bytesEqual, toHex } from "../build/host/util.js";
 
 import { ensureSodium, newKey } from "./helpers.mjs";
 
 export async function run(t) {
   const sodium = await ensureSodium();
   const crypto = new Crypto(sodium);
+
+  t.group("util.toHex: unsigned words, leading zeros, tails and byte views");
+  {
+    const data = Uint8Array.from({ length: 272 }, (_, i) => i & 255);
+    const cases = [new Uint8Array(33), new Uint8Array(35).fill(255), data];
+    for (let n = 0; n <= 67; n++) cases.push(data.subarray(n % 8, n % 8 + n));
+    for (const bytes of cases) {
+      t.eq(toHex(bytes), Buffer.from(bytes).toString("hex"),
+        "hex preserves " + bytes.length + " bytes at offset " + bytes.byteOffset);
+    }
+  }
 
   t.group("crypto.hash: content hash is BLAKE2b-256 (§4.2)");
   {

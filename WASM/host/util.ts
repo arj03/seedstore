@@ -3,9 +3,15 @@
 const HEX_CHARS = "0123456789abcdef";
 const HEX_BYTES = Array.from({ length: 256 }, (_, b) => HEX_CHARS[b >> 4] + HEX_CHARS[b & 15]);
 export function toHex(b: Uint8Array): string {
-  const chars: string[] = new Array(b.length);
-  for (let i = 0; i < b.length; i++) chars[i] = HEX_BYTES[b[i]];
-  return chars.join("");
+  let out = "", i = 0;
+  // Convert four bytes per string operation. The multiplication keeps the high
+  // byte unsigned, including values above 0x7fffffff; pad preserves leading zeros.
+  for (; i + 4 <= b.length; i += 4) {
+    const word = b[i] * 0x1000000 + (b[i + 1] << 16) + (b[i + 2] << 8) + b[i + 3];
+    out += word.toString(16).padStart(8, "0");
+  }
+  for (; i < b.length; i++) out += HEX_BYTES[b[i]];
+  return out;
 }
 
 export function fromHex(hex: string): Uint8Array {
