@@ -87,8 +87,7 @@ export async function run(t) {
       const rt = await bootNodeShell({
         policyJson: JSON.stringify({ authors: [toHex(authorId)] }),
         dir: shellDir, identity: shellIdentity,
-        channels: net.view(toHex(shellIdentity.publicKey)),
-        listen: { host: "127.0.0.1", port: 0 },
+        transport: { channels: net.view(toHex(shellIdentity.publicKey)), listen: { host: "127.0.0.1", port: 0 } },
         timeoutMs: TIMEOUT,
       });
       shell = rt.shell;
@@ -129,8 +128,8 @@ export async function run(t) {
       const shell2Id = generateKeyPair(sodium);
       const { shell: shell2 } = await bootNodeShell({
         policyJson: JSON.stringify({ authors: [toHex(generateKeyPair(sodium).publicKey)] }),
-        dir: shell2Dir, identity: shell2Id, channels: net.view(toHex(shell2Id.publicKey)),
-        listen: { host: "127.0.0.1", port: 0 },
+        dir: shell2Dir, identity: shell2Id,
+        transport: { channels: net.view(toHex(shell2Id.publicKey)), listen: { host: "127.0.0.1", port: 0 } },
       });
       let refused = false;
       try { await shell2.loadBundle(bundlePath); } catch { refused = true; }
@@ -170,7 +169,7 @@ export async function run(t) {
       const shellId = generateKeyPair(sodium);
       const rt = await bootNodeShell({
         policyJson: JSON.stringify({ authors: [toHex(authorId)] }),
-        dir: shellDir, identity: shellId, channels: net.view(toHex(shellId.publicKey)),
+        dir: shellDir, identity: shellId, transport: { channels: net.view(toHex(shellId.publicKey)) },
         timeoutMs: TIMEOUT,
       });
       shell = rt.shell;

@@ -61,8 +61,7 @@ export async function run(t) {
     const identity = generateKeyPair(sodium);
     const { shell, transport } = await bootNodeShell({
       policyJson, dir, identity,
-      channels: net.view(toHex(identity.publicKey)),
-      listen: { host: "127.0.0.1", port: 0 },
+      transport: { channels: net.view(toHex(identity.publicKey)), listen: { host: "127.0.0.1", port: 0 } },
       timeoutMs: TIMEOUT,
     });
     await transport.start(); // bind the loopback port the cohort dials
