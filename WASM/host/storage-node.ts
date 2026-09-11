@@ -162,7 +162,8 @@ export interface StorageNodeOptions {
    *  transport guest config; call `setContactSecret` to rotate it after boot. */
   contactSecret?: Uint8Array;
   /** Optional network key — which network this node belongs to (an isolation
-   *  boundary, not a gate; §12.6). Absent ⇒ the public network. */
+   *  boundary, not a gate; seedkernel §12.6.3). It is installation-local transport
+   *  guest config, like the contact secret. Absent ⇒ the public network. */
   networkKey?: Uint8Array;
   /** Optional peer whitelist — 32-byte channel keys this node will talk to,
    *  supplied to the transport in LOCAL (seedkernel §12.6.3). A lint, not a gate.
@@ -496,9 +497,6 @@ export async function bootTransportShell(
   const fs = opts.fs ?? new MemoryFs();
   const { shell, transport } = await bootShell({
     sodium: opts.sodium, identity: opts.identity, fs,
-    // Top-level (not under `transport`) since it must reach both the adapter and
-    // the shell's link signing scope (seedkernel §12.6).
-    networkKey: opts.networkKey,
     createRealm: opts.createRealm, now: opts.now,
     // This node's network, whole (seedkernel §12.6): the sockets AND the signed
     // program that drives them, one object because they are one decision — the blob
@@ -515,6 +513,9 @@ export async function bootTransportShell(
       // ride the LOAD as its LOCAL config. JSON, so omit absent values and spell peer
       // ids as hex strings.
       config: {
+        ...(opts.networkKey === undefined
+          ? {}
+          : { networkKey: toHex(opts.networkKey) }),
         ...(opts.contactSecret === undefined
           ? {}
           : { contactSecret: toHex(opts.contactSecret) }),
