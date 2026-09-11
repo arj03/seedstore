@@ -18,8 +18,6 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { bootNodeShell } from "seedkernel-wasm/shell-node";
-import { verifyBundle } from "seedkernel-wasm/bundle";
-import { transportBundleBytes } from "seedkernel-wasm/transport-bundle";
 import {
   loadSodium, generateKeyPair, LoopbackNetwork, createConnectedCohort,
 } from "../build/host/node.js";
@@ -40,16 +38,8 @@ function file(n, seed = 1) {
   return out;
 }
 
-/** The transport bundle's author — derived from the artifact, never restated —
- *  so the policy can admit it for the transport role. */
-function transportAuthorHex(sodium) {
-  const bytes = transportBundleBytes();
-  return toHex(verifyBundle(sodium, bytes).author);
-}
-
 export async function run(t) {
   const sodium = await loadSodium();
-  const transportHex = transportAuthorHex(sodium);
   const author = generateKeyPair(sodium);
   const bundleDir = mkdtempSync(join(tmpdir(), "seedstore-bundle-"));
   const bundlePath = join(bundleDir, "seedstore.skb");
@@ -59,10 +49,7 @@ export async function run(t) {
   // The StorageNode cohort loads the SAME signed bundle the shells load, so every node
   // derives the one author signing scope and a descriptor one signs verifies on another.
   const bundleBlob = new Uint8Array(readFileSync(bundlePath));
-  const policyJson = JSON.stringify({
-    authors: [toHex(authorId)],
-    grants: { link: [transportHex] },
-  });
+  const policyJson = JSON.stringify({ authors: [toHex(authorId)] });
   const tmpDirs = [bundleDir];
 
   // Boot a generic shell that both initiates and holds: it loads the bundle and

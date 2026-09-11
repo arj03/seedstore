@@ -173,8 +173,8 @@ export interface StorageNodeOptions {
    *  fan-out. */
   connsPerPeer?: number;
   /** The signed transport bundle blob. Defaults to the one shipped in the
-   *  seedkernel artifact; an operator who pins a different transport author
-   *  builds their own. Only read when StorageNode builds its own runtime. */
+   *  seedkernel artifact; an operator selecting a different transport passes
+   *  its blob here. Only read when StorageNode builds its own runtime. */
   transportBlob?: Uint8Array;
   /** Override the cohort's signing scope author: sign descriptors under this
    *  author instead of the loaded bundle's (used when joining a cohort whose
@@ -500,14 +500,13 @@ export async function bootTransportShell(
     createRealm: opts.createRealm, now: opts.now,
     // This node's network, whole (seedkernel §12.6): the sockets AND the signed
     // program that drives them, one object because they are one decision — the blob
-    // whose author is PINNED is the blob that gets loaded.
+    // selected here is the transport installed at boot.
     transport: {
       channels: opts.channels,
       listen: opts.listen,
       wsListen: opts.wsListen,
-      // Also PINS the transport slot to this blob's own author — no other
-      // transport-role bundle may claim the slot on this node. Defaults to the
-      // kernel-shipped artifact.
+      // Selecting these bytes authorizes them as the transport; a later change
+      // must replace this slot explicitly. Defaults to the kernel-shipped artifact.
       bundle: opts.transportBlob,
       // Policies of the signed transport program, not socket-driver facts, so they
       // ride the LOAD as its LOCAL config. JSON, so omit absent values and spell peer
@@ -532,7 +531,7 @@ export async function bootTransportShell(
     },
     // The one admission branch that's ours: the operator handing us a bundle IS
     // the trust decision (manifest sig + module hashes are still verified);
-    // the transport author pin and revocation/downgrade guard are bootShell's/the shell's.
+    // transport selection and the revocation/downgrade guard are bootShell's.
     admit: () => true,
   });
   return { shell, transport: transport!, identity: opts.identity };

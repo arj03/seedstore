@@ -5,7 +5,7 @@
 // loopback fabric: proof storage rides the runtime as signed content, never
 // baked into the binary.
 //
-// The shell's network is itself a signed bundle: `boot()` admits the kernel's
+// The shell's network is itself a signed bundle: the boot installs the kernel's
 // transport bundle, standing the TransportHost driver up over a per-node view
 // of the shared LoopbackNetwork fabric — exactly as a real-sockets node would.
 //
@@ -21,8 +21,6 @@ import { fileURLToPath } from "node:url";
 // where only the shell is wanted — the adapter is the platform's now, so it comes back
 // beside the shell rather than on it.
 import { bootNodeShell } from "seedkernel-wasm/shell-node";
-import { verifyBundle } from "seedkernel-wasm/bundle";
-import { transportBundleBytes } from "seedkernel-wasm/transport-bundle";
 import {
   loadSodium, generateKeyPair, LoopbackNetwork, createConnectedCohort,
 } from "../build/host/node.js";
@@ -48,13 +46,6 @@ function file(n, seed = 1) {
   return out;
 }
 
-/** The transport bundle's author — derived from the artifact, never restated —
- *  so the policy can admit it for the transport role. */
-function transportAuthorHex(sodium) {
-  const bytes = transportBundleBytes();
-  return toHex(verifyBundle(sodium, bytes).author);
-}
-
 /** Wire one shell's channel adapter to one storage node's (destinations + dial).
  *  The adapter is the platform's — the shell does not carry one — so it is
  *  passed in beside the peer id it belongs to. */
@@ -66,7 +57,6 @@ async function link(shell, shellNet, shellPeerId, node) {
 
 export async function run(t) {
   const sodium = await loadSodium();
-  const transportHex = transportAuthorHex(sodium);
 
   t.group("shell: a generic seedkernel-shell runs the seedstore guest end-to-end (step 7)");
   {
@@ -95,10 +85,7 @@ export async function run(t) {
       // A cohort is mutual, so both sides receive an address and authenticate.
       const shellIdentity = generateKeyPair(sodium);
       const rt = await bootNodeShell({
-        policyJson: JSON.stringify({
-          authors: [toHex(authorId)],
-          grants: { link: [transportHex] },
-        }),
+        policyJson: JSON.stringify({ authors: [toHex(authorId)] }),
         dir: shellDir, identity: shellIdentity,
         channels: net.view(toHex(shellIdentity.publicKey)),
         listen: { host: "127.0.0.1", port: 0 },
@@ -141,10 +128,7 @@ export async function run(t) {
       const shell2Dir = mkdtempSync(join(tmpdir(), "seedstore-shell2-"));
       const shell2Id = generateKeyPair(sodium);
       const { shell: shell2 } = await bootNodeShell({
-        policyJson: JSON.stringify({
-          authors: [toHex(generateKeyPair(sodium).publicKey)],
-          grants: { link: [transportHex] },
-        }),
+        policyJson: JSON.stringify({ authors: [toHex(generateKeyPair(sodium).publicKey)] }),
         dir: shell2Dir, identity: shell2Id, channels: net.view(toHex(shell2Id.publicKey)),
         listen: { host: "127.0.0.1", port: 0 },
       });
@@ -185,10 +169,7 @@ export async function run(t) {
       await buildBundle(loPath, author, sodium, build, 3);
       const shellId = generateKeyPair(sodium);
       const rt = await bootNodeShell({
-        policyJson: JSON.stringify({
-          authors: [toHex(authorId)],
-          grants: { link: [transportHex] },
-        }),
+        policyJson: JSON.stringify({ authors: [toHex(authorId)] }),
         dir: shellDir, identity: shellId, channels: net.view(toHex(shellId.publicKey)),
         timeoutMs: TIMEOUT,
       });

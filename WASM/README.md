@@ -145,7 +145,7 @@ npm test           # build + run the full test suite (Node); `bun tests/run.mjs`
 
 A node is the generic seedkernel **shell** plus two signed bundles: the
 kernel-shipped **transport bundle** (the signed program that IS the node's
-network — the shell admits it for the transport role and stands its driver up)
+network — the shell installs it at boot and stands its driver up)
 and the signed seed store **bundle**. First build the bundle once (the offline
 producer holds the app author key):
 
@@ -154,13 +154,12 @@ npm run build:bundle      # → ./bundle/ (manifest + codec/reputation wasm + in
                           #   signed by ./seedstore-author.key (minted on first run; keep it secret)
 ```
 
-The shell admits content only from authors named in its policy file
+The shell admits apps only from authors named in its policy file
 (seedkernel §12.5). Take the author public key it printed (`author …`) and allow
-it — the transport role needs the transport author's key too (ask the shell for
-it, or omit `roles` and the node boots without a network):
+it; the transport is selected at boot and needs no entry:
 
 ```sh
-echo '{ "authors": ["<author-pubkey-hex>"], "roles": { "transport": ["<transport-author-hex>"] } }' > allowed-keys.json
+echo '{ "authors": ["<author-pubkey-hex>"] }' > allowed-keys.json
 ```
 
 Now run the shell from the seedkernel checkout. A **serving** node that has loaded

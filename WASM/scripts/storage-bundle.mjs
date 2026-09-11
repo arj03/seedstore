@@ -41,8 +41,8 @@ export function authorKeysFor(sodium, edSk) {
 
 // The HOST services the storage guest reaches, EXACTLY (`guest.requires`): a
 // `host.call` naming a host method is refused unless the method's SERVICE is in this
-// list. Each one is a privilege an operator grants — `node` (sign/verify scoped to this
-// bundle's (author, app), identity, random), `fs`, `clock`.
+// list. Each one is a host service the seam wires for this slot — `node` (sign/verify
+// scoped to this bundle's (author, app), identity, random), `fs`, `clock`.
 //
 // Pure transforms (BLAKE2b, ChaCha20-Poly1305, and this bundle's own
 // codec/reputation modules) are not grants and are never listed here.
