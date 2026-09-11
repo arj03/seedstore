@@ -35,8 +35,8 @@ type Transport = NonNullable<BootResult["transport"]>;
 //
 // Peers and cohort readiness are the transport GUEST's — its address book dies with
 // its realm — so they are claim calls on the id that bundle claims, through the same
-// door a co-resident guest reaches with `host.call`. `OpArgs` is that bundle's own
-// framing, which the shell passes through and never reads.
+// door a co-resident guest reaches with `host.call`. `OpArgs` also encodes kernel link events; these service ops use it as optional
+// application framing, which the shell passes through and never reads.
 
 /** One op to the transport, with the shell's caller-id prefix. Throws when nothing
  *  claims the id — a node with no transport bundle, which is a legitimate
