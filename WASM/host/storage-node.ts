@@ -157,6 +157,13 @@ export interface StorageNodeOptions {
   channels?: ChannelFactoryLike;
   listen?: { host: string; port: number };
   wsListen?: { host: string; port: number };
+  /** Silence the kernel driver's link-down diagnostic (seedkernel
+   *  `TransportHostOptions.suppressLinkLog`). Left OFF in production on purpose: a
+   *  cohort that cannot reach its peers should say so on stderr, which is the only
+   *  thing a `p2p-cli` run reporting "only 0/N peers linked" otherwise leaves
+   *  unexplained. Tests set it, because tearing cohorts down is what they DO and the
+   *  `truncated` line per peer per shutdown buries the assertions. */
+  suppressLinkLog?: boolean;
   /** Optional deployment secret — the gate a caller must produce before this
    *  node's inbound side opens (seedkernel §12.6.3). It is installation-local
    *  transport guest config; call `setContactSecret` to rotate it after boot. */
@@ -283,7 +290,8 @@ export class StorageNode {
         return { publicKey: kp.publicKey, privateKey: kp.privateKey };
       })(),
       fs: opts.fs, channels: opts.channels,
-      listen: opts.listen, wsListen: opts.wsListen, networkKey: opts.networkKey,
+      listen: opts.listen, wsListen: opts.wsListen, suppressLinkLog: opts.suppressLinkLog,
+      networkKey: opts.networkKey,
       contactSecret: opts.contactSecret, admitPeers: opts.admitPeers,
       connsPerPeer: opts.connsPerPeer, timeoutMs: opts.timeoutMs,
       transportBlob: opts.transportBlob,
@@ -487,6 +495,7 @@ export async function bootTransportShell(
     fs?: Fs; channels?: ChannelFactoryLike;
     listen?: { host: string; port: number };
     wsListen?: { host: string; port: number };
+    suppressLinkLog?: boolean;
     networkKey?: Uint8Array; contactSecret?: Uint8Array;
     admitPeers?: Uint8Array[]; connsPerPeer?: number;
     timeoutMs?: number; transportBlob?: Uint8Array;
@@ -505,6 +514,7 @@ export async function bootTransportShell(
       channels: opts.channels,
       listen: opts.listen,
       wsListen: opts.wsListen,
+      suppressLinkLog: opts.suppressLinkLog,
       // Selecting these bytes authorizes them as the transport; a later change
       // must replace this slot explicitly. Defaults to the kernel-shipped artifact.
       bundle: opts.transportBlob,

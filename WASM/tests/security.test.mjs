@@ -17,7 +17,7 @@ export async function run(t) {
   const sodium = await loadSodium(), wasm = await loadWasmBytes();
   const crypto = new Crypto(sodium);
   const net = new LoopbackNetwork();
-  const nodes = await createConnectedCohort({ count: 3, network: net, sodium, wasm,
+  const nodes = await createConnectedCohort({ suppressLinkLog: true, count: 3, network: net, sodium, wasm,
     config: { k: 1, m: 1, blockSize: 1024 }, timeoutMs: 200 });
   const [owner, attacker, holder] = nodes;
   const sign = (node, d) => signDescriptor(sodium, d, node.identity.publicKey, node.identity.privateKey, owner.signAuthor);

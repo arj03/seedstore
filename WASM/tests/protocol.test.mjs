@@ -122,7 +122,7 @@ export async function run(t) {
   t.group("a cold holder indexes more records than the host-call concurrency cap");
   {
     const net = new LoopbackNetwork();
-    const [a, b] = await createConnectedCohort({ count: 2, network: net, sodium, wasm, timeoutMs: TIMEOUT });
+    const [a, b] = await createConnectedCohort({ suppressLinkLog: true, count: 2, network: net, sodium, wasm, timeoutMs: TIMEOUT });
     try {
       // The kernel admits 256 unresolved host calls per realm. The old cold-index
       // path launched one fs/size call per record in a single Promise.all, so record
@@ -141,7 +141,7 @@ export async function run(t) {
   t.group("large OFFER batches preserve admission decisions across verification windows");
   {
     const net = new LoopbackNetwork();
-    const [a, b] = await createConnectedCohort({ count: 2, network: net, sodium, wasm, timeoutMs: 2000 });
+    const [a, b] = await createConnectedCohort({ suppressLinkLog: true, count: 2, network: net, sodium, wasm, timeoutMs: 2000 });
     try {
       const offers = Array.from({ length: 300 }, (_, i) => {
         const blockId = fromHex(i.toString(16).padStart(64, "0"));
@@ -165,7 +165,7 @@ export async function run(t) {
   t.group("a holder evaluates the sibling rule over the whole OFFER batch");
   {
     const net = new LoopbackNetwork();
-    const [a, b] = await createConnectedCohort({ count: 2, network: net, sodium, wasm, timeoutMs: TIMEOUT });
+    const [a, b] = await createConnectedCohort({ suppressLinkLog: true, count: 2, network: net, sodium, wasm, timeoutMs: TIMEOUT });
     try {
       // Two blocks of ONE chunk (siblings, §6), signed so the holder admits them.
       const sib0 = id(20), sib1 = id(21);
@@ -183,7 +183,7 @@ export async function run(t) {
   t.group("concurrent STORE requests cannot race the authoritative sibling rule");
   {
     const net = new LoopbackNetwork();
-    const [a, b] = await createConnectedCohort({ count: 2, network: net, sodium, wasm, timeoutMs: TIMEOUT });
+    const [a, b] = await createConnectedCohort({ suppressLinkLog: true, count: 2, network: net, sodium, wasm, timeoutMs: TIMEOUT });
     try {
       const block0 = bytes(100, 41), block1 = bytes(100, 42);
       const id0 = b.crypto.blockId(a.identity.publicKey, block0), id1 = b.crypto.blockId(a.identity.publicKey, block1);
@@ -211,12 +211,12 @@ export async function run(t) {
     const net = new LoopbackNetwork();
     let quotaErr = null, typoErr = null;
     try {
-      await createConnectedCohort({ count: 1, network: net, sodium, wasm, config: { quota: 500 }, timeoutMs: TIMEOUT });
+      await createConnectedCohort({ suppressLinkLog: true, count: 1, network: net, sodium, wasm, config: { quota: 500 }, timeoutMs: TIMEOUT });
     } catch (e) { quotaErr = e; }
     t.ok(quotaErr !== null, "config: { quota } is refused — quota is the sibling option (or a shell's boot config)");
     t.ok(quotaErr && /sibling option/.test(quotaErr.message), "the error says where quota actually goes");
     try {
-      await createConnectedCohort({ count: 1, network: net, sodium, wasm, config: { windowTarget: 1 }, timeoutMs: TIMEOUT });
+      await createConnectedCohort({ suppressLinkLog: true, count: 1, network: net, sodium, wasm, config: { windowTarget: 1 }, timeoutMs: TIMEOUT });
     } catch (e) { typoErr = e; }
     t.ok(typoErr !== null, "a misspelled knob (windowTarget) is refused, not silently defaulted");
     t.ok(typoErr && /windowTargetBytes/.test(typoErr.message), "the error lists the real key names");
@@ -229,7 +229,7 @@ export async function run(t) {
     // this is a pure §14 quota decision. The holder charges what it will commit — the
     // 100-byte block + 157-byte descriptor + 4-byte record frame = 261 each — reading
     // the size from signed geometry, never from the offer. Room for two, not three.
-    const [a, b] = await createConnectedCohort({ count: 2, network: net, sodium, wasm, quota: 530, timeoutMs: TIMEOUT });
+    const [a, b] = await createConnectedCohort({ suppressLinkLog: true, count: 2, network: net, sodium, wasm, quota: 530, timeoutMs: TIMEOUT });
     try {
       const solo = (blockId) => signDescriptor(
         sodium, { level: 0, k: 1, m: 0, blockSize: 100, tailBytes: 100, authTag: authTag(), blockIds: [blockId] }, a.identity.publicKey, a.identity.privateKey, a.signAuthor,
@@ -247,7 +247,7 @@ export async function run(t) {
   {
     const net = new LoopbackNetwork();
     // Room for one 1000-byte block + its 136-byte descriptor, not two.
-    const [a, b] = await createConnectedCohort({ count: 2, network: net, sodium, wasm, quota: 1500, timeoutMs: TIMEOUT });
+    const [a, b] = await createConnectedCohort({ suppressLinkLog: true, count: 2, network: net, sodium, wasm, quota: 1500, timeoutMs: TIMEOUT });
     try {
       const b0 = bytes(1000, 1), b1 = bytes(1000, 2);
       const i0 = b.crypto.blockId(a.identity.publicKey, b0), i1 = b.crypto.blockId(a.identity.publicKey, b1);
@@ -271,7 +271,7 @@ export async function run(t) {
   t.group("a holder refuses bytes whose descriptor doesn't verify (§4.3 admission)");
   {
     const net = new LoopbackNetwork();
-    const [a, b] = await createConnectedCohort({ count: 2, network: net, sodium, wasm, timeoutMs: TIMEOUT });
+    const [a, b] = await createConnectedCohort({ suppressLinkLog: true, count: 2, network: net, sodium, wasm, timeoutMs: TIMEOUT });
     try {
       const junk = bytes(100, 8);
       const jid = b.crypto.blockId(a.identity.publicKey, junk);
@@ -320,7 +320,7 @@ export async function run(t) {
   t.group("a holder serves a batched FETCH, present and absent together");
   {
     const net = new LoopbackNetwork();
-    const [a, b] = await createConnectedCohort({ count: 2, network: net, sodium, wasm, timeoutMs: TIMEOUT });
+    const [a, b] = await createConnectedCohort({ suppressLinkLog: true, count: 2, network: net, sodium, wasm, timeoutMs: TIMEOUT });
     try {
       const held = bytes(777, 4);
       const heldId = b.crypto.hash(held);

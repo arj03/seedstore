@@ -48,7 +48,7 @@ export interface ChannelFactoryLike {
 /** One end of an in-process socket pair. Delivery is asynchronous (a microtask, or a
  *  `setTimeout(delayMs)` when the fabric models a latency-bearing link), mirroring a
  *  real socket; closing one end fires the other's onClose — the close semantics of
- *  BufferedChannel's fail() path, which is how a real channel reports the far side
+ *  MessageChannel's fail() path, which is how a real channel reports the far side
  *  going away. */
 class LoopbackChannel implements RawLinkLike {
   /** A socket pair with `send` as the boundary. In byte-stream mode a send is
@@ -106,7 +106,7 @@ class LoopbackChannel implements RawLinkLike {
     queueMicrotask(() => { if (p && !p.dead) p.cls?.(); });
   }
   /** The far end went away / this end failed: notify our own onClose (the
-   *  BufferedChannel.fail() path — how a socket reports being cut). */
+   *  MessageChannel.fail() path — how a socket reports being cut). */
   kill(): void {
     if (this.dead) return;
     this.dead = true;

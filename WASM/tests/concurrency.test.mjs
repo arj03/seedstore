@@ -100,7 +100,7 @@ export async function run(t) {
   // Op.STATS) — cleared by an initial read so wiring traffic isn't counted.
   async function onCohort(cfg, body, delayMs = DELAY) {
     const net = new LatencyNetwork(delayMs);
-    const nodes = await createConnectedCohort({ count: 6, network: net, sodium, wasm, config: cfg, timeoutMs: TIMEOUT });
+    const nodes = await createConnectedCohort({ suppressLinkLog: true, count: 6, network: net, sodium, wasm, config: cfg, timeoutMs: TIMEOUT });
     const owner = nodes[0];
     await owner.stats(); // clear whatever the cohort wiring accumulated
     const t0 = performance.now();
@@ -192,7 +192,7 @@ export async function run(t) {
     // manifest; the batched GET issues ≈ one FETCH per distinct holder + the
     // manifest, and assembles byte-identically.
     const net = new LatencyNetwork(DELAY);
-    const nodes = await createConnectedCohort({ count: 6, network: net, sodium, wasm, config: { ...config, fanoutWindow: W }, timeoutMs: TIMEOUT });
+    const nodes = await createConnectedCohort({ suppressLinkLog: true, count: 6, network: net, sodium, wasm, config: { ...config, fanoutWindow: W }, timeoutMs: TIMEOUT });
     const owner = nodes[0];
     const put = await owner.put(data);
 
@@ -215,7 +215,7 @@ export async function run(t) {
     // A full round trip on the latency link, just like the loopback groups, to
     // confirm the batched path is correct end-to-end and tolerates loss.
     const net = new LatencyNetwork(DELAY);
-    const nodes = await createConnectedCohort({ count: 6, network: net, sodium, wasm, config, timeoutMs: TIMEOUT });
+    const nodes = await createConnectedCohort({ suppressLinkLog: true, count: 6, network: net, sodium, wasm, config, timeoutMs: TIMEOUT });
     const owner = nodes[0];
     const put = await owner.put(data);
     t.ok(bytesEqual(await owner.get(put.root, put.key), data), "PUT → GET round-trips on a latency-bearing link");
@@ -235,7 +235,7 @@ export async function run(t) {
     // fan-out: a serial awaited round trip would peak at 1, the Promise.all fan-out
     // peaks at the holder count.
     const net = new LatencyNetwork(DELAY);
-    const nodes = await createConnectedCohort({ count: 6, network: net, sodium, wasm, config, timeoutMs: TIMEOUT });
+    const nodes = await createConnectedCohort({ suppressLinkLog: true, count: 6, network: net, sodium, wasm, config, timeoutMs: TIMEOUT });
     const owner = nodes[0];
 
     await owner.stats(); // clear
@@ -292,7 +292,7 @@ export async function run(t) {
     const bs = 16 * 1024, chunks = 300, cap = 256 * 1024;
     const data = file(chunks * 2 * bs, 31);
     const net = new LatencyNetwork(5, 48 * 1024);
-    const nodes = await createConnectedCohort({ count: 6, network: net, sodium, wasm, timeoutMs: TIMEOUT,
+    const nodes = await createConnectedCohort({ suppressLinkLog: true, count: 6, network: net, sodium, wasm, timeoutMs: TIMEOUT,
       config: { k: 2, m: 2, blockSize: bs, maxMessageBytes: cap,
         fanoutWindow: 32, windowTargetBytes: data.length } });
     try {

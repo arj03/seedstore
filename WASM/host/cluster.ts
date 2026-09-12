@@ -23,6 +23,12 @@ export interface CohortOptions {
   quota?: number;
   timeoutMs?: number;
   guestDeadlineMs?: number;
+  /** Silence the kernel driver's link-down diagnostic for every node in the cohort
+   *  (seedkernel `TransportHostOptions.suppressLinkLog`). A cohort is stood up and torn
+   *  down wholesale here, so each teardown prints a `truncated` line at every peer that
+   *  had a link to the node going away — hundreds across a suite, burying the assertions.
+   *  Left OFF by default, because in a real deployment that line is the point. */
+  suppressLinkLog?: boolean;
 }
 
 /** Create `count` storage nodes on `network` and connect them into one cohort. */
@@ -45,6 +51,7 @@ export async function createConnectedCohort(opts: CohortOptions): Promise<Storag
       // Each node dials/listens through its own view of the shared fabric.
       channels: opts.network.view(peerId),
       listen: { host: "127.0.0.1", port: 0 },
+      suppressLinkLog: opts.suppressLinkLog,
     }));
   }
   for (let i = 0; i < nodes.length; i++) {

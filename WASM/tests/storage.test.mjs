@@ -55,7 +55,7 @@ export async function run(t) {
   t.group("node boots on seedkernel: pure codec + reputation modules installed (§19)");
   {
     const net = new LoopbackNetwork();
-    const [node] = await createConnectedCohort({ count: 1, network: net, sodium, wasm, config, timeoutMs: TIMEOUT });
+    const [node] = await createConnectedCohort({ suppressLinkLog: true, count: 1, network: net, sodium, wasm, config, timeoutMs: TIMEOUT });
     t.ok(node.handlersInstalled(), "codec + reputation installed as kernel modules");
     node.close();
     net.close();
@@ -64,7 +64,7 @@ export async function run(t) {
   t.group("PUT → GET round trip across a cohort (RS path, §6, §7)");
   {
     const net = new LoopbackNetwork();
-    const nodes = await createConnectedCohort({ count: 6, network: net, sodium, wasm, config, timeoutMs: TIMEOUT });
+    const nodes = await createConnectedCohort({ suppressLinkLog: true, count: 6, network: net, sodium, wasm, config, timeoutMs: TIMEOUT });
     const owner = nodes[0];
     const data = file(3200); // 4 blocks → 2 RS chunks
     const put = await owner.put(data);
@@ -88,7 +88,7 @@ export async function run(t) {
     // and parity response past the default, over genuine (k>1) parity.
     const net = new LoopbackNetwork();
     const bigCfg = { k: 2, m: 2, blockSize: 96 * 1024 };
-    const nodes = await createConnectedCohort({ count: 6, network: net, sodium, wasm, config: bigCfg, timeoutMs: TIMEOUT });
+    const nodes = await createConnectedCohort({ suppressLinkLog: true, count: 6, network: net, sodium, wasm, config: bigCfg, timeoutMs: TIMEOUT });
     const owner = nodes[0];
     const data = file(bigCfg.k * bigCfg.blockSize * 3 - 5000, 9); // ~3 chunks, last chunk short
     const put = await owner.put(data);
@@ -102,7 +102,7 @@ export async function run(t) {
   t.group("small file — sub-chunk plaintext → k=1 replicated chunk (§4.1)");
   {
     const net = new LoopbackNetwork();
-    const nodes = await createConnectedCohort({ count: 6, network: net, sodium, wasm, config, timeoutMs: TIMEOUT });
+    const nodes = await createConnectedCohort({ suppressLinkLog: true, count: 6, network: net, sodium, wasm, config, timeoutMs: TIMEOUT });
     const owner = nodes[0];
     const data = file(640, 9); // < 1 block → k=1 chunk, its id listed m+1 times
     const put = await owner.put(data);
@@ -115,7 +115,7 @@ export async function run(t) {
   t.group("offline tolerance: any k of n still reads (§7, §8)");
   {
     const net = new LoopbackNetwork();
-    const nodes = await createConnectedCohort({ count: 6, network: net, sodium, wasm, config, timeoutMs: TIMEOUT });
+    const nodes = await createConnectedCohort({ suppressLinkLog: true, count: 6, network: net, sodium, wasm, config, timeoutMs: TIMEOUT });
     const owner = nodes[0];
     const data = file(3200, 3);
     const put = await owner.put(data);
@@ -132,7 +132,7 @@ export async function run(t) {
   t.group("self-healing: repair restores redundancy after loss (§9)");
   {
     const net = new LoopbackNetwork();
-    const nodes = await createConnectedCohort({ count: 8, network: net, sodium, wasm, config, timeoutMs: TIMEOUT });
+    const nodes = await createConnectedCohort({ suppressLinkLog: true, count: 8, network: net, sodium, wasm, config, timeoutMs: TIMEOUT });
     const owner = nodes[0];
     const data = file(2048, 5); // 2 blocks → 1 RS chunk (n=4)
     const put = await owner.put(data);
@@ -182,7 +182,7 @@ export async function run(t) {
   {
     const net = new LoopbackNetwork();
     const cfg = { k: 1, m: 1, blockSize: 1024 };            // the p2p.html demo config
-    const nodes = await createConnectedCohort({ count: 5, network: net, sodium, wasm, config: cfg, timeoutMs: TIMEOUT });
+    const nodes = await createConnectedCohort({ suppressLinkLog: true, count: 5, network: net, sodium, wasm, config: cfg, timeoutMs: TIMEOUT });
     const owner = nodes[0];
     // Nothing about durability is a config field any more: r = m+1 and the low-water
     // mark come off each chunk's signed descriptor, so overriding k/m cannot leave a
@@ -220,7 +220,7 @@ export async function run(t) {
     // lower margin and re-place forever, never settling.
     const net = new LoopbackNetwork();
     const cfg = { k: 1, m: 4, blockSize: 1024 };
-    const nodes = await createConnectedCohort({ count: 7, network: net, sodium, wasm, config: cfg, timeoutMs: TIMEOUT }); // owner + 6 holders >= r=5
+    const nodes = await createConnectedCohort({ suppressLinkLog: true, count: 7, network: net, sodium, wasm, config: cfg, timeoutMs: TIMEOUT }); // owner + 6 holders >= r=5
     const owner = nodes[0];
     const data = file(4096, 41);                           // 4 blocks → windowed (per-chunk replication)
     const put = await owner.put(data);
@@ -243,7 +243,7 @@ export async function run(t) {
     const ownerId = sodium.crypto_sign_keypair();
     const owner = await StorageNode.create({
       sodium, bundleBlob: wasm.bundleBlob, identity: ownerId,
-      channels: net.view(toHex(ownerId.publicKey)), listen: { host: "127.0.0.1", port: 0 },
+      suppressLinkLog: true, channels: net.view(toHex(ownerId.publicKey)), listen: { host: "127.0.0.1", port: 0 },
       config: { k: 1, m: 4, blockSize: 1024 }, timeoutMs: TIMEOUT,
     });
     const holders = [];
@@ -251,7 +251,7 @@ export async function run(t) {
       const id = sodium.crypto_sign_keypair();
       holders.push(await StorageNode.create({
         sodium, bundleBlob: wasm.bundleBlob, identity: id,
-        channels: net.view(toHex(id.publicKey)), listen: { host: "127.0.0.1", port: 0 },
+        suppressLinkLog: true, channels: net.view(toHex(id.publicKey)), listen: { host: "127.0.0.1", port: 0 },
         config: { k: 1, m: 1, blockSize: 1024 }, timeoutMs: TIMEOUT,
       }));
     }
@@ -283,7 +283,7 @@ export async function run(t) {
   {
     const net = new LoopbackNetwork();
     const cfg = { k: 1, m: 1, blockSize: 1024 };
-    const nodes = await createConnectedCohort({ count: 5, network: net, sodium, wasm, config: cfg, timeoutMs: TIMEOUT });
+    const nodes = await createConnectedCohort({ suppressLinkLog: true, count: 5, network: net, sodium, wasm, config: cfg, timeoutMs: TIMEOUT });
     const owner = nodes[0];
     const put = await owner.put(file(4096, 13));           // multi-block → windowed replication
 
@@ -310,7 +310,7 @@ export async function run(t) {
   t.group("sharing is sharing the key, not the bytes (§4.4)");
   {
     const net = new LoopbackNetwork();
-    const nodes = await createConnectedCohort({ count: 6, network: net, sodium, wasm, config, timeoutMs: TIMEOUT });
+    const nodes = await createConnectedCohort({ suppressLinkLog: true, count: 6, network: net, sodium, wasm, config, timeoutMs: TIMEOUT });
     const owner = nodes[0], recipient = nodes[1];
     const data = file(3200, 11);
     const put = await owner.put(data);
@@ -329,7 +329,7 @@ export async function run(t) {
   t.group("crypto-shredding: without K the bytes are noise (§11)");
   {
     const net = new LoopbackNetwork();
-    const nodes = await createConnectedCohort({ count: 6, network: net, sodium, wasm, config, timeoutMs: TIMEOUT });
+    const nodes = await createConnectedCohort({ suppressLinkLog: true, count: 6, network: net, sodium, wasm, config, timeoutMs: TIMEOUT });
     const owner = nodes[0];
     const data = file(3200, 13);
     const put = await owner.put(data);
@@ -346,7 +346,7 @@ export async function run(t) {
   t.group("reciprocity: serving raises a holder's local standing (§13)");
   {
     const net = new LoopbackNetwork();
-    const nodes = await createConnectedCohort({ count: 6, network: net, sodium, wasm, config, timeoutMs: TIMEOUT });
+    const nodes = await createConnectedCohort({ suppressLinkLog: true, count: 6, network: net, sodium, wasm, config, timeoutMs: TIMEOUT });
     const owner = nodes[0];
     const put = await owner.put(file(3200, 17));
     await owner.get(put.root, put.key); // verification-fetches feed scoring
@@ -370,7 +370,7 @@ export async function run(t) {
   {
     const net = new LoopbackNetwork();
     const cfg = { k: 1, m: 9, blockSize: 1024 };
-    const nodes = await createConnectedCohort({ count: 3, network: net, sodium, wasm, config: cfg, timeoutMs: TIMEOUT }); // owner + 2 holders
+    const nodes = await createConnectedCohort({ suppressLinkLog: true, count: 3, network: net, sodium, wasm, config: cfg, timeoutMs: TIMEOUT }); // owner + 2 holders
     const owner = nodes[0];
     const data = file(6400, 23); // > 1 block → windowed, several chunks
 
@@ -406,7 +406,7 @@ export async function run(t) {
     // can (≥ k distinct blocks) and leans on repair, rather than failing the PUT.
     const net = new LoopbackNetwork();
     const cfg = { k: 2, m: 2, blockSize: 1024 };
-    const nodes = await createConnectedCohort({ count: 4, network: net, sodium, wasm, config: cfg, timeoutMs: TIMEOUT }); // owner + 3 holders < n=4
+    const nodes = await createConnectedCohort({ suppressLinkLog: true, count: 4, network: net, sodium, wasm, config: cfg, timeoutMs: TIMEOUT }); // owner + 3 holders < n=4
     const owner = nodes[0];
     const data = file(4800, 29);
     const put = await owner.put(data); // threw before best-effort placement
@@ -428,7 +428,7 @@ export async function run(t) {
     const holderCfg = { ...ownerCfg, maxMessageBytes: 1600 };
     const mk = (cfg, tag) => StorageNode.create({
       sodium, bundleBlob: wasm.bundleBlob, identity: tag,
-      channels: net.view(toHex(tag.publicKey)), listen: { host: "127.0.0.1", port: 0 },
+      suppressLinkLog: true, channels: net.view(toHex(tag.publicKey)), listen: { host: "127.0.0.1", port: 0 },
       config: cfg, timeoutMs: TIMEOUT,
     });
     const owner = await mk(ownerCfg, sodium.crypto_sign_keypair());
@@ -477,7 +477,7 @@ export async function run(t) {
       const identity = sodium.crypto_sign_keypair();
       return StorageNode.create({
         sodium, bundleBlob: wasm.bundleBlob, identity,
-        channels: net.view(toHex(identity.publicKey)), listen: { host: "127.0.0.1", port: 0 },
+        suppressLinkLog: true, channels: net.view(toHex(identity.publicKey)), listen: { host: "127.0.0.1", port: 0 },
         config: { ...cfg, lieOnFetch }, timeoutMs: TIMEOUT,
       });
     };
@@ -516,7 +516,7 @@ export async function run(t) {
   {
     const net = new LoopbackNetwork();
     const cfg = { ...config, k: 1, m: 0 };               // one block per chunk, no parity
-    const nodes = await createConnectedCohort({ count: 2, network: net, sodium, wasm, config: cfg, quota: 0, timeoutMs: TIMEOUT });
+    const nodes = await createConnectedCohort({ suppressLinkLog: true, count: 2, network: net, sodium, wasm, config: cfg, quota: 0, timeoutMs: TIMEOUT });
     const data = file(2048, 7);                           // 2 blocks → windowed path, 2 chunks
     let err = null;
     try {
@@ -540,7 +540,7 @@ export async function run(t) {
     const holderId = sodium.crypto_sign_keypair();
     const mk = (id, extra) => StorageNode.create({
       sodium, bundleBlob: wasm.bundleBlob, identity: id,
-      channels: net.view(toHex(id.publicKey)), listen: { host: "127.0.0.1", port: 0 },
+      suppressLinkLog: true, channels: net.view(toHex(id.publicKey)), listen: { host: "127.0.0.1", port: 0 },
       config: { ...config, k: 1, m: 0 }, quota: 1 << 30, timeoutMs: TIMEOUT, ...extra,
     });
     // A backend that accepts reads and refuses the record write — a full disk, near
@@ -571,7 +571,7 @@ export async function run(t) {
     // fresh keypair and self-sign. Anchoring the author to a known peer is what
     // makes a forgery attributable (§13).
     const net = new LoopbackNetwork();
-    const [a, b] = await createConnectedCohort({ count: 2, network: net, sodium, wasm, config, timeoutMs: TIMEOUT });
+    const [a, b] = await createConnectedCohort({ suppressLinkLog: true, count: 2, network: net, sodium, wasm, config, timeoutMs: TIMEOUT });
     try {
       const bytes = file(config.blockSize, 77);
       const bid = a.crypto.blockId(a.identity.publicKey, bytes);
@@ -606,7 +606,7 @@ export async function run(t) {
     // distinct peers. Silently overwriting an existing copy would fill a slot without
     // adding a holder — the chunk would look placed and be short a replica.
     const net = new LoopbackNetwork();
-    const [a, b] = await createConnectedCohort({ count: 2, network: net, sodium, wasm, config, timeoutMs: TIMEOUT });
+    const [a, b] = await createConnectedCohort({ suppressLinkLog: true, count: 2, network: net, sodium, wasm, config, timeoutMs: TIMEOUT });
     try {
       const bytes = file(config.blockSize, 91);
       const bid = a.crypto.blockId(a.identity.publicKey, bytes);
@@ -629,7 +629,7 @@ export async function run(t) {
     // level ℓ from naming a list also at level ℓ. Only the strict descent check does.
     const net = new LoopbackNetwork();
     const cfg = { k: 1, m: 1, blockSize: 512 };
-    const nodes = await createConnectedCohort({ count: 4, network: net, sodium, wasm, config: cfg, timeoutMs: TIMEOUT });
+    const nodes = await createConnectedCohort({ suppressLinkLog: true, count: 4, network: net, sodium, wasm, config: cfg, timeoutMs: TIMEOUT });
     const [owner] = nodes;
     try {
       const K = owner.crypto.randomKey();
@@ -664,7 +664,7 @@ export async function run(t) {
     // genuinely multi-level index — a single root descriptor could never cover it.
     const net = new LoopbackNetwork();
     const cfg = { k: 2, m: 2, blockSize: 272 };            // one index chunk holds just 2 tagged descriptors
-    const nodes = await createConnectedCohort({ count: 6, network: net, sodium, wasm, config: cfg, timeoutMs: TIMEOUT });
+    const nodes = await createConnectedCohort({ suppressLinkLog: true, count: 6, network: net, sodium, wasm, config: cfg, timeoutMs: TIMEOUT });
     try {
       const data = file(cfg.k * cfg.blockSize * 9 - 77, 55); // 9 chunks → 9 → 5 → 3 → 2 → 1: four index levels
       const put = await nodes[0].put(data);

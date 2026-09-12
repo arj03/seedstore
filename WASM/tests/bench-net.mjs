@@ -66,7 +66,7 @@ async function measure(W) {
   const net = new LatencyNetwork(delay, WIRE_CHUNK_KIB * 1024);
   // n = k + m = 4 distinct holders per chunk; give the cohort a little headroom.
   const nodes = await createConnectedCohort({
-    count: 6, network: net, sodium, wasm,
+    suppressLinkLog: true, count: 6, network: net, sodium, wasm,
     config: { ...config, fanoutWindow: W }, timeoutMs,
   });
   const owner = nodes[0];

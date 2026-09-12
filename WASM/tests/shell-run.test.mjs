@@ -76,7 +76,7 @@ export async function run(t) {
         const authorId = await buildBundle(bundlePath, author, sodium, build);
         const bundleBlob = new Uint8Array(readFileSync(bundlePath));
       holders = await createConnectedCohort({
-        // Match the shell's test-scale geometry so this tiny file spreads across the
+        suppressLinkLog: true, // Match the shell's test-scale geometry so this tiny file spreads across the
         // cohort (the signed bundle ships PRODUCTION 256 KiB blocks).
         count: 6, network: net, sodium, wasm: { bundleBlob }, config: { blockSize: 1024 }, timeoutMs: TIMEOUT,
       });
@@ -87,7 +87,7 @@ export async function run(t) {
       const rt = await bootNodeShell({
         policyJson: JSON.stringify({ authors: [toHex(authorId)] }),
         dir: shellDir, identity: shellIdentity,
-        transport: { channels: net.view(toHex(shellIdentity.publicKey)), listen: { host: "127.0.0.1", port: 0 } },
+        transport: { suppressLinkLog: true, channels: net.view(toHex(shellIdentity.publicKey)), listen: { host: "127.0.0.1", port: 0 } },
         timeoutMs: TIMEOUT,
       });
       shell = rt.shell;
@@ -129,7 +129,7 @@ export async function run(t) {
       const { shell: shell2 } = await bootNodeShell({
         policyJson: JSON.stringify({ authors: [toHex(generateKeyPair(sodium).publicKey)] }),
         dir: shell2Dir, identity: shell2Id,
-        transport: { channels: net.view(toHex(shell2Id.publicKey)), listen: { host: "127.0.0.1", port: 0 } },
+        transport: { suppressLinkLog: true, channels: net.view(toHex(shell2Id.publicKey)), listen: { host: "127.0.0.1", port: 0 } },
       });
       let refused = false;
       try { await shell2.loadBundle(bundlePath); } catch { refused = true; }
@@ -169,7 +169,7 @@ export async function run(t) {
       const shellId = generateKeyPair(sodium);
       const rt = await bootNodeShell({
         policyJson: JSON.stringify({ authors: [toHex(authorId)] }),
-        dir: shellDir, identity: shellId, transport: { channels: net.view(toHex(shellId.publicKey)) },
+        dir: shellDir, identity: shellId, transport: { suppressLinkLog: true, channels: net.view(toHex(shellId.publicKey)) },
         timeoutMs: TIMEOUT,
       });
       shell = rt.shell;

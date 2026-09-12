@@ -61,7 +61,7 @@ export async function run(t) {
     const identity = generateKeyPair(sodium);
     const { shell, transport } = await bootNodeShell({
       policyJson, dir, identity,
-      transport: { channels: net.view(toHex(identity.publicKey)), listen: { host: "127.0.0.1", port: 0 } },
+      transport: { suppressLinkLog: true, channels: net.view(toHex(identity.publicKey)), listen: { host: "127.0.0.1", port: 0 } },
       timeoutMs: TIMEOUT,
     });
     await transport.start(); // bind the loopback port the cohort dials
@@ -123,7 +123,7 @@ export async function run(t) {
       // holder in the same cohort, so two PUTs overlap. The realm serializes —
       // costing latency on a busy realm, never correctness.
       const [sn] = await createConnectedCohort({
-        // Same signed bundle as the shells (cross-path parity); blockSize back to
+        suppressLinkLog: true, // Same signed bundle as the shells (cross-path parity); blockSize back to
         // test scale so this tiny file takes the RS path.
         count: 1, network: net, sodium, wasm: { bundleBlob }, config: { blockSize: 1024 }, timeoutMs: TIMEOUT,
       });
@@ -166,7 +166,7 @@ export async function run(t) {
       const shells = [];
       for (let i = 0; i < 5; i++) shells.push(await bootShell(net));
       const [sn] = await createConnectedCohort({
-        // Same signed bundle as the shells ⇒ same author scope (cross-path parity).
+        suppressLinkLog: true, // Same signed bundle as the shells ⇒ same author scope (cross-path parity).
         // blockSize back to test scale so this tiny file takes the RS path across the cohort.
         count: 1, network: net, sodium, wasm: { bundleBlob }, config: { blockSize: 1024 }, timeoutMs: TIMEOUT,
       });
