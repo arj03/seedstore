@@ -97,7 +97,7 @@ export async function run(t) {
       // guest as `LOCAL`, which its `CFG` lets win: blockSize back to test scale (the
       // bundle ships the PRODUCTION 256 KiB, which would make this tiny file
       // single-block/replicated instead of RS across the cohort).
-      const loaded = await shell.loadBundle(bundlePath, { localConfig: { blockSize: 1024 } });
+      const loaded = await shell.installFile(bundlePath, { localConfig: { blockSize: 1024 } });
       // The app key rides the load's handle: a node with a network has at least two apps
       // loaded — the storage bundle and the transport, an ordinary app claiming `_net`
       // under its `services` list (§12.10), a co-resident guest's to reach and never a peer's.
@@ -132,7 +132,7 @@ export async function run(t) {
         transport: { suppressLinkLog: true, channels: net.view(toHex(shell2Id.publicKey)), listen: { host: "127.0.0.1", port: 0 } },
       });
       let refused = false;
-      try { await shell2.loadBundle(bundlePath); } catch { refused = true; }
+      try { await shell2.installFile(bundlePath); } catch { refused = true; }
       t.ok(refused, "a shell whose policy omits the author refuses the bundle");
       shell2.close();
       rmSync(shell2Dir, { recursive: true, force: true });
@@ -174,9 +174,9 @@ export async function run(t) {
       });
       shell = rt.shell;
       await rt.transport.start();
-      await shell.loadBundle(hiPath); // advances the (author, app) high-water mark to 5
+      await shell.installFile(hiPath); // advances the (author, app) high-water mark to 5
       let refused = false;
-      try { await shell.loadBundle(loPath); } catch { refused = true; }
+      try { await shell.installFile(loPath); } catch { refused = true; }
       t.ok(refused, "a version-3 bundle is refused after a version-5 bundle loaded (no downgrade)");
     } finally {
       if (shell) shell.close();

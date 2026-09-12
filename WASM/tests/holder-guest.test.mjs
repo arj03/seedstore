@@ -70,7 +70,7 @@ export async function run(t) {
     // settings go on THIS LOAD as `LOCAL` (seedkernel §12.4) — note this is the
     // SHELL's spelling of quota; StorageNode takes it as a sibling option instead.
     // blockSize goes back to test scale (the bundle ships PRODUCTION 256 KiB).
-    const loaded = await shell.loadBundle(bundlePath, {
+    const loaded = await shell.installFile(bundlePath, {
       localConfig: { quota: 64 * 1024 * 1024, blockSize: 1024 },
     });
     return { shell, peerId: toHex(identity.publicKey), net: transport, app: loaded };

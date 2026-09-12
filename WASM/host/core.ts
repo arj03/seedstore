@@ -107,7 +107,7 @@ export function assertStorageConfig(config?: Partial<StorageConfig>): void {
       throw new Error(
         "StorageConfig has no `quota`: it is operator policy, passed as the sibling option " +
         "`quota` on StorageNode.create({ quota }) — only a seedkernel shell's per-load " +
-        "config carries it inline (loadBundleBlob(blob, { localConfig: { quota } })). " +
+        "config carries it inline (install(blob, { localConfig: { quota } })). " +
         "Passing it here would be ignored.",
       );
     }

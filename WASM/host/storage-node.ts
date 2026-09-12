@@ -307,7 +307,7 @@ export class StorageNode {
       // manifest claims STORAGE_PROTO, §12.10) — nothing else arms it. `localConfig`
       // and `realmMemoryBytes` ride with THIS load (§12.4/§12.3), not the shell,
       // so they reach a caller-supplied shell too and don't leak into the transport's budget.
-      const loaded = await shell.loadBundleBlob(opts.bundleBlob, {
+      const loaded = await shell.install(opts.bundleBlob, {
         localConfig: localConfigFor(opts),
         realmMemoryBytes: normaliseConfig(opts.config ?? {}).realmMemoryBytes,
         guestDeadlineMs: opts.guestDeadlineMs,
