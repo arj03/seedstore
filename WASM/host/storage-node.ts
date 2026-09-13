@@ -540,7 +540,7 @@ export async function bootTransportShell(
       },
     },
     // The one admission branch that's ours: the operator handing us a bundle IS
-    // the trust decision (manifest sig + module hashes are still verified);
+    // the trust decision (the bundle's signature is still verified);
     // transport selection and the revocation/downgrade guard are bootShell's.
     admit: () => true,
   });

@@ -7,8 +7,8 @@
 //
 //   node scripts/build-bundle.mjs   (writes ./bundle, signs with ./seedstore-author.key)
 //
-// Output: bundle/seedstore.skb — the signed manifest + all modules packed into
-// one blob (seedkernel §12.4). Run `npm run build` first.
+// Output: bundle/seedstore.skb — manifest, guest and modules under one signature
+// (seedkernel §12.4). Run `npm run build` first.
 
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -27,11 +27,9 @@ const bundlePath = join(out, "seedstore.skb");
 const { toHex, fromHex } = await import(new URL("../build/host/util.js", import.meta.url));
 
 const sodium = await loadCrypto();
-// Bundle *content* is assembled below from sodium alone: it hashes the module bytes
-// (genesisHash) the manifest commits to and signs the manifest. No kernel host is needed —
-// hashing is a free `genesisHash(sodium, …)` in the bundle module now, and a module's
-// name is its bare manifest name — reached by the guest on the seam, slot-local, with
-// no bind name or global namespace (seedkernel §5.1).
+// Bundle *content* is assembled below from sodium alone, which signs it. No kernel host
+// is needed, and a module's name is its bare manifest name — reached by the guest on the
+// seam, slot-local, with no bind name or global namespace (seedkernel §5.1).
 
 // Author identity: the key the bundle is signed with (and that installs are
 // signed with). Policy pins the derived key-set id (§12.4), not this Ed25519 key.
@@ -73,7 +71,7 @@ if (existsSync(versionPath)) {
 }
 const version = prevVersion + 1;
 
-const { manifest, author } = writeStorageBundle({ path: bundlePath, sodium, sk, build, version, log: console.log });
+const { manifest, author } = writeStorageBundle({ path: bundlePath, sodium, sk, build, version });
 
 // Record the new high-water mark beside the key, so the next publish counts on from here
 // even if bundle/ is wiped.

@@ -1,8 +1,8 @@
 // The single source of truth for a seedstore app bundle's *content* — shared by
 // the offline producer (scripts/build-bundle.mjs) and the test fixture
-// (tests/bundle-fixture.mjs) so the two can never drift. Writes one signed blob
-// holding each module's wasm, the guest, and the signed manifest envelope; the
-// manifest commits to every module's genesisHash (seedkernel §12.4, §5.1).
+// (tests/bundle-fixture.mjs) so the two can never drift. Writes one signed blob:
+// the manifest, the guest and each module's wasm, all under one hybrid signature
+// (seedkernel §12.4, §5.1).
 //
 // Two deliberate choices:
 //   • `requires` declares SERVICES, not method names — the unit a manifest grants
@@ -16,7 +16,6 @@ import { dirname, join } from "node:path";
 
 import { authorBundle, hybridAuthorKeysFromSeed }
   from "seedkernel-wasm/bundle-author";
-import { moduleFile } from "seedkernel-wasm/bundle";
 import { TRANSPORT_SERVICE } from "seedkernel-wasm/transport-bundle";
 import { defaultConfig, normaliseConfig, PRODUCTION_BLOCK_SIZE } from "../build/host/core.js";
 import { STORAGE_PROTO } from "../build/host/descriptor.js";
@@ -63,37 +62,34 @@ const STORAGE_CALLS = [
 
 /**
  * Write a complete signed seedstore bundle to `path` (one blob, seedkernel §12.4).
- * The manifest is signed under suite `0x02` (hybrid Ed25519 + ML-DSA-65): the
+ * The bundle is signed under suite `0x02` (hybrid Ed25519 + ML-DSA-65): the
  * author's PQ half is derived from the same seed (see `authorKeysFor`), so the
  * pinned author id is the key-set hash and the bundle is post-quantum by default.
  * @param {object} o
  * @param {string} o.path     output bundle file (e.g. ./bundle/seedstore.skb)
- * @param {any}    o.sodium   loaded libsodium (hashes the module bytes; signs the manifest)
- * @param {Uint8Array} o.sk   author secret key — the Ed25519 half (signs the manifest)
+ * @param {any}    o.sodium   loaded libsodium with the ML-DSA-65 signer (signs the bundle)
+ * @param {Uint8Array} o.sk   author secret key — the Ed25519 half, whose seed derives both
  * @param {string} o.build    seedstore build/ dir (holds the codec wasm + staged guest)
  * @param {number} [o.version] monotonic-per-(author,app) freshness mark (README §12.4);
  *                             the shell refuses a load below its high-water mark. Integer.
- * @param {(s:string)=>void} [o.log]  optional progress logger
  * @returns {{blob: Uint8Array, manifest: object, author: Uint8Array}} the signed blob,
  *  the manifest that was signed, and the derived author id — the key-set hash a policy
  *  `authors` entry pins, on the value rather than re-derived by the caller.
  */
-export function writeStorageBundle({ path, sodium, sk, build, version = 1, log = () => {} }) {
+export function writeStorageBundle({ path, sodium, sk, build, version = 1 }) {
   if (!Number.isInteger(version)) throw new Error("writeStorageBundle: version must be an integer");
   // A module's name is its bare manifest name — the seam argument the guest
   // passes; there is no bind name or global namespace (seedkernel §5.1, §12.4).
   const modSpecs = ["codec", "reputation"];
 
-  // The two pure modules (§17); authorBundle hashes each module's bytes into the
-  // signed manifest — no hash computed here.
+  // The two pure modules (§17), as the build writes them.
   const modules = modSpecs.map((name) => ({
-    name, wasm: new Uint8Array(readFileSync(join(build, moduleFile(name)))),
+    name, wasm: new Uint8Array(readFileSync(join(build, `${name}.wasm`))),
   }));
 
   // Ship the comment-stripped guest (scripts/minify.mjs, `node --check`-gated) to
-  // keep the signed bundle small; the content hash authorBundle derives covers
-  // these exact bytes (the guest is authored as TEXT — what verification decodes
-  // back before re-checking, bundle.ts).
+  // keep the signed bundle small; the signature covers these exact bytes (the guest
+  // is authored as TEXT — what verification decodes back, bundle.ts).
   const guestSource = readFileSync(join(build, "host-min", "tier2-guest.js"), "utf8");
 
   // This is a DEPLOYED config, so it carries production geometry; one named constant
@@ -127,7 +123,6 @@ export function writeStorageBundle({ path, sodium, sk, build, version = 1, log =
       windowTargetBytes: cfg.windowTargetBytes,
     },
   });
-  for (const mod of manifest.modules) log(`  ${mod.name}: bytesHash ${mod.hash}`);
 
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, blob);
