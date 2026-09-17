@@ -68,8 +68,9 @@ const mParam = num("m", 1);
 // Parallel connections per holder — bulk transfers stripe frames across them so N
 // TCP flows fill a link one flow can't. Independent of k/m (flows-per-holder, not
 // holders-per-chunk); holders must run the multi-link core. --conns 1 to A/B
-// against a single flow.
-const connsN = num("conns", 16);
+// against a single flow. Default 8, the transport's `maxHalfOpenPerSource`: a holder
+// admits no more links than that from one address and closes the rest at handshake.
+const connsN = num("conns", 8);
 const blockSize = num("block", PRODUCTION_BLOCK_SIZE / 1024) * 1024;
 // Per-message cap, and the real lever on a wire-bound link: a streaming window holds a
 // fixed number of blocks, so SMALLER messages put more of them in flight to feed the

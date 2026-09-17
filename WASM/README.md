@@ -406,7 +406,8 @@ host-side delay that charged only the inbound request, not the response.) Over a
 real browser↔browser WebRTC link the `p2p.html` demo reports ~13 MB/s both ways.
 
 Over a real WAN link — two remote holders, RS(1,1), 256 KiB blocks, 512 KiB batches,
-16 connections per holder, 24 MB streaming window, 50 MB per run:
+8 connections per holder (the most a holder admits from one address), 24 MB streaming
+window, 50 MB per run:
 
 | | rate | |
 |---|---:|---|
