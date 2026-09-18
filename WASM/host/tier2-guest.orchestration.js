@@ -118,13 +118,10 @@ function blockHash(d, bytes) { return hash(blockHashInput(d.authorPk, bytes)); }
 const P_SEAL = "crypto/chacha20poly1305-ietf/seal";
 const P_OPEN = "crypto/chacha20poly1305-ietf/open";
 function randomKey() { const n = new Uint8Array(4); wU32(n, 0, 32); return host.call("node/random", n); }
-function identity() { return host.call("node/identity", EMPTY); }
-let myPeerCache = null;
-async function myPeer() {
-  // Cache the in-flight Promise too: concurrent callers share one seam crossing.
-  if (myPeerCache === null) myPeerCache = identity().then((pk) => toHex(pk));
-  return myPeerCache;
-}
+// This node's channel public key, as the host hands it over in `HOST` (seedkernel §12.4).
+// Read at the call rather than at load, so the unit tests can evaluate this file bare.
+function identity() { return fromHex(HOST.identity); }
+function myPeer() { return HOST.identity; }
 // 12-byte nonce = [level u8][chunk index u32 BE][0…] (§4.4). A fresh random K per
 // file makes this deterministic per-file namespace unique; level separates index data.
 function nonce(level, index) { const n = new Uint8Array(12); n[0] = level & 255; wU32(n, 1, index >>> 0); return n; }
