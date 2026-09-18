@@ -147,7 +147,7 @@ export async function run(t) {
         const blockId = fromHex(i.toString(16).padStart(64, "0"));
         const descriptor = signDescriptor(sodium,
           { level: 0, k: 1, m: 0, blockSize: 100, tailBytes: 100, authTag: authTag(), blockIds: [blockId] },
-          a.identity.publicKey, a.identity.privateKey, a.signAuthor);
+          a.identity.publicKey, a.identity.privateKey);
         return { blockId, descriptor };
       });
       offers.push(offers[0]); // provisional sibling state must span every verification window
@@ -169,7 +169,7 @@ export async function run(t) {
     try {
       // Two blocks of ONE chunk (siblings, §6), signed so the holder admits them.
       const sib0 = id(20), sib1 = id(21);
-      const env = signDescriptor(sodium, { level: 0, k: 1, m: 1, blockSize: 100, tailBytes: 100, authTag: authTag(), blockIds: [sib0, sib1] }, a.identity.publicKey, a.identity.privateKey, a.signAuthor);
+      const env = signDescriptor(sodium, { level: 0, k: 1, m: 1, blockSize: 100, tailBytes: 100, authTag: authTag(), blockIds: [sib0, sib1] }, a.identity.publicKey, a.identity.privateKey);
       const offers = [
         { blockId: sib0, descriptor: env },
         { blockId: sib1, descriptor: env }, // sibling of sib0 — must not both pass
@@ -189,7 +189,7 @@ export async function run(t) {
       const id0 = b.crypto.blockId(a.identity.publicKey, block0), id1 = b.crypto.blockId(a.identity.publicKey, block1);
       const env = signDescriptor(
         sodium, { level: 0, k: 1, m: 1, blockSize: 100, tailBytes: 100, authTag: authTag(), blockIds: [id0, id1] },
-        a.identity.publicKey, a.identity.privateKey, a.signAuthor,
+        a.identity.publicKey, a.identity.privateKey,
       );
       const verdicts = (await Promise.all([
         a.request(b.peerId, typed(MsgType.STORE, encodeStoreBatch([{ blockId: id0, descriptor: env, bytes: block0 }]))),
@@ -232,7 +232,7 @@ export async function run(t) {
     const [a, b] = await createConnectedCohort({ suppressLinkLog: true, count: 2, network: net, sodium, wasm, quota: 530, timeoutMs: TIMEOUT });
     try {
       const solo = (blockId) => signDescriptor(
-        sodium, { level: 0, k: 1, m: 0, blockSize: 100, tailBytes: 100, authTag: authTag(), blockIds: [blockId] }, a.identity.publicKey, a.identity.privateKey, a.signAuthor,
+        sodium, { level: 0, k: 1, m: 0, blockSize: 100, tailBytes: 100, authTag: authTag(), blockIds: [blockId] }, a.identity.publicKey, a.identity.privateKey,
       );
       const offers = [id(30), id(31), id(32)].map((blockId) => ({ blockId, descriptor: solo(blockId) }));
       t.eq(offers[0].descriptor.length, 157, "a one-block descriptor envelope is [pk 32][sig 64][core 61]");
@@ -252,7 +252,7 @@ export async function run(t) {
       const b0 = bytes(1000, 1), b1 = bytes(1000, 2);
       const i0 = b.crypto.blockId(a.identity.publicKey, b0), i1 = b.crypto.blockId(a.identity.publicKey, b1);
       const solo = (blockId) => signDescriptor(
-        sodium, { level: 0, k: 1, m: 0, blockSize: 1000, tailBytes: 1000, authTag: authTag(), blockIds: [blockId] }, a.identity.publicKey, a.identity.privateKey, a.signAuthor,
+        sodium, { level: 0, k: 1, m: 0, blockSize: 1000, tailBytes: 1000, authTag: authTag(), blockIds: [blockId] }, a.identity.publicKey, a.identity.privateKey,
       );
       const stored = decodeMask(await a.request(b.peerId, typed(MsgType.STORE, encodeStoreBatch([
         { blockId: i0, descriptor: solo(i0), bytes: b0 },
@@ -284,7 +284,7 @@ export async function run(t) {
       // Signed, but for a DIFFERENT chunk: the signature verifies and yet this block is
       // not one of its block_ids (§4.3's block_id ∈ block_ids check).
       const other = signDescriptor(
-        sodium, { level: 0, k: 1, m: 0, blockSize: 100, tailBytes: 100, authTag: authTag(), blockIds: [id(77)] }, a.identity.publicKey, a.identity.privateKey, a.signAuthor,
+        sodium, { level: 0, k: 1, m: 0, blockSize: 100, tailBytes: 100, authTag: authTag(), blockIds: [id(77)] }, a.identity.publicKey, a.identity.privateKey,
       );
       const stored2 = decodeMask(await a.request(b.peerId, typed(MsgType.STORE, encodeStoreBatch([
         { blockId: jid, descriptor: other, bytes: junk },
@@ -296,7 +296,7 @@ export async function run(t) {
       // geometry is the descriptor's, so bytes that aren't blockSize long are not the
       // block that was admitted (this is what makes OFFER's old size field redundant).
       const wrongSize = signDescriptor(
-        sodium, { level: 0, k: 1, m: 0, blockSize: 99, tailBytes: 99, authTag: authTag(), blockIds: [jid] }, a.identity.publicKey, a.identity.privateKey, a.signAuthor,
+        sodium, { level: 0, k: 1, m: 0, blockSize: 99, tailBytes: 99, authTag: authTag(), blockIds: [jid] }, a.identity.publicKey, a.identity.privateKey,
       );
       const stored3 = decodeMask(await a.request(b.peerId, typed(MsgType.STORE, encodeStoreBatch([
         { blockId: jid, descriptor: wrongSize, bytes: junk }, // 100 bytes vs a signed blockSize of 99
@@ -307,7 +307,7 @@ export async function run(t) {
       // Correctly signed descriptor, correct blockSize, but the BYTES don't hash to the
       // claimed blockId — a content-address mismatch the holder checks before admission (§4.2).
       const goodDesc = signDescriptor(
-        sodium, { level: 0, k: 1, m: 0, blockSize: 100, tailBytes: 100, authTag: authTag(), blockIds: [jid] }, a.identity.publicKey, a.identity.privateKey, a.signAuthor,
+        sodium, { level: 0, k: 1, m: 0, blockSize: 100, tailBytes: 100, authTag: authTag(), blockIds: [jid] }, a.identity.publicKey, a.identity.privateKey,
       );
       const stored4 = decodeMask(await a.request(b.peerId, typed(MsgType.STORE, encodeStoreBatch([
         { blockId: id(99), descriptor: goodDesc, bytes: junk }, // blockId ≠ hash(bytes)
@@ -324,7 +324,9 @@ export async function run(t) {
     try {
       const held = bytes(777, 4);
       const heldId = b.crypto.hash(held);
-      await plantBlock(b.fs, toHex(heldId), held); // seed the holder directly, bypassing the protocol
+      // Seed the holder directly, bypassing the protocol. FETCH serves bytes and never
+      // reads the descriptor, so any non-empty one will do.
+      await plantBlock(b.fs, toHex(heldId), held, new Uint8Array([1]));
       const absentId = id(99);
 
       const res = decodeFetchBatchRes(await a.request(b.peerId, typed(MsgType.FETCH, encodeFetchBatchReq([heldId, absentId]))));

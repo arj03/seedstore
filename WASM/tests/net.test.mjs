@@ -123,7 +123,7 @@ export async function run(t) {
 
       const bytes = file(8192, 33);
       const bid = S.crypto.blockId(idB.publicKey, bytes);
-      const desc = signDescriptor(sodium, { level: 0, k: 1, m: 0, blockSize: bytes.length, tailBytes: bytes.length, authTag: new Uint8Array(16), blockIds: [bid] }, idB.publicKey, idB.privateKey, S.signAuthor);
+      const desc = signDescriptor(sodium, { level: 0, k: 1, m: 0, blockSize: bytes.length, tailBytes: bytes.length, authTag: new Uint8Array(16), blockIds: [bid] }, idB.publicKey, idB.privateKey);
       const stored = decodeMask(await B.request(S.peerId, typed(MsgType.STORE, encodeStoreBatch([{ blockId: bid, descriptor: desc, bytes }]))));
       t.eq(stored[0], VERDICT_ACCEPTED, "STORE lands through the ws codec");
       const back = decodeFetchBatchRes(await B.request(S.peerId, typed(MsgType.FETCH, encodeFetchBatchReq([bid]))))[0];
@@ -155,22 +155,23 @@ export async function run(t) {
       t.ok(await view.has(id), "present once the block is on the backend");
       const got = await view.get(id);
       t.ok(got && bytesEqual(got.bytes, bytes), "get returns the bytes");
-      t.ok(got && got.descriptor && bytesEqual(got.descriptor, desc), "descriptor read from the sibling .dsc");
-      t.eq(await view.usedBytes(), bytes.length + desc.length, "used counts ciphertext + descriptor — what the holder charges (§14)");
+      t.ok(got && bytesEqual(got.descriptor, desc), "descriptor read back from the record");
+      const rec1 = 4 + desc.length + bytes.length;
+      t.eq(await view.usedBytes(), rec1, "used counts the whole record — what the holder charges (§14)");
       t.eq((await view.list()).length, 1, "list sees the one block");
 
       // The view holds no index of its own, so it sees writes it did not make —
       // which is the point: on a live node the guest is the one writing.
       const bytes2 = file(32, 5);
       const id2 = sodium.crypto_generichash(32, bytes2);
-      await plantBlock(fs, toHex(id2), bytes2, null);
+      const desc2 = new Uint8Array([5, 4]);
+      await plantBlock(fs, toHex(id2), bytes2, desc2);
       t.eq((await view.list()).length, 2, "a write made behind the view's back still shows up");
-      t.eq((await view.get(id2)).descriptor, null, "a bare block reads back with a null descriptor");
 
       // Durability: a fresh view over the same directory sees the same blocks.
       const reopened = new FsBlobView(new NodeFs(dir));
       t.ok(await reopened.has(id), "reopened view still has the block");
-      t.eq(await reopened.usedBytes(), bytes.length + desc.length + bytes2.length, "reopened used is correct (blks + dscs)");
+      t.eq(await reopened.usedBytes(), rec1 + 4 + desc2.length + bytes2.length, "reopened used is correct (both records)");
       t.ok(bytesEqual((await reopened.get(id)).bytes, bytes), "reopened get returns the bytes");
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -274,7 +275,7 @@ export async function run(t) {
       // The block travels with its author-signed chunk descriptor (§4.3) — the holder
       // verifies it before admitting, here as on any other transport. Both nodes load the
       // same bundle, so they share one signing scope (author).
-      const desc = signDescriptor(sodium, { level: 0, k: 1, m: 0, blockSize: bytes.length, tailBytes: bytes.length, authTag: new Uint8Array(16), blockIds: [bid] }, idB.publicKey, idB.privateKey, S.signAuthor);
+      const desc = signDescriptor(sodium, { level: 0, k: 1, m: 0, blockSize: bytes.length, tailBytes: bytes.length, authTag: new Uint8Array(16), blockIds: [bid] }, idB.publicKey, idB.privateKey);
 
       const stored = decodeMask(await B.request(S.peerId, typed(MsgType.STORE, encodeStoreBatch([{ blockId: bid, descriptor: desc, bytes }]))));
       t.eq(stored[0], VERDICT_ACCEPTED, "STORE acknowledged over ws");

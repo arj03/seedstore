@@ -20,7 +20,7 @@ export async function run(t) {
   const nodes = await createConnectedCohort({ suppressLinkLog: true, count: 3, network: net, sodium, wasm,
     config: { k: 1, m: 1, blockSize: 1024 }, timeoutMs: 200 });
   const [owner, attacker, holder] = nodes;
-  const sign = (node, d) => signDescriptor(sodium, d, node.identity.publicKey, node.identity.privateKey, owner.signAuthor);
+  const sign = (node, d) => signDescriptor(sodium, d, node.identity.publicKey, node.identity.privateKey);
   try {
     t.group("security: a known peer cannot claim another author's block ids");
     const bytes = sodium.randombytes_buf(1024);
@@ -31,7 +31,7 @@ export async function run(t) {
     const forged = sign(attacker, { ...d, m: 0, blockIds: [id] });
     const store = async (descriptor, blockId = id) => (await attacker.request(holder.peerId,
       typed(MsgType.STORE, encodeStoreBatch([{ blockId, descriptor, bytes }]))))[0];
-    t.ok(verifyDescriptor(sodium, forged, owner.signAuthor) !== null, "the attack carries a valid cohort signature");
+    t.ok(verifyDescriptor(sodium, forged) !== null, "the attack carries a valid cohort signature");
     t.ok(await store(forged) !== VERDICT_ACCEPTED, "re-signed ciphertext is rejected even on a fresh holder");
     t.ok(!(await holder.store.has(id)), "the attack cannot squat on the original block id");
     t.eq(await store(legitimate), VERDICT_ACCEPTED, "a third-party repairer can relay the authentic descriptor");
@@ -68,7 +68,7 @@ export async function run(t) {
   const sealed = crypto.encrypt(K, 0, 0, plaintext);
   const id = crypto.blockId(author.publicKey, sealed.ciphertext);
   const env = signDescriptor(sodium, { level: 0, k: 1, m: 2, blockSize: 1024, tailBytes: 1024,
-    authTag: sealed.authTag, blockIds: [id, id, id] }, author.publicKey, author.privateKey, author.publicKey);
+    authTag: sealed.authTag, blockIds: [id, id, id] }, author.publicKey, author.privateKey);
   const d = parseSignedDescriptor(env).descriptor;
   const good = encodeFetchBatchRes([sealed.ciphertext]);
   const badReplies = [
@@ -82,7 +82,7 @@ export async function run(t) {
   for (let i = 0; i < badReplies.length; i++) {
     const ctx = vm.createContext({ APP: { k: 1, m: 2, blockSize: 1024, maxMessageBytes: 8192, fanoutWindow: 4 }, LOCAL: {},
       Uint8Array, badReply: badReplies[i], good, d, env, K, crypto,
-      verifySigned: bytes => verifyDescriptor(sodium, bytes, author.publicKey) !== null });
+      verifySigned: bytes => verifyDescriptor(sodium, bytes) !== null });
     vm.runInContext(source, ctx);
     const result = await vm.runInContext(`(async () => {
       // Every guest name this harness reaches into, checked up front: a rename in the

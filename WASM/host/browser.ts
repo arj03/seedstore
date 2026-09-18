@@ -60,7 +60,4 @@ export type { StorageNodeOptions } from "./storage-node.js";
 export { netAddr, netContact, netReady, netPeers } from "./storage-node.js";
 export type { StorageConfig, Identity } from "./core.js";
 export { defaultConfig } from "./core.js";
-// A browser node joining a cohort of bundle-running holders must verify
-// descriptors under that bundle's author scope. Re-export the scope derivation
-// so the page can compute `storageSignScope(bundleAuthor)`.
-export { STORAGE_APP, STORAGE_PROTO, storageSignScope } from "./descriptor.js";
+export { STORAGE_APP, STORAGE_PROTO } from "./descriptor.js";

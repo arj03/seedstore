@@ -183,10 +183,6 @@ export interface StorageNodeOptions {
    *  seedkernel artifact; an operator selecting a different transport passes
    *  its blob here. Only read when StorageNode builds its own runtime. */
   transportBlob?: Uint8Array;
-  /** Override the cohort's signing scope author: sign descriptors under this
-   *  author instead of the loaded bundle's (used when joining a cohort whose
-   *  holders run a DIFFERENT bundle's author — the browser demo's override). */
-  signAuthor?: Uint8Array;
 }
 
 export class StorageNode {
@@ -213,14 +209,11 @@ export class StorageNode {
    *  harness) reach the runtime directly, and a caller-passed shell is already theirs. */
   readonly shell: Shell;
   private readonly clockFn: () => number;
-  /** The cohort's signing-scope author (§16), derived from the verified bundle
-   *  author. Pass as signDescriptor()'s 5th arg to match the guest's node/verify. */
-  readonly signAuthor: Uint8Array;
   /** This app's fs keyspace prefix (seedkernel §12.2): every key the holder
    *  writes is `appScope + key` on the raw backend. Tooling opening a node's
    *  directory cold must wrap it in `scopedFs(raw, appScope)` to see the same blocks. */
   readonly appScope: string;
-  /** The load's returned handle: app key + scoped fs view + the slot-bound loopback
+  /** The load's returned handle: app label + scoped fs view + the slot-bound loopback
    *  `invoke`. Invocation needs no shell-level identity lookup. */
   private readonly handle: AppHandle;
   private repairLoopOn = false;
@@ -252,11 +245,6 @@ export class StorageNode {
     this.net = net;
     this.ownsShell = ownsShell;
     this.handle = loaded;
-
-    // `signAuthor` overrides the derived scope (§16) so a caller can join a cohort
-    // whose holders run a different bundle's author; fs keyspace/app key stay the
-    // loaded bundle's regardless.
-    this.signAuthor = opts.signAuthor ?? loaded.author;
     this.appScope = loaded.appScope;
 
     // Mirrors the guest's own CFG precedence rule (tier2-guest CFG) — must not

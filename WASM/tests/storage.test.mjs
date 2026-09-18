@@ -38,7 +38,7 @@ async function chunkBlockIds(nodes) {
   for (const node of nodes) {
     for (const id of await node.store.list()) {
       const sb = await node.store.get(id);
-      if (!sb || !sb.descriptor) continue;
+      if (!sb) continue;
       const sd = parseSignedDescriptor(sb.descriptor);
       const key = toHex(node.crypto.hash(sb.descriptor));
       if (!seen.has(key)) seen.set(key, sd.descriptor.blockIds);
@@ -577,7 +577,7 @@ export async function run(t) {
       const bid = a.crypto.blockId(a.identity.publicKey, bytes);
       const desc = (id, sk) => signDescriptor(
         sodium, { level: 0, k: 1, m: 0, blockSize: config.blockSize, tailBytes: config.blockSize, authTag: new Uint8Array(16), blockIds: [bid] },
-        id.publicKey, id.privateKey, a.signAuthor,
+        id.publicKey, id.privateKey,
       );
 
       // Signed by a real cohort peer (a, which b knows): admitted.
@@ -591,7 +591,7 @@ export async function run(t) {
       const bid2 = a.crypto.blockId(stranger.publicKey, bytes2);
       const forged = signDescriptor(
         sodium, { level: 0, k: 1, m: 0, blockSize: config.blockSize, tailBytes: config.blockSize, authTag: new Uint8Array(16), blockIds: [bid2] },
-        stranger.publicKey, stranger.privateKey, a.signAuthor,
+        stranger.publicKey, stranger.privateKey,
       );
       const unknown = decodeMask(await a.request(b.peerId, typed(MsgType.STORE, encodeStoreBatch([{ blockId: bid2, descriptor: forged, bytes: bytes2 }]))));
       t.eq(unknown[0], VERDICT_DESCRIPTOR, "a self-signed descriptor from a fresh keypair is declined — the signature is not anchored");
@@ -612,7 +612,7 @@ export async function run(t) {
       const bid = a.crypto.blockId(a.identity.publicKey, bytes);
       const env = signDescriptor(
         sodium, { level: 0, k: 1, m: 2, blockSize: config.blockSize, tailBytes: config.blockSize, authTag: new Uint8Array(16), blockIds: [bid, bid, bid] },
-        a.identity.publicKey, a.identity.privateKey, a.signAuthor,
+        a.identity.publicKey, a.identity.privateKey,
       );
       const first = decodeMask(await a.request(b.peerId, typed(MsgType.STORE, encodeStoreBatch([{ blockId: bid, descriptor: env, bytes }]))));
       t.eq(first[0], VERDICT_ACCEPTED, "the first copy is admitted");
@@ -633,7 +633,7 @@ export async function run(t) {
     const [owner] = nodes;
     try {
       const K = owner.crypto.randomKey();
-      const sign = (d) => signDescriptor(sodium, d, owner.identity.publicKey, owner.identity.privateKey, owner.signAuthor);
+      const sign = (d) => signDescriptor(sodium, d, owner.identity.publicKey, owner.identity.privateKey);
       const at = (level, sealed, tailBytes) => {
         const id = owner.crypto.blockId(owner.identity.publicKey, sealed.ciphertext);
         return { id, ciphertext: sealed.ciphertext, env: sign({ level, k: 1, m: 1, blockSize: cfg.blockSize, tailBytes, authTag: sealed.authTag, blockIds: [id, id] }) };

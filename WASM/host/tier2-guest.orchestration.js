@@ -63,14 +63,13 @@ const MSG_HAVE = 1, MSG_OFFER = 2, MSG_FETCH = 3, MSG_STORE = 4;
 const NET_PROTO = strBytes("seedstore");
 const HAVE_ID_LEN = 32;      // a HAVE/FETCH request names 32-byte block_ids (§18)
 const FETCH_FRAME = 5;       // a present block costs [found u8][len u32] in a FETCH response (§18)
-// New writes use one record per block: [descriptor length u32][descriptor][ciphertext].
-// The legacy two-file layout remains readable so existing holders upgrade in place.
-const STORE_REC = ".rec", STORE_BLK = ".blk", STORE_DSC = ".dsc", STORE_REC_HEAD = 4;
+// One record per block: [descriptor length u32][descriptor][ciphertext].
+const STORE_REC = ".rec", STORE_REC_HEAD = 4;
 // The logical names this app's own modules are installed under. The guest calls them
 // by the logical name from its manifest, straight through `host.call` — a name this
 // realm did not declare as a local service, and that is not a host method (`service/call`),
-// is this app's module (seedkernel §12.2). The seam resolves it against this app's map,
-// so app keys never leave the host.
+// is this app's module (seedkernel §12.2). The seam resolves it against this app's own
+// map, so no other app's modules are nameable from here.
 const CODEC_NAME = "codec";
 const REP_NAME = "reputation";
 
@@ -265,7 +264,7 @@ function repTally() {
 }
 
 // ── local store over fs ─────────────────────────────────────────────────────
-// New blocks are one <hex>.rec; legacy <hex>.blk/.dsc pairs remain readable.
+// One <hex>.rec per block.
 function decodeStoreRecord(rec) {
   if (!rec || rec.length < STORE_REC_HEAD) return null;
   const dlen = rU32(rec, 0);
@@ -277,26 +276,9 @@ async function fsGet(keyStr) {
   return r[0] === 1 ? r.subarray(1) : null;
 }
 async function storeHas(id) { await ensureStoreIndex(); return heldBlocks.has(toHex(id)); }
-async function storeGet(id) {
-  const hex = toHex(id);
-  const rec = await fsGet(hex + STORE_REC);
-  if (rec) return decodeStoreRecord(rec);
-  const blk = await fsGet(hex + STORE_BLK);
-  if (!blk) return null;
-  return { bytes: blk, descriptor: await fsGet(hex + STORE_DSC) };
-}
-async function storeGetBytes(id) {
-  const hex = toHex(id);
-  const rec = await fsGet(hex + STORE_REC);
-  if (rec) { const decoded = decodeStoreRecord(rec); return decoded ? decoded.bytes : null; }
-  return fsGet(hex + STORE_BLK);
-}
-async function storeGetDescriptor(id) {
-  const hex = toHex(id);
-  const rec = await fsGet(hex + STORE_REC);
-  if (rec) { const decoded = decodeStoreRecord(rec); return decoded ? decoded.descriptor : null; }
-  return fsGet(hex + STORE_DSC);
-}
+async function storeGet(id) { return decodeStoreRecord(await fsGet(toHex(id) + STORE_REC)); }
+async function storeGetBytes(id) { const r = await storeGet(id); return r ? r.bytes : null; }
+async function storeGetDescriptor(id) { const r = await storeGet(id); return r ? r.descriptor : null; }
 async function storeKeys() {
   const r = await host.call("fs/list", EMPTY), out = [];
   let o = 0; const n = rU32(r, o); o += 4;
@@ -1331,19 +1313,12 @@ async function ensureStoreIndex() {
       if (activeStoreWrites > 0) await storeWritesIdle;
       const reservationVersion = storeReservationVersion;
       const keys = await storeKeys();
-      const records = new Set(), legacy = new Set();
+      const rebuilt = new Set();
       for (const key of keys) {
-        if (key.length !== 68) continue;
-        const hex = key.slice(0, 64), ext = key.slice(64);
-        if (ext === STORE_REC) records.add(hex);
-        else if (ext === STORE_BLK) legacy.add(hex);
+        if (key.length === 68 && key.endsWith(STORE_REC)) rebuilt.add(key.slice(0, 64));
       }
-      const sizeKeys = [];
-      for (const hex of records) sizeKeys.push(hex + STORE_REC);
-      for (const hex of legacy) sizeKeys.push(hex + STORE_BLK, hex + STORE_DSC);
-      const sizes = await fsSizes(sizeKeys);
+      const sizes = await fsSizes([...rebuilt].map((hex) => hex + STORE_REC));
       if (reservationVersion !== storeReservationVersion || activeStoreWrites > 0) continue;
-      const rebuilt = new Set([...records, ...legacy]);
       let rebuiltBytes = sizes.reduce((sum, size) => sum + size, 0);
       for (const [hex, cost] of liveStoreReservations) {
         if (!rebuilt.has(hex)) rebuiltBytes += cost;
@@ -1371,7 +1346,6 @@ async function fsPutStoreRecord(keyStr, descriptor, bytes) {
   await host.call("fs/put", concat([head, kb, recordHead, descriptor, bytes]));
 }
 // The one write path into store.local: one framed record, under the quota budget.
-// Legacy two-file records are read but all new commits avoid the second metadata op.
 //
 // Backend failures (full disk, backend error, realm OOM) surface as holder errors:
 // a holder has no console, so the verdict byte is its only way to report them.

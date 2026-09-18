@@ -91,8 +91,9 @@ mirror, and the bundle producer:
    envelope; the host mirror (`signDescriptor`/`verifyDescriptor` in
    `host/descriptor.ts`) rides the same two scoped names, so the parity tests
    hold. Neither path ever reconstructs the prefix: the scope is the kernel's to
-   apply, derived from the admitted manifest's `(author, app)` — one derivation,
-   so the two cannot disagree.
+   apply, derived from the admitted manifest's `app` label — one derivation, so
+   the two cannot disagree, and a fork or a rotated author key signs in the same
+   scope.
 2. **The descriptor's leading byte is the signed-format tag** (spec §16). The
    descriptor core leads with `TAG_DESCRIPTOR = 0x01` (`descriptor-core.ts`), and
    the Part II signed formats reserve their own values before they exist
@@ -102,9 +103,8 @@ mirror, and the bundle producer:
    rebuilds held ids and quota usage from `FS_LIST`/`FS_SIZE`, then updates that
    authoritative index with each STORE reservation. OFFER and STORE sibling checks
    therefore avoid repeated filesystem metadata calls. New blocks commit as one
-   `<block-id>.rec` (`[descriptor length][descriptor][ciphertext]`) instead of a
-   `.blk` plus `.dsc` pair; the guest and `FsBlobView` still read the legacy layout
-   so an existing holder upgrades in place.
+   `<block-id>.rec` (`[descriptor length][descriptor][ciphertext]`), so a commit is
+   one metadata op.
 4. **The bundle carries an integer, monotonic `version`** (the monotonic
    downgrade refusal, seedkernel §12.4; `scripts/storage-bundle.mjs`):
    guarded by `Number.isInteger` and bumped on every publish, so the shell's
@@ -112,7 +112,7 @@ mirror, and the bundle producer:
 5. **The tests that pin this**: `descriptor` (tamper-evidence over the tagged,
    scoped preimage), `tier2-port` / `holder-guest` (parity across the scoped
    sign/verify paths), `shell-run` (bundle version freshness — a downgrade is
-   refused), `net` (legacy and current durable layouts across a cold reopen), and
+   refused), `net` (the durable layout across a cold reopen), and
    `protocol` (concurrent STOREs cannot race the authoritative sibling reservation).
 
 **Purely storage-side, independent of all this:** the codec and reputation

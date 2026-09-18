@@ -181,9 +181,6 @@ const sodium = await loadSodium();
 const identity = sodium.crypto_sign_keypair();
 console.log(`me: ${hex(identity.publicKey).slice(0, 16)}…`);
 
-// The node derives its signing scope (§16) from the staged bundle's verified
-// author, so every p2p-cli node on the same bundle agrees automatically.
-console.log("signing scope: derived from the loaded seedstore bundle author");
 
 // Base on defaultConfig so every guest knob is set (a partial config would feed
 // the strict guest an undefined one). realmMemoryBytes is host-only and split

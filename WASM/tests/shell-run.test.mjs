@@ -60,9 +60,9 @@ export async function run(t) {
 
   t.group("shell: a generic seedkernel-shell runs the seedstore guest end-to-end (step 7)");
   {
-    // The bundle author fixes the deployment's signing scope (README §16). The shell
+    // The bundle's app label fixes the deployment's signing scope (README §16). The shell
     // running the bundle signs descriptors under it, so the host-side StorageNode holders
-    // must verify under the SAME scope — they load the SAME signed bundle.
+    // verify under the SAME scope — they run storage under the same label.
     const author = generateKeyPair(sodium);
     const net = new LoopbackNetwork();
 
@@ -98,16 +98,16 @@ export async function run(t) {
       // bundle ships the PRODUCTION 256 KiB, which would make this tiny file
       // single-block/replicated instead of RS across the cohort).
       const loaded = await shell.installFile(bundlePath, { localConfig: { blockSize: 1024 } });
-      // The app key rides the load's handle: a node with a network has at least two apps
-      // loaded — the storage bundle and the transport, an ordinary app claiming `_net`
-      // under its `services` list (§12.10), a co-resident guest's to reach and never a peer's.
-      const appKey = loaded.key;
+      // A node with a network has at least two apps loaded — the storage bundle and the
+      // transport, an ordinary app claiming `_net` under its `services` list (§12.10), a
+      // co-resident guest's to reach and never a peer's — so each claim names its label.
+      const app = loaded.manifest.app;
       // A slot's modules are private to its guest now, so there is no table to ask what
       // landed: the load is all-or-none (seedkernel §12.4), so what proves the modules
       // stood up is the app answering on the claim it made — and, below, a PUT that
       // cannot complete without the codec.
       for (const proto of loaded.manifest.protocols ?? []) {
-        t.eq(shell.resolve(proto), appKey, `the loaded app claims ${proto}`);
+        t.eq(shell.resolve(proto), app, `the loaded app claims ${proto}`);
       }
 
       // PUT, orchestrated by the confined guest the shell loaded.

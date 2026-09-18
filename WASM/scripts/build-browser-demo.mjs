@@ -343,9 +343,7 @@ function prune(dir) {
 prune(out);
 
 console.log(`browser demo staged at ${out}  (deps vendored under ./vendor — runs offline)`);
-console.log(bundleBlob
-  ? "cohort author: p2p.html auto-reads ./seedstore.skb (bundle present)"
-  : "cohort author: no ./bundle — p2p.html defaults to zero-author scope (run `npm run build:bundle` for a seedloader cohort)");
+
 console.log("serve it:   npm run serve:demo        (re-stages + http-server with caching OFF)");
 console.log("  ── DO NOT use a plain `http-server` without -c-1: its default max-age=3600 makes");
 console.log("     the browser keep a STALE codec.wasm after a rebuild → confusing errors.");

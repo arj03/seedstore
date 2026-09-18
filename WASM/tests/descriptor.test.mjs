@@ -11,6 +11,7 @@ import {
   encodeDescriptorList, decodeDescriptorList,
 } from "../build/host/descriptor.js";
 import { bytesEqual } from "../build/host/util.js";
+import { appSigner } from "seedkernel-wasm/guest-seam";
 
 import { ensureSodium, newKey, paths } from "./helpers.mjs";
 
@@ -116,33 +117,33 @@ export async function run(t) {
     const ids = [];
     for (let i = 0; i < 4; i++) ids.push(crypto.hash(new Uint8Array([i + 10])));
     const d = { level: 0, k: 2, m: 2, blockSize: 256, tailBytes: 512, authTag: tag(), blockIds: ids };
-    // The 5th argument is the SCOPE AUTHOR — the key whose storageSignScope is the
-    // deployment scope. signDescriptor/verifyDescriptor route through the kernel's
-    // scoped node/sign + node/verify, which apply `DOMAIN_guest ‖ scope` host-side;
-    // the scope bytes themselves are never reconstructed here (§16).
-    const env = signDescriptor(sodium, d, author.publicKey, author.privateKey, author.publicKey);
+    // signDescriptor/verifyDescriptor route through the kernel's scoped signer, which
+    // applies `DOMAIN_guest ‖ scope` host-side for the `seedstore` label; the scope
+    // bytes themselves are never reconstructed here (§16).
+    const env = signDescriptor(sodium, d, author.publicKey, author.privateKey);
 
-    const ok = verifyDescriptor(sodium, env, author.publicKey);
+    const ok = verifyDescriptor(sodium, env);
     t.ok(ok !== null, "valid descriptor verifies");
     t.ok(ok && bytesEqual(ok.authorPk, author.publicKey), "author pubkey recovered");
 
     // A holder alters a block id to misdirect repair → signature breaks.
     const tampered = env.slice();
     tampered[96 + 13] ^= 0xff; // flip a byte inside the authenticated tag of the core
-    t.ok(verifyDescriptor(sodium, tampered, author.publicKey) === null, "tampered descriptor rejected");
+    t.ok(verifyDescriptor(sodium, tampered) === null, "tampered descriptor rejected");
 
     // A holder re-signs with its own key → authority is bound to the author,
     // so a repairer keyed to the author's pubkey would not accept holder's key.
-    const forged = signDescriptor(sodium, d, holder.publicKey, holder.privateKey, holder.publicKey);
-    const fv = verifyDescriptor(sodium, forged, holder.publicKey);
+    const forged = signDescriptor(sodium, d, holder.publicKey, holder.privateKey);
+    const fv = verifyDescriptor(sodium, forged);
     t.ok(fv !== null && !bytesEqual(fv.authorPk, author.publicKey), "holder re-sign is detectable (different author)");
 
     // The signature is bound to its signing scope (§16): the same author + core signed
-    // under a different scope does not verify under the original one — a storage signature
-    // cannot be replayed into another deployment's (author, app) namespace.
-    const scoped = signDescriptor(sodium, d, author.publicKey, author.privateKey, holder.publicKey);
-    t.ok(verifyDescriptor(sodium, scoped, author.publicKey) === null, "a descriptor signed under a different scope is rejected");
-    t.ok(verifyDescriptor(sodium, scoped, holder.publicKey) !== null, "…but verifies under its own scope");
+    // under another app label's scope does not verify as a storage descriptor — another
+    // app's signature cannot be replayed into storage's namespace.
+    const core = encodeDescriptorCore(d);
+    const elsewhere = appSigner(sodium, author, "another-app").sign(core);
+    const replayed = new Uint8Array([...author.publicKey, ...elsewhere, ...core]);
+    t.ok(verifyDescriptor(sodium, replayed) === null, "a descriptor signed under another app's scope is rejected");
   }
 
   t.group("index list: encode/decode + encrypt round trip (§4.3, §4.4)");
@@ -152,7 +153,7 @@ export async function run(t) {
       const ids = [];
       for (let i = 0; i < 4; i++) ids.push(crypto.hash(new Uint8Array([c, i])));
       return signDescriptor(sodium, { level: 0, k: 2, m: 2, blockSize: 512, tailBytes: 1024, authTag: tag(), blockIds: ids },
-        author.publicKey, author.privateKey, author.publicKey);
+        author.publicKey, author.privateKey);
     });
     // An index level is JUST the ordered signed descriptors — no header, no file_size, no
     // enc alg, no version. Every one of those either moved into the descriptor (tailBytes,

@@ -116,16 +116,7 @@
     <textarea id="wsPeers" class="mono" rows="3" style="width:100%;box-sizing:border-box" placeholder="abc…64hex@127.0.0.1:47210&#10;def…64hex@127.0.0.1:47211"></textarea>
   </div>
 </div>
-<div class="row muted">
-  cohort bundle author:
-  <input id="author" class="mono" type="text" style="width:28rem;max-width:100%" placeholder="auto-read from ./seedstore.skb — override with a 64-hex author id, or blank for a browser-only cohort" />
-</div>
-<p class="muted" style="margin:.2rem 0 0">
-  Descriptor signatures are <strong>scoped to the deployment's bundle author</strong> (README §16): a holder running a
-  signed bundle (a <code>seedloader</code>) only admits blocks signed under that author's scope. This is filled in for you
-  from the deployment's <code>seedstore.skb</code>; override only to join a different cohort, or clear it when every
-  holder is another browser tab / a default zero-author <code>StorageNode</code>. A mismatch makes holders silently decline every block.
-</p>
+
 <div class="row">
   <button id="connect">Connect</button>
   <span id="status" class="pill warn">offline</span>
@@ -159,7 +150,7 @@ import { bootTransportShell, netAddr, netReady } from "./host/storage-node.js";
 import { RtcNetwork } from "seedkernel-wasm/net-rtc";
 import { WsNetwork } from "seedkernel-wasm/net-ws";
 import { parsePeerRef } from "seedkernel-wasm/peer-addr";
-import { verifyBundle } from "seedkernel-wasm/bundle";
+
 import { createRelaySignaling } from "seedrelay";
 
 // k=1, m=1: replication r = m+1 = 2 — each block is copied to two distinct holders
@@ -253,44 +244,14 @@ const $ = (id) => document.getElementById(id);
 const logEl = $("log");
 const log = (m) => { logEl.textContent += m + "\n"; logEl.scrollTop = logEl.scrollHeight; };
 const hex = (b) => [...b].map((x) => x.toString(16).padStart(2, "0")).join("");
-const fromHex = (s) => new Uint8Array(s.match(/.{1,2}/g)?.map((h) => parseInt(h, 16)) ?? []);
 
-// The cohort's signing scope is its bundle author (README §16). Read it off the
-// staged ./seedstore.skb so a browser joining a seedloader cohort matches the
-// holders' scope automatically. Absent (no bundle staged) → null → zero-author.
-//
-// `verifyBundle` rather than a slice off the front: an author id is a derivation, not
-// a fixed offset (seedkernel §12.4) — a hash over BOTH of the author's public keys,
-// which no amount of slicing produces. Verifying also means the scope this page adopts
-// came from a signature that checked, not from bytes a static server happened to serve.
-//
-// One fetch, one artifact: this promise is the SAME bundle boot() loads, and crypto
-// (core libsodium + ML-DSA-65) readies eagerly beside it — verifyBundle
-// needs the PQ half mixed onto sodium, and boot() needs it either way.
+// One fetch, one artifact: the staged ./seedstore.skb boot() installs, fetched eagerly
+// beside the crypto (core libsodium + ML-DSA-65) the install verifies it with.
 const cryptoReady = loadCrypto(sodium, "./");
 const bundleReady = loadWasmBytes("./");
-// Marked handled: with an explicit ?author= nothing awaits this until Connect, and an
-// unstaged bundle is legal — every awaiting site has its own try/catch.
+// Marked handled: nothing awaits it until Connect, and an unstaged bundle is reported
+// by boot()'s own try/catch.
 bundleReady.catch(() => {});
-async function detectCohortAuthor() {
-  try {
-    const [{ bundleBlob }] = await Promise.all([bundleReady, cryptoReady]);
-    return hex(verifyBundle(sodium, bundleBlob).author);
-  } catch (e) {
-    // verifyBundle throws rather than returning null, so this is the one failure
-    // path: no bundle staged (the ordinary browser-only cohort), or one that did
-    // not verify. Soft — say so, because the fallback silently costs every block.
-    log(`could not read the cohort author from ./seedstore.skb (${e.message}) — using the zero-author scope.`);
-    return null;
-  }
-}
-// Pre-fill the author field on load so the scope is visible before connecting. An
-// explicit ?author=<hex> wins (so an A/B URL carries the cohort scope and can't be
-// forgotten); otherwise fall back to the staged bundle's author. NB the scope is fixed
-// when the node BOOTS (Connect) — editing the field after connecting has no effect.
-const urlAuthor = params.get("author")?.trim();
-if (urlAuthor) $("author").value = urlAuthor;
-else detectCohortAuthor().then((a) => { if (a && !$("author").value.trim()) $("author").value = a; });
 
 let node = null, net = null, runtime = null, dialTimer = null;
 
@@ -409,30 +370,15 @@ async function boot() {
     });
 
     log("booting the storage node on the seedkernel (the staged ./seedstore.skb)…");
-    // Descriptor signatures are scoped to the cohort's bundle author (README §16). A
-    // holder running a signed bundle (a seedloader) verifies under that author's scope,
-    // so this node must sign under the SAME author or every block it offers is declined.
-    // The field is auto-read from the cohort's bundle (detectCohortAuthor); a manual
-    // value overrides it, and a blank field + no bundle → the zero-author default.
-    let authorHex = $("author").value.trim() || (await detectCohortAuthor()) || "";
-    let signAuthor;
-    if (authorHex) {
-      // 32 bytes: the derived key-set id a manifest author is (seedkernel §12.4).
-      if (!/^[0-9a-f]{64}$/i.test(authorHex)) throw new Error("cohort bundle author must be a 64-hex (32-byte) author id");
-      signAuthor = fromHex(authorHex);
-      $("author").value = authorHex; // reflect the auto-detected scope in the UI
-    }
     node = await createStorageNode({
       runtime, sodium, wasm: await bundleReady, config,
-      quota: 64 * 1024 * 1024, timeoutMs, signAuthor,
+      quota: 64 * 1024 * 1024, timeoutMs,
     });
     // Log the LIVE config the coordinator actually uses (after defaultConfig
     // merge), so a stale/cached build that lost maxMessageBytes is visible here.
     const winMiB = Math.round((node.config.windowTargetBytes ?? 4 * 1024 * 1024) / (1024 * 1024));
     const heapMiB = Math.round((node.config.realmMemoryBytes ?? 64 * 1024 * 1024) / (1024 * 1024));
     log(`node ready (${node.peerId.slice(0, 8)}…), RS(${node.config.k},${node.config.m}), ${node.config.blockSize / 1024} KiB blocks, batch cap ${Math.round(node.config.maxMessageBytes / 1024)} KiB, window ${winMiB} MiB, heap ${heapMiB} MiB${mode === "ws" ? `, conns/peer ${connsPerPeerFor(mode)}` : ""}. handlers installed: ${node.handlersInstalled()}`);
-    log(signAuthor ? `signing scope: bundle author ${authorHex.slice(0, 8)}… (matches a seedloader cohort)`
-                  : `signing scope: zero-author default — holders running a signed bundle will DECLINE; set the cohort bundle author above if so.`);
 
     // Pay the codec + crypto cold-JIT tax now (a throwaway encode/decode, no network,
     // no store), so the first PUT isn't cold: a cold PUT encodes the WHOLE file before
@@ -509,9 +455,6 @@ function armDialWatchdog() {
 function lockTransportChoice() {
   for (const r of document.querySelectorAll('input[name="transport"]')) r.disabled = true;
   $("relay").disabled = true; $("room").disabled = true;
-  // The signing scope is fixed when the node BOOTS, so editing the author after connecting
-  // does nothing — disable it too so the field can't lie about what scope this node uses.
-  $("author").disabled = true;
 }
 
 $("store").onclick = async () => {
@@ -568,8 +511,8 @@ $("store").onclick = async () => {
         log("    fix: clear each holder's data directory, or raise its quota, then retry.");
       }
       if (/descriptor/.test(reasons)) {
-        log("  ⚠ holders rejected the DESCRIPTOR — this node signs under a different scope than the cohort (§16).");
-        log("    fix: set the cohort bundle author above to the holders' bundle author, then reconnect.");
+        log("  ⚠ holders rejected the DESCRIPTOR — it does not verify under their app's signing scope (§16).");
+        log("    fix: run storage under the same app label as the holders' bundle.");
       }
       if (/sibling/.test(reasons)) {
         log("  ⚠ holders refused under the SIBLING rule (§6) — they already hold another block of this chunk.");

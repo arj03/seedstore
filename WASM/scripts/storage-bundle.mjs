@@ -20,9 +20,9 @@ import { TRANSPORT_SERVICE } from "seedkernel-wasm/transport-bundle";
 import { defaultConfig, normaliseConfig, PRODUCTION_BLOCK_SIZE } from "../build/host/core.js";
 import { STORAGE_PROTO } from "../build/host/descriptor.js";
 
-// The app name — the manifest `app` and the `app` component of the signing scope
-// (README §16). The shell scopes the guest's SIGN/VERIFY ops to (author, app);
-// the host-side mirror derives the byte-identical scope from the same app name.
+// The app label — the manifest `app`, and the whole of the signing scope (README
+// §16). The shell scopes the guest's SIGN/VERIFY ops to this label, whoever signed the
+// bundle; the host-side mirror derives the byte-identical scope from the same label.
 const APP_NAME = "seedstore";
 
 /**
@@ -41,7 +41,7 @@ export function authorKeysFor(sodium, edSk) {
 // The HOST services the storage guest reaches, EXACTLY (`guest.requires`): a
 // `host.call` naming a host method is refused unless the method's SERVICE is in this
 // list. Each one is a host service the seam wires for this slot — `node` (sign/verify
-// scoped to this bundle's (author, app), identity, random), `fs`, `clock`.
+// scoped to this bundle's app label, identity, random), `fs`, `clock`.
 //
 // Pure transforms (BLAKE2b, ChaCha20-Poly1305, and this bundle's own
 // codec/reputation modules) are not grants and are never listed here.

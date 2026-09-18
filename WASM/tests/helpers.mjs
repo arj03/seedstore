@@ -44,13 +44,17 @@ export async function liveBlockCount(nodes, net, ids) {
 }
 
 /** Plant a block straight into a node's store.local, bypassing the protocol —
- *  for tests that need a holder to already have something. Writes the
- *  `<hex>.blk`/`.dsc` layout directly, since admission is the guest holder's alone.
+ *  for tests that need a holder to already have something. Writes the guest's
+ *  `<hex>.rec` record directly (`[descriptor length u32 BE][descriptor][bytes]`),
+ *  since admission is the guest holder's alone.
  *
  *  Seed BEFORE the holder is otherwise exercised: the guest rebuilds its §14
  *  byte total from the fs lazily, so a later plant is invisible to it until
  *  the realm is rebuilt. */
-export async function plantBlock(fs, idHex, bytes, descriptor = null) {
-  await fs.put(idHex + ".blk", bytes);
-  if (descriptor) await fs.put(idHex + ".dsc", descriptor);
+export async function plantBlock(fs, idHex, bytes, descriptor) {
+  const record = new Uint8Array(4 + descriptor.length + bytes.length);
+  new DataView(record.buffer).setUint32(0, descriptor.length);
+  record.set(descriptor, 4);
+  record.set(bytes, 4 + descriptor.length);
+  await fs.put(idHex + ".rec", record);
 }
