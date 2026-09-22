@@ -1,6 +1,6 @@
 // Stage a self-contained browser demo into build/browser-demo — ALL browser pages
 // plus the assets they share, so there is ONE staged dir (not one per page):
-//   - the four WASM modules (kernel, signature, codec, reputation)
+//   - the four WASM modules (libsodium, signature, codec, reputation)
 //   - this project's compiled host, minified (build/host-min → host/)
 //   - seedkernel's node:fs-free browser host, minified (build-min → seedkernel/)
 //   - the pages: index.html (in-page loopback cohort), p2p.html (real P2P)
@@ -24,7 +24,7 @@ const root = join(__dirname, "..");
 const build = join(root, "build");
 const out = process.env.BROWSER_DEMO_OUT ?? join(build, "browser-demo");
 const seedstoreHost = join(build, "host-min");
-// The kernel's minified tree: build-min (host/ + core/ subdirs) — its minifier
+// seedkernel's minified tree: build-min (host/ + services/ subdirs) — its minifier
 // moved the output there from the old build/host-min.
 const seedkernelHost = join(root, "..", "..", "seedkernel", "WASM", "build-min");
 const seedRelayRoot = join(root, "..", "..", "seedrelay");
@@ -60,7 +60,7 @@ function newestJsMtime(dir) {
 }
 function assertMinFresh(label, hostDir, minDir, rebuildCmd, subs = [""]) {
   // `subs` narrows the comparison to the subtrees the minify step actually
-  // covers — the kernel's build/ also holds fixture output that no
+  // covers — seedkernel's build/ also holds fixture output that no
   // tsc<->minify cycle touches, which would otherwise false-alarm every run.
   for (const sub of subs) {
     const host = join(hostDir, sub), min = join(minDir, sub);
@@ -81,7 +81,7 @@ assertMinFresh("seedstore", join(build, "host"), seedstoreHost,
 assertMinFresh("seedkernel", join(root, "..", "..", "seedkernel", "WASM", "build"),
   seedkernelHost,
   "in seedkernel/WASM run `npm run build`.",
-  ["host", "core"]);
+  ["host", "services"]);
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -116,8 +116,8 @@ for (const f of ["codec.wasm", "reputation.wasm"]) {
 // next to the wasm — browser.js feeds it to StorageNode (no node:fs in the browser).
 await copy(join(build, "host", "tier2-guest.js"), join(out, "tier2-guest.js"));
 
-// Host JS (seedstore + seedkernel). Copy .js recursively — the kernel's minified
-// tree has host/ and core/ subdirs, and the import maps resolve
+// Host JS (seedstore + seedkernel). Copy .js recursively — seedkernel's minified
+// tree has host/ and services/ subdirs, and the import maps resolve
 // "seedkernel-wasm/*" into ./seedkernel/ and this project's host into ./host/.
 //
 // Node-only modules do NOT ship: both minified trees carry modules that exist
@@ -126,7 +126,7 @@ await copy(join(build, "host", "tier2-guest.js"), join(out, "tier2-guest.js"));
 // a STATIC `node:` import — and assert below that nothing staged still imports
 // one, so the rule can never silently drop a module a page actually needs.
 //
-// A DYNAMIC `node:` import is a branch, not a dependency (e.g. the kernel's
+// A DYNAMIC `node:` import is a branch, not a dependency (e.g. seedkernel's
 // module table reaches for `node:worker_threads` only when there's no DOM
 // `Worker`), so it must not be treated as node-only.
 //
@@ -172,10 +172,10 @@ await copyJs(seedkernelHost, join(out, "seedkernel"));
 // ML-KEM-768 is private content of the signed transport bundle now; no loose
 // browser artifact is needed here.
 
-// ── core libsodium: the kernel's, not a second copy ──────────────────────────
-// The pages import "seedkernel-wasm/libsodium" (the kernel's published browser
+// ── core libsodium: seedkernel's, not a second copy ──────────────────────────
+// The pages import "seedkernel-wasm/libsodium" (seedkernel's published browser
 // entry) rather than the upstream npm package, so browser, Node, and the Go
-// loader all run the SAME crypto binary. These three files must land in ONE
+// binary all run the SAME crypto binary. These three files must land in ONE
 // directory: the wrapper resolves the core and .wasm relative to its own
 // import.meta.url, and the wasm is a sibling fetch, not a base64 blob.
 {
@@ -191,9 +191,9 @@ await copyJs(seedkernelHost, join(out, "seedkernel"));
   }
 }
 
-// ── the QuickJS engine: the kernel's own build, like everything else ─────────
+// ── the QuickJS engine: seedkernel's own build, like everything else ─────────
 // safe-js runs its realms on seedkernel's in-repo quickjs-ng build (package
-// export "seedkernel-wasm/quickjs"), staged from the kernel checkout rather
+// export "seedkernel-wasm/quickjs"), staged from the seedkernel checkout rather
 // than vendored from npm. Its glue picks the browser's fetch path at runtime;
 // the four files must land in ONE dir since variant.mjs imports its siblings
 // relatively and fetches `new URL("emscripten-module.wasm", import.meta.url)`.
@@ -245,7 +245,7 @@ for (const [pkg, sub, dest, files, allMjs] of VENDOR) {
   for (const n of names) await copy(join(src, n), join(dstDir, n));
 }
 
-// The app-neutral relay adapter is its own sibling package, not kernel surface.
+// The app-neutral relay adapter is its own sibling package, not seedkernel surface.
 // Stage its single browser module under the import map's vendor path.
 {
   const dstDir = join(out, "vendor", "seedrelay");
@@ -297,7 +297,7 @@ function checkPage(page) {
       } else if (spec.startsWith("node:")) {
         // STATIC is fatal wherever it appears (catches a Node-host module that
         // slipped past copyJs). DYNAMIC is a branch, not a dependency (e.g. the
-        // kernel's glue reaches for `node:module` only inside its
+        // seedkernel's glue reaches for `node:module` only inside its
         // ENVIRONMENT_IS_NODE test) — nothing to resolve, so skip it.
         if (dynamic) continue;
         fail(file, spec, "a Node builtin: this module should not be in the browser graph.");
@@ -348,5 +348,5 @@ console.log("serve it:   npm run serve:demo        (re-stages + http-server with
 console.log("  ── DO NOT use a plain `http-server` without -c-1: its default max-age=3600 makes");
 console.log("     the browser keep a STALE codec.wasm after a rebuild → confusing errors.");
 console.log("  in-page cohort:        http://localhost:3000/index.html");
-console.log("  real P2P (direct WS):  seedloader --ws-listen nodes, endpoints pasted in → http://localhost:3000/p2p.html");
+console.log("  real P2P (direct WS):  seedkernel --ws-listen nodes, endpoints pasted in → http://localhost:3000/p2p.html");
 console.log("  real P2P (relay+STUN): `seedrelay` (or seedchat's `npm run relay`) + npm run serve:rtc-holder");

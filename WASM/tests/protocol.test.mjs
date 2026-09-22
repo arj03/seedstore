@@ -124,7 +124,7 @@ export async function run(t) {
     const net = new LoopbackNetwork();
     const [a, b] = await createConnectedCohort({ suppressLinkLog: true, count: 2, network: net, sodium, wasm, timeoutMs: TIMEOUT });
     try {
-      // The kernel admits 256 unresolved host calls per realm. The old cold-index
+      // The host admits 256 unresolved host calls per realm. The old cold-index
       // path launched one fs/size call per record in a single Promise.all, so record
       // 257 made initialization throw and every HAVE/OFFER returned an empty reply.
       for (let i = 0; i < 257; i++) {

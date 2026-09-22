@@ -13,9 +13,9 @@
 // parity — which is what lets a repairer regenerate a block keylessly (§9).
 //
 // DECODE rows have their zero coefficients compacted into a term list once
-// (cheaper than a per-strip branch, and it cuts the loader's per-back-edge
+// (cheaper than a per-strip branch, and it cuts the native binary's per-back-edge
 // module-call billing, seedkernel SECURITY §14.1); ENCODE rows are dense and
-// must NOT get this treatment — measured on the loader's wazero, removing the
+// must NOT get this treatment — measured on the native binary's wazero, removing the
 // (dead) zero test or precomputing the source address each cost ~8% MORE on a
 // 64 KiB RS(10,6) encode. Re-measure before touching `dense` or the zero test below.
 

@@ -1,5 +1,5 @@
 // p2p-cli — a headless "p2p.html light": boots the SAME WsNetwork + StorageNode the
-// browser demo uses and drives PUT/GET against real `seedloader --ws-listen` nodes,
+// browser demo uses and drives PUT/GET against real `seedkernel --ws-listen` nodes,
 // printing a wire-level timeline. All four are CUMULATIVE TIMESTAMPS (ms since the
 // op started, not durations):
 //   encode = first STORE frame sent     queue  = last STORE frame handed to a socket
@@ -26,7 +26,7 @@
 // NOTE each PUT permanently costs every holder ~fileSize bytes of its §14 quota (no
 // dedup on re-put). Keep --puts low against live nodes.
 //
-// NOTE one streamed window is ONE guest invocation, bounded by the kernel's 5 s
+// NOTE one streamed window is ONE guest invocation, bounded by the host's 5 s
 // handoff deadline (guest execution AND every handoff's wall clock). A 24 MB window
 // at ~10 MB/s runs ~3.4 s against it, so a slow link fails the PUT with "handoff
 // deadline exhausted" — raise --guest-deadline, NOT --timeout, which is a different
@@ -204,7 +204,7 @@ const runtime = await bootTransportShell({
 
 // `config` is this node's LOCAL — it reaches the guest with the bundle load.
 let node = await createStorageNode({ runtime, config, quota: DEFAULT_QUOTA_BYTES, timeoutMs, guestDeadlineMs });
-console.log(`node ready: RS(${kParam},${mParam}), ${blockSize / 1024} KiB blocks, batch ${Math.round(maxMessageBytes / 1024)} KiB, window ${windowN}, conns/peer ${connsN}, wtarget ${wtargetMB > 0 ? wtargetMB + " MB" : "4 MiB (default)"}, heap ${heapMB > 0 ? heapMB + " MB" : "64 MiB (default)"}, timeout ${timeoutMs} ms, guest deadline ${guestDeadlineMs ?? "kernel default"}${guestDeadlineMs == null ? "" : " ms"}`);
+console.log(`node ready: RS(${kParam},${mParam}), ${blockSize / 1024} KiB blocks, batch ${Math.round(maxMessageBytes / 1024)} KiB, window ${windowN}, conns/peer ${connsN}, wtarget ${wtargetMB > 0 ? wtargetMB + " MB" : "4 MiB (default)"}, heap ${heapMB > 0 ? heapMB + " MB" : "64 MiB (default)"}, timeout ${timeoutMs} ms, guest deadline ${guestDeadlineMs ?? "host default"}${guestDeadlineMs == null ? "" : " ms"}`);
 
 const expected = new Set();
 for (const spec of specs) {

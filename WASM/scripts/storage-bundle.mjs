@@ -7,7 +7,7 @@
 // Two deliberate choices:
 //   • `requires` declares SERVICES, not method names — the unit a manifest grants
 //     is `node`/`fs`/`clock` (and a local service id), never `node/sign` or `fs/get`.
-//     The shell gates a `host.call` by the method's SERVICE (seedkernel §12.2).
+//     The host gates a `host.call` by the method's SERVICE (seedkernel §12.2).
 //   • `quota` and anything runtime-derived (e.g. the signing scope) are absent
 //     from the signed config — both are host-applied facts, never author content.
 
@@ -21,7 +21,7 @@ import { defaultConfig, normaliseConfig, PRODUCTION_BLOCK_SIZE } from "../build/
 import { STORAGE_PROTO } from "../build/host/descriptor.js";
 
 // The app label — the manifest `app`, and the whole of the signing scope (README
-// §16). The shell scopes the guest's SIGN/VERIFY ops to this label, whoever signed the
+// §16). The host scopes the guest's SIGN/VERIFY ops to this label, whoever signed the
 // bundle; the host-side mirror derives the byte-identical scope from the same label.
 const APP_NAME = "seedstore";
 
@@ -71,7 +71,7 @@ const STORAGE_CALLS = [
  * @param {Uint8Array} o.sk   author secret key — the Ed25519 half, whose seed derives both
  * @param {string} o.build    seedstore build/ dir (holds the codec wasm + staged guest)
  * @param {number} [o.version] monotonic-per-(author,app) freshness mark (README §12.4);
- *                             the shell refuses a load below its high-water mark. Integer.
+ *                             the host refuses a load below its high-water mark. Integer.
  * @returns {{blob: Uint8Array, manifest: object, author: Uint8Array}} the signed blob,
  *  the manifest that was signed, and the derived author id — the key-set hash a policy
  *  `authors` entry pins, on the value rather than re-derived by the caller.
@@ -102,7 +102,7 @@ export function writeStorageBundle({ path, sodium, sk, build, version = 1 }) {
 
   const { blob, manifest, author } = authorBundle(sodium, authorKeysFor(sodium, sk), {
     app: APP_NAME,
-    // Monotonic freshness mark per (author, app): the shell refuses a downgrade
+    // Monotonic freshness mark per (author, app): the host refuses a downgrade
     // below its high-water mark (README §12.4). Bump on every publish.
     version,
     // The wire protocol this app serves (seedkernel §12.10), read from the same
@@ -114,7 +114,7 @@ export function writeStorageBundle({ path, sodium, sk, build, version = 1 }) {
     guestRequires: [...STORAGE_REQUIRES],
     guestCalls: [...STORAGE_CALLS],
     // The AUTHOR's config, injected as `const APP = …` exactly as signed. The
-    // shell merges nothing into it; LOCAL (operator settings) arrives beside
+    // host merges nothing into it; LOCAL (operator settings) arrives beside
     // it and the guest's CFG picks precedence. No `quota` here — LOCAL-only.
     guestConfig: {
       k: cfg.k, m: cfg.m, blockSize: cfg.blockSize,

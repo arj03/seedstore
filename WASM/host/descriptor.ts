@@ -22,11 +22,11 @@ export {
 export type { Descriptor, SignedDescriptor } from "./descriptor-core.js";
 
 // ── scoped signing (README §16, seedkernel §12.2/§14) ────────────────────────
-// The guest's SIGN/VERIFY ops are both *scoped*: the kernel signs and verifies
+// The guest's SIGN/VERIFY ops are both *scoped*: the host signs and verifies
 // `DOMAIN_guest ‖ scope ‖ msg`, never the raw message, so a storage signature
-// verifies only as a storage signature — never as a kernel envelope, a bundle
+// verifies only as a storage signature — never as a host envelope, a bundle
 // manifest, or a channel handshake, nor in another app's scope. This mirror goes
-// through the kernel's own signer, so it never reconstructs the prefix bytes either.
+// through the host's own signer, so it never reconstructs the prefix bytes either.
 
 /** This app's label — the bundle manifest's `app`, and so the whole of its signing
  *  scope: every node running storage under this label derives the same scope, whoever
@@ -56,7 +56,7 @@ export function signDescriptor(
   return concatBytes([authorPk, sig, core]);
 }
 
-/** Verify the author signature over the descriptor (§4.3), via the kernel's scoped
+/** Verify the author signature over the descriptor (§4.3), via the host's scoped
  *  signer — the host applies `DOMAIN_guest ‖ scope ‖ core` for us. Returns the parsed
  *  signed descriptor if valid, else null. */
 export function verifyDescriptor(sodium: Sodium, env: Uint8Array): SignedDescriptor | null {

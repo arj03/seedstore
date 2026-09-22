@@ -56,7 +56,7 @@ export async function run(t) {
   {
     const net = new LoopbackNetwork();
     const [node] = await createConnectedCohort({ suppressLinkLog: true, count: 1, network: net, sodium, wasm, config, timeoutMs: TIMEOUT });
-    t.ok(node.handlersInstalled(), "codec + reputation installed as kernel modules");
+    t.ok(node.handlersInstalled(), "codec + reputation installed as bundle modules");
     node.close();
     net.close();
   }
@@ -82,7 +82,7 @@ export async function run(t) {
 
   t.group("large blocks (> the 128 KB default module scratch) round-trip (§4.1)");
   {
-    // A codec request of k·blockSize bytes can exceed the kernel's 128 KB
+    // A codec request of k·blockSize bytes can exceed the host's 128 KB
     // default module scratch, so the codec must declare its larger scratch
     // (exported `scratchSize`). RS(2,2) at 96 KiB puts both the encode request
     // and parity response past the default, over genuine (k>1) parity.
@@ -314,7 +314,7 @@ export async function run(t) {
     const owner = nodes[0], recipient = nodes[1];
     const data = file(3200, 11);
     const put = await owner.put(data);
-    // Owner seals K to the recipient's kernel key; recipient opens and reads.
+    // Owner seals K to the recipient's node key; recipient opens and reads.
     const sealed = owner.shareKey(put.key, recipient.identity.publicKey);
     const K = recipient.openKey(sealed);
     t.ok(K && bytesEqual(K, put.key), "recipient recovers K from the seal");

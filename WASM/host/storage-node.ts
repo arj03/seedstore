@@ -3,7 +3,7 @@
 // guest (host/tier2-guest.js), run in one seedkernel safe-js realm over the
 // generic guest seam. Boots the shared `bootShell()` and loads the signed
 // bundles (§12.4) — first the transport bundle (§12.6), then the seedstore one.
-// Modules arrive only via the verified bundle loader, never raw-bound.
+// Modules arrive only via verified `install`, never raw-bound.
 //
 // A caller that already stands a shell up (a WebRTC/WS node) passes the whole
 // `runtime` in; StorageNode then loads only the seedstore bundle on it.
@@ -35,7 +35,7 @@ type Transport = NonNullable<BootResult["transport"]>;
 //
 // Peers and cohort readiness are the transport GUEST's — its address book dies with
 // its realm — so they are claim calls on the id that bundle claims, through the same
-// door a co-resident guest reaches with `host.call`. `OpArgs` also encodes kernel link events; these service ops use it as optional
+// door a co-resident guest reaches with `host.call`. `OpArgs` also encodes the host's link events; these service ops use it as optional
 // application framing, which the shell passes through and never reads.
 
 /** One op to the transport, with the shell's caller-id prefix. Throws when nothing
@@ -133,7 +133,7 @@ export interface StorageNodeOptions {
   runtime?: StorageRuntime;
   sodium: Sodium;
   /** The signed seedstore bundle blob (seedstore.skb), loaded through the §12.4
-   *  bundle loader (verify manifest, govern policy, install modules). */
+   *  `install` (verify manifest, govern policy, install modules). */
   bundleBlob: Uint8Array;
   /** This node's signing identity. Only read when StorageNode builds its own
    *  runtime; minted if absent. With `runtime`, `runtime.identity` is the one. */
@@ -148,7 +148,7 @@ export interface StorageNodeOptions {
    *  a deferred answer. A DIFFERENT clock from `timeoutMs`, which is the per-request
    *  stall window a silent peer is given — that one is deliberately short (a cohort
    *  wants an offline peer written off fast), and the same number as a realm budget
-   *  starves a large-block encode before it can finish. Omitted ⇒ the kernel default. */
+   *  starves a large-block encode before it can finish. Omitted ⇒ the host default. */
   guestDeadlineMs?: number;
   /** The socket seam the transport driver dials/listens through (seedkernel
    *  §12.6): an in-process fabric for tests, a NodeChannelFactory for TCP, or a
@@ -157,7 +157,7 @@ export interface StorageNodeOptions {
   channels?: ChannelFactoryLike;
   listen?: { host: string; port: number };
   wsListen?: { host: string; port: number };
-  /** Silence the kernel driver's link-down diagnostic (seedkernel
+  /** Silence the host transport driver's link-down diagnostic (seedkernel
    *  `TransportHostOptions.suppressLinkLog`). Left OFF in production on purpose: a
    *  cohort that cannot reach its peers should say so on stderr, which is the only
    *  thing a `p2p-cli` run reporting "only 0/N peers linked" otherwise leaves
@@ -262,7 +262,7 @@ export class StorageNode {
 
   /** Boot a storage node: take the caller's prebuilt runtime, or stand one up here
    *  (shell + transport bundle), then load the seedstore bundle onto it. Handlers
-   *  arrive solely via the §12.4 bundle loader. */
+   *  arrive solely via `install` (§12.4). */
   static async create(opts: StorageNodeOptions): Promise<StorageNode> {
     await opts.sodium.ready;
 
@@ -349,7 +349,7 @@ export class StorageNode {
     return p;
   }
 
-  /** One local op into the guest: the op-frame composition is kernel-shipped content
+  /** One local op into the guest: the op-frame composition is seedkernel-shipped content
    *  (seedkernel-wasm/op-frame `writeOp`) - the shell passes bytes and never reads them. */
   private invoke(op: string, args: Uint8Array): Promise<Uint8Array> {
     return this.handle.invoke(writeOp(op, args));
@@ -422,7 +422,7 @@ export class StorageNode {
     return decodeStats(await this.invoke(Op.STATS, NO_ARG));
   }
 
-  /** Share a file: seal K to a recipient's kernel key (§4.4). */
+  /** Share a file: seal K to a recipient's node key (§4.4). */
   shareKey(K: Uint8Array, recipientPk: Uint8Array): Uint8Array { return this.crypto.seal(K, recipientPk); }
   /** Open a sealed K addressed to this node. */
   openKey(sealed: Uint8Array): Uint8Array | null {
@@ -474,7 +474,7 @@ export class StorageNode {
 
 /** Build the runtime a StorageNode loads its bundles onto: the platform seam (fs,
  *  channel factory, realm factory) plus the transport bundle admitted first, with
- *  listeners started. Wraps the kernel's `bootShell`; returns the `StorageRuntime`
+ *  listeners started. Wraps seedkernel's `bootShell`; returns the `StorageRuntime`
  *  StorageNode takes as `runtime` — the shell, the `TransportHost` (the shell
  *  itself doesn't expose it), and the identity both registered under. */
 export async function bootTransportShell(
@@ -504,7 +504,7 @@ export async function bootTransportShell(
       wsListen: opts.wsListen,
       suppressLinkLog: opts.suppressLinkLog,
       // Selecting these bytes authorizes them as the transport; a later change
-      // must replace this slot explicitly. Defaults to the kernel-shipped artifact.
+      // must replace this slot explicitly. Defaults to the seedkernel-shipped artifact.
       bundle: opts.transportBlob,
       // Policies of the signed transport program, not socket-driver facts, so they
       // ride the LOAD as its LOCAL config. JSON, so omit absent values and spell peer

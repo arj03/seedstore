@@ -135,6 +135,6 @@ export function normaliseConfig(raw: Partial<Record<string, unknown>>): Partial<
 }
 
 /** peer_id is the hex of a peer's channel public key (§2) — the identity the
- *  address book is keyed on. Stated here rather than imported: the kernel's own
- *  alias lives in `core/socket-seam.ts`, not an exported entry. */
+ *  address book is keyed on. Stated here rather than imported: seedkernel's own
+ *  alias lives in `services/socket-seam.ts`, not an exported entry. */
 export type PeerId = string;

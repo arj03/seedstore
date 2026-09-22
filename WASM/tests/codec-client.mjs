@@ -1,6 +1,6 @@
 // Test-only host-owned instance of the codec WASM (README §17). Lets a test drive
 // the Reed–Solomon codec directly — instantiating the same codec.wasm the way the
-// kernel host does: a PURE transform that imports only the AssemblyScript runtime
+// seedkernel host does: a PURE transform that imports only the AssemblyScript runtime
 // shims (env.*) and makes no host calls. The runtime never uses this: a node reaches
 // the codec as an installed module, by bare name on the guest seam (host/storage-node.ts),
 // so this client lives with the tests that exercise the wasm in isolation. The ABI

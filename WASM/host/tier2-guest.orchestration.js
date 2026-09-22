@@ -45,11 +45,11 @@ function readF64LE(b) { return new DataView(b.buffer, b.byteOffset, 8).getFloat6
 function strBytes(s) { const o = new Uint8Array(s.length); for (let i = 0; i < s.length; i++) o[i] = s.charCodeAt(i) & 255; return o; }
 function bytesToStr(b) { let s = ""; for (let i = 0; i < b.length; i++) s += String.fromCharCode(b[i]); return s; }
 
-// ── the guest seam: storage policy over GENERIC kernel names ────────────────
+// ── the guest seam: storage policy over GENERIC host names ────────────────
 // Thin wrappers over the seam's application-neutral names (crypto/fs/module/
 // clock/node, seedkernel host/guest-seam.ts). All storage STRUCTURE — nonce
 // convention, signed-descriptor envelope, wire format, store layout — lives here,
-// never in the kernel. Crypto calls resolve sync; fs/net/module calls are async.
+// never in the host. Crypto calls resolve sync; fs/net/module calls are async.
 
 // The op bytes of the codec module (the guest owns its ABI). The reputation module's
 // op bytes + request framing (REP_OBSERVE/REP_SCORE, encodeScoreReq/encodeObserveReq)
@@ -74,7 +74,7 @@ const CODEC_NAME = "codec";
 const REP_NAME = "reputation";
 
 // ── request statistics (§18, for the latency/bench harnesses) ────────────────
-// The kernel has no host-side inbound seam, so these counters live here: `netSend`
+// The host has no host-side inbound seam, so these counters live here: `netSend`
 // counts+peaks outbound requests, `doHandle` counts+times inbound holder work.
 // Read and cleared by the Op.STATS local op. Indexed by MsgType byte (256 slots).
 const statsSent = new Uint32Array(256);
@@ -124,7 +124,7 @@ function myPeer() { return HOST.identity; }
 // 12-byte nonce = [level u8][chunk index u32 BE][0…] (§4.4). A fresh random K per
 // file makes this deterministic per-file namespace unique; level separates index data.
 function nonce(level, index) { const n = new Uint8Array(12); n[0] = level & 255; wU32(n, 1, index >>> 0); return n; }
-// The kernel's seal result is [ciphertext][tag 16]. Keep the tag in the signed
+// The host's seal result is [ciphertext][tag 16]. Keep the tag in the signed
 // descriptor so the ciphertext remains exactly k·blockSize for systematic RS.
 async function encrypt(K, level, index, msg) {
   const sealed = await host.call(P_SEAL, concat([nonce(level, index), K, msg]));
@@ -303,7 +303,7 @@ const NET_ID = "_net";
 // the empty answer - same shape as an unreachable peer - so a PUT reports "no holder
 // answered" instead of an uncaught rejection out of a fan-out.
 function netCall(frame) { return host.call(NET_ID, frame).then((r) => r, () => EMPTY); }
-function netOp(op, args) { return netCall(writeOp(op, args)); } // kernel op-frame (content) - this app's own framing
+function netOp(op, args) { return netCall(writeOp(op, args)); } // seedkernel op-frame (content) - this app's own framing
 
 // ── peers + ranking by reciprocity (§13) ──
 // The `peers` answer is the raw 32-byte keys back to back — the peers the transport holds at
@@ -335,7 +335,7 @@ async function rank(peers) { return (await makeRanker())(peers); }
 // One round trip via the transport's `send` op:
 //   [noReply u8][to blob][proto blob][payload blob]
 // No deadline field: the round trip runs under THIS invocation's remaining segment,
-// which the kernel carries across every handoff (seedkernel §12.3) — a caller naming
+// which the host carries across every handoff (seedkernel §12.3) — a caller naming
 // its own would be minting time. Answer is `[ok u8][response]`; an unreachable peer
 // comes back `[0]`, mapped to null below. `proto` is the routing id (§12.10); the
 // storage message type leads the payload, opaque in between.
@@ -473,7 +473,7 @@ function maxMsgBytes() { const v = CFG.maxMessageBytes; return (typeof v === "nu
 // present block) so a full reply stays under the cap. The GET gather and the repair
 // audit both size their batches this way; the holder caps served bytes the same (§18).
 function fetchMaxIds() { return Math.max(1, Math.floor(maxMsgBytes() / (CFG.blockSize + FETCH_FRAME))); }
-// A conservative allowance for what the kernel copies ALONGSIDE a message payload
+// A conservative allowance for what the host copies ALONGSIDE a message payload
 // (type, request id, peer address): payload + this is what a call really charges.
 const MSG_ENVELOPE_BYTES = 128;
 // What ONE in-flight message costs the realm at its peak: a full-cap message in the fat
@@ -503,11 +503,11 @@ function blockMsgBytes() {
 // a holder's many small messages instead of one round trip apiece. core.ts homes the default.
 //
 // Clamped to what the host will actually admit. Every message in a round is one unresolved
-// `host.call`, and the kernel holds its copied input against a per-realm ceiling it advertises
+// `host.call`, and the host holds its copied input against a per-realm ceiling it advertises
 // to us (`HOST.maxOutstandingHostCallBytes`) for the call's whole life, then ADDS the answer's
 // bytes when it lands. Windowing to that budget is how a configured window becomes backpressure:
-// past it the kernel refuses the call outright, which fails the PUT rather than pacing it.
-// A host that advertises nothing is an older kernel, and the configured window stands.
+// past it the host refuses the call outright, which fails the PUT rather than pacing it.
+// A host that advertises nothing is an older host, and the configured window stands.
 //
 // `peers` is how many holders a round fans out to at once, because W is per peer there
 // and the budget is realm-wide: STORE passes its peer count, while a cohort-wide flat
@@ -515,7 +515,7 @@ function blockMsgBytes() {
 function fanoutWindow(peers = 1, msgBytes = maxMsgBytes()) {
   const budget = typeof HOST === "object" && HOST ? HOST.maxOutstandingHostCallBytes : 0;
   if (!(typeof budget === "number" && budget > 0)) return CFG.fanoutWindow;
-  // Reserve one message for the call whose answer resumed this continuation: the kernel
+  // Reserve one message for the call whose answer resumed this continuation: the host
   // still holds its request AND response while our continuation runs (safe-js settles the
   // guest inside the try, releasing only in the finally), so those bytes are not ours yet.
   const charge = callChargeBytes(msgBytes);
@@ -724,7 +724,7 @@ async function placeChunksBatched(jobs, what) {
       // "holders declined" here would point at the wrong place.
       const why = parts.length
         ? "holders declined (" + total + " holders: " + parts.join(", ") + "). Check quota (--local-config), signing scope (§16), or connect more holders"
-        : "no holder returned a verdict — the requests timed out or the peers were unreachable rather than refusing. Raise the request deadline if a large PUT is queueing past it (p2p-cli --timeout, loader --request-deadline)";
+        : "no holder returned a verdict — the requests timed out or the peers were unreachable rather than refusing. Raise the request deadline if a large PUT is queueing past it (p2p-cli --timeout, seedkernel --guest-timeout)";
       throw new Error("put: " + what + " landed " + distinct.size + "/" + ch.floor + " distinct blocks — " + why);
     }
     ch.placedIds = [...distinct].map(fromHex);  // the distinct ids that landed, for the PUT result
@@ -1275,7 +1275,7 @@ async function doRepair() {
 // The request side a node serves to its cohort: admission control (§6 sibling rule
 // + §14 quota), content-addressing (§4.2), and durable record writes — confined
 // here; the host keeps only a read view (host/store-view.ts), no write path. Async,
-// since the fs seam is async on every backend (seedkernel core/fs.ts).
+// since the fs seam is async on every backend (seedkernel services/fs.ts).
 let bytesUsed = -1, heldBlocks = null, storeIndexPromise = null, storeIndexDirty = false;
 let activeStoreWrites = 0, resolveStoreWritesIdle = null, storeWritesIdle = Promise.resolve();
 const liveStoreReservations = new Map();
@@ -1287,7 +1287,7 @@ function quota() { return LOCAL.quota != null ? LOCAL.quota : 0; }
 async function fsSizeRaw(keyStr) { return rU32(await host.call("fs/size", strBytes(keyStr)), 0); }
 async function fsSize(keyStr) { const v = await fsSizeRaw(keyStr); return v === 0xffffffff ? 0 : v; }
 // Rebuilding a cold holder's index can require thousands of fs/size calls. Launching
-// all of them in one Promise.all crosses the kernel's per-realm outstanding-call cap
+// all of them in one Promise.all crosses the host's per-realm outstanding-call cap
 // as soon as the store has more than 256 records, and the holder then answers HAVE /
 // OFFER with an empty error response. Consume the advertised cap in bounded rounds,
 // reserving the one slot still held by the host call whose answer resumed this guest
@@ -1466,7 +1466,7 @@ async function acceptStoreBatch(stores) {
 // The READS are bounded by that same cap, not by the request: an id costs 32 bytes to
 // ask for and a whole block to look up, so reading every id first let one message pull
 // far more off the store than any reply can carry — n ids re-asked n times cost n²/2
-// reads, and enough concurrent reads to exceed what the kernel's outstanding-call
+// reads, and enough concurrent reads to exceed what the host's outstanding-call
 // budget admits. An id never read answers UNANSWERED, exactly as an over-cap one does.
 const FETCH_READS_IN_FLIGHT = 64;   // concurrent store reads; `room` already bounds their BYTES
 const FETCH_MISS_ALLOWANCE = 256;   // reads past one full reply's worth, since a miss costs no reply bytes
@@ -1518,7 +1518,7 @@ async function serveFetch(ids) {
 // parallel fan-out would race `bytesUsed` (two blocks both seeing the pre-batch
 // budget). A HAVE batch is independent reads and may fan out.
 async function doHandle(arg) {
-  // The kernel's part of the argument is exactly the 32-byte caller; everything
+  // The host's part of the argument is exactly the 32-byte caller; everything
   // after it is THIS app's own shape (util.ts `callerOf`/`readOp`) - same shape
   // `handle` and the host-side `invoke` share.
   const { fromHost, body } = callerOf(arg);
@@ -1599,7 +1599,7 @@ async function doWarm() {
   return EMPTY;
 }
 
-// The one entrypoint, declared top-level: the kernel invokes `handle` -
+// The one entrypoint, declared top-level: the host invokes `handle` -
 // `[caller 32][body …]` - and nothing else (seedkernel §12.2). The call is
 // asynchronous precisely because the async host names round-trip.
 function handle(arg) {

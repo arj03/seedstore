@@ -73,7 +73,7 @@ async function measure(W) {
 
   // The latency link lives at the WIRE (latency-net.mjs — every message delayed);
   // the request counts and in-flight peaks come from the guest's Op.STATS counter
-  // (read-and-cleared), since the kernel's shell has no host-side inbound seam.
+  // (read-and-cleared), since the host's shell has no host-side inbound seam.
   await owner.stats(); // clear whatever the cohort wiring accumulated
   let t0 = performance.now();
   const put = await owner.put(data);

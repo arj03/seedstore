@@ -1,22 +1,22 @@
-// libsodium access for the storage layer. Seed store reuses the kernel's
+// libsodium access for the storage layer. Seed store reuses the host's
 // cryptography rather than shipping its own (README §2, §16): hashing,
-// ChaCha20-Poly1305, and key-sealing are all calls on the kernel's core libsodium.
+// ChaCha20-Poly1305, and key-sealing are all calls on the host's core libsodium.
 
 /** The subset of libsodium the storage host uses. */
 export interface Sodium {
   ready: Promise<void>;
   // content-address hash for block_id (§4.2). Block-ids never cross into the
-  // kernel, so the storage layer hashes them with BLAKE2b (crypto_generichash)
-  // — fast and already in libsodium — rather than the kernel's BLAKE2b-256 genesis
-  // hash. (BLAKE2b-256 is the kernel's hash for module-name inputs too.)
+  // host, so the storage layer hashes them with BLAKE2b (crypto_generichash)
+  // — fast and already in libsodium — rather than the host's BLAKE2b-256 genesis
+  // hash. (BLAKE2b-256 is the host's hash for module-name inputs too.)
   crypto_generichash(hashLength: number, message: Uint8Array, key?: Uint8Array | null): Uint8Array;
   crypto_generichash_BYTES: number;
-  // key sealing to a recipient's kernel key (§4.4)
+  // key sealing to a recipient's node key (§4.4)
   crypto_box_seal(message: Uint8Array, recipientCurvePk: Uint8Array): Uint8Array;
   crypto_box_seal_open(ciphertext: Uint8Array, recipientCurvePk: Uint8Array, recipientCurveSk: Uint8Array): Uint8Array;
   crypto_sign_ed25519_pk_to_curve25519(edPk: Uint8Array): Uint8Array;
   crypto_sign_ed25519_sk_to_curve25519(edSk: Uint8Array): Uint8Array;
-  // identity (§2) — peers are kernel keypairs
+  // identity (§2) — peers are node keypairs
   crypto_sign_keypair(): { publicKey: Uint8Array; privateKey: Uint8Array; keyType: string };
   crypto_sign_detached(message: Uint8Array, sk: Uint8Array): Uint8Array;
   crypto_sign_verify_detached(sig: Uint8Array, message: Uint8Array, pk: Uint8Array): boolean;
@@ -41,7 +41,7 @@ let cached: Sodium | null = null;
 
 /** Load the core libsodium the seedkernel runtime bundles, returning that one
  *  shared, readied instance. seedstore ships no second crypto library — it
- *  reuses the kernel's (README §16). Safe to call repeatedly. */
+ *  reuses the host's (README §16). Safe to call repeatedly. */
 export async function loadSodium(): Promise<Sodium> {
   if (cached) return cached;
   const { loadCrypto: kernelLoadCrypto } = await import("seedkernel-wasm");
@@ -49,7 +49,7 @@ export async function loadSodium(): Promise<Sodium> {
   return cached;
 }
 
-/** A fresh kernel keypair = a peer identity (§2). */
+/** A fresh node keypair = a peer identity (§2). */
 export function generateKeyPair(sodium: Sodium): { publicKey: Uint8Array; privateKey: Uint8Array } {
   const kp = sodium.crypto_sign_keypair();
   return { publicKey: kp.publicKey, privateKey: kp.privateKey };

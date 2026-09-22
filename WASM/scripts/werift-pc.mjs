@@ -1,4 +1,4 @@
-// A werift-backed RTCPeerConnection for the *console* side of the kernel's RtcNetwork.
+// A werift-backed RTCPeerConnection for the *console* side of seedkernel's RtcNetwork.
 //
 // `seedkernel-wasm/net-rtc` is browser-native and drives the W3C surface; this is the Node
 // side of that swap, in pure JS with werift (no native addon, so it also bundles into a
@@ -11,12 +11,12 @@
 //
 // The whole job is an impedance match: werift speaks an rxjs-style `.subscribe()` API,
 // delivers Buffers, wants explicit createOffer/createAnswer and exposes no `binaryType`.
-// The facade means the kernel needs zero werift-specific code — its ChannelFactory owes
+// The facade means seedkernel needs zero werift-specific code — its ChannelFactory owes
 // the transport a byte duplex, and this is one implementation. The transport's in-channel
 // handshake still does the real authentication; werift's DTLS only has to bring up *a*
 // channel, so nothing here carries security weight.
 //
-// It lives here rather than in the kernel because werift (~19 MB with its DTLS/SRTP
+// It lives here rather than in seedkernel because werift (~19 MB with its DTLS/SRTP
 // dependency tree) is a console-only concern: the browser never takes this path, and
 // scripts/smoke-rtc.mjs — a real ICE → DTLS → SCTP round trip on loopback — is the only
 // thing that exercises it.
@@ -47,7 +47,7 @@ class Emitter {
     }
 }
 // ── RTCDataChannel facade over a werift data channel ──────────────────────────
-// MessageChannel (the kernel's net-channel.ts) consumes binaryType, addEventListener,
+// MessageChannel (seedkernel's services/net-channel.ts) consumes binaryType, addEventListener,
 // send(Uint8Array), close() and an optional bufferedAmount; werift offers
 // .onMessage/.stateChanged/.error and a Buffer-only send.
 export class WeriftRtcDataChannel extends Emitter {

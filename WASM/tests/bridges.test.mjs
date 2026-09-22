@@ -1,5 +1,5 @@
 // Storage host-service tests: the crypto primitives (§16). There are no
-// storage-specific kernel services — the guest reaches crypto/fs/clock/module
+// storage-specific host services — the guest reaches crypto/fs/clock/module
 // through the seam's generic names. store.local is not
 // tested here: the host only has a read view (net.test.mjs); admission/quota
 // policy is the confined holder's, covered in protocol.test.mjs.

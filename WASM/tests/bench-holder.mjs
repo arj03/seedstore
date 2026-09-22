@@ -2,7 +2,7 @@
 // compute and bench-net.mjs measures round-trip economy; neither isolates what
 // the RECEIVING side costs per block — the open question behind a live PUT
 // that fills socket buffers (receiver-limited vs. path-limited). Answer: holder
-// STORE-processing is measured on real disk with the all-async kernel seam. The
+// STORE-processing is measured on real disk with the all-async host seam. The
 // verdict reports both conservative whole-process payload/wall throughput and the
 // sum of the co-resident holders' independently measured active-window rates.
 //

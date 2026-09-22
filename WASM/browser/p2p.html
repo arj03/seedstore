@@ -20,25 +20,25 @@
   .ok { background:#d8f0d8; } .warn { background:#fde9c8; }
   #token { background:#f0f0f0; padding:.4rem; border-radius:4px; word-break:break-all; }
 </style>
-<!-- Browser-native, no bundler. The host imports the kernel with bare, EXTENSIONLESS
+<!-- Browser-native, no bundler. The host imports seedkernel with bare, EXTENSIONLESS
      specifiers ("seedkernel-wasm/shell-core"), so each is mapped explicitly to its
      real ./seedkernel/*.js file — a folder-prefix map ("seedkernel-wasm/" →
      "./seedkernel/") can't be used because it would resolve to an extensionless path
-     a static server 404s. The minified kernel tree ships as host/ + core/ (host
-     modules import ../core/* by relative path). Only specifiers this page's graph
+     a static server 404s. The minified seedkernel tree ships as host/ + services/ (host
+     modules import ../services/* by relative path). Only specifiers this page's graph
      actually NAMES need an entry: shell-core pulls its safe-js realm and its module
      table in by RELATIVE import, so neither is mapped. safe-js is the QuickJS sandbox
      the storage node runs the guest in, and safe-js.js DOES name
-     "seedkernel-wasm/quickjs" — that entry is live. Its engine is the kernel's own
+     "seedkernel-wasm/quickjs" — that entry is live. Its engine is seedkernel's own
      quickjs-ng build, staged into ./seedkernel/quickjs/ with its .wasm beside it — the
-     same engine the kernel's Node tests run and, at the same source pin, the Go
-     loader; the JS layer over it (quickjs-emscripten-core and the quickjs-ffi-types
+     same engine seedkernel's Node tests run and, at the same source pin, the native
+     binary; the JS layer over it (quickjs-emscripten-core and the quickjs-ffi-types
      it names) is VENDORED into ./vendor/ by scripts/build-browser-demo.mjs, so the
      demo runs fully offline and every bare specifier in that graph has a map entry.
-     Sumo libsodium is likewise NOT vendored: it comes from the kernel as the
+     Sumo libsodium is likewise NOT vendored: it comes from seedkernel as the
      "seedkernel-wasm/libsodium" export — the prebuilt wrapper staged into
      ./seedkernel/ next to its core and its libsodium.wasm, which is the same crypto
-     binary the Go loader embeds. This project's host is relative (./host/). -->
+     binary the native binary embeds. This project's host is relative (./host/). -->
 <script type="importmap">
 {
   "imports": {
@@ -46,14 +46,14 @@
     "seedkernel-wasm/bundle":         "./seedkernel/host/bundle.js",
     "seedkernel-wasm/crypto-browser": "./seedkernel/host/crypto-browser.js",
     "seedkernel-wasm/guest-seam":     "./seedkernel/host/guest-seam.js",
-    "seedkernel-wasm/fs":             "./seedkernel/core/fs.js",
-    "seedkernel-wasm/op-frame":       "./seedkernel/core/op-frame.js",
-    "seedkernel-wasm/peer-addr":      "./seedkernel/host/peer-addr.js",
-    "seedkernel-wasm/fs-memory":      "./seedkernel/host/fs-memory.js",
+    "seedkernel-wasm/fs":             "./seedkernel/services/fs.js",
+    "seedkernel-wasm/op-frame":       "./seedkernel/services/op-frame.js",
+    "seedkernel-wasm/peer-addr":      "./seedkernel/services/peer-addr.js",
+    "seedkernel-wasm/fs-memory":      "./seedkernel/services/fs-memory.js",
     "seedkernel-wasm/transport-host": "./seedkernel/host/transport-host.js",
     "seedkernel-wasm/transport-bundle": "./seedkernel/host/transport-bundle.js",
-    "seedkernel-wasm/net-rtc":        "./seedkernel/host/net-rtc.js",
-    "seedkernel-wasm/net-ws":         "./seedkernel/host/net-ws.js",
+    "seedkernel-wasm/net-rtc":        "./seedkernel/services/net-rtc.js",
+    "seedkernel-wasm/net-ws":         "./seedkernel/services/net-ws.js",
     "seedkernel-wasm/libsodium":      "./seedkernel/libsodium-wrappers.mjs",
     "seedkernel-wasm/quickjs":        "./seedkernel/quickjs/variant.mjs",
     "seedrelay":                      "./vendor/seedrelay/client.js",
@@ -76,7 +76,7 @@
   joins via node-datachannel, README §13.6).
 </p>
 <p class="muted">
-  Direct WebSocket is the default because its holders are <code>seedloader</code> processes
+  Direct WebSocket is the default because its holders are <code>seedkernel</code> processes
   with a real disk-backed store. A tab's own store is in-RAM — there is no OPFS/IndexedDB
   backend yet — so a cohort <em>of tabs</em> forgets everything on reload, and the tab is
   best read as the cohort's <em>owner</em> rather than one of its holders. What WebRTC buys
@@ -108,7 +108,7 @@
     error: peers simply never link.</p>
 </div>
 <div id="wsConfig">
-  <p class="muted">Dial natively-reachable nodes started with <code>seedloader --ws-listen 0.0.0.0:&lt;port&gt;</code>.
+  <p class="muted">Dial natively-reachable nodes started with <code>seedkernel --ws-listen 0.0.0.0:&lt;port&gt;</code>.
     One <code>pubkey[.secret]@host:port</code> per line (or comma-separated). Need at least
     <span class="mono">k+m</span> distinct holders. The optional <code>.secret</code> is that node's
     32-byte hex contact secret (its <code>--contact-secret</code>); omit it for an open node.</p>
@@ -171,7 +171,7 @@ import { createRelaySignaling } from "seedrelay";
 // Each holder runs its own OFFER→STORE pipeline in parallel, so both sockets stay
 // saturated. blockSize still matters: bigger blocks = fewer chunks = less per-block
 // CPU (encrypt + RS + Ed25519) and a smaller index. Capped by the transport —
-// WebRTC keeps physical data-channel messages at 48 KiB, with the kernel's length
+// WebRTC keeps physical data-channel messages at 48 KiB, with the host's length
 // framer reassembling larger encrypted records, so 32 KiB remains the block size. On WS
 // the binding cap is the HOLDER's maxMessageBytes (serveFetch bounds one FETCH
 // response by it, and the deployed bundles don't override the 1 MiB default): one

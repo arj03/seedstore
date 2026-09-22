@@ -23,7 +23,7 @@ export interface CohortOptions {
   quota?: number;
   timeoutMs?: number;
   guestDeadlineMs?: number;
-  /** Silence the kernel driver's link-down diagnostic for every node in the cohort
+  /** Silence the host transport driver's link-down diagnostic for every node in the cohort
    *  (seedkernel `TransportHostOptions.suppressLinkLog`). A cohort is stood up and torn
    *  down wholesale here, so each teardown prints a `truncated` line at every peer that
    *  had a link to the node going away — hundreds across a suite, burying the assertions.

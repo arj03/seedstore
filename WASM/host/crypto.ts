@@ -1,6 +1,6 @@
 // Host crypto wrappers (README §16). Thin wrappers over the core libsodium the
-// kernel already loads. The guest reaches the same BLAKE2b-256 and
-// ChaCha20-Poly1305 transforms through the kernel's ungated `crypto/*` table.
+// host already loads. The guest reaches the same BLAKE2b-256 and
+// ChaCha20-Poly1305 transforms through the host's ungated `crypto/*` table.
 //
 // Confidentiality is added client-side here (§4.4). The ciphertext remains
 // length-preserving for RS geometry; its detached 16-byte authentication tag is
@@ -17,7 +17,7 @@ import { blockHashInput } from "./descriptor-core.js";
 export const LEVEL_BODY = 0x00;
 
 /** Content-address hash for block_id (§4.2). BLAKE2b (`crypto_generichash`):
- *  fast in software and already in the libsodium the kernel loads (§16), so it
+ *  fast in software and already in the libsodium the host loads (§16), so it
  *  ships no new bytes. (A future BLAKE3 + SIMD step is discussed in the README.) */
 export const BLOCK_ID_BYTES = 32;
 export const AUTH_TAG_BYTES = 16;
@@ -88,14 +88,14 @@ export class Crypto {
     return this.sodium.randombytes_buf(n);
   }
 
-  /** Seal K to a recipient's kernel public key — converting the Ed25519 key to
+  /** Seal K to a recipient's node public key — converting the Ed25519 key to
    *  X25519 (§4.4). Sharing a file is sharing the key, not moving bytes. */
   seal(K: Uint8Array, recipientEdPk: Uint8Array): Uint8Array {
     const curvePk = this.sodium.crypto_sign_ed25519_pk_to_curve25519(recipientEdPk);
     return this.sodium.crypto_box_seal(K, curvePk);
   }
 
-  /** Open a sealed K with the recipient's kernel keypair. Returns null if the
+  /** Open a sealed K with the recipient's node keypair. Returns null if the
    *  seal was not for this recipient. */
   sealOpen(sealed: Uint8Array, recipientEdPk: Uint8Array, recipientEdSk: Uint8Array): Uint8Array | null {
     try {

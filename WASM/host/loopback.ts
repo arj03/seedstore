@@ -10,7 +10,7 @@
 // There is no re-online in the tests, so going back online is a bookkeeping toggle.
 
 // A destination is opaque to everything above the factory (seedkernel §12.10), so the
-// kernel's own parser takes one apart here rather than a second copy of the grammar:
+// seedkernel's own parser takes one apart here rather than a second copy of the grammar:
 // this fabric routes `tcp://` and `ws://` by port, and nothing else (`wss://` asks
 // for a TLS stack no in-process pair has).
 import { parseDest } from "seedkernel-wasm/peer-addr";
@@ -235,7 +235,7 @@ export class LoopbackNetwork {
 
   /** `delayMs` > 0 makes every delivered message take `delayMs` ms to arrive — a
    *  wire-level round-trip latency (one request/response costs 2×delayMs), the model
-   *  the latency/concurrency harnesses use now that the kernel's shell has no host
+   *  the latency/concurrency harnesses use now that the host's shell has no host
    *  side inbound seam to time against. */
   constructor(delayMs = 0, chunkBytes = 0) {
     this.fabric = new LoopbackChannels(delayMs, chunkBytes);

@@ -7,9 +7,9 @@ node runs the same protocol in Node, in Bun, and in the browser.
 
 ## seed store is content, not a binary
 
-The deployable artifact is the **generic seedkernel runtime** (the "shell"),
-which knows nothing about storage. seed store ships as **signed content** that
-the shell loads and *becomes* a storage node:
+The deployable artifact is the **generic seedkernel host**, which knows nothing
+about storage. seed store ships as **signed content** that the host loads and
+*becomes* a storage node:
 
 ```
 seed store bundle (seedstore.skb — one signed blob, verified at load) ─────────────────┐
@@ -19,15 +19,15 @@ seed store bundle (seedstore.skb — one signed blob, verified at load) ──�
         │  reaches I/O only through ↓ the one guest seam                                 │
   host.call   crypto · fs · node · clock · bare module names · local service ids ──────┘
         │
-  seedkernel runtime (the shell)     bundle loader → admission policy → kernel  +  the raw-byte seams
+  seedkernel host                    install → admission policy  +  the host services
 ```
 
 Everything with *structure* — content-addressing, the signed chunk descriptor,
 the HAVE/OFFER/STORE/FETCH wire format, Reed–Solomon, the nonce convention, the
-quota — is **seed store's**, and lives in the bundle. The kernel only moves
-opaque bytes. So the same shell can host storage or any other signed app, and a
+quota — is **seed store's**, and lives in the bundle. The host only moves
+opaque bytes. So the same host can run storage or any other signed app, and a
 storage upgrade is new content, not a new binary (spec §2.1, §17). The runtime
-side of this — the shell, the guest seam and its grants, the confinement realms,
+side of this — the host, the guest seam and its grants, the confinement realms,
 and the bundle format — is documented in [seedkernel §12](https://github.com/arj03/seedkernel/blob/main/docs/RUNTIME.md)
 and [EXPORTS](https://github.com/arj03/seedkernel/blob/main/docs/EXPORTS.md).
 
@@ -90,7 +90,7 @@ mirror, and the bundle producer:
    checks the same preimage through `node/verify` for the author key in the
    envelope; the host mirror (`signDescriptor`/`verifyDescriptor` in
    `host/descriptor.ts`) rides the same two scoped names, so the parity tests
-   hold. Neither path ever reconstructs the prefix: the scope is the kernel's to
+   hold. Neither path ever reconstructs the prefix: the scope is the host's to
    apply, derived from the admitted manifest's `app` label — one derivation, so
    the two cannot disagree, and a fork or a rotated author key signs in the same
    scope.
@@ -107,7 +107,7 @@ mirror, and the bundle producer:
    one metadata op.
 4. **The bundle carries an integer, monotonic `version`** (the monotonic
    downgrade refusal, seedkernel §12.4; `scripts/storage-bundle.mjs`):
-   guarded by `Number.isInteger` and bumped on every publish, so the shell's
+   guarded by `Number.isInteger` and bumped on every publish, so the host's
    freshness check (§12.4) has a real high-water mark to enforce.
 5. **The tests that pin this**: `descriptor` (tamper-evidence over the tagged,
    scoped preimage), `tier2-port` / `holder-guest` (parity across the scoped
@@ -119,11 +119,11 @@ mirror, and the bundle producer:
 WASM, the HAVE/OFFER/STORE/FETCH wire format and its windowing, content
 addressing, the nonce convention, and the quota. The storage *structure* is the
 app's own; only how signatures are prefixed, how existence is asked, and how the
-bundle versions itself follow the kernel contracts above.
+bundle versions itself follow the host contracts above.
 
 ## Build
 
-The kernel is a **path dependency** on the sibling seedkernel checkout — this
+seedkernel is a **path dependency** on the sibling seedkernel checkout — this
 project runs a node on it, it does not re-implement it. Build seedkernel first:
 
 ```sh
@@ -143,9 +143,9 @@ npm test           # build + run the full test suite (Node); `bun tests/run.mjs`
 
 ## Run a node from the command line
 
-A node is the generic seedkernel **shell** plus two signed bundles: the
-kernel-shipped **transport bundle** (the signed program that IS the node's
-network — the shell installs it at boot and stands its driver up)
+A node is the generic seedkernel **host** plus two signed bundles: the
+seedkernel-shipped **transport bundle** (the signed program that IS the node's
+network — the host installs it at boot and stands its driver up)
 and the signed seed store **bundle**. First build the bundle once (the offline
 producer holds the app author key):
 
@@ -154,7 +154,7 @@ npm run build:bundle      # → ./bundle/ (manifest + codec/reputation wasm + in
                           #   signed by ./seedstore-author.key (minted on first run; keep it secret)
 ```
 
-The shell admits apps only from authors named in its policy file
+The host admits apps only from authors named in its policy file
 (seedkernel §12.5). Take the author public key it printed (`author …`) and allow
 it; the transport is selected at boot and needs no entry:
 
@@ -162,7 +162,7 @@ it; the transport is selected at boot and needs no entry:
 echo '{ "authors": ["<author-pubkey-hex>"] }' > allowed-keys.json
 ```
 
-Now run the shell from the seedkernel checkout. A **serving** node that has loaded
+Now run the host from the seedkernel checkout. A **serving** node that has loaded
 a bundle becomes a full storage node — it installs the modules, runs the confined
 guest, and serves the holder side (HAVE/OFFER/STORE/FETCH) over TCP (and WebSocket
 for browsers):
@@ -199,7 +199,7 @@ node "$SHELL" --policy allowed-keys.json --bundle ./bundle/seedstore.skb --dir .
 
 `--op` is the runtime's ONE app-facing flag (seedkernel §12.8): it names an op on the
 app's `handle`, hands it **stdin** and writes its answer to **stdout**, and knows nothing
-else — no argument shape, no response format, no storage word anywhere in the kernel.
+else — no argument shape, no response format, no storage word anywhere in the host.
 A GET's argument is `[K 32][root …]`, so it is cut out of the receipt here, with whatever
 tool you like:
 
@@ -212,16 +212,15 @@ process.stdout.write(Buffer.concat([b.subarray(0,32), b.subarray(48,48+n)]))' > 
 
 The root descriptor locates the file; the key `K` decrypts it (lose `K` and the holders
 keep only permanent noise, §11). Operator lines go to stderr on both targets, so a
-redirect carries only the app's bytes. The shell flags themselves
+redirect carries only the app's bytes. The host's flags themselves
 (`--listen`/`--ws-listen`/`--peers`/`--dir`/`--key`/`--timeout`) and `--op` are all
 generic; only the storage bundle and the byte formats above are this node's. A node with
 no listener is a pure client; one with `--listen`/`--ws-listen` keeps serving until
 Ctrl-C.
 
-> A self-contained single-file binary is `bun build --compile` of the shell
-> (`seedkernel/WASM/host/main-bun.ts`) with kernel + signature embedded; it loads
-> the same bundle. The shell is application-neutral, so this binary can host any
-> signed app, not just storage.
+> A self-contained single-file node is seedkernel's native binary (`seedkernel`,
+> seedkernel §12.9); it loads the same bundle. The host is application-neutral, so
+> this binary can run any signed app, not just storage.
 
 ### As a library (in-process)
 
@@ -246,7 +245,7 @@ microtask-delivered channel pairs, so an in-process cohort exercises the shipped
 stack. There is one protocol implementation: `put`/`get`/`repair` always run the
 *confined* guest (`host/tier2-guest.orchestration.js`) inside a QuickJS realm,
 and the holder side (HAVE/OFFER/STORE/FETCH) runs the same guest in the same
-realm — `StorageNode` is just the host that boots the kernel, admits the signed
+realm — `StorageNode` is just the code that boots the host, admits the signed
 transport + storage bundles, and drives it (§19, §2.1). The `BlobStore` backend
 is in-memory by default; a server uses a directory (`new NodeFs(dir)`), a
 browser uses OPFS/IndexedDB (§12).
@@ -272,11 +271,11 @@ in is encrypted and erasure-coded (RS(1,1)) across the other nodes; any node reb
 from the retrieval token. Two transports, picked on the page:
 
 **Direct WebSocket** (the default) dials natively-reachable nodes straight at their
-`--ws-listen` port — no relay, no STUN, no signaling of any kind. Start `seedloader`
+`--ws-listen` port — no relay, no STUN, no signaling of any kind. Start `seedkernel`
 holders, copy each one's `pubkey[.secret]@host:port` into the peers box, and store:
 
 ```sh
-seedloader --ws-listen 0.0.0.0:47210 …   # one per holder; disk-backed store
+seedkernel --ws-listen 0.0.0.0:47210 …   # one per holder; disk-backed store
 #   then open http://localhost:3000/p2p.html and paste the endpoints
 ```
 
@@ -289,7 +288,7 @@ client live in `seedrelay`; [seedchat](https://github.com/arj03/seedchat) keeps 
 `npm run relay` command as a wrapper around its CLI. Seed store runs no server of its own.
 The cohort is either **3+ tabs** in one room, or one tab plus **console
 holders** — the same `RtcNetwork`, driven on the Node/Bun side by werift's pure-JS
-WebRTC through this project's own `scripts/werift-pc.mjs` (§12.6). The kernel owns the
+WebRTC through this project's own `scripts/werift-pc.mjs` (§12.6). seedkernel owns the
 seam and depends on no ICE/DTLS stack; the console peer-connection is ours:
 
 ```sh
@@ -300,7 +299,7 @@ npm run serve:rtc-holder             # a real StorageNode joining the room (Bun)
 
 A caveat on the all-tabs cohort: a tab's `BlobStore` is in-RAM — the OPFS/IndexedDB
 backend (§12) is not built yet — so tabs-as-holders forget everything on reload. Until
-that lands, read the browser as the cohort's **owner** and let `seedloader` or the
+that lands, read the browser as the cohort's **owner** and let `seedkernel` or the
 console holders be the ones that actually keep bytes.
 
 (`npm run smoke:rtc` proves the same PUT→GET path headless — owner + holders, no relay
@@ -373,7 +372,7 @@ Three optimizations got here. (1) The codec multiplies via a precomputed 256×25
 GF(2⁸) table — one indexed load per byte — making encode **~26× faster** than the
 naive exp/log multiply. (2) Block-ids hash with **BLAKE2b** instead of SHA-3,
 **~6× faster** (~0.83 s of SHA-3 was the original write bottleneck) and, like
-everything else, already in the libsodium the kernel loads — **no new bytes**
+everything else, already in the libsodium the host loads — **no new bytes**
 (§16). (3) The RS multiply-accumulate loops use **WASM SIMD** — the GF(2⁸)
 split-table / `i8x16.swizzle` trick does 16 multiplies per instruction — for
 another **~3.4×** on encode/decode. With all three, sealing is the largest part of
@@ -451,13 +450,13 @@ it does not divide by the holder count a second time.
 table. WASM's `i8x16.swizzle` is a 16-lane parallel table lookup, so one
 instruction multiplies 16 bytes at once; output accumulators stay in `v128`
 registers across the *k* inputs (register blocking), with a scalar tail for a
-block whose size is not a multiple of 16. This is the same kernel native RS
+block whose size is not a multiple of 16. This is the same native RS
 libraries use, and it lines up with the uniform *B*-byte blocks — the same shape
 that would let a BLAKE3 `hash_many` vectorize the block-id hashing next.
 
 **Block-id hash choice (BLAKE2b, and the BLAKE3 next step).** Block-ids are
-content addressing *internal* to storage — they never cross into the kernel — so
-they are storage's own choice, not something the kernel imposes, and storage hashes
+content addressing *internal* to storage — they never cross into the host — so
+they are storage's own choice, not something the host imposes, and storage hashes
 them with **BLAKE2b** (`crypto_generichash`) — fast and already in libsodium.
 (seedkernel has since standardized on BLAKE2b-256 as its own genesis hash too, so
 the two now coincide — but independently, not because one constrains the other.) The next step up is **BLAKE3**: its tree of
@@ -485,8 +484,8 @@ Source — the storage layer itself:
 
 (plus ~2,100 LOC of tests and ~530 of scripts + the browser demo.)
 
-Runtime artifacts. A shipped node is the generic seedkernel **shell** plus the
-signed **bundle**: the shell verifies the bundle, installs the two wasm cores, and
+Runtime artifacts. A shipped node is the generic seedkernel **host** plus the
+signed **bundle**: the host verifies the bundle, installs the two wasm cores, and
 runs the guest. So the *seedstore* content a bundle node loads is just the two
 cores and the guest — it never loads a line of the host-side TypeScript:
 
@@ -496,16 +495,16 @@ cores and the guest — it never loads a line of the host-side TypeScript:
 | `reputation.wasm` | 6.7 KB | — |
 | `guest.js` — the confined guest, shipped minified in the bundle | 29 KB | **7.6 KB** |
 
-riding on the seedkernel shell it shares with any app — the shell JS
-(28 KB / **5 KB gz**, module table included: the kernel is host code, not a
+riding on the seedkernel host it shares with any app — the host JS
+(28 KB / **5 KB gz**, module table included: the host is host code, not a
 module) and the core libsodium (217 KB, reused not bundled). So **seedstore's own runtime
 footprint is ~15 KB of WASM + ~8 KB of gzipped JS (the guest)** (§2, §16: "logic +
 RS, tens of KB, no second copy of a crypto library").
 
 The host-side TypeScript (`build/host`, minified to `build/host-min`) is a
-*separate* path — the **in-process library** (it boots the kernel and runs the same
+*separate* path — the **in-process library** (it boots the host and runs the same
 guest in-process) that the browser demo and the `createConnectedCohort` tests load
-*instead* of the shell+bundle. Minified it is **21 KB gz** (14 KB gz without its own
+*instead* of the host+bundle. Minified it is **21 KB gz** (14 KB gz without its own
 copy of the guest), debug 42 KB gz — so a browser-demo node carries ~26 KB gz of JS
 (host + the shared `ModuleTable`) against a bundle node's ~13 KB (the 8 KB guest +
 the 5 KB `ModuleTable`).
@@ -538,7 +537,7 @@ tests/    codec / bridges / descriptor / protocol / reputation / storage
           concurrency / net / browser / shell-run / holder-guest / bundle-fixture
 ```
 
-The runtime itself — the shell, the guest seam, the raw-byte services, the
+The runtime itself — the host, its shell, the guest seam, the raw-byte services, the
 QuickJS confinement realms, the bundle format and policy — lives in
 [seedkernel](https://github.com/arj03/seedkernel) ([RUNTIME §12](https://github.com/arj03/seedkernel/blob/main/docs/RUNTIME.md),
 [EXPORTS](https://github.com/arj03/seedkernel/blob/main/docs/EXPORTS.md)); seed
@@ -558,7 +557,7 @@ called out in the code: the Suspected/Lost grace window (§8) is represented by
 "verified-live vs not", admission/eviction (§14) is quota + the sibling rule
 rather than the full eviction-score, and the bulk plane (§3) rides the same
 awaited request/response channel rather than a separate unsigned frame stream —
-not a simplification at all but exactly what the kernel transport specifies: it
+not a simplification at all but exactly what the seedkernel transport specifies: it
 has no separate bulk frame kind, so block bytes ride ordinary req/res bodies
 (inside the encrypted record layer) and content-addressing stays the app-level
 admission check.

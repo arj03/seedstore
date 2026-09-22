@@ -5,7 +5,7 @@
 // loopback fabric: proof storage rides the runtime as signed content, never
 // baked into the binary.
 //
-// The shell's network is itself a signed bundle: the boot installs the kernel's
+// The host's network is itself a signed bundle: the boot installs seedkernel's
 // transport bundle, standing the TransportHost driver up over a per-node view
 // of the shared LoopbackNetwork fabric — exactly as a real-sockets node would.
 //
@@ -71,7 +71,7 @@ export async function run(t) {
       const shellDir = mkdtempSync(join(tmpdir(), "seedstore-shell-"));
       let shell, holders = [];
       try {
-        // The hybrid author id (key-set hash) is what policy and kernel names pin —
+        // The hybrid author id (key-set hash) is what policy and host names pin —
         // the bundle is signed under suite 0x02 (§12.4), not the bare Ed25519 key.
         const authorId = await buildBundle(bundlePath, author, sodium, build);
         const bundleBlob = new Uint8Array(readFileSync(bundlePath));
@@ -81,7 +81,7 @@ export async function run(t) {
         count: 6, network: net, sodium, wasm: { bundleBlob }, config: { blockSize: 1024 }, timeoutMs: TIMEOUT,
       });
 
-      // The shell knows only its policy + the kernel; storage arrives as content.
+      // The host knows only its policy; storage arrives as content.
       // A cohort is mutual, so both sides receive an address and authenticate.
       const shellIdentity = generateKeyPair(sodium);
       const rt = await bootNodeShell({

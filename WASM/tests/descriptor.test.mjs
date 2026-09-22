@@ -117,7 +117,7 @@ export async function run(t) {
     const ids = [];
     for (let i = 0; i < 4; i++) ids.push(crypto.hash(new Uint8Array([i + 10])));
     const d = { level: 0, k: 2, m: 2, blockSize: 256, tailBytes: 512, authTag: tag(), blockIds: ids };
-    // signDescriptor/verifyDescriptor route through the kernel's scoped signer, which
+    // signDescriptor/verifyDescriptor route through the host's scoped signer, which
     // applies `DOMAIN_guest ‖ scope` host-side for the `seedstore` label; the scope
     // bytes themselves are never reconstructed here (§16).
     const env = signDescriptor(sodium, d, author.publicKey, author.privateKey);
