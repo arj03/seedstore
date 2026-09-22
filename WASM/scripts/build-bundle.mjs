@@ -29,7 +29,7 @@ const { toHex, fromHex } = await import(new URL("../build/host/util.js", import.
 const sodium = await loadCrypto();
 // Bundle *content* is assembled below from sodium alone, which signs it. No kernel host
 // is needed, and a module's name is its bare manifest name — reached by the guest on the
-// seam, slot-local, with no bind name or global namespace (seedkernel §5.1).
+// seam, slot-local, with no bind name or global namespace (seedkernel §5).
 
 // Author identity: the key the bundle is signed with (and that installs are
 // signed with). Policy pins the derived key-set id (§12.4), not this Ed25519 key.

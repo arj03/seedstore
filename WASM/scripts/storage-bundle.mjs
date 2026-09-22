@@ -79,7 +79,7 @@ const STORAGE_CALLS = [
 export function writeStorageBundle({ path, sodium, sk, build, version = 1 }) {
   if (!Number.isInteger(version)) throw new Error("writeStorageBundle: version must be an integer");
   // A module's name is its bare manifest name — the seam argument the guest
-  // passes; there is no bind name or global namespace (seedkernel §5.1, §12.4).
+  // passes; there is no bind name or global namespace (seedkernel §5, §12.4).
   const modSpecs = ["codec", "reputation"];
 
   // The two pure modules (§17), as the build writes them.

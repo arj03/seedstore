@@ -30,8 +30,7 @@ export interface RawLinkLike {
 /** Metadata for a platform-opened channel (socket-seam.ts `Arrival`). */
 export interface ArrivalLike {
   readonly listener?: string;
-  readonly weDialed?: boolean;
-  readonly expectPeerId?: string;
+  readonly dialed?: string;
 }
 
 /** The structural ChannelFactory shape (socket-seam.ts `ChannelFactory`). */
