@@ -99,7 +99,6 @@ export async function run(t) {
       stub("decrypt", async (...args) => { const out = crypto.decrypt(...args); if (!out) throw new Error("authentication failed"); return out; });
       stub("verifyEnv", async bytes => verifySigned(bytes));
       stub("myPeer", async () => "self");
-      stub("clockNow", async () => 0);
       const observations = [];
       stub("repObserve", async (peer, time, passes, misses) => observations.push({ passes, misses }));
       stub("makeRanker", async () => async peers => peers);

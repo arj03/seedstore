@@ -46,7 +46,7 @@ structural sandbox guarantees they touch neither disk nor network even if buggy
 | coordinator (PUT/GET, placement, the index tree) + cohort (have/want, verification-fetch) + repair | confined QuickJS realm — **async** `call()` | zero-authority JS (`host/tier2-guest.js`) | §5–§9 |
 | holder side — admission, sibling rule, content-addressing, quota, the store writes | the **same** realm — **async** `call()` | zero-authority JS (`host/tier2-guest.js`) | §6, §10, §14 |
 | the seam the guest reaches I/O through | seedkernel runtime | `host.call(name, bytes)` — services, residual `crypto/*` transforms, module names | §16 |
-| `crypto/*`, `fs`, `node`, `clock` backends | seedkernel runtime | raw-byte services + frozen host-transform table | §12, §16 |
+| `crypto/*`, `fs`, `node` backends | seedkernel runtime | raw-byte services + frozen host-transform table | §12, §16 |
 
 Hashing, ChaCha20-Poly1305, and signatures are **reused** from the runtime's core
 libsodium — never bundled. The guest reaches the ungated

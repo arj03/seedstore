@@ -6,7 +6,7 @@
 //
 // Two deliberate choices:
 //   • `requires` declares SERVICES, not method names — the unit a manifest grants
-//     is `node`/`fs`/`clock` (and a local service id), never `node/sign` or `fs/get`.
+//     is `node`/`fs` (and a local service id), never `node/sign` or `fs/get`.
 //     The host gates a `host.call` by the method's SERVICE (seedkernel §12.2).
 //   • `quota` and anything runtime-derived (e.g. the signing scope) are absent
 //     from the signed config — both are host-applied facts, never author content.
@@ -38,25 +38,20 @@ export function authorKeysFor(sodium, edSk) {
   return hybridAuthorKeysFromSeed(sodium, edSk.slice(0, 32));
 }
 
-// The HOST services the storage guest reaches, EXACTLY (`guest.requires`): a
-// `host.call` naming a host method is refused unless the method's SERVICE is in this
-// list. Each one is a host service the seam wires for this slot — `node` (sign/verify
-// scoped to this bundle's app label, identity, random), `fs`, `clock`.
+// Everything the storage guest reaches, EXACTLY (`guest.requires`): a `host.call`
+// naming a host method is refused unless the method's SERVICE is in this list, and a
+// local service id is callable only when it is listed here.
+//   • `node` — sign/verify scoped to this bundle's app label.
+//   • `fs` — this app's own keyspace.
+//   • the network — a bundle (the transport) claiming `_net` under its own `services`
+//     list, reached over the same `host.call` by one cross-realm call (§12.10).
 //
-// Pure transforms (BLAKE2b, ChaCha20-Poly1305, and this bundle's own
-// codec/reputation modules) are not grants and are never listed here.
+// Pure transforms (BLAKE2b, ChaCha20-Poly1305, entropy, and this bundle's own
+// codec/reputation modules) are not grants and are never listed here; time is the
+// realm's own `Date.now()`.
 const STORAGE_REQUIRES = [
   "node",
   "fs",
-  "clock",
-];
-
-// The co-resident guests this one calls, EXACTLY (`guest.calls`, §12.10): the network
-// is a bundle (the transport) claiming `_net` under its own `services` list, reached
-// over the same `host.call` by one cross-realm call. Separate from the requires above
-// because it carries no privilege — and it is also what tells a bare `host.call` name
-// from one of this bundle's own module names.
-const STORAGE_CALLS = [
   TRANSPORT_SERVICE,
 ];
 
@@ -112,7 +107,6 @@ export function writeStorageBundle({ path, sodium, sk, build, version = 1 }) {
     modules,
     guestSource,
     guestRequires: [...STORAGE_REQUIRES],
-    guestCalls: [...STORAGE_CALLS],
     // The AUTHOR's config, injected as `const APP = …` exactly as signed. The
     // host merges nothing into it; LOCAL (operator settings) arrives beside
     // it and the guest's CFG picks precedence. No `quota` here — LOCAL-only.

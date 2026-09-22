@@ -116,7 +116,7 @@ function hash(bytes) { return host.call("crypto/blake2b-256", bytes); }
 function blockHash(d, bytes) { return hash(blockHashInput(d.authorPk, bytes)); }
 const P_SEAL = "crypto/chacha20poly1305-ietf/seal";
 const P_OPEN = "crypto/chacha20poly1305-ietf/open";
-function randomKey() { const n = new Uint8Array(4); wU32(n, 0, 32); return host.call("node/random", n); }
+function randomKey() { const n = new Uint8Array(4); wU32(n, 0, 32); return host.call("crypto/random", n); }
 // This node's channel public key, as the host hands it over in `HOST` (seedkernel §12.4).
 // Read at the call rather than at load, so the unit tests can evaluate this file bare.
 function identity() { return fromHex(HOST.identity); }
@@ -188,7 +188,6 @@ async function rsDecode(k, m, blockSize, present) {
   }
   return data;
 }
-async function clockNow() { const b = await host.call("clock/now", EMPTY); return rU32(b, 0) * 0x100000000 + rU32(b, 4); }
 
 // Per-peer reputation accumulators (module is a pure transform; callers hold state).
 // hex pubkey → {serve, miss, last}. Entries are created only by repObserve — a real
@@ -256,7 +255,7 @@ function repTally() {
     // One clock read for the round: every outcome in it shares an observation time anyway.
     async settle() {
       if (per.size === 0) return;
-      const t = await clockNow();
+      const t = Date.now();
       for (const [peerHex, { passes, misses }] of per) await repObserve(fromHex(peerHex), t, passes, misses);
       per.clear();
     },
@@ -319,7 +318,7 @@ async function cohortPeers() { return decodePeers(await netOp("peers", EMPTY)); 
 // share one in-flight call) for its lifetime, so ranking overlapping holder subsets
 // across a round costs one bridge crossing per peer, not one per (peer, id).
 async function makeRanker() {
-  const t = await clockNow();
+  const t = Date.now();
   const cache = new Map(); // peerHex → Promise<decayed score>
   const scoreOf = (p) => { let s = cache.get(p); if (s === undefined) cache.set(p, s = repScore(fromHex(p), t)); return s; };
   return async (peers) => {
@@ -1537,7 +1536,7 @@ async function doHandle(arg) {
       case Op.REPAIR: return doRepair();
       case Op.REQUEST: return doRequest(payload);
       case Op.WARM: return doWarm();
-      case Op.SCORE: return repScoreBytes(payload, await clockNow());
+      case Op.SCORE: return repScoreBytes(payload, Date.now());
       case Op.STATS: return encodeStats();
       default: return EMPTY;
     }
@@ -1545,7 +1544,7 @@ async function doHandle(arg) {
   // A peer's wire frame: answer it, timing + counting it as holder work (the
   // `recv*` half of the STATS op, since the host has no inbound seam of its own).
   const type = body[0], payload = body.subarray(1); // a view — the decoders below own no bytes
-  const t0 = await clockNow();
+  const t0 = Date.now();
   let out;
   if (type === MSG_HAVE) out = await encodeMask(await Promise.all(decodeHaveReq(payload).map((id) => storeHas(id))));
   else if (type === MSG_OFFER) out = await encodeMask(await admitBatch(decodeOfferBatch(payload)));
@@ -1557,7 +1556,7 @@ async function doHandle(arg) {
   else out = EMPTY;
   statsRecv[type]++;
   statsRecvBytes[type] += payload.length;
-  statsRecvMs[type] += await clockNow() - t0;
+  statsRecvMs[type] += Date.now() - t0;
   return out;
 }
 

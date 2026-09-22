@@ -142,7 +142,6 @@ export interface StorageNodeOptions {
   fs?: Fs;
   store?: BlobView;
   quota?: number;
-  clock?: () => number;
   timeoutMs?: number;
   /** The realm's invocation budget (seedkernel §12.3): queue wait + guest execution +
    *  a deferred answer. A DIFFERENT clock from `timeoutMs`, which is the per-request
@@ -208,7 +207,6 @@ export class StorageNode {
   /** The shell this node runs on. Public because some drivers (the latency
    *  harness) reach the runtime directly, and a caller-passed shell is already theirs. */
   readonly shell: Shell;
-  private readonly clockFn: () => number;
   /** This app's fs keyspace prefix (seedkernel §12.2): every key the holder
    *  writes is `appScope + key` on the raw backend. Tooling opening a node's
    *  directory cold must wrap it in `scopedFs(raw, appScope)` to see the same blocks. */
@@ -240,7 +238,6 @@ export class StorageNode {
     this.fs = opts.fs ?? new MemoryFs();
     this.quota = opts.quota ?? DEFAULT_QUOTA_BYTES;
     this.store = opts.store ?? new FsBlobView(this.fs);
-    this.clockFn = opts.clock ?? (() => Date.now());
     this.crypto = new Crypto(opts.sodium);
     this.net = net;
     this.ownsShell = ownsShell;
@@ -283,7 +280,6 @@ export class StorageNode {
       contactSecret: opts.contactSecret, admitPeers: opts.admitPeers,
       connsPerPeer: opts.connsPerPeer, timeoutMs: opts.timeoutMs,
       transportBlob: opts.transportBlob,
-      now: opts.clock,
     });
     const { shell, transport: net, identity } = runtime;
 
@@ -311,8 +307,6 @@ export class StorageNode {
   }
 
   // ── cohort membership (§5.1) ───────────────────────────────────────────
-  now(): number { return this.clockFn(); }
-
   /** The transport's authenticated peers right now. Link state belongs to the
    *  signed transport guest, so this is an async question rather than callbacks
    *  maintained by the WebSocket/WebRTC channel factory. */
@@ -488,13 +482,12 @@ export async function bootTransportShell(
     admitPeers?: Uint8Array[]; connsPerPeer?: number;
     timeoutMs?: number; transportBlob?: Uint8Array;
     createRealm?: RealmFactory;
-    now?: () => number;
   },
 ): Promise<StorageRuntime> {
   const fs = opts.fs ?? new MemoryFs();
   const { shell, transport } = await bootShell({
     sodium: opts.sodium, identity: opts.identity, fs,
-    createRealm: opts.createRealm, now: opts.now,
+    createRealm: opts.createRealm,
     // This node's network, whole (seedkernel §12.6): the sockets AND the signed
     // program that drives them, one object because they are one decision — the blob
     // selected here is the transport installed at boot.

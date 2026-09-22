@@ -82,4 +82,4 @@ writeFileSync(versionPath, `${manifest.version}\n`);
 // It is carried on the writeStorageBundle value, not re-derived here.
 console.log(`  author ${toHex(author)} (hybrid 0x02)`);
 console.log(`  wrote ${bundlePath} (app ${manifest.app} v${manifest.version}, ${manifest.modules.length} modules, `
-  + `requires ${manifest.guest.requires.join("+")}, calls ${(manifest.guest.calls ?? []).join("+") || "nothing"})`);
+  + `requires ${manifest.guest.requires.join("+") || "nothing"})`);
