@@ -24,12 +24,12 @@ export interface StorageConfig {
    *  the browser demo drops it to ~48 KB for WebRTC's ~64 KB channel. */
   maxMessageBytes: number;
   /** Target plaintext bytes per streamed PUT/GET window (§3): the guest heap
-   *  never holds the whole file. Bigger windows mean fewer inter-window barriers
-   *  but a larger peak footprint (≈3× the window at RS(1,1)). When unset, derived
-   *  from realmMemoryBytes (~/3); explicit override wins for benchmarking. */
+   *  never holds the whole file. Two windows are in flight at once (one placing
+   *  while the next encodes, or one prefetched while the last is read). When unset,
+   *  derived from realmMemoryBytes (~/6); explicit override wins for benchmarking. */
   windowTargetBytes?: number;
   /** Memory budget for the guest realm's QuickJS heap; windowTargetBytes derives
-   *  from it (~/3) when unset. Host-only — passed as THIS BUNDLE's realm bound
+   *  from it (~/6) when unset. Host-only — passed as THIS BUNDLE's realm bound
    *  (seedkernel §12.3), never shell-wide, so the transport guest doesn't get it. */
   realmMemoryBytes?: number;
   /** Misbehaving-peer test knob: when true, every FETCH answers FETCH_UNANSWERED
@@ -44,7 +44,7 @@ export interface StorageConfig {
 export const DEFAULT_FANOUT_WINDOW = 16;
 
 /** Default guest realm memory budget when the operator sets none: 64 MiB.
- *  windowTargetBytes is derived from this (~ /3) unless explicitly overridden. */
+ *  windowTargetBytes is derived from this (~ /6) unless explicitly overridden. */
 export const DEFAULT_REALM_MEMORY_BYTES = 64 * 1024 * 1024;
 
 /** Default target plaintext bytes per streamed PUT/GET window (§3): 4 MiB, used
@@ -124,11 +124,12 @@ export function assertStorageConfig(config?: Partial<StorageConfig>): void {
 export function normaliseConfig(raw: Partial<Record<string, unknown>>): Partial<StorageConfig> {
   const c: Partial<StorageConfig> = { ...raw } as Partial<StorageConfig>;
 
-  // Peak guest heap footprint peaks at ~3× the plaintext window (RS(1,1)), so a
-  // third of the realm budget is a safe window when not explicitly overridden.
+  // A PUT holds one window's blocks placing while the next window's plaintext and blocks
+  // encode, with the STORE frames the host-call budget admits on top. Measured on a slow
+  // link, a 64 MiB realm peaks at ~56 MiB with a sixth-sized window.
   if (c.windowTargetBytes == null) {
     const realm = c.realmMemoryBytes ?? DEFAULT_REALM_MEMORY_BYTES;
-    c.windowTargetBytes = Math.round(realm / 3);
+    c.windowTargetBytes = Math.round(realm / 6);
   }
 
   return c;

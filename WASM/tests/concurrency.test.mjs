@@ -167,9 +167,10 @@ export async function run(t) {
     // message per holder (≤ n + the manifest replicas), not one per block.
     t.ok(offersW <= n + replicas, `OFFER stays batched per holder under the WebRTC cap: ${offersW} for ${Nw * n} blocks`);
 
-    // BEFORE — serial per holder: at most one STORE in flight per holder, so the peak
-    // is just the holder count (≤ n), the round-trip-bound case the window must hide.
-    t.ok(storeSerial <= n, `serial STORE peaks at the holder count: ${storeSerial} in flight (≤ ${n})`);
+    // BEFORE — serial per holder: at most one STORE in flight per holder per placing
+    // window, and the index places beside the file's last window (placeStream), so the
+    // peak is at most twice the holder count — the round-trip-bound case the window must hide.
+    t.ok(storeSerial <= 2 * n, `serial STORE peaks at two per holder: ${storeSerial} in flight (≤ ${2 * n})`);
     // AFTER — the window pipelines each holder's STOREs, so many ride in flight at
     // once: a single holder alone overlaps its Nw blocks, far past the serial peak.
     t.ok(storeWindowed >= Nw, `windowed STORE pipelines past serial: ${storeWindowed} in flight (≥ ${Nw}, vs ${storeSerial} serial)`);
@@ -370,7 +371,7 @@ export async function run(t) {
       await runFetchTasks(new Map([["peerA", ids]]), fetchMaxIds(), async (peer, slice, ids2, blocks) => {
         if (blocks) for (const b of blocks) if (b) applied++;
       });
-      return { rounds, messages, applied, window: fanoutWindow(1, blockMsgBytes()) };
+      return { rounds, messages, applied, window: fanoutWindow() };
     })()`, ctx);
     t.eq(r.applied, 32, `one pass fetches every block the plan asked for (${r.applied}/32, ${r.messages} messages in ${r.rounds} rounds)`);
     t.ok(r.rounds <= 1 + Math.ceil(32 / r.window), `the re-asks ride the fan-out window rather than one per round (${r.rounds} rounds, window ${r.window})`);

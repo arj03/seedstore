@@ -106,14 +106,67 @@ function encodeStats() {
 // in host/storage-node.ts — keep the two in sync.
 const CFG = { ...APP, ...LOCAL };
 
+// ── the realm's host-call budget, as one ledger ──
+// The host holds every unresolved call's request, then its answer too, against per-realm
+// ceilings it advertises in HOST, and refuses a call past them outright — which fails the
+// PUT or GET rather than pacing it. The initiator's calls take their charge here first, so
+// phases that run at once — a window placing while the next encodes, a window prefetched
+// while the last one is decrypted — share the budget instead of each sizing itself to all
+// of it. FIFO, so a large charge is never starved by a stream of small ones.
+//
+// Holder work (`doHandle`) stays off the ledger and calls the host directly: it answers
+// other initiators, and parking it behind this node's own outbound traffic would let two
+// nodes storing to each other wait on each other until their requests time out.
+const hostBudget = (() => {
+  const advertised = (key) => {
+    const v = typeof HOST === "object" && HOST ? HOST[key] : 0;
+    return typeof v === "number" && v > 0 ? v : Infinity;
+  };
+  // Held back from the ledger: the call whose answer resumed the continuation now spending
+  // (the host releases it only after that continuation runs), plus the few small calls
+  // left off the ledger — the roster, a root verify.
+  // Read on first use: the charge sizes below are declared further down this file.
+  let callCap = 0, byteCap = 0;
+  let calls = 0, bytes = 0;
+  const waiting = [];
+  // A charge over the whole cap still runs once nothing else holds the ledger.
+  const fits = (n) => {
+    if (callCap === 0) {
+      callCap = Math.max(1, advertised("maxOutstandingHostCalls") - 1 - 16);
+      byteCap = advertised("maxOutstandingHostCallBytes") - maxCallChargeBytes();
+    }
+    return calls < callCap && (bytes === 0 || bytes + n <= byteCap);
+  };
+  const admit = () => {
+    while (waiting.length > 0 && fits(waiting[0].n)) {
+      const w = waiting.shift();
+      calls++; bytes += w.n;
+      w.go();
+    }
+  };
+  return async function run(n, fn) {
+    if (waiting.length > 0 || !fits(n)) await new Promise((go) => waiting.push({ n, go }));
+    else { calls++; bytes += n; }
+    try { return await fn(); }
+    finally { calls--; bytes -= n; admit(); }
+  };
+})();
+// The holder's calls: straight to the host, off the ledger.
+function rawCall(name, payload) { return host.call(name, payload); }
+// One initiator host call, charged its request plus the answer it expects.
+function call(name, payload, answerBytes = MSG_ENVELOPE_BYTES) {
+  return hostBudget(payload.length + answerBytes, () => host.call(name, payload));
+}
+
 // ── crypto primitives + storage framing ──
 // Pure transforms reach the host under the `crypto/` prefix (seedkernel §12.2):
 // BLAKE2b-256 for block-ids and ChaCha20-Poly1305 for at-rest encryption.
 // node/sign and node/verify apply the scoped `DOMAIN_guest ‖ scope` prefix on the
 // host side — the guest never holds or reconstructs it. Every seam name answers a
 // Promise now, so every helper here is awaited by its callers.
-function hash(bytes) { return host.call("crypto/blake2b-256", bytes); }
-function blockHash(d, bytes) { return hash(blockHashInput(d.authorPk, bytes)); }
+// `via` is the ledger by default; the holder passes `rawCall` (see hostBudget).
+function hash(bytes, via = call) { return via("crypto/blake2b-256", bytes, 32); }
+function blockHash(d, bytes, via = call) { return hash(blockHashInput(d.authorPk, bytes), via); }
 const P_SEAL = "crypto/chacha20poly1305-ietf/seal";
 const P_OPEN = "crypto/chacha20poly1305-ietf/open";
 function randomKey() { const n = new Uint8Array(4); wU32(n, 0, 32); return host.call("crypto/random", n); }
@@ -127,13 +180,13 @@ function nonce(level, index) { const n = new Uint8Array(12); n[0] = level & 255;
 // The host's seal result is [ciphertext][tag 16]. Keep the tag in the signed
 // descriptor so the ciphertext remains exactly k·blockSize for systematic RS.
 async function encrypt(K, level, index, msg) {
-  const sealed = await host.call(P_SEAL, concat([nonce(level, index), K, msg]));
+  const sealed = await call(P_SEAL, concat([nonce(level, index), K, msg]), msg.length + AUTH_TAG_LEN);
   if (sealed.length !== msg.length + AUTH_TAG_LEN) throw new Error("encrypt: unexpected ChaCha20-Poly1305 output length");
   return { ciphertext: sealed.slice(0, msg.length), authTag: sealed.slice(msg.length) };
 }
 async function decrypt(K, level, index, ct, authTag) {
   if (!authTag || authTag.length !== AUTH_TAG_LEN) throw new Error("get: malformed ciphertext authentication tag");
-  const opened = await host.call(P_OPEN, concat([nonce(level, index), K, ct, authTag]));
+  const opened = await call(P_OPEN, concat([nonce(level, index), K, ct, authTag]), 1 + ct.length);
   if (opened.length !== ct.length + 1 || opened[0] !== 1) throw new Error("get: ciphertext authentication failed");
   return opened.slice(1);
 }
@@ -141,7 +194,7 @@ async function decrypt(K, level, index, ct, authTag) {
 // node/sign applies the scoped prefix and returns just the signature; the stored
 // envelope carries only [pk][sig][core] — the prefix is preimage-only, never sent.
 async function signCore(core) {
-  const [pk, sig] = await Promise.all([identity(), host.call("node/sign", core)]);
+  const [pk, sig] = await Promise.all([identity(), call("node/sign", core)]);
   return concat([pk, sig, core]);
 }
 async function verifyEnv(env) {
@@ -158,7 +211,7 @@ async function verifyEnv(env) {
 async function rsEncode(k, m, blockSize, dataBlocks) {
   const head = new Uint8Array(7);
   head[0] = CODEC_ENCODE; head[1] = k; head[2] = m; wU32(head, 3, blockSize);
-  const parity = splitBlocks(await host.call(CODEC_NAME, concat([head, ...dataBlocks])), blockSize);
+  const parity = splitBlocks(await call(CODEC_NAME, concat([head, ...dataBlocks]), m * blockSize), blockSize);
   // A trapped or over-length codec rejects at the seam (seedkernel §12.2); this catches
   // the well-formed answer of the wrong shape, where the cause is, rather than as a
   // far-away "blockIds.length must be k or k+m" error or a chunk silently signed wrong.
@@ -178,7 +231,7 @@ async function rsDecode(k, m, blockSize, present) {
   head[0] = CODEC_DECODE; head[1] = k; head[2] = m; wU32(head, 3, blockSize); head[7] = use.length;
   const idx = new Uint8Array(use.length);
   for (let i = 0; i < use.length; i++) idx[i] = use[i].index;
-  const data = splitBlocks(await host.call(CODEC_NAME, concat([head, idx, ...use.map((p) => p.bytes)])), blockSize);
+  const data = splitBlocks(await call(CODEC_NAME, concat([head, idx, ...use.map((p) => p.bytes)]), k * blockSize), blockSize);
   // A short answer would otherwise silently reassemble from fewer blocks than the chunk
   // has — nothing on the read path re-verifies the codec's output (§4.2 only checks
   // inputs). Must error.
@@ -207,7 +260,7 @@ async function repScore(peerPk, t) {
 async function repScoreBytes(peerPk, t) {
   const rep = peerReps.get(toHex(peerPk)) ?? ZERO_REP;
   const req = encodeScoreReq(rep.serve, rep.miss, rep.last, t);
-  return host.call(REP_NAME, req).catch(() => EMPTY);
+  return call(REP_NAME, req).catch(() => EMPTY);
 }
 
 // Record one batch's witnessed passes/misses for a peer, awaiting the module call so
@@ -225,7 +278,7 @@ async function repObserve(peerPk, t, passes, misses) {
   }
   const req = encodeObserveReq(rep.serve, rep.miss, rep.last, t, passes, misses);
   try {
-    const resp = await host.call(REP_NAME, req);
+    const resp = await call(REP_NAME, req);
     // A module that rejects its input answers 0 bytes, and the seam delivers that as a
     // VALUE (seedkernel §12.2) — decoding it would zero the accumulator, so an
     // unreadable answer must leave a peer's standing alone rather than erase it.
@@ -270,13 +323,13 @@ function decodeStoreRecord(rec) {
   if (dlen === 0 || dlen > rec.length - STORE_REC_HEAD) return null;
   return { descriptor: rec.subarray(STORE_REC_HEAD, STORE_REC_HEAD + dlen), bytes: rec.subarray(STORE_REC_HEAD + dlen) };
 }
-async function fsGet(keyStr) {
-  const r = await host.call("fs/get", strBytes(keyStr));
+async function fsGet(keyStr, via = rawCall) {
+  const r = await via("fs/get", strBytes(keyStr), CFG.blockSize + 1024);
   return r[0] === 1 ? r.subarray(1) : null;
 }
 async function storeHas(id) { await ensureStoreIndex(); return heldBlocks.has(toHex(id)); }
-async function storeGet(id) { return decodeStoreRecord(await fsGet(toHex(id) + STORE_REC)); }
-async function storeGetBytes(id) { const r = await storeGet(id); return r ? r.bytes : null; }
+async function storeGet(id, via) { return decodeStoreRecord(await fsGet(toHex(id) + STORE_REC, via)); }
+async function storeGetBytes(id, via) { const r = await storeGet(id, via); return r ? r.bytes : null; }
 async function storeGetDescriptor(id) { const r = await storeGet(id); return r ? r.descriptor : null; }
 async function storeKeys() {
   const r = await host.call("fs/list", EMPTY), out = [];
@@ -344,11 +397,15 @@ const NET_SEND_OP = strBytes("send");
 // STORE batch five times before it left the realm; `parts` also lets the caller pass
 // the batch's pieces uncopied, so a block's bytes land in the frame directly off the
 // codec. The result must stay a WHOLE buffer: host.call copies any view it is handed.
+// A frame's length for a payload of `payloadLen` bytes, addressed to a 32-byte peer key.
+function netFrameBytes(payloadLen) {
+  return 1 + NET_SEND_OP.length + 1 + 4 + 32 + 4 + NET_PROTO.length + 4 + 1 + payloadLen;
+}
 function netSendFrame(to, type, parts) {
   let payloadLen = 0;
   for (const p of parts) payloadLen += p.length;
   const bodyLen = 1 + payloadLen; // [type u8][payload]
-  const out = new Uint8Array(1 + NET_SEND_OP.length + 1 + 4 + to.length + 4 + NET_PROTO.length + 4 + bodyLen);
+  const out = new Uint8Array(netFrameBytes(payloadLen));
   let o = 0;
   out[o++] = NET_SEND_OP.length;
   out.set(NET_SEND_OP, o); o += NET_SEND_OP.length;
@@ -361,25 +418,32 @@ function netSendFrame(to, type, parts) {
   return out;
 }
 // `payload` is one buffer or an array of pieces to frame in order (encodeStoreBatchParts).
-async function netSend(peer, type, payload) {
+// `answerBytes` is what the reply may carry, charged to the ledger with the frame
+// (verdicts, unless the caller says otherwise — maskAnswerBytes).
+async function netSend(peer, type, payload, answerBytes) {
+  const parts = Array.isArray(payload) ? payload : [payload];
+  let payloadLen = 0;
+  for (const p of parts) payloadLen += p.length;
+  const frameBytes = netFrameBytes(payloadLen);
   statsSent[type]++;
-  statsInFlight[type]++;
-  if (statsInFlight[type] > statsPeak[type]) statsPeak[type] = statsInFlight[type];
-  try {
-    const r = await netCall(netSendFrame(fromHex(peer), type, Array.isArray(payload) ? payload : [payload]));
-    // A view, not a copy: the caller decodes it (and keeps only what it needs) before
-    // the answer goes out of scope. null = peer unreachable within the window.
-    return r[0] === 1 ? r.subarray(1) : null;
-  } finally {
-    statsInFlight[type]--;
-  }
+  // The frame is built once the ledger admits the call, so a lane waiting its turn holds
+  // no copy of its blocks, and in-flight counts only what the host actually holds.
+  const r = await hostBudget(frameBytes + (answerBytes ?? maskAnswerBytes(frameBytes)), async () => {
+    statsInFlight[type]++;
+    if (statsInFlight[type] > statsPeak[type]) statsPeak[type] = statsInFlight[type];
+    try { return await host.call(NET_ID, netSendFrame(fromHex(peer), type, parts)); }
+    finally { statsInFlight[type]--; }
+  }).then((r) => r, () => EMPTY);
+  // A view, not a copy: the caller decodes it (and keeps only what it needs) before
+  // the answer goes out of scope. null = peer unreachable within the window.
+  return r[0] === 1 ? r.subarray(1) : null;
 }
 // Per-peer fan-out (§6/§7): a distinct request per peer, all issued concurrently via
 // Promise.all. `requests` = [{ peer, type, payload }]; results align to input order,
 // an unreachable peer coming back `ok:false`/`bytes:null` rather than a throw.
 function netSendMany(requests) {
   return Promise.all(requests.map(async (rq) => {
-    const bytes = await netSend(rq.peer, rq.type, rq.payload);
+    const bytes = await netSend(rq.peer, rq.type, rq.payload, rq.answerBytes);
     return { peer: rq.peer, ok: bytes !== null, bytes };
   }));
 }
@@ -414,8 +478,8 @@ async function haveWant(ids) {
 // null for the whole batch if the peer was unreachable — so the caller can score a
 // reachable-but-didn't-serve as a §8 miss but never an unreachable peer.
 async function fetchBatch(peer, ids) {
-  if (peer === await myPeer()) return Promise.all(ids.map((id) => storeGetBytes(id)));
-  const resp = await netSend(peer, MSG_FETCH, encodeFetchBatchReq(ids));
+  if (peer === await myPeer()) return Promise.all(ids.map((id) => storeGetBytes(id, call)));
+  const resp = await netSend(peer, MSG_FETCH, encodeFetchBatchReq(ids), fetchAnswerBytes(ids.length));
   if (resp === null) return null;
   const blocks = decodeFetchBatchRes(resp);
   return ids.map((_, i) => blocks[i] || null);
@@ -475,52 +539,26 @@ function fetchMaxIds() { return Math.max(1, Math.floor(maxMsgBytes() / (CFG.bloc
 // A conservative allowance for what the host copies ALONGSIDE a message payload
 // (type, request id, peer address): payload + this is what a call really charges.
 const MSG_ENVELOPE_BYTES = 128;
-// What ONE in-flight message costs the realm at its peak: a full-cap message in the fat
-// direction plus the other direction's small answer — never two full messages. No type is
-// full-size both ways: STORE/OFFER send a packed batch and get a verdict mask back (a byte
-// per block), FETCH asks with an id list (32 B each) and gets the blocks. Charging 2× a
-// message halves the window for nothing, and at production geometry — 1 MiB batches over
-// a 16 MiB budget — halving it is the difference between feeding the wire and starving it.
-function callChargeBytes(msgBytes) {
-  const perMsg = Math.max(1, Math.ceil(msgBytes / CFG.blockSize)); // blocks, or ids, in one message
-  return msgBytes + BLOCK_ID_LEN * perMsg + MSG_ENVELOPE_BYTES;
-}
-// What a BLOCK-BEARING message (STORE, FETCH) actually carries, which is NOT the cap: both
-// pack whole blocks, so a 1 MiB cap over 256 KiB blocks moves three blocks — the fourth does
-// not fit once framed. Charging the cap would spend a quarter of the budget on bytes no
-// message sends, and the budget is what bounds how many messages ride the wire at once.
-// FETCH_FRAME is the smaller of the two per-block framings, so this counts the most blocks
-// either direction could pack — the safe side. OFFER is not block-bearing (it packs
-// descriptors and can reach the cap), so it keeps charging the cap.
-function blockMsgBytes() {
-  const framed = CFG.blockSize + FETCH_FRAME;
-  return Math.min(maxMsgBytes(), Math.max(1, Math.floor(maxMsgBytes() / framed)) * framed);
+// What a message's answer may carry, charged to the ledger with its frame. Every type but
+// FETCH answers a verdict byte per entry, and an entry is at least an id; a FETCH answers
+// the blocks it asked for. No type is full-size both ways.
+function maskAnswerBytes(frameBytes) { return MSG_ENVELOPE_BYTES + Math.ceil(frameBytes / BLOCK_ID_LEN); }
+function fetchAnswerBytes(n) { return MSG_ENVELOPE_BYTES + 4 + n * (CFG.blockSize + FETCH_FRAME); }
+// The largest charge one initiator call takes to the ledger: a full-cap message and its
+// verdicts, a full FETCH answer, or a chunk through the cipher (in and out) or the codec
+// (k in, m out; k in, k out).
+function maxCallChargeBytes() {
+  const c = CFG, frame = maxMsgBytes() + MSG_ENVELOPE_BYTES;
+  return Math.max(frame + maskAnswerBytes(frame), fetchAnswerBytes(fetchMaxIds()) + MSG_ENVELOPE_BYTES,
+    Math.max(2 * c.k, c.k + c.m) * c.blockSize + MSG_ENVELOPE_BYTES);
 }
 // The fan-out window (operator policy, like maxMessageBytes): how many per-peer
 // sub-batches one Promise.all round fires at once. PUT and GET share it — it bounds
 // STORE messages PER PEER and OFFER/FETCH messages TOTAL across the cohort, pipelining
-// a holder's many small messages instead of one round trip apiece. core.ts homes the default.
-//
-// Clamped to what the host will actually admit. Every message in a round is one unresolved
-// `host.call`, and the host holds its copied input against a per-realm ceiling it advertises
-// to us (`HOST.maxOutstandingHostCallBytes`) for the call's whole life, then ADDS the answer's
-// bytes when it lands. Windowing to that budget is how a configured window becomes backpressure:
-// past it the host refuses the call outright, which fails the PUT rather than pacing it.
-// A host that advertises nothing is an older host, and the configured window stands.
-//
-// `peers` is how many holders a round fans out to at once, because W is per peer there
-// and the budget is realm-wide: STORE passes its peer count, while a cohort-wide flat
-// list (OFFER, FETCH) is already the whole round and passes 1.
-function fanoutWindow(peers = 1, msgBytes = maxMsgBytes()) {
-  const budget = typeof HOST === "object" && HOST ? HOST.maxOutstandingHostCallBytes : 0;
-  if (!(typeof budget === "number" && budget > 0)) return CFG.fanoutWindow;
-  // Reserve one message for the call whose answer resumed this continuation: the host
-  // still holds its request AND response while our continuation runs (safe-js settles the
-  // guest inside the try, releasing only in the finally), so those bytes are not ours yet.
-  const charge = callChargeBytes(msgBytes);
-  const affordable = Math.floor((budget - charge) / (charge * Math.max(1, peers)));
-  return Math.max(1, Math.min(CFG.fanoutWindow, affordable));
-}
+// a holder's many small messages instead of one round trip apiece. core.ts homes the
+// default. It asks for concurrency; the ledger (hostBudget) decides how much of it the
+// host's budget admits at once, and paces the rest.
+function fanoutWindow() { return CFG.fanoutWindow; }
 function sliceN(arr, size) {
   if (arr.length <= size) return [arr];
   const out = [];
@@ -645,10 +683,9 @@ async function placeChunksBatched(jobs, what) {
     // fanoutWindow() per peer (peers concurrent → peak W·peers).
 
     // ── OFFER phase ── every peer's slices form ONE cohort-wide list, windowed like the
-    // FETCH plan: an OFFER slice is a full-cap message too, so peers × slices in flight
-    // is what the realm-wide byte budget bounds — a wide cohort would otherwise fan out
-    // past it on peer count alone. Round-robin over peers so a window spreads across
-    // holders instead of serializing on the one with the most slices.
+    // FETCH plan, so a wide cohort does not fan out one full-cap message per peer at once.
+    // Round-robin over peers so a window spreads across holders instead of serializing on
+    // the one with the most slices.
     const offerSlices = new Map(); // peer → [slice]
     for (const [peer, items] of byPeer) offerSlices.set(peer, sliceN(items, maxOffers));
     const offerTasks = [];
@@ -682,19 +719,11 @@ async function placeChunksBatched(jobs, what) {
 
     // ── STORE phase ── the accepted blocks, byte-bounded per peer, then one request
     // per lane across fanoutWindow() lanes per peer, each lane refilling on its own
-    // ack. Peak is still W per peer, inside the realm-wide byte AND call ceilings.
+    // ack. Peak is W per peer, as far as the ledger admits.
     const storeGroups = new Map(); // peer → [group]
     const storeEntryBytes = ({ ch, i }) => 40 + ch.descriptor.length + ch.slotBlocks[i].length;
-    let storeMsgBytes = 0;
-    for (const [peer, accepted] of acceptedByPeer) {
-      const groups = batchBytes(accepted, storeEntryBytes, maxBytes);
-      storeGroups.set(peer, groups);
-      for (const group of groups) storeMsgBytes = Math.max(storeMsgBytes, 4 + group.reduce((sum, entry) => sum + storeEntryBytes(entry), 0));
-    }
-    const callBudget = typeof HOST === "object" && HOST ? HOST.maxOutstandingHostCalls : 0;
-    const callWidth = callBudget > 0 ? Math.max(1, Math.floor((callBudget - 1) / Math.max(1, storeGroups.size))) : CFG.fanoutWindow;
-    const putW = Math.min(fanoutWindow(storeGroups.size, storeMsgBytes), callWidth);
-    await runStoreBatches(storeGroups, putW, async (peer, group) => {
+    for (const [peer, accepted] of acceptedByPeer) storeGroups.set(peer, batchBytes(accepted, storeEntryBytes, maxBytes));
+    await runStoreBatches(storeGroups, fanoutWindow(), async (peer, group) => {
       // Parts, not a concatenated batch: netSend writes the blocks into the outgoing
       // frame itself, so the ciphertext is never copied to a second buffer.
       const bytes = await netSend(peer, MSG_STORE, encodeStoreBatchParts(group.map(({ ch, i }) => ({ blockId: ch.slotIds[i], descriptor: ch.descriptor, bytes: ch.slotBlocks[i] }))));
@@ -753,14 +782,14 @@ async function runFetchTasks(byPeer, maxIds, apply) {
     if (peer === me) continue;
     for (const slice of sliceN(byPeer.get(peer), maxIds)) tasks.push({ peer, slice, ids: slice.map(fromHex) });
   }
-  const getW = fanoutWindow(1, blockMsgBytes());  // one flat cohort-wide list, block-bearing
+  const getW = fanoutWindow();  // one flat cohort-wide list
   // Advance by what the window actually took, not by getW: a partial window (the last
   // one, before re-asks were appended behind it) would otherwise step over the tasks
   // appended into the gap, leaving the caller to re-plan them a whole round later.
   for (let base = 0; base < tasks.length; ) {
     const window = tasks.slice(base, base + getW);
     base += window.length;
-    const results = await netSendMany(window.map(({ peer, ids }) => ({ peer, type: MSG_FETCH, payload: encodeFetchBatchReq(ids) })));
+    const results = await netSendMany(window.map(({ peer, ids }) => ({ peer, type: MSG_FETCH, payload: encodeFetchBatchReq(ids), answerBytes: fetchAnswerBytes(ids.length) })));
     for (let ri = 0; ri < results.length; ri++) {
       const { peer, slice, ids } = window[ri];
       if (!results[ri].ok) { await apply(results[ri].peer, slice, ids, null); continue; } // unreachable
@@ -906,7 +935,7 @@ async function assembleChunk(d, got) {
 // the whole-file `put` entry drives the same loop over its own in-memory argument.
 
 // Target footprint for one window's plaintext slice, derived by the host driver
-// from realmMemoryBytes (~/3, peak guest footprint ratio) as CFG.windowTargetBytes.
+// from realmMemoryBytes (~/6: two windows in flight, core.ts) as CFG.windowTargetBytes.
 // A too-small window idles the wire between OFFER→STORE→ack rounds on a fat link.
 function windowTarget() { return CFG.windowTargetBytes ?? 4 * 1024 * 1024; }
 // A chunk-aligned window size: as many whole chunks (k·blockSize) as fit under the
@@ -916,47 +945,70 @@ function putWindowBytes() { const chunkData = CFG.k * CFG.blockSize; return Math
 // (§4.3), passed in by the reader, never config's.
 function getWindowChunks(chunkData) { return Math.max(1, Math.floor(windowTarget() / chunkData)); }
 
-// Encode + place the chunks wholly contained in `slice` — a chunk-aligned slice of a
-// LEVEL's byte stream at offset `baseByteOffset`. Each chunk codes at its own k
-// (§4.1). Level 0 (the file) and level ℓ > 0 (an index) are the same call.
-async function placeWindow(slice, baseByteOffset, K, level) {
+// Encode the chunks wholly contained in `slice` — a chunk-aligned slice of a LEVEL's
+// byte stream at offset `baseByteOffset`. Each chunk codes at its own k (§4.1).
+// Level 0 (the file) and level ℓ > 0 (an index) are the same call.
+async function encodeWindow(slice, baseByteOffset, K, level) {
   const c = CFG;
   const chunkData = c.k * c.blockSize;
   const baseCi = Math.floor(baseByteOffset / chunkData);
   const numChunks = Math.max(1, Math.ceil(slice.length / chunkData));
   const chunks = [];
-  // Overlap the codec worker with neighboring chunks' encryption/hash/sign work, bounded
-  // by what ONE in-flight encodeChunk costs the realm: its k+m parallel hashes (plus
-  // encrypt/rsEncode/sign slack) in calls, and in bytes the larger of encrypt's
-  // request+response and those same k+m blocks — both scale with the geometry, so a
-  // wide-m or wide-k deployment narrows the pipeline instead of overrunning the budget.
-  const callBudget = typeof HOST === "object" && HOST ? HOST.maxOutstandingHostCalls : 0;
-  const byteBudget = typeof HOST === "object" && HOST ? HOST.maxOutstandingHostCallBytes : 0;
-  const callsPerChunk = c.k + c.m + 2, bytesPerChunk = Math.max(2 * c.k, c.k + c.m) * c.blockSize;
-  const depth = Math.max(1, Math.min(4,
-    callBudget > 0 ? Math.floor((callBudget - 1) / callsPerChunk) : 1,
-    byteBudget > 0 ? Math.floor(byteBudget / bytesPerChunk) : 1));
+  // Overlap the codec worker with neighboring chunks' encryption/hash/sign work; the
+  // ledger paces their calls to the host's budget, whatever the geometry.
+  const depth = 4;
   for (let base = 0; base < numChunks; base += depth) {
     const work = [];
     for (let lc = base; lc < Math.min(base + depth, numChunks); lc++) work.push(encodeChunk(slice, lc, baseCi + lc, K, level));
     chunks.push(...await Promise.all(work));
   }
-  await placeChunksBatched(chunks, "chunk");
   return chunks;
 }
 
 // Place a whole byte stream as a run of chunks, answering with signed descriptors.
 // The only thing that turns bytes into placed chunks — a file's descriptor list is
 // bytes too, so it goes through here at a different `level`. One path, called twice.
+//
+// Placement is pipelined: a window's descriptors exist once it is encoded, so it is
+// handed to placement and the stream moves on, keeping one window placing behind the
+// one just started. The next window's encode and OFFER round trip then run while the
+// last one's STOREs drain, instead of the wire idling through each boundary — and an
+// index level, whose input is only the descriptors, places beside the file's last window.
+// The two share the realm's host-call budget through the ledger (hostBudget).
 async function placeStream(s, bytes, level, base) {
   const out = [];
   const wb = putWindowBytes();
   for (let off = 0; off === 0 || off < bytes.length; off += wb) {   // an empty file is still one chunk
-    const chunks = await placeWindow(bytes.subarray(off, Math.min(off + wb, bytes.length)), base + off, s.K, level);
-    await recordPlacements(s, chunks);
+    const chunks = await encodeWindow(bytes.subarray(off, Math.min(off + wb, bytes.length)), base + off, s.K, level);
     for (const ch of chunks) out.push(ch.descriptor);
+    await pipePlacement(s, placeChunksBatched(chunks, "chunk").then(() => recordPlacements(s, chunks)));
   }
   return out;
+}
+// Start one window placing and wait for the one behind it, so at most two are in flight.
+// A failure is thrown only once the other has settled: no placement outlives its stream.
+async function pipePlacement(s, placing) {
+  placing.catch(() => {}); // observed here, by the next window, or by settlePlacements
+  const behind = s.placing;
+  s.placing = placing;
+  if (!behind) return;
+  try { await behind; }
+  catch (err) { await placing.catch(() => {}); throw err; }
+}
+async function settlePlacements(s) {
+  const last = s.placing;
+  s.placing = null;
+  if (last) await last;
+}
+// Run one stream step; on failure, let the placement still in flight settle first.
+async function streamStep(s, step) {
+  try { return await step(); }
+  catch (err) {
+    const pending = s.placing;
+    s.placing = null;
+    if (pending) await pending.catch(() => {});
+    throw err;
+  }
 }
 
 // ── the streamed PUT session ─────────────────────────────────────────────────
@@ -984,7 +1036,7 @@ async function putStart() {
     throw new Error("put: k·blockSize (" + chunkData + " B) must hold two chunk descriptors ("
       + descriptorBytes() + " B each) so a file's descriptor list can reach a single root — raise blockSize or k");
   }
-  putStream = { K: await randomKey(), offset: 0, descriptors: [], placedIds: [], placed: 0, intended: 0 };
+  putStream = { K: await randomKey(), offset: 0, descriptors: [], placedIds: [], placed: 0, intended: 0, placing: null };
   return putWindowBytes();
 }
 // Fold placed chunks into the stream's durability accounting (§8). Counts REPLICA
@@ -1000,12 +1052,15 @@ async function recordPlacements(s, chunks) {
     s.intended += Math.min(ch.slotIds.length, peerCount);
   }
 }
-// Feed the next plaintext window, in file order — a chunk-aligned slice of the file. Its
-// ciphertext is placed and dropped before this returns; the driver never learns the
-// window's byte offset, because the stream knows it.
+// Feed the next plaintext window, in file order — a chunk-aligned slice of the file. It
+// returns once the window BEFORE it is placed, leaving this one placing behind the next
+// feed (placeStream); the driver never learns the window's byte offset, because the
+// stream knows it.
 async function putFeed(slice) {
   const s = requirePut();
-  for (const env of await placeStream(s, slice, LEVEL_BODY, s.offset)) s.descriptors.push(env);
+  await streamStep(s, async () => {
+    for (const env of await placeStream(s, slice, LEVEL_BODY, s.offset)) s.descriptors.push(env);
+  });
   s.offset += slice.length;
 }
 // Seal the stream and report the whole PUT. Closes the stream first, so a failed or
@@ -1018,9 +1073,12 @@ async function putFinish() {
   const s = requirePut();
   putStream = null;
   if (!s.descriptors.length) throw new Error("put: stream sealed with no data — call putWindow at least once before putFinish");
-  let envs = s.descriptors;
-  for (let level = 1; envs.length > 1; level++) envs = await placeStream(s, encodeDescriptorList(envs), level, 0);
-  return encodePutResult(envs[0], s);
+  return streamStep(s, async () => {
+    let envs = s.descriptors;
+    for (let level = 1; envs.length > 1; level++) envs = await placeStream(s, encodeDescriptorList(envs), level, 0);
+    await settlePlacements(s);
+    return encodePutResult(envs[0], s);
+  });
 }
 // The ONE PUT result format, read by every driver:
 //   [K 32][chunkCount u32][placed u32][intended u32][rootLen u32][root ...]
@@ -1110,19 +1168,39 @@ async function getStart(rootEnv, K) {
     fileSize += d.tailBytes;
     if (d.k * d.blockSize > maxChunkBytes) maxChunkBytes = d.k * d.blockSize;
   }
-  getStream = { K, ds, next: 0, windowChunks: getWindowChunks(maxChunkBytes) };
+  getStream = { K, ds, next: 0, windowChunks: getWindowChunks(maxChunkBytes), ahead: null };
   return fileSize;
 }
-// The next window's plaintext, in file order. Empty once the file is exhausted, which
-// also closes the stream — so a driver reading to the end leaves nothing behind.
-async function getNext() {
-  const s = getStream;
-  if (!s) throw new Error("get: no stream open — call getStart first");
-  if (s.next >= s.ds.length) { getStream = null; return EMPTY; }
+// Start reconstructing the stream's next window, or null once every window is started.
+function startWindow(s) {
+  if (s.next >= s.ds.length) return null;
   const start = s.next;
   const ds = s.ds.slice(start, start + s.windowChunks);
   s.next = start + ds.length;
-  return reconstructChunks(ds, s.K, start);
+  const window = reconstructChunks(ds, s.K, start);
+  window.catch(() => {}); // observed by the getNext that returns it
+  return window;
+}
+// The next window's plaintext, in file order. Empty once the file is exhausted, which
+// also closes the stream — so a driver reading to the end leaves nothing behind.
+//
+// Prefetched: the window after this one is started before this one is awaited, so its
+// HAVE and FETCH round trips run while this one lands and the driver drains it, instead
+// of the wire idling through every boundary. At most two windows are in flight; they
+// share the realm's host-call budget through the ledger (hostBudget).
+async function getNext() {
+  const s = getStream;
+  if (!s) throw new Error("get: no stream open — call getStart first");
+  const window = s.ahead ?? startWindow(s);
+  if (!window) { getStream = null; return EMPTY; }
+  s.ahead = startWindow(s);
+  try { return await window; }
+  catch (err) {
+    // A failed read ends the stream, once the window behind it has settled.
+    getStream = null;
+    if (s.ahead) await s.ahead.catch(() => {});
+    throw err;
+  }
 }
 
 // [K 32][root ...] → [fileSize u64]: open the stream, report how much to drain. K leads so
@@ -1441,7 +1519,7 @@ async function acceptStoreBatch(stores) {
   const parsed = stores.map((s) => {
     try { return parseSignedDescriptor(s.descriptor).descriptor; } catch { return null; }
   });
-  const hashes = await Promise.all(stores.map((s, i) => parsed[i] ? blockHash(parsed[i], s.bytes) : null));
+  const hashes = await Promise.all(stores.map((s, i) => parsed[i] ? blockHash(parsed[i], s.bytes, rawCall) : null));
   const verdicts = parsed.map((d) => d ? VERDICT_DECLINED : VERDICT_DESCRIPTOR);
   const valid = [];
   for (let i = 0; i < stores.length; i++) {
@@ -1566,7 +1644,7 @@ async function doHandle(arg) {
 // the placement engine drives, exposed as a local op (Op.REQUEST) rather than a
 // second entrypoint. Answers `[ok u8][response]`; unreachable is `[0]`.
 async function doRequest(arg) {
-  const resp = await netSend(toHex(arg.subarray(0, 32)), arg[32], arg.subarray(33));
+  const resp = await netSend(toHex(arg.subarray(0, 32)), arg[32], arg.subarray(33), MSG_ENVELOPE_BYTES + maxMsgBytes());
   return resp === null ? Uint8Array.from([0]) : concat([Uint8Array.from([1]), resp]);
 }
 

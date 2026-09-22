@@ -393,8 +393,8 @@ batches split into 48 KiB physical messages, window 32):
 
 | | time | rate | |
 |---|---:|---:|---|
-| **PUT** | ~0.51 s | ~7.9 MB/s | ships the 2× erasure overhead — RS(2,2) is 2 data + 2 parity |
-| **GET** | ~0.24 s | ~16.6 MB/s | downloads any *k* of *n* — 1× the file |
+| **PUT** | ~0.41 s | ~9.7 MB/s | ships the 2× erasure overhead — RS(2,2) is 2 data + 2 parity |
+| **GET** | ~0.24 s | ~16.9 MB/s | downloads any *k* of *n* — 1× the file |
 
 `node tests/bench-net.mjs 10 4 32 256 48 32` reproduces this in a fresh W=32
 process (omit the final `32` to sweep the window); the
@@ -410,14 +410,14 @@ window, 50 MB per run:
 
 | | rate | |
 |---|---:|---|
-| **PUT** | ~10.3 MB/s wire | 5.1 MB/s of file — RS(1,1) ships 2× |
-| **GET** | ~14 MB/s | |
+| **PUT** | ~12.5 MB/s wire | ~6.2 MB/s of file — RS(1,1) ships 2× |
+| **GET** | ~15 MB/s | |
 
-`node --experimental-websocket scripts/p2p-cli.mjs --peers … --size 50 --timeout 30000`
-reproduces it against live nodes.
+`node --experimental-websocket scripts/p2p-cli.mjs --peers … --size 50 --timeout 30000
+--guest-deadline 60000` reproduces it against live nodes.
 
-The lever there is not the window's *width* — 31 messages per peer at that geometry,
-clamped by the realm's outstanding-call byte budget — but how its slots **refill**.
+The lever there is not the window's *width* — the ledger paces it to the realm's host-call
+budget either way — but how its slots **refill**.
 Lock-step rounds let one slow holder idle every other slot in the round; giving each slot
 its own lane over a shared cursor (`runStoreBatches`) measured **+22%**, paired and
 order-interleaved on the same holders, and removed a slow tail that was failing whole PUTs
@@ -431,16 +431,37 @@ to full value: the table above moved **+7% PUT / +10% GET on the `toHex` work al
 (revert `host/util.ts` and rebuild to check), which the live link does not show. Price
 guest CPU here; judge wire behaviour on a live cohort.
 
-**A streamed window is one guest invocation, and it is deadline-bound.** seedkernel gives
-each invocation `DEFAULT_GUEST_DEADLINE_MS` (5 s), covering guest execution *and* every
-handoff's wall clock. A 24 MB window at ~10 MB/s runs ~3.4 s against it; overrunning fails
-the whole PUT with `guest: handoff deadline exhausted before host.call`. That is not the
-request timeout — raise `guestDeadlineMs` (p2p-cli `--guest-deadline`), not `--timeout`.
-Nothing derives the window from it (`windowTargetBytes` comes from `realmMemoryBytes`,
-~/3), so widening the window or running a slower link needs the deadline raised to match.
+**Windows are pipelined.** A streamed PUT keeps one window placing while the next encodes
+and sends its OFFERs, and the index places beside the file's last window; a streamed GET
+fetches the next window while the current one is decrypted and handed back. Otherwise every
+window boundary idles the wire for the tail of the last window's acknowledgements plus the
+next window's first round trip. The two windows share the realm's host-call budget through
+one FIFO ledger (`hostBudget`), which every initiator call takes its charge from; holder
+work stays off it, so two nodes storing to each other cannot wait on each other. Over a
+40 ms link (16 MB, RS(2,2), 32 KiB blocks, 4 MiB windows — `node tests/bench-net.mjs 40 16
+32 256 48 32 4`), pipelining measured PUT ~1.99 → ~1.60 s and GET ~1.10 → ~0.83 s.
+
+Two windows in flight cost memory, so the default window is a sixth of `realmMemoryBytes`:
+a 64 MiB realm peaks at ~56 MiB during a PUT on a slow link. A frame is built only once the
+ledger admits its call, so a lane waiting its turn holds no copy of its blocks. A 64 MB file
+over 40 ms with 1 MiB batches (`node tests/bench-net.mjs 40 64 256 1024 48 32`) runs PUT
+~2.7 s (~24 MB/s) and GET ~1.34 s (~48 MB/s).
+
+**A window's placement is deadline-bound.** seedkernel gives each guest invocation
+`DEFAULT_GUEST_DEADLINE_MS` (5 s), covering guest execution *and* every handoff's wall clock.
+A window's calls run under the invocation that fed it, so its encode and placement must
+finish within that deadline even though the placement finishes during the next feed.
+Overrunning fails the whole PUT with `guest: handoff deadline exhausted before host.call`.
+That is not the request timeout — raise `guestDeadlineMs` (p2p-cli `--guest-deadline`), not
+`--timeout`. Nothing derives the window from it (`windowTargetBytes` comes from
+`realmMemoryBytes`), so widening the window or running a slower link needs the deadline
+raised to match.
 
 `node tests/bench-holder.mjs 16 256 1 1 disk` isolates holder admission and
-durable STORE work on a real filesystem. Its capacity comparison uses total holder
+durable STORE work on a real filesystem: ~6.6 ms per 256 KiB block, ~37 MB/s mean
+holder rate, PUT ~0.67 s (~24 MB/s) with initiator and holders sharing one process. The
+per-block time is mostly waiting for that one thread — the crypto floor is ~0.36 ms a
+block — so read it as a bound on a co-resident cohort, not on a holder box. Its capacity comparison uses total holder
 payload over the complete PUT wall time as a conservative floor, and separately
 sums the already co-resident holders' measured rates for the active holder window;
 it does not divide by the holder count a second time.
