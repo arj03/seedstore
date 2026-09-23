@@ -1,15 +1,15 @@
-# seed store: WASM implementation
+# Seedstore: WASM implementation
 
 This is an AssemblyScript + TypeScript implementation of **Part I** of the
-[seed store spec](../docs/SPEC.md), a private, self-healing peer-to-peer storage
+[seedstore spec](../docs/SPEC.md), a private, self-healing peer-to-peer storage
 layer that runs on [seedkernel](https://github.com/arj03/seedkernel). A node runs the
 same protocol in Node, Bun and the browser. Spec references in this file and in code
 comments (`§n`, `SPEC §n`) point to that spec.
 
-## seed store is content, not a binary
+## Seedstore is content, not a binary
 
 The deployable artifact is the **generic seedkernel host**, which knows nothing
-about storage. Seed store ships as **signed content**. The host loads that content
+about storage. Seedstore ships as **signed content**. The host loads that content
 and becomes a storage node:
 
 ```
@@ -23,7 +23,7 @@ seedkernel host                 install + admission policy, and the services:
                                 node (scoped sign/verify), fs, _net (transport), crypto/*
 ```
 
-Everything with *structure* belongs to seed store and lives in the bundle: content
+Everything with *structure* belongs to seedstore and lives in the bundle: content
 addressing, the signed chunk descriptor, the wire format, Reed–Solomon, the nonce
 convention and the quota. The host only moves opaque bytes. So the same host can run
 storage or any other signed app, and an upgrade to storage is new content rather than
@@ -62,7 +62,7 @@ hosts refuse downgrades. Both files are gitignored, and they must travel togethe
 ## Run a node from the command line
 
 A node is the seedkernel host plus two signed bundles: seedkernel's **transport
-bundle**, which is the node's network and is installed at boot, and the seed store
+bundle**, which is the node's network and is installed at boot, and the seedstore
 bundle. The host admits apps only from authors named in its policy file. Put the
 author public key printed by `npm run build:bundle` in one:
 
@@ -257,7 +257,7 @@ pipelined windows, the host-call ledger, and the guest deadline.
 | `reputation.wasm` | 5.3 KB |
 | the guest, minified | 64 KB (16 KB gzipped) |
 
-Those three files are all of seed store's runtime code. Everything else is the
+Those three files are all of seedstore's runtime code. Everything else is the
 seedkernel host and its core libsodium, which any app on that host shares.
 
 The host-side TypeScript in `build/host` (minified to `build/host-min`) is a separate

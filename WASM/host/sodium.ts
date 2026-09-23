@@ -1,4 +1,4 @@
-// libsodium access for the storage layer. Seed store reuses the host's
+// libsodium access for the storage layer. Seedstore reuses the host's
 // cryptography rather than shipping its own (SPEC §2, §16): hashing,
 // ChaCha20-Poly1305, and key-sealing are all calls on the host's core libsodium.
 

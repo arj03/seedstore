@@ -80,7 +80,7 @@ const runtime = await bootTransportShell({
 const node = await StorageNode.create({ runtime, sodium, ...wasm, config, quota: 64 * 1024 * 1024, timeoutMs: 6000 });
 net.join(); // announce into the room → present peers begin the WebRTC handshake
 
-console.log(`\nseed store RTC holder ${short(node.peerId)} ready — handlers installed: ${node.handlersInstalled()}`);
+console.log(`\nseedstore RTC holder ${short(node.peerId)} ready — handlers installed: ${node.handlersInstalled()}`);
 console.log(`joined ${url}  (RS k=${config.k} m=${config.m}, ${config.blockSize} B blocks)`);
 console.log(`open browser/p2p.html with the SAME relay + room "${room}" (or run more holders), then store a file.`);
 console.log(contactSecret

@@ -1,16 +1,16 @@
-# seed store
+# seedstore — a file storage app for [seedkernel](https://github.com/arj03/seedkernel)
 
 Private, self-healing peer-to-peer file storage for a group of peers who know each
 other: your own devices, your friends, or an explicit storage group.
 
-You hand seed store a file. It encrypts the file on your machine, erasure-codes the
+You hand seedstore a file. It encrypts the file on your machine, erasure-codes the
 ciphertext, and spreads the pieces across your peers so that no single peer can make
 the file unavailable. Peers can be offline for a while without losing data. When
 redundancy drops, the remaining holders rebuild the missing pieces, and they do it
 without being able to read the file. Peers that store and serve reliably for others
 get reliable storage back, with no coin involved.
 
-Seed store runs on [seedkernel](https://github.com/arj03/seedkernel). It ships as one
+Seedstore runs on [seedkernel](https://github.com/arj03/seedkernel). It ships as one
 signed bundle that the generic seedkernel host loads. It is not a separate binary,
 and it runs the same way in Node, Bun and the browser.
 
@@ -55,12 +55,12 @@ rebuild it without the file key.
 The trusted part is small. Only seedkernel's host services (filesystem, signing,
 network link) do real I/O. All storage logic runs confined: the Reed–Solomon codec
 and the reputation math are no-grant WASM modules, and the protocol runs in a
-zero-authority JS realm. So upgrading seed store changes signed content, not what
+zero-authority JS realm. So upgrading seedstore changes signed content, not what
 you trust.
 
 ## Quick start
 
-seed store builds against sibling checkouts of
+Seedstore builds against sibling checkouts of
 [seedkernel](https://github.com/arj03/seedkernel) and
 [seedrelay](https://github.com/arj03/seedrelay):
 
@@ -82,7 +82,7 @@ npm run serve:demo     # browser demo → http://localhost:3000/index.html
 The in-tab demo (`index.html`) boots a small cohort inside one page. You can store a
 file, take peers offline, and watch repair restore redundancy. `p2p.html` makes the
 tab a real node against real holders. To run nodes from the command line, to embed
-seed store as a library, and for the browser transports, see the
+seedstore as a library, and for the browser transports, see the
 [implementation README](WASM/README.md).
 
 ## Repository
