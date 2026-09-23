@@ -1,4 +1,4 @@
-# Seedstore performance
+# seedstore: performance
 
 Numbers and tuning notes for the [WASM implementation](../WASM/README.md). Spec
 references (`§n`) point to [SPEC.md](SPEC.md). Run the commands from `WASM/` after

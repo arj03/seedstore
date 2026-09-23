@@ -1,4 +1,4 @@
-# Seedstore: WASM implementation
+# seedstore: WASM implementation
 
 This is an AssemblyScript + TypeScript implementation of **Part I** of the
 [seedstore spec](../docs/SPEC.md), a private, self-healing peer-to-peer storage

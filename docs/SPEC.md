@@ -1,4 +1,4 @@
-# Seedstore specification
+# seedstore: specification
 
 ## 1. Introduction
 
@@ -51,7 +51,7 @@ file ─encrypt─► ciphertext ─slice into k─► data blocks ─RS(k,m)─
 
 ---
 
-# Part I — The minimal system
+# Part I: The minimal system
 
 This is the whole system you actually need: a durable, private, self-healing store for a cohort of friends or your own devices. It is complete on its own — every section in Part II is an optional add-on you reach for only when a specific assumption changes.
 
@@ -439,7 +439,7 @@ Storage's confined logic reaches the world through one seam — `host.call(name,
 
 ---
 
-## 17. App logic — Tier-2, confined (§2.1)
+## 17. App logic: Tier-2, confined (§2.1)
 
 All storage *logic* is Tier-2: confined, grant-bounded, and reaching I/O only through the §16 surface. It comes in the two confined forms of §2.1 — **WASM** for the pure hot compute, and a **zero-authority sandboxed-JS realm** for the async orchestration. Both are bounded identically: the manifest's signed, human-auditable `guest.requires` (§2.1), no ambient I/O.
 
@@ -481,7 +481,7 @@ A node that only wants to *store and serve* runs the holder side (the `fs`-backe
 
 ---
 
-# Part II — Extensions
+# Part II: Extensions
 
 Everything below is **optional**. The system in Part I is a complete, durable, private store for a cohort of friends or your own devices. Add a layer here only when a specific assumption changes — the cohort grows beyond people who have stored for each other (§20), repair bandwidth dominates cost (§21), throughput on large files matters (§22), the cohort is less than fully trusted (§23), you want cross-user dedup (§24), or you need prompt rather than lazy space reclamation (§25).
 

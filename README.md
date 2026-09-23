@@ -1,4 +1,4 @@
-# seedstore — a file storage app for [seedkernel](https://github.com/arj03/seedkernel)
+# seedstore: a file storage app for [seedkernel](https://github.com/arj03/seedkernel)
 
 Private, self-healing peer-to-peer file storage for a group of peers who know each
 other: your own devices, your friends, or an explicit storage group.
