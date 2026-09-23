@@ -84,6 +84,31 @@ export async function run(t) {
     t.eq(started, 15, "a failed placement does not refill pending work");
   }
 
+  t.group("STORE lanes back off to what a holder admits instead of failing");
+  {
+    const source = readFileSync(new URL("../build/host/tier2-guest.js", import.meta.url), "utf8");
+    const ctx = vm.createContext({ APP: {}, LOCAL: {}, Uint8Array });
+    vm.runInContext(source, ctx);
+    // A holder that answers empty past ADMIT requests in flight from us (router.js `admits`).
+    const ADMIT = 5;
+    let active = 0, peak = 0, refused = 0;
+    const stored = new Set();
+    await ctx.runStoreBatches(new Map([["holder", Array.from({ length: 80 }, (_, i) => i)]]), 15, async (_, group) => {
+      if (active >= ADMIT) { refused++; await Promise.resolve(); return false; }
+      active++; peak = Math.max(peak, active);
+      await new Promise(resolve => setTimeout(resolve, 1));
+      active--; stored.add(group);
+    });
+    t.eq(stored.size, 80, "every refused group is re-sent and lands");
+    t.eq(peak, ADMIT, "the peer's width settles at what the holder admits");
+    t.ok(refused > 0 && refused <= 15 - ADMIT, `each refusal retires one lane: ${refused} refused`);
+
+    // A lone lane's refusal is the holder's answer, not a width to back off from.
+    let sends = 0;
+    await ctx.runStoreBatches(new Map([["holder", [0, 1, 2]]]), 1, async () => { sends++; return false; });
+    t.eq(sends, 3, "a last lane's refusal stands and is not retried");
+  }
+
   const sodium = await loadSodium();
   const wasm = await loadWasmBytes();
   // RS(2,2): every chunk places n = k + m = 4 distinct blocks; a 6-node cohort

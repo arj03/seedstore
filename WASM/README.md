@@ -411,7 +411,7 @@ window, 50 MB per run:
 | | rate | |
 |---|---:|---|
 | **PUT** | ~12.5 MB/s wire | ~6.2 MB/s of file — RS(1,1) ships 2× |
-| **GET** | ~15 MB/s | |
+| **GET** | ~18.5 MB/s | |
 
 `node --experimental-websocket scripts/p2p-cli.mjs --peers … --size 50 --timeout 30000
 --guest-deadline 60000` reproduces it against live nodes.
@@ -436,10 +436,20 @@ and sends its OFFERs, and the index places beside the file's last window; a stre
 fetches the next window while the current one is decrypted and handed back. Otherwise every
 window boundary idles the wire for the tail of the last window's acknowledgements plus the
 next window's first round trip. The two windows share the realm's host-call budget through
-one FIFO ledger (`hostBudget`), which every initiator call takes its charge from; holder
-work stays off it, so two nodes storing to each other cannot wait on each other. Over a
-40 ms link (16 MB, RS(2,2), 32 KiB blocks, 4 MiB windows — `node tests/bench-net.mjs 40 16
-32 256 48 32 4`), pipelining measured PUT ~1.99 → ~1.60 s and GET ~1.10 → ~0.83 s.
+one ledger (`hostBudget`), which every initiator call takes its charge from. It has two FIFO
+classes: foreground calls (crypto, codec, OFFER, HAVE) are admitted before bulk (STORE,
+FETCH), and bulk always leaves room for the largest one, so the next window's encode never queues
+behind the last window's STOREs. Holder work stays off it, so two nodes storing to each
+other cannot wait on each other. Over a 40 ms link (16 MB, RS(2,2), 32 KiB blocks, 4 MiB
+windows — `node tests/bench-net.mjs 40 16 32 256 48 32 4`), pipelining measured PUT
+~1.99 → ~1.60 s and GET ~1.10 → ~0.83 s.
+
+A holder admits only so many request bytes from one source at once and answers the rest
+empty. The ledger alone does not stop one holder from getting more than that: it lets out
+~15 MiB while a holder admits ~10 MiB at defaults. So STORE lanes start round-robin across
+peers, and a lane whose request comes back empty hands it to its peer's other lanes and
+retires. Before either, most local 50 MB PUTs to two holders failed with "no holder
+returned a verdict".
 
 Two windows in flight cost memory, so the default window is a sixth of `realmMemoryBytes`:
 a 64 MiB realm peaks at ~56 MiB during a PUT on a slow link. A frame is built only once the

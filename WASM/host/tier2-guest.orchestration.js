@@ -112,7 +112,11 @@ const CFG = { ...APP, ...LOCAL };
 // PUT or GET rather than pacing it. The initiator's calls take their charge here first, so
 // phases that run at once — a window placing while the next encodes, a window prefetched
 // while the last one is decrypted — share the budget instead of each sizing itself to all
-// of it. FIFO, so a large charge is never starved by a stream of small ones.
+// of it. FIFO within a class, so a large charge is never starved by a stream of small ones.
+//
+// FOREGROUND (crypto, codec, OFFER, HAVE) is admitted before BULK (STORE, FETCH), and bulk
+// always leaves room for foreground's largest call — else the next window's encode queues
+// behind the last window's STOREs, the very boundary the pipeline exists to hide.
 //
 // Holder work (`doHandle`) stays off the ledger and calls the host directly: it answers
 // other initiators, and parking it behind this node's own outbound traffic would let two
@@ -126,29 +130,43 @@ const hostBudget = (() => {
   // (the host releases it only after that continuation runs), plus the few small calls
   // left off the ledger — the roster, a root verify.
   // Read on first use: the charge sizes below are declared further down this file.
-  let callCap = 0, byteCap = 0;
-  let calls = 0, bytes = 0;
-  const waiting = [];
-  // A charge over the whole cap still runs once nothing else holds the ledger.
-  const fits = (n) => {
-    if (callCap === 0) {
-      callCap = Math.max(1, advertised("maxOutstandingHostCalls") - 1 - 16);
-      byteCap = advertised("maxOutstandingHostCallBytes") - maxCallChargeBytes();
-    }
-    return calls < callCap && (bytes === 0 || bytes + n <= byteCap);
+  let callCap = 0, byteCap = 0, bulkCallCap = 0, bulkByteCap = 0;
+  let calls = 0, bytes = 0, bulkCalls = 0, bulkBytes = 0;
+  const queues = [[], []]; // [foreground, bulk], admitted in that order
+  const init = () => {
+    callCap = Math.max(1, advertised("maxOutstandingHostCalls") - 1 - 16);
+    byteCap = advertised("maxOutstandingHostCallBytes") - maxCallChargeBytes();
+    bulkCallCap = Math.max(1, callCap - (CFG.k + CFG.m + 2));
+    bulkByteCap = byteCap - maxCallChargeBytes();
+  };
+  // A charge over the whole cap still runs once nothing else of its class holds the ledger.
+  const fits = (n, bulk) => {
+    if (callCap === 0) init();
+    if (calls >= callCap || (bytes > 0 && bytes + n > byteCap)) return false;
+    return !bulk || (bulkCalls < bulkCallCap && (bulkBytes === 0 || bulkBytes + n <= bulkByteCap));
+  };
+  const take = (n, bulk, sign) => {
+    calls += sign; bytes += sign * n;
+    if (bulk) { bulkCalls += sign; bulkBytes += sign * n; }
   };
   const admit = () => {
-    while (waiting.length > 0 && fits(waiting[0].n)) {
-      const w = waiting.shift();
-      calls++; bytes += w.n;
-      w.go();
+    for (const q of queues) {
+      while (q.length > 0 && fits(q[0].n, q[0].bulk)) {
+        const w = q.shift();
+        take(w.n, w.bulk, 1);
+        w.go();
+      }
     }
   };
-  return async function run(n, fn) {
-    if (waiting.length > 0 || !fits(n)) await new Promise((go) => waiting.push({ n, go }));
-    else { calls++; bytes += n; }
+  return async function run(n, fn, bulk = false) {
+    const q = queues[bulk ? 1 : 0];
+    if (q.length > 0 || (bulk && queues[0].length > 0) || !fits(n, bulk)) {
+      await new Promise((go) => q.push({ n, bulk, go }));
+    } else {
+      take(n, bulk, 1);
+    }
     try { return await fn(); }
-    finally { calls--; bytes -= n; admit(); }
+    finally { take(n, bulk, -1); admit(); }
   };
 })();
 // The holder's calls: straight to the host, off the ledger.
@@ -433,7 +451,7 @@ async function netSend(peer, type, payload, answerBytes) {
     if (statsInFlight[type] > statsPeak[type]) statsPeak[type] = statsInFlight[type];
     try { return await host.call(NET_ID, netSendFrame(fromHex(peer), type, parts)); }
     finally { statsInFlight[type]--; }
-  }).then((r) => r, () => EMPTY);
+  }, type === MSG_STORE || type === MSG_FETCH).then((r) => r, () => EMPTY);
   // A view, not a copy: the caller decodes it (and keeps only what it needs) before
   // the answer goes out of scope. null = peer unreachable within the window.
   return r[0] === 1 ? r.subarray(1) : null;
@@ -570,20 +588,28 @@ function sliceN(arr, size) {
 // lane instead of a whole round. Refilling in COUPLED batches was measured 22% slower to
 // the live holders, and its slow tail ran windows past the 5 s handoff deadline (§12.3),
 // failing whole PUTs; one request per lane is the finest refill that same width allows.
+// Lanes start round-robin across peers, so the ledger's arrival order spreads its budget.
+//
+// A holder admits only so many bytes from one source at once and answers the rest empty
+// (`send` returns false). The refused group goes back to that peer's other lanes and this
+// lane retires, so the peer's width settles at what the holder admits; a last lane's refusal stands.
 async function runStoreBatches(byPeer, width, send) {
   const workers = [];
   let failed = false, failure;
-  for (const [peer, groups] of byPeer) {
-    let next = 0;
-    for (let lane = 0; lane < Math.min(width, groups.length); lane++) {
-      workers.push((async () => {
-        while (!failed && next < groups.length) {
-          const group = groups[next++];
-          try { await send(peer, group); }
-          catch (err) { if (!failed) { failed = true; failure = err; } }
-        }
-      })());
+  const peers = [...byPeer].map(([peer, groups]) => ({ peer, groups: groups.slice(), next: 0, running: 0, lanes: Math.min(width, groups.length) }));
+  const lane = (p) => (async () => {
+    p.running++;
+    while (!failed && p.next < p.groups.length) {
+      const group = p.groups[p.next++];
+      let refused = false;
+      try { refused = (await send(p.peer, group)) === false; }
+      catch (err) { if (!failed) { failed = true; failure = err; } }
+      if (refused && p.running > 1) { p.groups.push(group); break; }
     }
+    p.running--;
+  })();
+  for (let l = 0; l < width; l++) {
+    for (const p of peers) if (l < p.lanes) workers.push(lane(p));
   }
   // Drain started lanes even on error; none may outlive this placement phase.
   await Promise.all(workers);
@@ -661,7 +687,7 @@ async function placeChunksBatched(jobs, what) {
 
   // Advisory diagnostics collected from holder verdicts — a holder may lie, so the
   // reason is never policy, but the error a failed PUT throws becomes exact.
-  const diag = { quota: 0, sibling: 0, descriptor: 0, error: 0 };
+  const diag = { quota: 0, sibling: 0, descriptor: 0, error: 0, refused: 0 };
 
   for (let r = 0; ; r++) {
     const byPeer = new Map(); // peer → [{ch, i}]
@@ -704,6 +730,7 @@ async function placeChunksBatched(jobs, what) {
       for (let ri = 0; ri < results.length; ri++) {
         const slice = round[ri].slice;
         const mask = results[ri].ok ? decodeMask(results[ri].bytes) : [];
+        if (results[ri].ok && results[ri].bytes.length === 0) diag.refused++;
         const accepted = slice.filter((_, j) => mask[j] === VERDICT_ACCEPTED);
         for (let j = 0; j < slice.length; j++) {
           if (mask[j] === VERDICT_QUOTA) diag.quota++;
@@ -727,6 +754,8 @@ async function placeChunksBatched(jobs, what) {
       // Parts, not a concatenated batch: netSend writes the blocks into the outgoing
       // frame itself, so the ciphertext is never copied to a second buffer.
       const bytes = await netSend(peer, MSG_STORE, encodeStoreBatchParts(group.map(({ ch, i }) => ({ blockId: ch.slotIds[i], descriptor: ch.descriptor, bytes: ch.slotBlocks[i] }))));
+      // Empty is the holder turning the request away unread, not a verdict (runStoreBatches).
+      if (bytes !== null && bytes.length === 0) { diag.refused++; return false; }
       const stored = bytes !== null ? decodeMask(bytes) : [];
       for (let j = 0; j < group.length; j++) {
         if (stored[j] === VERDICT_ACCEPTED) { group[j].ch.placedPeer[group[j].i] = peer; }
@@ -747,12 +776,14 @@ async function placeChunksBatched(jobs, what) {
       if (diag.sibling) { parts.push("sibling"); total += diag.sibling; }
       if (diag.descriptor) { parts.push("descriptor-rejected"); total += diag.descriptor; }
       if (diag.error) { parts.push("holder-error"); total += diag.error; }
-      // No verdicts at all is itself the diagnosis: every response failed (deadline
-      // expiry or unreachable peers), so no holder ever judged anything — saying
-      // "holders declined" here would point at the wrong place.
+      // No verdicts at all is itself the diagnosis — "holders declined" would point at the
+      // wrong place. An empty answer is a holder turning requests away unread; no answer at
+      // all is a deadline or an unreachable peer.
       const why = parts.length
         ? "holders declined (" + total + " holders: " + parts.join(", ") + "). Check quota (--local-config), signing scope (§16), or connect more holders"
-        : "no holder returned a verdict — the requests timed out or the peers were unreachable rather than refusing. Raise the request deadline if a large PUT is queueing past it (p2p-cli --timeout, seedkernel --guest-timeout)";
+        : diag.refused
+          ? "no holder returned a verdict — " + diag.refused + " request(s) were answered empty: the holder was over its per-source delivery window, or serves no seedstore app"
+          : "no holder returned a verdict — the requests timed out or the peers were unreachable rather than refusing. Raise the request deadline if a large PUT is queueing past it (p2p-cli --timeout, seedkernel --guest-timeout)";
       throw new Error("put: " + what + " landed " + distinct.size + "/" + ch.floor + " distinct blocks — " + why);
     }
     ch.placedIds = [...distinct].map(fromHex);  // the distinct ids that landed, for the PUT result
@@ -777,10 +808,14 @@ async function runFetchTasks(byPeer, maxIds, apply) {
       await apply(me, slice, ids, await fetchBatch(me, ids));
     }
   }
-  const tasks = []; // { peer, slice, ids } — re-requested unanswered blocks are appended and picked up by later windows
-  for (const peer of byPeer.keys()) {
-    if (peer === me) continue;
-    for (const slice of sliceN(byPeer.get(peer), maxIds)) tasks.push({ peer, slice, ids: slice.map(fromHex) });
+  // { peer, slice, ids } — re-requested unanswered blocks are appended and picked up by later
+  // windows. Round-robin over peers, as the STORE lanes start (runStoreBatches): the ledger
+  // admits in order, so one peer's slices first would idle every other holder.
+  const tasks = [];
+  const slicesOf = [...byPeer.keys()].filter((peer) => peer !== me).map((peer) => ({ peer, slices: sliceN(byPeer.get(peer), maxIds) }));
+  for (let s = 0, more = true; more; s++) {
+    more = false;
+    for (const { peer, slices } of slicesOf) if (s < slices.length) { tasks.push({ peer, slice: slices[s], ids: slices[s].map(fromHex) }); more = true; }
   }
   const getW = fanoutWindow();  // one flat cohort-wide list
   // Advance by what the window actually took, not by getW: a partial window (the last
@@ -945,6 +980,9 @@ function putWindowBytes() { const chunkData = CFG.k * CFG.blockSize; return Math
 // (§4.3), passed in by the reader, never config's.
 function getWindowChunks(chunkData) { return Math.max(1, Math.floor(windowTarget() / chunkData)); }
 
+// Chunks one window encodes at once, overlapping the codec worker with neighboring chunks'
+// encryption/hash/sign work.
+const ENCODE_DEPTH = 4;
 // Encode the chunks wholly contained in `slice` — a chunk-aligned slice of a LEVEL's
 // byte stream at offset `baseByteOffset`. Each chunk codes at its own k (§4.1).
 // Level 0 (the file) and level ℓ > 0 (an index) are the same call.
@@ -954,12 +992,9 @@ async function encodeWindow(slice, baseByteOffset, K, level) {
   const baseCi = Math.floor(baseByteOffset / chunkData);
   const numChunks = Math.max(1, Math.ceil(slice.length / chunkData));
   const chunks = [];
-  // Overlap the codec worker with neighboring chunks' encryption/hash/sign work; the
-  // ledger paces their calls to the host's budget, whatever the geometry.
-  const depth = 4;
-  for (let base = 0; base < numChunks; base += depth) {
+  for (let base = 0; base < numChunks; base += ENCODE_DEPTH) {
     const work = [];
-    for (let lc = base; lc < Math.min(base + depth, numChunks); lc++) work.push(encodeChunk(slice, lc, baseCi + lc, K, level));
+    for (let lc = base; lc < Math.min(base + ENCODE_DEPTH, numChunks); lc++) work.push(encodeChunk(slice, lc, baseCi + lc, K, level));
     chunks.push(...await Promise.all(work));
   }
   return chunks;
