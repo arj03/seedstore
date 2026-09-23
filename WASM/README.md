@@ -194,7 +194,7 @@ The guest is assembled from `util`, `reputation-core`, `protocol` and
 descriptor have **one** definition, not a hand-copied second one.
 
 **Crypto is reused, not bundled.** The guest calls the host's ungated
-`crypto/blake2b-256` and `crypto/chacha20poly1305-ietf/{seal,open}` transforms. It
+`crypto/blake2b` and `crypto/chacha20poly1305-ietf/{seal,open}` transforms. It
 keeps ciphertext length-preserving for RS and carries each detached 16-byte tag
 inside the signed descriptor. A block id includes the descriptor's author in the hash
 (§4.2):

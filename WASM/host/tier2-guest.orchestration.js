@@ -183,10 +183,15 @@ function call(name, payload, answerBytes = MSG_ENVELOPE_BYTES) {
 // host side — the guest never holds or reconstructs it. Every seam name answers a
 // Promise now, so every helper here is awaited by its callers.
 // `via` is the ledger by default; the holder passes `rawCall` (see hostBudget).
-function hash(bytes, via = call) { return via("crypto/blake2b-256", bytes, 32); }
+// `crypto/blake2b` takes [outLen][keyLen][key][msg]; block-ids are its unkeyed 32 bytes.
+const HASH_256 = Uint8Array.of(32, 0);
+function hash(bytes, via = call) { return via("crypto/blake2b", concat([HASH_256, bytes]), 32); }
 function blockHash(d, bytes, via = call) { return hash(blockHashInput(d.authorPk, bytes), via); }
 const P_SEAL = "crypto/chacha20poly1305-ietf/seal";
 const P_OPEN = "crypto/chacha20poly1305-ietf/open";
+// The AEAD names take [npub 12][key 32][adLen u32][ad][bytes]; chunks bind no associated
+// data (the nonce already names level and index), so adLen is four zero bytes.
+const NO_AD = new Uint8Array(4);
 function randomKey() { const n = new Uint8Array(4); wU32(n, 0, 32); return host.call("crypto/random", n); }
 // This node's channel public key, as the host hands it over in `HOST` (seedkernel §12.4).
 // Read at the call rather than at load, so the unit tests can evaluate this file bare.
@@ -198,13 +203,13 @@ function nonce(level, index) { const n = new Uint8Array(12); n[0] = level & 255;
 // The host's seal result is [ciphertext][tag 16]. Keep the tag in the signed
 // descriptor so the ciphertext remains exactly k·blockSize for systematic RS.
 async function encrypt(K, level, index, msg) {
-  const sealed = await call(P_SEAL, concat([nonce(level, index), K, msg]), msg.length + AUTH_TAG_LEN);
+  const sealed = await call(P_SEAL, concat([nonce(level, index), K, NO_AD, msg]), msg.length + AUTH_TAG_LEN);
   if (sealed.length !== msg.length + AUTH_TAG_LEN) throw new Error("encrypt: unexpected ChaCha20-Poly1305 output length");
   return { ciphertext: sealed.slice(0, msg.length), authTag: sealed.slice(msg.length) };
 }
 async function decrypt(K, level, index, ct, authTag) {
   if (!authTag || authTag.length !== AUTH_TAG_LEN) throw new Error("get: malformed ciphertext authentication tag");
-  const opened = await call(P_OPEN, concat([nonce(level, index), K, ct, authTag]), 1 + ct.length);
+  const opened = await call(P_OPEN, concat([nonce(level, index), K, NO_AD, ct, authTag]), 1 + ct.length);
   if (opened.length !== ct.length + 1 || opened[0] !== 1) throw new Error("get: ciphertext authentication failed");
   return opened.slice(1);
 }
