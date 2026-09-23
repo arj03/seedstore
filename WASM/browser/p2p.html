@@ -73,7 +73,7 @@
   no relay and no STUN (<code>WsNetwork</code>); or <strong>WebRTC</strong> — tabs find
   each other through a WebSocket relay (signaling only) and then talk directly,
   peer-to-peer, no server in the data path (the same <code>RtcNetwork</code> a Node peer
-  joins via node-datachannel, README §13.6).
+  joins via werift, seedkernel §12.6).
 </p>
 <p class="muted">
   Direct WebSocket is the default because its holders are <code>seedkernel</code> processes
@@ -209,7 +209,7 @@ const maxMessageBytesFor = (mode) => (mode === "ws" ? 1 << 20 : 256 * 1024);
 const CONFIG = { k: 1, m: 1, blockSize: 32 * 1024, fanoutWindow: 64 };
 const REQUIRED_PEERS = CONFIG.k + CONFIG.m; // distinct holders a PUT needs
 
-// Streamed-window + heap knobs (README §3): the host driver awaits each window's full
+// Streamed-window + heap knobs (SPEC §3): the host driver awaits each window's full
 // OFFER→STORE→ack before the next, so a too-small window idles the wire between windows
 // — a bigger window is a first-order PUT/GET win on the fat WS/TCP path. Peak guest heap
 // ≈ 3× window at RS(1,1), so the heap must stay well above it (24 MiB window ⇒ ~72 MiB,

@@ -1,4 +1,4 @@
-// Host crypto wrappers (README §16). Thin wrappers over the core libsodium the
+// Host crypto wrappers (SPEC §16). Thin wrappers over the core libsodium the
 // host already loads. The guest reaches the same BLAKE2b-256 and
 // ChaCha20-Poly1305 transforms through the host's ungated `crypto/*` table.
 //
@@ -18,7 +18,7 @@ export const LEVEL_BODY = 0x00;
 
 /** Content-address hash for block_id (§4.2). BLAKE2b (`crypto_generichash`):
  *  fast in software and already in the libsodium the host loads (§16), so it
- *  ships no new bytes. (A future BLAKE3 + SIMD step is discussed in the README.) */
+ *  ships no new bytes. (A future BLAKE3 + SIMD step is discussed in docs/PERFORMANCE.md.) */
 export const BLOCK_ID_BYTES = 32;
 export const AUTH_TAG_BYTES = 16;
 

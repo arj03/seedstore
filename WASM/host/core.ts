@@ -1,4 +1,4 @@
-// Shared types + deployment configuration for the storage layer (README §17).
+// Shared types + deployment configuration for the storage layer (SPEC §17).
 // The protocol itself is the confined guest (host/tier2-guest.js); StorageNode
 // runs it. This module only holds the identity + the durability/overhead dial
 // every node agrees on.

@@ -1,4 +1,4 @@
-// GF(2^8) arithmetic for Reed–Solomon (README §4.1).
+// GF(2^8) arithmetic for Reed–Solomon (SPEC §4.1).
 //
 // The construction (field polynomial 0x11D, generator α = 2) is pinned
 // deployment-wide and fixed, never a knob: §9's keyless repair only holds when

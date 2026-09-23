@@ -1,4 +1,4 @@
-// The PURE core of the file descriptor (README §4.3): fixed binary
+// The PURE core of the file descriptor (SPEC §4.3): fixed binary
 // codecs and structural validation, no crypto or seam dependency. One
 // definition of the wire format, shared by descriptor.ts (host) and stitched
 // verbatim into the guest bundle (scripts/build-guest.mjs). Synchronous and
@@ -13,7 +13,7 @@ import { bytesEqual, toHex, writeU32BE, readU32BE, concatBytes } from "./util.js
 export const BLOCK_ID_LEN = 32;
 export const AUTH_TAG_LEN = 16;
 
-// ── signed-format tags (README §16) ──────────────────────────────────────────
+// ── signed-format tags (SPEC §16) ──────────────────────────────────────────
 // Every signed storage object opens with a distinct leading byte inside the
 // signed `core`, so one type can never be replayed as another.
 export const TAG_DESCRIPTOR = 0x01;

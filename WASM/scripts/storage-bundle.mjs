@@ -20,7 +20,7 @@ import { TRANSPORT_SERVICE } from "seedkernel-wasm/transport-bundle";
 import { defaultConfig, normaliseConfig, PRODUCTION_BLOCK_SIZE } from "../build/host/core.js";
 import { STORAGE_PROTO } from "../build/host/descriptor.js";
 
-// The app label — the manifest `app`, and the whole of the signing scope (README
+// The app label — the manifest `app`, and the whole of the signing scope (SPEC
 // §16). The host scopes the guest's SIGN/VERIFY ops to this label, whoever signed the
 // bundle; the host-side mirror derives the byte-identical scope from the same label.
 const APP_NAME = "seedstore";
@@ -65,7 +65,7 @@ const STORAGE_REQUIRES = [
  * @param {any}    o.sodium   loaded libsodium with the ML-DSA-65 signer (signs the bundle)
  * @param {Uint8Array} o.sk   author secret key — the Ed25519 half, whose seed derives both
  * @param {string} o.build    seedstore build/ dir (holds the codec wasm + staged guest)
- * @param {number} [o.version] monotonic-per-(author,app) freshness mark (README §12.4);
+ * @param {number} [o.version] monotonic-per-(author,app) freshness mark (seedkernel §12.4);
  *                             the host refuses a load below its high-water mark. Integer.
  * @returns {{blob: Uint8Array, manifest: object, author: Uint8Array}} the signed blob,
  *  the manifest that was signed, and the derived author id — the key-set hash a policy
@@ -98,7 +98,7 @@ export function writeStorageBundle({ path, sodium, sk, build, version = 1 }) {
   const { blob, manifest, author } = authorBundle(sodium, authorKeysFor(sodium, sk), {
     app: APP_NAME,
     // Monotonic freshness mark per (author, app): the host refuses a downgrade
-    // below its high-water mark (README §12.4). Bump on every publish.
+    // below its high-water mark (seedkernel §12.4). Bump on every publish.
     version,
     // The wire protocol this app serves (seedkernel §12.10), read from the same
     // STORAGE_PROTO constant the guest names in every request (NET_PROTO), so

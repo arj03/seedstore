@@ -1,4 +1,4 @@
-// codec — the storage layer's pure-compute module (README §17, no grants).
+// codec — the storage layer's pure-compute module (SPEC §17, no grants).
 //
 // It owns the one algorithm libsodium cannot provide: systematic Reed–Solomon
 // erasure coding over GF(2^8) (§4.1). A bundle module is a PURE TRANSFORM — no
@@ -46,7 +46,7 @@ const MATRIX_SIZE: i32 = 24576;
 const PRIV_WORK_OFF: i32 = PRIV_MATRIX_OFF + MATRIX_SIZE; // big output buffer
 
 export let scratch: i32 = 0;
-// Declare the full 2 MB I/O region to the host (README §4.1 optional export): a
+// Declare the full 2 MB I/O region to the host (SPEC §4.1 optional export): a
 // storage chunk is up to k·blockSize data (or m·blockSize parity) bytes, far past
 // the 128 KB default, so without this the host would reject a large-block encode
 // request and the codec would silently return no parity.

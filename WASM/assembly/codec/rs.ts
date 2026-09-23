@@ -1,4 +1,4 @@
-// Systematic Reed–Solomon RS(k, m) over GF(2^8) (README §4.1, §4.2, §9).
+// Systematic Reed–Solomon RS(k, m) over GF(2^8) (SPEC §4.1, §4.2, §9).
 //
 // Generator = [ I_k ; C ]: the top k rows are the identity (systematic — all-k-
 // present reads just concatenate, never decode) and the bottom m rows are a

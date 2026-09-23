@@ -1,4 +1,4 @@
-// The host's READ VIEW of what this node's holder has stored (README §12).
+// The host's READ VIEW of what this node's holder has stored (SPEC §12).
 //
 // The confined guest holder owns store.local outright (admission, quota, the
 // `<hex>.rec` layout — see the guest). This module implements NONE of that policy —

@@ -1,4 +1,4 @@
-// StorageNode — a single storage peer running *on* the seedkernel (README §19
+// StorageNode — a single storage peer running *on* the seedkernel (SPEC §19
 // bootstrap). A THIN host: the entire storage protocol lives in the confined
 // guest (host/tier2-guest.js), run in one seedkernel safe-js realm over the
 // generic guest seam. Boots the shared `bootShell()` and loads the signed

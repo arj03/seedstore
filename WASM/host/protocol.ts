@@ -1,4 +1,4 @@
-// Control-plane message catalog (README §18) for the storage RPC carried over
+// Control-plane message catalog (SPEC §18) for the storage RPC carried over
 // net.send.
 //
 // OFFER and FETCH are *batched*: one OFFER lists every block headed to a peer,

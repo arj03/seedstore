@@ -1,4 +1,4 @@
-// The Tier-2 guest: the whole storage protocol (README §6/§7/§9) as zero-authority
+// The Tier-2 guest: the whole storage protocol (SPEC §6/§7/§9) as zero-authority
 // JS running inside the QuickJS realm (§2.1) — placement, k-of-n, admission, wire
 // format, and repair. Reached only through `host.call(name, bytes)` (seedkernel §12.2);
 // net/fs/module calls resolve async, crypto/clock resolve sync.

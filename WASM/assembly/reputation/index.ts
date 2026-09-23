@@ -1,4 +1,4 @@
-// reputation — the second pure-compute module (README §13, §17, no grants).
+// reputation — the second pure-compute module (SPEC §13, §17, no grants).
 //
 // Each node keeps, per peer, a small *decayed* reciprocity balance built only
 // from things it has witnessed directly: verification-fetch passes raise the

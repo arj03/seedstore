@@ -1,5 +1,5 @@
 // libsodium access for the storage layer. Seed store reuses the host's
-// cryptography rather than shipping its own (README §2, §16): hashing,
+// cryptography rather than shipping its own (SPEC §2, §16): hashing,
 // ChaCha20-Poly1305, and key-sealing are all calls on the host's core libsodium.
 
 /** The subset of libsodium the storage host uses. */
@@ -41,7 +41,7 @@ let cached: Sodium | null = null;
 
 /** Load the core libsodium the seedkernel runtime bundles, returning that one
  *  shared, readied instance. seedstore ships no second crypto library — it
- *  reuses the host's (README §16). Safe to call repeatedly. */
+ *  reuses the host's (SPEC §16). Safe to call repeatedly. */
 export async function loadSodium(): Promise<Sodium> {
   if (cached) return cached;
   const { loadCrypto: kernelLoadCrypto } = await import("seedkernel-wasm");

@@ -46,7 +46,7 @@ if (existsSync(keyPath)) {
   console.log(`  minted author key → ${keyPath}`);
 }
 
-// Freshness (README §12.4): manifest `version` is a monotonic high-water mark a
+// Freshness (seedkernel §12.4): manifest `version` is a monotonic high-water mark a
 // deployed shell enforces. Persisted NEXT TO THE AUTHOR KEY (not derived from
 // bundle/, which is gitignored and gets wiped) so it survives a `git clean` or a
 // build on a second machine. Key + version file travel together.
@@ -67,7 +67,7 @@ if (existsSync(versionPath)) {
     `  ⚠ author key exists but no version high-water mark (${versionPath}) and no prior bundle in ${out} — ` +
     `restarting version at 1.\n` +
     `    If you have already published under this author, a deployed shell will REFUSE this bundle as a ` +
-    `downgrade (README §12.4). Put the real last-published version number in ${versionPath} and re-run.`);
+    `downgrade (seedkernel §12.4). Put the real last-published version number in ${versionPath} and re-run.`);
 }
 const version = prevVersion + 1;
 

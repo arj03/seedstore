@@ -1,4 +1,4 @@
-// The one object that describes a file (README §4.3): the per-chunk *signed*
+// The one object that describes a file (SPEC §4.3): the per-chunk *signed*
 // descriptor — no separate manifest object. Pure codecs live in descriptor-core.ts
 // (shared with the guest); this module adds the two scoped-signature pieces:
 // signing and verifying the author signature. Verified from the author's public
@@ -21,7 +21,7 @@ export {
 } from "./descriptor-core.js";
 export type { Descriptor, SignedDescriptor } from "./descriptor-core.js";
 
-// ── scoped signing (README §16, seedkernel §12.2/§14) ────────────────────────
+// ── scoped signing (SPEC §16, seedkernel §12.2/§14) ────────────────────────
 // The guest's SIGN/VERIFY ops are both *scoped*: the host signs and verifies
 // `DOMAIN_guest ‖ scope ‖ msg`, never the raw message, so a storage signature
 // verifies only as a storage signature — never as a host envelope, a bundle
