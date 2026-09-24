@@ -34,8 +34,8 @@ and [EXPORTS](https://github.com/arj03/seedkernel/blob/main/docs/EXPORTS.md).
 
 ## Build
 
-seedkernel and seedrelay are **path dependencies** on sibling checkouts
-(`../../seedkernel`, `../../seedrelay`). Build seedkernel first:
+seedkernel is a **path dependency** on a sibling checkout (`../../seedkernel`).
+Build it first:
 
 ```sh
 (cd ../../seedkernel/WASM && npm install && npm run build)
@@ -106,12 +106,12 @@ to stderr, so the redirects carry only app bytes. The root is a signed descripto
 variable length (§4.3), which is why the GET argument reads its length from the
 receipt. Keep `K`: without it, the holders hold permanent noise (§11).
 
-Every other flag belongs to the host: `--listen`/`--ws-listen`/`--peers`/`--dir`/
+Every other flag belongs to the host: `--listen`/`--peers`/`--dir`/
 `--key`/`--guest-timeout`/`--guest-memory`, and more. A node with no listener is a
 pure client, and a node with a listener serves until Ctrl-C. seedkernel's native
 single-file `seedkernel` binary loads the same bundle (seedkernel §12.9).
 
-To benchmark PUT/GET against live `--ws-listen` nodes, see `scripts/p2p-cli.mjs`
+To benchmark PUT/GET against live nodes listening with `--listen ws=…`, see `scripts/p2p-cli.mjs`
 and [PERFORMANCE.md](../docs/PERFORMANCE.md).
 
 ## Use it as a library
@@ -153,23 +153,26 @@ reads it back, and lets you take peers offline and watch repair restore redundan
 replicated (RS(1,1)) across the other nodes, and any node can rebuild it from the
 retrieval token. You pick one of two transports on the page:
 
-- **Direct WebSocket** (the default) dials holders at their `--ws-listen` port, with
-  no relay or STUN. Start holders with `--ws-listen 0.0.0.0:47210 …` and paste each
+- **Direct WebSocket** (the default) dials holders at a `ws`-labelled listener, with
+  no relay or STUN. Start holders with `--listen ws=0.0.0.0:47210 …` and paste each
   one's `pubkey[.secret]@host:port` into the peers box.
 - **WebRTC** finds peers through a signaling relay
   ([seedrelay](https://github.com/arj03/seedrelay)) and then connects directly, using
-  STUN for NAT traversal. Use it when holders have no port you could paste. For the
-  cohort, open 3+ tabs in one room, or one tab plus console holders:
+  STUN for NAT traversal. Use it when holders have no port you could paste. The
+  transport bundle joins the room itself (`netRelay`) and negotiates every peer
+  connection; the page only supplies the sockets (seedkernel §12.7). For the cohort,
+  open 3+ tabs in one room, or one tab plus console holders:
 
   ```sh
   (cd ../../seedchat && npm run relay)   # seedrelay on ws://localhost:8080
-  npm run serve:rtc-holder               # a console holder joining the room (Bun); run two
+  npm run serve:rtc-holder               # a console holder joining the room; run two
   #   then pick WebRTC in p2p.html (relay ws://localhost:8080, room "seedstore-demo")
   ```
 
   Console holders use werift's pure-JS WebRTC through `scripts/werift-pc.mjs`.
-  `npm run smoke:rtc` runs the same PUT→GET path headless, with no relay process
-  and no browser.
+  `npm run smoke:rtc` runs the same PUT→GET path headless over an in-process relay
+  room, with no relay process and no browser; `RELAY=ws://host:port` points it at a
+  real one.
 
 A tab's block store is in RAM, because the OPFS/IndexedDB backend isn't built yet.
 Tabs acting as holders therefore forget everything on reload. For now, treat the

@@ -1,5 +1,5 @@
 // p2p-cli — a headless "p2p.html light": boots the SAME WsNetwork + StorageNode the
-// browser demo uses and drives PUT/GET against real `seedkernel --ws-listen` nodes,
+// browser demo uses and drives PUT/GET against real `seedkernel --listen ws=…` nodes,
 // printing a wire-level timeline. All four are CUMULATIVE TIMESTAMPS (ms since the
 // op started, not durations):
 //   encode = first STORE frame sent     queue  = last STORE frame handed to a socket
@@ -37,7 +37,6 @@ import { readFile } from "node:fs/promises";
 import { randomBytes, timingSafeEqual } from "node:crypto";
 
 import { WsNetwork } from "seedkernel-wasm/net-ws";
-import { parsePeerRef } from "seedkernel-wasm/peer-addr";
 import { createStorageNode, loadSodium, defaultConfig, PRODUCTION_BLOCK_SIZE, toHex } from "../build/host/node.js";
 import { DEFAULT_QUOTA_BYTES } from "../build/host/core.js";
 
@@ -192,7 +191,7 @@ const config = { ...defaultConfig(blockSize, kParam, mParam), maxMessageBytes, f
 // The transport is a signed bundle: build the WS ChannelFactory first, then boot
 // the shared shell with it installed. Wrapped sodium rides into the shell so
 // record-layer AEAD costs stay instrumented. Storage geometry does NOT ride here.
-const { bootTransportShell, netAddr, netReady } = await import("../build/host/storage-node.js");
+const { bootTransportShell, netPeer, netReady } = await import("../build/host/storage-node.js");
 const net = new WsNetwork({ webSocketFactory: wsFactory });
 const runtime = await bootTransportShell({
   sodium: wrapTransportSodium(sodium),
@@ -207,11 +206,7 @@ let node = await createStorageNode({ runtime, config, quota: DEFAULT_QUOTA_BYTES
 console.log(`node ready: RS(${kParam},${mParam}), ${blockSize / 1024} KiB blocks, batch ${Math.round(maxMessageBytes / 1024)} KiB, window ${windowN}, conns/peer ${connsN}, wtarget ${wtargetMB > 0 ? wtargetMB + " MB" : "4 MiB (default)"}, heap ${heapMB > 0 ? heapMB + " MB" : "64 MiB (default)"}, timeout ${timeoutMs} ms, guest deadline ${guestDeadlineMs ?? "host default"}${guestDeadlineMs == null ? "" : " ms"}`);
 
 const expected = new Set();
-for (const spec of specs) {
-  const { peerId, contactSecret, dest } = parsePeerRef(spec, "ws");
-  expected.add(peerId);
-  await netAddr(runtime.shell, peerId, dest, contactSecret);
-}
+for (const spec of specs) expected.add(await netPeer(runtime.shell, spec, "ws"));
 // The signed transport owns dialing, fan-out, retries and the readiness deadline.
 // ready() is best-effort and resolves on its timeout, so inspect its source-of-truth
 // peer set once afterward to turn a partial CLI startup into a useful error.

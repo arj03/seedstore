@@ -90,7 +90,7 @@ for (let i = 0; i < 1 + holders; i++) {
     bundleBlob: wasm.bundleBlob,
     identity,
     suppressLinkLog: true, channels: net.view(peerId),
-    listen: { host: "127.0.0.1", port: 0 },
+    listen: [{ label: "tcp", host: "127.0.0.1", port: 0 }],
     config, fs,
     // Generous: each holder takes ~fileBytes plus descriptors and record framing; a §14-full
     // holder would silently decline instead of measuring anything.

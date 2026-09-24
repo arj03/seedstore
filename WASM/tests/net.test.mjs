@@ -60,7 +60,7 @@ async function tcpCohort({ count, sodium, wasm, config, baseDir }) {
     nodes.push(await StorageNode.create({
       sodium, ...wasm, identity: newKey(sodium), config, timeoutMs: 3000,
       suppressLinkLog: true, channels: new NodeChannelFactory(),
-      listen: { host: "127.0.0.1", port: 0 },
+      listen: [{ label: "tcp", host: "127.0.0.1", port: 0 }],
       // Give the node a disk-backed fs; its default store view reads that same fs, so
       // what the confined guest holder writes via `fs` lands on disk and node.store
       // reflects it (the view must read the fs the guest serves).
@@ -106,7 +106,7 @@ export async function run(t) {
     const S = await StorageNode.create({
       sodium, ...wasm, identity: idS, timeoutMs: 3000,
       suppressLinkLog: true, channels: net.view(toHex(idS.publicKey)),
-      wsListen: { host: "127.0.0.1", port: 0 },
+      listen: [{ label: "ws", host: "127.0.0.1", port: 0 }],
     });
     const B = await StorageNode.create({
       sodium, ...wasm, identity: idB, timeoutMs: 3000,
@@ -116,7 +116,7 @@ export async function run(t) {
       t.eq(net.view("nobody").connect("wss://127.0.0.1:1"), null,
         "wss is not a route this fabric has — no TLS under an in-process pair");
 
-      await netAddr(B.shell, S.peerId, `ws://127.0.0.1:${S.net.wsPort}`);
+      await netAddr(B.shell, S.peerId, `ws://127.0.0.1:${S.net.portOf("ws")}`);
       await netReady(B.shell, 5000);
       t.ok((await B.linkedPeers()).includes(S.peerId),
         "a ws:// dial into the fabric's ws listener authenticates");
@@ -253,15 +253,14 @@ export async function run(t) {
     const S = await StorageNode.create({
       sodium, ...wasm, identity: idS, timeoutMs: 3000,
       suppressLinkLog: true, channels: new NodeChannelFactory(),
-      listen: { host: "127.0.0.1", port: 0 },
-      wsListen: { host: "127.0.0.1", port: 0 },
+      listen: [{ label: "tcp", host: "127.0.0.1", port: 0 }, { label: "ws", host: "127.0.0.1", port: 0 }],
       contactSecret: secretS,
     });
     const B = await StorageNode.create({
       sodium, ...wasm, identity: idB, timeoutMs: 3000,
       suppressLinkLog: true, channels: new NodeChannelFactory(),
     });
-    await netAddr(B.shell, S.peerId, `ws://127.0.0.1:${S.net.wsPort}`, secretS);
+    await netAddr(B.shell, S.peerId, `ws://127.0.0.1:${S.net.portOf("ws")}`, secretS);
     await netReady(B.shell, 8000);
     await sleep(50);
 
@@ -304,7 +303,7 @@ export async function run(t) {
           suppressLinkLog: true, channels: new NodeChannelFactory(),
         });
         try {
-          await netAddr(n.shell, S.peerId, `ws://127.0.0.1:${S.net.wsPort}`, secret);
+          await netAddr(n.shell, S.peerId, `ws://127.0.0.1:${S.net.portOf("ws")}`, secret);
           await netReady(n.shell, deadlineMs);
           return (await n.linkedPeers()).includes(S.peerId);
         } finally { n.close(); }

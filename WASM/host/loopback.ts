@@ -14,42 +14,14 @@
 // this fabric routes `tcp://` and `ws://` by port, and nothing else (`wss://` asks
 // for a TLS stack no in-process pair has).
 import { parseDest } from "seedkernel-wasm/peer-addr";
-
-/** The structural RawLink shape this file needs (socket-seam.ts is not an
- *  exported entry). The fabric preserves message boundaries by default. Tests
- *  may instead model a chunked byte stream, which the transport guest frames. */
-export interface RawLinkLike {
-  send(bytes: Uint8Array): void;
-  onData(cb: (bytes: Uint8Array) => void): void;
-  onClose(cb: () => void): void;
-  close(graceful?: boolean): void;
-  readonly stream?: boolean;
-  readonly remoteAddr?: string;
-}
-
-/** Metadata for a platform-opened channel (socket-seam.ts `Arrival`). */
-export interface ArrivalLike {
-  readonly listener?: string;
-  readonly dialed?: string;
-}
-
-/** The structural ChannelFactory shape (socket-seam.ts `ChannelFactory`). */
-export interface ChannelFactoryLike {
-  connect?(dest: string): RawLinkLike | null;
-  listen(
-    tcp: { host: string; port: number } | undefined,
-    ws: { host: string; port: number } | undefined,
-    onAccept: (channel: RawLinkLike, arrival?: ArrivalLike) => void,
-  ): Promise<{ port: number; wsPort: number }>;
-  close(): void;
-}
+import type { ChannelFactory, ListenAddress, RawLink } from "seedkernel-wasm/socket-seam";
 
 /** One end of an in-process socket pair. Delivery is asynchronous (a microtask, or a
  *  `setTimeout(delayMs)` when the fabric models a latency-bearing link), mirroring a
  *  real socket; closing one end fires the other's onClose — the close semantics of
  *  MessageChannel's fail() path, which is how a real channel reports the far side
  *  going away. */
-class LoopbackChannel implements RawLinkLike {
+class LoopbackChannel implements RawLink {
   /** A socket pair with `send` as the boundary. In byte-stream mode a send is
    *  split into `chunkBytes`-sized deliveries for the guest to reassemble. */
   readonly stream: boolean;
@@ -118,8 +90,8 @@ class LoopbackChannel implements RawLinkLike {
  *  it. The fabric is SHARED by every driver in a process (like a real network),
  *  so closing one driver only clears the listeners — it does not poison the
  *  fabric for the others. */
-class LoopbackChannels implements ChannelFactoryLike {
-  private listeners = new Map<number, (channel: RawLinkLike) => void>();
+class LoopbackChannels implements ChannelFactory {
+  private listeners = new Map<number, (channel: RawLink) => void>();
   private nextPort = 10000;
   private readonly delayMs: number;
   private readonly chunkBytes: number;
@@ -129,26 +101,16 @@ class LoopbackChannels implements ChannelFactoryLike {
     this.chunkBytes = chunkBytes;
   }
 
-  /** The bound ports (set by a driver's start()). */
-  port = 0;
-  wsPort = 0;
-
+  /** One port per address. Framing selection belongs to the transport guest; the socket
+   *  factory says only which listener accepted, by its label. */
   async listen(
-    tcp: { host: string; port: number } | undefined,
-    ws: { host: string; port: number } | undefined,
-    onAccept: (channel: RawLinkLike, arrival?: ArrivalLike) => void,
-  ): Promise<{ port: number; wsPort: number }> {
-    let port = 0, wsPort = 0;
-    // These labels match seedkernel's LISTENER values. Framing selection belongs
-    // to the transport guest; the socket factory says only which listener accepted.
-    if (tcp) { port = this.bind(tcp.port, (ch) => onAccept(ch, { listener: "tcp" })); }
-    if (ws) { wsPort = this.bind(ws.port, (ch) => onAccept(ch, { listener: "ws" })); }
-    this.port = port;
-    this.wsPort = wsPort;
-    return { port, wsPort };
+    addrs: readonly ListenAddress[],
+    onAccept: Parameters<ChannelFactory["listen"]>[1],
+  ): Promise<number[]> {
+    return addrs.map((a) => this.bind(a.port, (ch) => onAccept(ch, { listener: a.label })));
   }
 
-  private bind(requested: number, onAccept: (channel: RawLinkLike) => void): number {
+  private bind(requested: number, onAccept: (channel: RawLink) => void): number {
     const port = requested > 0 ? requested : this.nextPort++;
     if (this.listeners.has(port)) throw new Error("LoopbackChannels: port already bound");
     this.listeners.set(port, onAccept);
@@ -160,7 +122,7 @@ class LoopbackChannels implements ChannelFactoryLike {
    *  scheme is the DIALER's half of the framing decision (the acceptor's is the
    *  listener label `listen` hands out), so a ws dial has to name the ws port — the
    *  two ends would otherwise pick different codecs for the same pipe. */
-  connect(dest: string): RawLinkLike | null {
+  connect(dest: string): RawLink | null {
     const d = parseDest(dest);
     if (!d || (d.scheme !== "tcp" && d.scheme !== "ws")) return null;
     const onAccept = this.listeners.get(d.port);
@@ -186,16 +148,15 @@ class LoopbackChannels implements ChannelFactoryLike {
   /** A per-node view of this fabric: dials/listens through the same registry, but
    *  its `close` unbinds only the ports *it* bound — an in-place transport upgrade
    *  closing its driver must not unbind every other node sharing this fabric. */
-  view(): ChannelFactoryLike {
+  view(): ChannelFactory {
     const fabric = this;
     const mine: number[] = [];
     return {
       connect: (dest) => fabric.connect(dest),
-      async listen(tcp, ws, onAccept) {
-        const r = await fabric.listen(tcp, ws, onAccept);
-        if (r.port) mine.push(r.port);
-        if (r.wsPort) mine.push(r.wsPort);
-        return r;
+      async listen(addrs, onAccept) {
+        const ports = await fabric.listen(addrs, onAccept);
+        mine.push(...ports);
+        return ports;
       },
       close() {
         for (const p of mine.splice(0)) fabric.unbind(p);
@@ -213,7 +174,7 @@ class LoopbackChannels implements ChannelFactoryLike {
 /** A channel that dies immediately — what a dial to an offline peer's port draws,
  *  mirroring the fabric's own dead-port dial (the dial side's onClose fires and
  *  the transport forgets the link before it ever authenticates). */
-function deadChannel(): RawLinkLike {
+function deadChannel(): RawLink {
   const cbHolder: { cb?: () => void } = {};
   queueMicrotask(() => cbHolder.cb?.());
   return {
@@ -231,7 +192,7 @@ export class LoopbackNetwork {
   private readonly portOf = new Map<number, string>();
   private readonly offline = new Set<string>();
   /** Every live channel of a peer (dialed and accepted) — killed on offline. */
-  private readonly links = new Map<string, RawLinkLike[]>();
+  private readonly links = new Map<string, RawLink[]>();
 
   /** `delayMs` > 0 makes every delivered message take `delayMs` ms to arrive — a
    *  wire-level round-trip latency (one request/response costs 2×delayMs), the model
@@ -241,20 +202,8 @@ export class LoopbackNetwork {
     this.fabric = new LoopbackChannels(delayMs, chunkBytes);
   }
 
-  /** The peers' bound ports, for dial wiring. A node binds at most one tcp and
-   *  one ws port on the fabric. */
-  portOfPeer(peerId: string): { port: number; wsPort: number } | null {
-    let found: { port: number; wsPort: number } | null = null;
-    for (const [port, owner] of this.portOf) {
-      if (owner !== peerId) continue;
-      if (!found) { found = { port, wsPort: 0 }; }
-      else if (found.port !== port) { found.wsPort = port; }
-    }
-    return found;
-  }
-
   /** A per-node view of the fabric — hand it to a node as its `channels`. */
-  view(peerId: string): ChannelFactoryLike {
+  view(peerId: string): ChannelFactory {
     const inner = this.fabric.view();
     const net = this;
     return {
@@ -269,14 +218,13 @@ export class LoopbackNetwork {
         if (ch) net.track(peerId, ch);
         return ch;
       },
-      listen: async (tcp, ws, onAccept) => {
-        const r = await inner.listen(tcp, ws, (ch, arrival) => {
+      listen: async (addrs, onAccept) => {
+        const ports = await inner.listen(addrs, (ch, arrival) => {
           net.track(peerId, ch);
           onAccept(ch, arrival);
         });
-        if (r.port) net.portOf.set(r.port, peerId);
-        if (r.wsPort) net.portOf.set(r.wsPort, peerId);
-        return r;
+        for (const port of ports) net.portOf.set(port, peerId);
+        return ports;
       },
       close: () => inner.close(),
     };
@@ -308,7 +256,7 @@ export class LoopbackNetwork {
     return owner !== undefined && this.offline.has(owner);
   }
 
-  private track(peerId: string, ch: RawLinkLike): void {
+  private track(peerId: string, ch: RawLink): void {
     let list = this.links.get(peerId);
     if (!list) this.links.set(peerId, (list = []));
     list.push(ch);

@@ -46,7 +46,7 @@ export async function createStorageNode(
   let o = rest;
   if (network && !o.runtime) {
     const identity = o.identity ?? generateKeyPair(sodium);
-    o = { ...o, identity, channels: network.view(toHex(identity.publicKey)), listen: { host: "127.0.0.1", port: 0 } };
+    o = { ...o, identity, channels: network.view(toHex(identity.publicKey)), listen: [{ label: "tcp", host: "127.0.0.1", port: 0 }] };
   }
   return StorageNode.create({ ...o, bundleBlob: wasm.bundleBlob, sodium });
 }
@@ -58,7 +58,7 @@ export { createConnectedCohort } from "./cluster.js";
 export type { StorageNodeOptions, PutResult } from "./storage-node.js";
 // The host's door into the signed transport: peers and cohort readiness live in that
 // guest, so they are calls to the id it claims rather than methods on the socket driver.
-export { netAddr, netContact, netReady, netPeers } from "./storage-node.js";
+export { netAddr, netPeer, netRelay, netRelayState, netContact, netReady, netPeers } from "./storage-node.js";
 export type { StorageConfig, Identity } from "./core.js";
 export { defaultConfig, PRODUCTION_BLOCK_SIZE, TEST_BLOCK_SIZE } from "./core.js";
 export { STORAGE_APP, STORAGE_PROTO } from "./descriptor.js";

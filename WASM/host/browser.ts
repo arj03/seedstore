@@ -48,7 +48,7 @@ export async function createStorageNode(
   let o = rest;
   if (network && !o.runtime) {
     const identity = o.identity ?? (() => { const kp = sodium.crypto_sign_keypair(); return { publicKey: kp.publicKey, privateKey: kp.privateKey }; })();
-    o = { ...o, identity, channels: network.view(toHex(identity.publicKey)), listen: { host: "127.0.0.1", port: 0 } };
+    o = { ...o, identity, channels: network.view(toHex(identity.publicKey)), listen: [{ label: "tcp", host: "127.0.0.1", port: 0 }] };
   }
   return StorageNode.create({ ...o, bundleBlob: wasm.bundleBlob, sodium });
 }
@@ -57,7 +57,7 @@ export { StorageNode } from "./storage-node.js";
 export { LoopbackNetwork } from "./loopback.js";
 export { createConnectedCohort } from "./cluster.js";
 export type { StorageNodeOptions } from "./storage-node.js";
-export { netAddr, netContact, netReady, netPeers } from "./storage-node.js";
+export { netAddr, netPeer, netRelay, netRelayState, netContact, netReady, netPeers } from "./storage-node.js";
 export type { StorageConfig, Identity } from "./core.js";
 export { defaultConfig } from "./core.js";
 export { STORAGE_APP, STORAGE_PROTO } from "./descriptor.js";

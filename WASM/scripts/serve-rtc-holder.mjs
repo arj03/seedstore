@@ -4,24 +4,20 @@
 // is killable once channels are up. Console counterpart of browser/p2p.html: run a
 // few of these, open p2p.html on the SAME relay + room, drop a file.
 //
-//   bun scripts/serve-rtc-holder.mjs                 (npm run serve:rtc-holder)
-//   RELAY=ws://localhost:8080 ROOM=seedstore-demo bun scripts/serve-rtc-holder.mjs
+//   node scripts/serve-rtc-holder.mjs                (npm run serve:rtc-holder)
+//   RELAY=ws://localhost:8080 ROOM=seedstore-demo node scripts/serve-rtc-holder.mjs
 //
-// Needs a global WebSocket (seedrelay client) → run on Bun (or Node >=22). Start the
-// relay first, on NODE not Bun (Bun's http upgrade swallows writes):
+// The transport bundle speaks the relay itself, over a node:net socket and its own
+// RFC 6455 framing, so no WebSocket global is needed. Start the relay first, on NODE
+// not Bun (Bun's http upgrade swallows writes):
 //   cd ../../seedchat && npm run relay
 
 import { loadSodium, loadWasmBytes } from "../build/host/node.js";
-import { StorageNode } from "../build/host/storage-node.js";
+import { StorageNode, netRelay } from "../build/host/storage-node.js";
 import { RtcNetwork } from "seedkernel-wasm/net-rtc";
-import { createRelaySignaling } from "seedrelay";
+import { NodeChannelFactory } from "seedkernel-wasm/net-node";
+import { combineChannels } from "seedkernel-wasm/socket-seam";
 import { weriftPeerConnectionFactory } from "./werift-pc.mjs";
-import { toHex } from "../build/host/util.js";
-
-if (typeof WebSocket === "undefined") {
-  console.error("seedrelay needs a global WebSocket — run on Bun (`bun scripts/serve-rtc-holder.mjs`) or Node ≥22.");
-  process.exit(1);
-}
 
 const short = (id) => id.slice(0, 12) + "…";
 const base = (process.env.RELAY ?? "ws://localhost:8080").replace(/\/+$/, "");
@@ -33,7 +29,7 @@ const url = `${base}/${encodeURIComponent(room)}`;
 // same. Unset => open room. A mismatched secret has no error path (§12.6.2) — a
 // gated peer refuses in silence, so "peers never link" is the symptom.
 //
-//   CONTACT=$(openssl rand -hex 32) ROOM=my-room bun scripts/serve-rtc-holder.mjs
+//   CONTACT=$(openssl rand -hex 32) ROOM=my-room node scripts/serve-rtc-holder.mjs
 const contactSecret = (() => {
   const hex = process.env.CONTACT;
   if (!hex) return undefined;
@@ -47,7 +43,7 @@ const contactSecret = (() => {
 // Public STUN so the data channel can punch NAT/CGNAT to a browser/peer off-LAN —
 // the same list browser/p2p.html uses. (Symmetric CGNAT with no IPv6 can still
 // defeat hole punching; that is the ~5–10% case TURN exists for.)
-const RTC_CONFIG = { iceServers: [{ urls: ["stun:stun.l.google.com:19302", "stun:stun.cloudflare.com:3478"] }] };
+const ICE_SERVERS = [{ urls: ["stun:stun.l.google.com:19302", "stun:stun.cloudflare.com:3478"] }];
 
 // Defaults match p2p.html so a mixed browser/console cohort agrees on RS params.
 // maxMessageBytes mirrors the browser's WebRTC value — under werift's ~64 KiB channel.
@@ -57,28 +53,25 @@ const sodium = await loadSodium();
 const wasm = await loadWasmBytes();
 const identity = (() => { const kp = sodium.crypto_sign_keypair(); return { publicKey: kp.publicKey, privateKey: kp.privateKey }; })();
 
-// A browser-edge-style node — no TCP/WS listeners. RtcNetwork is the node's
-// ChannelFactory, so construct it before the transport host and pass it at boot.
-// Same-room RTC links use this node's own contact secret on both ends.
-const relay = createRelaySignaling({ webSocketFactory: (relayUrl) => new WebSocket(relayUrl) });
-relay.connect(url);
-const net = new RtcNetwork({
-  peerId: toHex(identity.publicKey),
-  rtcConfig: RTC_CONFIG,
-  signaling: relay.signaling,
+// A browser-edge-style node — no listeners. Its sockets are a node:net factory for the
+// relay and an RtcNetwork for the peer connections; the transport bundle does the
+// signaling over the first and drives the second. Same-room RTC links use this node's
+// own contact secret on both ends.
+const net = combineChannels(
+  new NodeChannelFactory(),
   // werift's RTCPeerConnection: pure-JS, no native addon (bundles into `bun --compile`).
-  peerConnectionFactory: weriftPeerConnectionFactory(),
-});
+  new RtcNetwork({ peerConnectionFactory: weriftPeerConnectionFactory() }),
+);
 const { bootTransportShell } = await import("../build/host/storage-node.js");
 const runtime = await bootTransportShell({
-  sodium, identity, timeoutMs: 6000, contactSecret, channels: net,
+  sodium, identity, timeoutMs: 6000, contactSecret, channels: net, iceServers: ICE_SERVERS,
   // No app config here — it travels with the storage bundle's own load below.
 });
 
 // A real StorageNode serving HAVE / OFFER / STORE / FETCH over the P2P links. Default
 // store.local is an in-RAM fs, read back through the node's FsBlobView.
 const node = await StorageNode.create({ runtime, sodium, ...wasm, config, quota: 64 * 1024 * 1024, timeoutMs: 6000 });
-net.join(); // announce into the room → present peers begin the WebRTC handshake
+await netRelay(runtime.shell, url); // join the room → present peers begin the WebRTC handshake
 
 console.log(`\nseedstore RTC holder ${short(node.peerId)} ready — handlers installed: ${node.handlersInstalled()}`);
 console.log(`joined ${url}  (RS k=${config.k} m=${config.m}, ${config.blockSize} B blocks)`);
@@ -114,4 +107,4 @@ const timer = setInterval(() => {
   }
 }, 300);
 
-process.on("SIGINT", () => { clearInterval(timer); node.close(); net.close(); process.exit(0); });
+process.on("SIGINT", () => { clearInterval(timer); node.close(); process.exit(0); });

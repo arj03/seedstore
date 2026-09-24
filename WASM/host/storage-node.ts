@@ -20,7 +20,8 @@ import {
 } from "./core.js";
 import { Op, decodeStats, type RequestStats } from "./protocol.js";
 import { toHex, fromHex, readU32BE, readU64BE, concatBytes } from "./util.js";
-import type { ChannelFactoryLike } from "./loopback.js";
+import type { ChannelFactory, ListenAddress } from "seedkernel-wasm/socket-seam";
+import { parseDest } from "seedkernel-wasm/peer-addr";
 import type { Sodium } from "./sodium.js";
 import {
   bootShell, type AppHandle, type BootResult, type RealmFactory, type Shell,
@@ -75,6 +76,40 @@ export function netContact(
  *  bounds a boot rather than deciding anything — read `netPeers` for what landed. */
 export function netReady(shell: Pick<Shell, "call">, timeoutMs = 5000): Promise<Uint8Array> {
   return transportOp(shell, new OpArgs("ready").u32(timeoutMs));
+}
+
+/** Teach the transport one peer from an operator's reference, `pk[.secret]@[scheme://]host:port[/path]`
+ *  — the shipped transport's own spelling, the one its `peers` config takes — with
+ *  `defaultScheme` filling a bare `host:port`. `.secret` is THAT peer's contact secret.
+ *  Checked here, so a typo fails where it was typed rather than reading as a peer that
+ *  never answers. Resolves with the peer id once it is taught. */
+export async function netPeer(
+  shell: Pick<Shell, "call">, spec: string, defaultScheme = "ws",
+): Promise<PeerId> {
+  const at = spec.indexOf("@");
+  if (at < 0) throw new Error(`bad peer (want pk[.secret]@dest): ${spec}`);
+  const [pk, secret, ...extra] = spec.slice(0, at).trim().toLowerCase().split(".");
+  const hex32 = (v: string | undefined) => v !== undefined && /^[0-9a-f]{64}$/.test(v);
+  if (!hex32(pk) || extra.length > 0) throw new Error(`bad peer key (want 64 hex characters): ${spec}`);
+  if (secret !== undefined && !hex32(secret)) throw new Error(`bad peer contact secret (want 64 hex characters): ${spec}`);
+  const where = spec.slice(at + 1).trim();
+  const dest = where.includes("://") ? where : `${defaultScheme}://${where}`;
+  if (!parseDest(dest)) throw new Error(`bad peer destination (want [scheme://]host:port[/path]): ${spec}`);
+  await netAddr(shell, pk, dest, secret === undefined ? undefined : fromHex(secret));
+  return pk;
+}
+
+/** Join a WebRTC signaling room — a `ws://`/`wss://` relay URL, "" to leave. The transport
+ *  opens the relay link itself and connects the peers it meets there (seedkernel §12.7);
+ *  the node's channels must reach both the relay and `rtc:` destinations. */
+export function netRelay(shell: Pick<Shell, "call">, url: string): Promise<Uint8Array> {
+  return transportOp(shell, new OpArgs("relay").text(url));
+}
+
+/** The relay's state: "none" joined, its link "up", or joined and "redialing". */
+export async function netRelayState(shell: Pick<Shell, "call">): Promise<"none" | "up" | "redialing"> {
+  const b = await transportOp(shell, new OpArgs("relayState"));
+  return b[0] === 1 ? "up" : b[0] === 2 ? "redialing" : "none";
 }
 
 /** The peers this node holds at least one authenticated link to. A fact about links,
@@ -153,9 +188,10 @@ export interface StorageNodeOptions {
    *  §12.6): an in-process fabric for tests, a NodeChannelFactory for TCP, or a
    *  browser WebSocket/WebRTC factory. A WebRTC factory has no `connect`; its
    *  links arrive through signaling and the factory's `listen` sink. */
-  channels?: ChannelFactoryLike;
-  listen?: { host: string; port: number };
-  wsListen?: { host: string; port: number };
+  channels?: ChannelFactory;
+  /** The listeners to bind, each labelled for the transport: the shipped one reads `ws`
+   *  as RFC 6455 and any other label as length framing. */
+  listen?: ListenAddress[];
   /** Silence the host transport driver's link-down diagnostic (seedkernel
    *  `TransportHostOptions.suppressLinkLog`). Left OFF in production on purpose: a
    *  cohort that cannot reach its peers should say so on stderr, which is the only
@@ -275,7 +311,7 @@ export class StorageNode {
         return { publicKey: kp.publicKey, privateKey: kp.privateKey };
       })(),
       fs: opts.fs, channels: opts.channels,
-      listen: opts.listen, wsListen: opts.wsListen, suppressLinkLog: opts.suppressLinkLog,
+      listen: opts.listen, suppressLinkLog: opts.suppressLinkLog,
       networkKey: opts.networkKey,
       contactSecret: opts.contactSecret, admitPeers: opts.admitPeers,
       connsPerPeer: opts.connsPerPeer, timeoutMs: opts.timeoutMs,
@@ -326,8 +362,8 @@ export class StorageNode {
    *  connected again. */
   static async connect(a: StorageNode, b: StorageNode): Promise<void> {
     await Promise.all([
-      netAddr(a.shell, b.peerId, `tcp://127.0.0.1:${b.net.port}`),
-      netAddr(b.shell, a.peerId, `tcp://127.0.0.1:${a.net.port}`),
+      netAddr(a.shell, b.peerId, `tcp://127.0.0.1:${b.net.portOf("tcp")}`),
+      netAddr(b.shell, a.peerId, `tcp://127.0.0.1:${a.net.portOf("tcp")}`),
     ]);
     await Promise.all([netReady(a.shell), netReady(b.shell)]);
   }
@@ -474,14 +510,15 @@ export class StorageNode {
 export async function bootTransportShell(
   opts: {
     sodium: Sodium; identity: Identity;
-    fs?: Fs; channels?: ChannelFactoryLike;
-    listen?: { host: string; port: number };
-    wsListen?: { host: string; port: number };
+    fs?: Fs; channels?: ChannelFactory;
+    listen?: ListenAddress[];
     suppressLinkLog?: boolean;
     networkKey?: Uint8Array; contactSecret?: Uint8Array;
     admitPeers?: Uint8Array[]; connsPerPeer?: number;
     timeoutMs?: number; transportBlob?: Uint8Array;
     createRealm?: RealmFactory;
+    /** STUN/TURN servers for WebRTC peers, as `RTCConfiguration.iceServers` takes them. */
+    iceServers?: { urls: string | string[]; username?: string; credential?: string }[];
   },
 ): Promise<StorageRuntime> {
   const fs = opts.fs ?? new MemoryFs();
@@ -494,7 +531,6 @@ export async function bootTransportShell(
     transport: {
       channels: opts.channels,
       listen: opts.listen,
-      wsListen: opts.wsListen,
       suppressLinkLog: opts.suppressLinkLog,
       // Selecting these bytes authorizes them as the transport; a later change
       // must replace this slot explicitly. Defaults to the seedkernel-shipped artifact.
@@ -518,6 +554,9 @@ export async function bootTransportShell(
         ...(opts.admitPeers === undefined
           ? {}
           : { admitPeers: opts.admitPeers.map(toHex) }),
+        ...(opts.iceServers === undefined
+          ? {}
+          : { iceServers: opts.iceServers }),
       },
     },
     // The one admission branch that's ours: the operator handing us a bundle IS

@@ -53,10 +53,10 @@
     "seedkernel-wasm/transport-host": "./seedkernel/host/transport-host.js",
     "seedkernel-wasm/transport-bundle": "./seedkernel/host/transport-bundle.js",
     "seedkernel-wasm/net-rtc":        "./seedkernel/services/net-rtc.js",
+    "seedkernel-wasm/socket-seam":    "./seedkernel/services/socket-seam.js",
     "seedkernel-wasm/net-ws":         "./seedkernel/services/net-ws.js",
     "seedkernel-wasm/libsodium":      "./seedkernel/libsodium-wrappers.mjs",
     "seedkernel-wasm/quickjs":        "./seedkernel/quickjs/variant.mjs",
-    "seedrelay":                      "./vendor/seedrelay/client.js",
     "quickjs-emscripten-core":        "./vendor/quickjs-emscripten-core/index.mjs",
     "@jitl/quickjs-ffi-types":        "./vendor/quickjs-ffi-types/index.mjs"
   }
@@ -69,7 +69,7 @@
   Each tab is a full storage node. A file you drop here is encrypted and erasure-coded
   across the cohort's nodes; any tab can reconstruct it. Two ways to reach the cohort:
   <strong>Direct WebSocket</strong> — dial a known set of natively-reachable nodes
-  (a public IP / LAN / port-forward) straight at their <code>--ws-listen</code> port,
+  (a public IP / LAN / port-forward) straight at their <code>ws</code>-labelled listener,
   no relay and no STUN (<code>WsNetwork</code>); or <strong>WebRTC</strong> — tabs find
   each other through a WebSocket relay (signaling only) and then talk directly,
   peer-to-peer, no server in the data path (the same <code>RtcNetwork</code> a Node peer
@@ -108,7 +108,7 @@
     error: peers simply never link.</p>
 </div>
 <div id="wsConfig">
-  <p class="muted">Dial natively-reachable nodes started with <code>seedkernel --ws-listen 0.0.0.0:&lt;port&gt;</code>.
+  <p class="muted">Dial natively-reachable nodes started with <code>seedkernel --listen ws=0.0.0.0:&lt;port&gt;</code>.
     One <code>pubkey[.secret]@host:port</code> per line (or comma-separated). Need at least
     <span class="mono">k+m</span> distinct holders. The optional <code>.secret</code> is that node's
     32-byte hex contact secret (its <code>--contact-secret</code>); omit it for an open node.</p>
@@ -146,12 +146,10 @@
 import sodium from "seedkernel-wasm/libsodium";
 import { loadCrypto } from "seedkernel-wasm/crypto-browser";
 import { createStorageNode, loadWasmBytes } from "./host/browser.js";
-import { bootTransportShell, netAddr, netReady } from "./host/storage-node.js";
+import { bootTransportShell, netPeer, netReady, netRelay, netRelayState } from "./host/storage-node.js";
 import { RtcNetwork } from "seedkernel-wasm/net-rtc";
 import { WsNetwork } from "seedkernel-wasm/net-ws";
-import { parsePeerRef } from "seedkernel-wasm/peer-addr";
-
-import { createRelaySignaling } from "seedrelay";
+import { combineChannels } from "seedkernel-wasm/socket-seam";
 
 // k=1, m=1: replication r = m+1 = 2 — each block is copied to two distinct holders
 // (RS(1,·) is replication in disguise, so the guest takes the replication path, not
@@ -238,7 +236,7 @@ const connsPerPeerFor = (mode) => (mode === "ws" ? qNum("conns", 8) : 1);
 
 // Public STUN so peers on different machines/NATs can still find a path; for
 // same-machine tabs host candidates connect without it.
-const RTC_CONFIG = { iceServers: [{ urls: ["stun:stun.l.google.com:19302", "stun:stun.cloudflare.com:3478"] }] };
+const ICE_SERVERS = [{ urls: ["stun:stun.l.google.com:19302", "stun:stun.cloudflare.com:3478"] }];
 
 const $ = (id) => document.getElementById(id);
 const logEl = $("log");
@@ -253,7 +251,7 @@ const bundleReady = loadWasmBytes("./");
 // by boot()'s own try/catch.
 bundleReady.catch(() => {});
 
-let node = null, net = null, runtime = null, dialTimer = null;
+let node = null, net = null, runtime = null, dialTimer = null, peersEnough = false;
 
 const transport = () => document.querySelector('input[name="transport"]:checked').value;
 
@@ -272,6 +270,7 @@ async function refreshPeers() {
   const n = node ? (await node.linkedPeers().catch(() => [])).length : 0;
   $("peers").textContent = String(n);
   const enough = n >= REQUIRED_PEERS;
+  peersEnough = enough;
   const more = transport() === "ws" ? "dial more nodes" : "open more tabs in this room";
   $("need").textContent = enough ? "(enough to store)" : `(need ${REQUIRED_PEERS} — ${more})`;
   $("store").disabled = !(node && enough);
@@ -287,6 +286,23 @@ async function refreshPeers() {
 // would queue `peers` ops behind a realm busy with a PUT and never catch up.
 function startPeerPolling() {
   const tick = async () => { await refreshPeers(); setTimeout(tick, 300); };
+  void tick();
+}
+
+// The relay link is the transport's, so its state is asked of the transport too. It only
+// speaks while the cohort is short — once there is a quorum, "connected" says the rest.
+function watchRelay(relayUrl) {
+  let warned = false;
+  const tick = async () => {
+    const state = await netRelayState(runtime.shell).catch(() => "none");
+    if (!peersEnough) {
+      const up = state === "up";
+      $("status").textContent = up ? "relay connected" : "relay redialing";
+      $("status").className = up ? "pill ok" : "pill warn";
+      if (!up && !warned) { warned = true; log(`relay unreachable — is one running at ${relayUrl}? (redialing)`); }
+    }
+    setTimeout(tick, 1000);
+  };
   void tick();
 }
 
@@ -308,8 +324,9 @@ async function boot() {
     // ~50 KB/s and brief WiFi stalls; WebRTC's 48 KiB messages keep gaps tiny.
     const timeoutMs = mode === "ws" ? 20000 : 5000;
 
-    // The transport is now a signed bundle. Build the WS/WebRTC ChannelFactory
-    // first, then boot the shared shell with that factory and the bundle admitted.
+    // The transport is a signed bundle. Build the socket factories first, then boot the
+    // shared shell with them and the bundle admitted. In WebRTC mode the transport opens
+    // the relay as a WebSocket itself and drives the peer connections RtcNetwork holds.
     // WebRTC links are same-deployment links, so both ends use the node's own room
     // contact secret; direct WS peers carry THEIR secret in each parsed address.
     // The geometry does NOT ride in here: app config travels with the bundle load that
@@ -337,36 +354,14 @@ async function boot() {
     // reaches the shell, which also hosts the transport.
     const config = { ...CONFIG, blockSize: blockSizeFor(mode), maxMessageBytes: maxMessageBytesFor(mode),
       windowTargetBytes: windowTargetBytesFor(mode), realmMemoryBytes: realmMemoryBytesFor() };
-    if (mode === "ws") {
-      net = new WsNetwork({
-        webSocketFactory: (u) => new WebSocket(u),
-      });
-    } else {
-      const relay = createRelaySignaling({
-        webSocketFactory: (url) => new WebSocket(url),
-        onStateChange: ({ state }) => {
-          if (state === "connecting") {
-            $("status").textContent = "relay connecting"; $("status").className = "pill";
-          } else if (state === "connected") {
-            $("status").textContent = "relay connected"; $("status").className = "pill ok";
-          } else if (state === "error") {
-            $("status").textContent = "relay error"; $("status").className = "pill warn";
-            log(`relay error — is one running at ${relayUrl}?`);
-          } else if (state === "disconnected") {
-            $("status").textContent = "relay disconnected"; $("status").className = "pill warn";
-          }
-        },
-      });
-      relay.connect(relayUrl);
-      net = new RtcNetwork({
-        peerId: hex(identity.publicKey),
-        rtcConfig: RTC_CONFIG, signaling: relay.signaling,
-      });
-    }
+    net = mode === "ws"
+      ? new WsNetwork({ webSocketFactory: (u) => new WebSocket(u) })
+      : combineChannels(new WsNetwork(), new RtcNetwork());
     runtime = await bootTransportShell({
       sodium, identity, timeoutMs, contactSecret,
       channels: net,
       connsPerPeer: connsPerPeerFor(mode),
+      ...(mode === "rtc" ? { iceServers: ICE_SERVERS } : {}),
     });
 
     log("booting the storage node on the seedkernel (the staged ./seedstore.skb)…");
@@ -394,7 +389,8 @@ async function boot() {
       $("status").textContent = "dialing"; $("status").className = "pill ok";
       dialWs(); // reads the peers box, dials, and arms the unreachable-peer watchdog
     } else {
-      net.join(); // announce into the room — peers begin the WebRTC handshake
+      await netRelay(runtime.shell, relayUrl); // join the room — peers begin the WebRTC handshake
+      watchRelay(relayUrl);
       log("waiting for peers — open this page in more tabs (same room).");
     }
   } catch (e) {
@@ -419,11 +415,8 @@ function dialWs() {
   if (specs.length === 0) { log("add at least one pubkey@host:port peer, then Dial."); return; }
   log(`dialing ${specs.length} node(s) — links come up as each authenticates…`);
   for (const spec of specs) {
-    try {
-      const { peerId, contactSecret, dest } = parsePeerRef(spec, "ws");
-      void netAddr(runtime.shell, peerId, dest, contactSecret)
-        .catch((e) => log(`  peer "${spec}" not taught: ${e?.message ?? e}`));
-    } catch (e) { log(`  bad peer "${spec}": ${e?.message ?? e}`); }
+    void netPeer(runtime.shell, spec, "ws")
+      .catch((e) => log(`  bad peer "${spec}": ${e?.message ?? e}`));
   }
   // `addr` only TEACHES the destination; the signed guest dials on `ready`, which tops
   // every known peer up to connsPerPeer. Fire-and-forget — it settles on its own deadline
@@ -445,7 +438,7 @@ function armDialWatchdog() {
     const n = node ? (await node.linkedPeers().catch(() => [])).length : 0;
     if (n < REQUIRED_PEERS) {
       log(`only ${n}/${REQUIRED_PEERS} peer(s) linked — unreachable nodes are dropped silently. ` +
-          `Check each pubkey@host:port (node up with --ws-listen? right host/port? firewall open?), then Re-dial.`);
+          `Check each pubkey@host:port (node up with --listen ws=…? right host/port? firewall open?), then Re-dial.`);
     }
   }, 8000);
 }

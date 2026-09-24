@@ -50,7 +50,7 @@ export async function createConnectedCohort(opts: CohortOptions): Promise<Storag
       guestDeadlineMs: opts.guestDeadlineMs,
       // Each node dials/listens through its own view of the shared fabric.
       channels: opts.network.view(peerId),
-      listen: { host: "127.0.0.1", port: 0 },
+      listen: [{ label: "tcp", host: "127.0.0.1", port: 0 }],
       suppressLinkLog: opts.suppressLinkLog,
     }));
   }

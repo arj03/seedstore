@@ -99,7 +99,7 @@ class WeriftRtcPeerConnection extends Emitter {
     }
     createDataChannel(label, opts) {
         const dc = this.pc.createDataChannel(label, opts);
-        // `negotiationneeded` is RtcNetwork's single entry point for making an offer.
+        // `negotiationneeded` is what makes the offering side of RtcNetwork offer.
         // werift's own has looser timing, so it is synthesised here — deterministic, and
         // exactly once per dial.
         queueMicrotask(() => this.dispatch("negotiationneeded"));
@@ -115,6 +115,12 @@ class WeriftRtcPeerConnection extends Emitter {
     }
     async setRemoteDescription(desc) { await this.pc.setRemoteDescription(desc); }
     async addIceCandidate(candidate) { await this.pc.addIceCandidate(candidate); }
+    // werift restarts on the next offer, so the offering side is asked for one, as a
+    // browser asks after `restartIce()`.
+    restartIce() {
+        this.pc.restartIce();
+        queueMicrotask(() => this.dispatch("negotiationneeded"));
+    }
     get signalingState() { return this.pc.signalingState; }
     get connectionState() { return this.pc.connectionState; }
     get localDescription() { return norm(this.pc.localDescription); }

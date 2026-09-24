@@ -60,14 +60,13 @@ you trust.
 
 ## Quick start
 
-Seedstore builds against sibling checkouts of
-[seedkernel](https://github.com/arj03/seedkernel) and
-[seedrelay](https://github.com/arj03/seedrelay):
+Seedstore builds against a sibling checkout of
+[seedkernel](https://github.com/arj03/seedkernel); the WebRTC demo also needs a
+[seedrelay](https://github.com/arj03/seedrelay) server to signal through:
 
 ```
 GitHub/
   seedkernel/
-  seedrelay/
   seedstore/
 ```
 

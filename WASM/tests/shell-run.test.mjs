@@ -50,8 +50,8 @@ function file(n, seed = 1) {
  *  The adapter is the platform's — the shell does not carry one — so it is
  *  passed in beside the peer id it belongs to. */
 async function link(shell, shellNet, shellPeerId, node) {
-  await netAddr(node.shell, shellPeerId, `tcp://127.0.0.1:${shellNet.port}`);
-  await netAddr(shell, node.peerId, `tcp://127.0.0.1:${node.net.port}`);
+  await netAddr(node.shell, shellPeerId, `tcp://127.0.0.1:${shellNet.portOf("tcp")}`);
+  await netAddr(shell, node.peerId, `tcp://127.0.0.1:${node.net.portOf("tcp")}`);
   await Promise.all([netReady(shell), netReady(node.shell)]);
 }
 
@@ -87,7 +87,7 @@ export async function run(t) {
       const rt = await bootNodeShell({
         policyJson: JSON.stringify({ authors: [toHex(authorId)] }),
         dir: shellDir, identity: shellIdentity,
-        transport: { suppressLinkLog: true, channels: net.view(toHex(shellIdentity.publicKey)), listen: { host: "127.0.0.1", port: 0 } },
+        transport: { suppressLinkLog: true, channels: net.view(toHex(shellIdentity.publicKey)), listen: [{ label: "tcp", host: "127.0.0.1", port: 0 }] },
         timeoutMs: TIMEOUT,
       });
       shell = rt.shell;
@@ -129,7 +129,7 @@ export async function run(t) {
       const { shell: shell2 } = await bootNodeShell({
         policyJson: JSON.stringify({ authors: [toHex(generateKeyPair(sodium).publicKey)] }),
         dir: shell2Dir, identity: shell2Id,
-        transport: { suppressLinkLog: true, channels: net.view(toHex(shell2Id.publicKey)), listen: { host: "127.0.0.1", port: 0 } },
+        transport: { suppressLinkLog: true, channels: net.view(toHex(shell2Id.publicKey)), listen: [{ label: "tcp", host: "127.0.0.1", port: 0 }] },
       });
       let refused = false;
       try { await shell2.installFile(bundlePath); } catch { refused = true; }

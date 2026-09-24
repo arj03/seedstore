@@ -1,18 +1,19 @@
-// Headless storage-over-RtcNetwork smoke: an owner + N holders, all werift-backed
-// RtcNetworks wired by an IN-PROCESS signaling hub (no relay process, no
-// WebSocket), connect over real WebRTC (ICE -> DTLS -> SCTP on loopback) and
+// Headless storage-over-WebRTC smoke: an owner + N holders, all werift-backed
+// RtcNetworks whose transports signal through an IN-PROCESS relay room (no relay
+// process), connect over real WebRTC (ICE -> DTLS -> SCTP on loopback) and
 // PUT -> GET a file. Node-parity of the relay + STUN path browser/p2p.html runs —
-// the same RtcNetwork + StorageNode, with loopback candidates standing in for
-// STUN-punched ones; the real demo swaps in seedrelay's WebSocket adapter.
+// the same transport signaling and StorageNode, with loopback candidates standing in
+// for STUN-punched ones; RELAY= points the same transports at a real seedrelay.
 //
 //   node scripts/smoke-rtc.mjs            (or: bun scripts/smoke-rtc.mjs)   HOLDERS=n
 
 import { loadSodium, loadWasmBytes } from "../build/host/node.js";
-import { StorageNode, bootTransportShell } from "../build/host/storage-node.js";
+import { StorageNode, bootTransportShell, netRelay } from "../build/host/storage-node.js";
 import { MsgType, encodeHaveReq, decodeMask } from "../build/host/protocol.js";
-import { bytesEqual, toHex } from "../build/host/util.js";
+import { bytesEqual } from "../build/host/util.js";
 import { RtcNetwork } from "seedkernel-wasm/net-rtc";
-import { createRelaySignaling } from "seedrelay";
+import { NodeChannelFactory } from "seedkernel-wasm/net-node";
+import { combineChannels } from "seedkernel-wasm/socket-seam";
 import { weriftPeerConnectionFactory } from "./werift-pc.mjs";
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -24,50 +25,47 @@ function typed(type, data) {
 }
 const HOLDERS = Number(process.env.HOLDERS) || 3;
 
-// Two modes. Default: an in-process signaling hub (offline, Node or Bun). With
-// RELAY=ws://host:port set: the REAL seedrelay path against a running server —
-// the exact transport serve-rtc-holder.mjs + p2p.html use. That needs a global
-// WebSocket, so run it on Bun:  RELAY=ws://127.0.0.1:8080 bun scripts/smoke-rtc.mjs
+// Two modes. Default: an in-process relay room (offline, Node or Bun). With
+// RELAY=ws://host:port set: the REAL seedrelay path against a running server — the
+// exact signaling serve-rtc-holder.mjs + p2p.html use:
+//   RELAY=ws://127.0.0.1:8080 node scripts/smoke-rtc.mjs
 const RELAY = process.env.RELAY ? process.env.RELAY.replace(/\/+$/, "") : null;
 const ROOM = process.env.ROOM ?? "smoke-rtc-" + Math.random().toString(16).slice(2, 10);
-if (RELAY && typeof WebSocket === "undefined") {
-  console.error("RELAY mode needs a global WebSocket — run on Bun (`bun scripts/smoke-rtc.mjs`) or Node ≥22.");
-  process.exit(1);
-}
+const RELAY_URL = RELAY ? `${RELAY}/${encodeURIComponent(ROOM)}` : "ws://in-process-relay/room";
 
-// An in-memory N-party signaling hub: every JSON signal from one member is
-// delivered to all OTHER members (RtcNetwork filters by from/to itself).
-// Delivery is DEFERRED (setTimeout 0): RtcNetwork's perfect-negotiation state
-// machine assumes async arrival, and a synchronous/reentrant send() reorders the
-// offer/answer/ICE handshake and wedges the mesh.
-function makeSignalingHub() {
+// An in-memory relay room, as a socket factory: every frame one member sends reaches
+// every OTHER member, verbatim, as seedrelay forwards it. Delivery is deferred, as a
+// socket's is.
+function makeRelayRoom() {
   const members = new Set();
-  return () => {
-    const m = { cb: () => {} };
-    members.add(m);
-    return {
-      send: (msg) => {
-        for (const o of members) {
-          if (o === m) continue;
-          const cb = o.cb;
-          setTimeout(() => { try { cb(msg); } catch { /* a bad handler must not wedge signaling */ } }, 0);
-        }
-      },
-      onMessage: (fn) => { m.cb = fn; },
-      close: () => { members.delete(m); },
-    };
+  return {
+    connect(dest) {
+      if (dest !== RELAY_URL) return null;
+      const m = { msg: null, dead: false };
+      members.add(m);
+      return {
+        send(bytes) {
+          for (const o of members) {
+            if (o === m) continue;
+            const copy = Uint8Array.from(bytes);
+            setTimeout(() => { if (!o.dead) o.msg?.(copy); }, 0);
+          }
+        },
+        onData(cb) { m.msg = cb; },
+        onClose() {},
+        close() { m.dead = true; members.delete(m); },
+        buffered: () => 0,
+      };
+    },
+    listen: async (addrs) => addrs.map(() => 0),
+    close() {},
   };
 }
 
 const sodium = await loadSodium();
 const wasm = await loadWasmBytes();
-// `join()` mints one signaling endpoint per node — the in-process hub by default, or
-// a fresh seedrelay client (same room) in RELAY mode.
-const join = RELAY ? () => {
-  const relay = createRelaySignaling({ webSocketFactory: (url) => new WebSocket(url) });
-  relay.connect(`${RELAY}/${encodeURIComponent(ROOM)}`);
-  return relay.signaling;
-} : makeSignalingHub();
+// The relay each node's transport dials: the in-process room, or a real one over node:net.
+const room = RELAY ? null : makeRelayRoom();
 // Loopback host candidate so every pair connects with no STUN (the smoke is offline).
 const pcFactory = weriftPeerConnectionFactory({ iceAdditionalHostAddresses: ["127.0.0.1"] });
 // Small file, replicated to every holder; 48 KiB stays under werift's 64 KiB
@@ -86,10 +84,7 @@ const CONTACT = process.env.CONTACT
 async function makeNode(contact = CONTACT) {
   const identity = (() => { const kp = sodium.crypto_sign_keypair(); return { publicKey: kp.publicKey, privateKey: kp.privateKey }; })();
   const entry = { node: null, runtime: null, net: null };
-  entry.net = new RtcNetwork({
-    peerId: toHex(identity.publicKey),
-    signaling: join(), peerConnectionFactory: pcFactory,
-  });
+  entry.net = combineChannels(room ?? new NodeChannelFactory(), new RtcNetwork({ peerConnectionFactory: pcFactory }));
   entry.runtime = await bootTransportShell({
     sodium, identity, timeoutMs: 8000, contactSecret: contact, channels: entry.net,
   });
@@ -105,7 +100,7 @@ try {
     nodes.push(e);
   }
   const owner = nodes[0];
-  for (const e of nodes) e.net.join(); // announce into the room → the WebRTC dance begins
+  for (const e of nodes) await netRelay(e.runtime.shell, RELAY_URL); // join the room → the WebRTC dance begins
 
   console.log(`booted owner + ${HOLDERS} holder(s); forming the WebRTC mesh (${RELAY ? `via relay ${RELAY} room ${ROOM}` : "in-process signaling, no relay"})…`);
 
@@ -142,7 +137,7 @@ try {
   nodes.push(stranger);
   stranger.node = await StorageNode.create({
     runtime: stranger.runtime, sodium, ...wasm, config, timeoutMs: 8000 });
-  stranger.net.join();
+  await netRelay(stranger.runtime.shell, RELAY_URL);
   const before = (await owner.node.linkedPeers()).length;
   const t1 = Date.now();
   let strangerPeers = await stranger.node.linkedPeers();
@@ -158,7 +153,7 @@ try {
 
   ok = roundTrip && onAll && gated;
   console.log(ok
-    ? `\nOK — file replicated to all ${HOLDERS} holders + retrieved over RtcNetwork (data peer-to-peer; relay = signaling only in the real demo)`
+    ? `\nOK — file replicated to all ${HOLDERS} holders + retrieved over WebRTC (data peer-to-peer; the relay carries signaling only)`
     : `\nFAIL — roundTrip=${roundTrip}, onAllHolders=${onAll}, gated=${gated}`);
 } catch (e) {
   console.error("\nFAILED:", e?.message ?? e);

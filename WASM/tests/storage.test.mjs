@@ -243,7 +243,7 @@ export async function run(t) {
     const ownerId = sodium.crypto_sign_keypair();
     const owner = await StorageNode.create({
       sodium, bundleBlob: wasm.bundleBlob, identity: ownerId,
-      suppressLinkLog: true, channels: net.view(toHex(ownerId.publicKey)), listen: { host: "127.0.0.1", port: 0 },
+      suppressLinkLog: true, channels: net.view(toHex(ownerId.publicKey)), listen: [{ label: "tcp", host: "127.0.0.1", port: 0 }],
       config: { k: 1, m: 4, blockSize: 1024 }, timeoutMs: TIMEOUT,
     });
     const holders = [];
@@ -251,7 +251,7 @@ export async function run(t) {
       const id = sodium.crypto_sign_keypair();
       holders.push(await StorageNode.create({
         sodium, bundleBlob: wasm.bundleBlob, identity: id,
-        suppressLinkLog: true, channels: net.view(toHex(id.publicKey)), listen: { host: "127.0.0.1", port: 0 },
+        suppressLinkLog: true, channels: net.view(toHex(id.publicKey)), listen: [{ label: "tcp", host: "127.0.0.1", port: 0 }],
         config: { k: 1, m: 1, blockSize: 1024 }, timeoutMs: TIMEOUT,
       }));
     }
@@ -428,7 +428,7 @@ export async function run(t) {
     const holderCfg = { ...ownerCfg, maxMessageBytes: 1600 };
     const mk = (cfg, tag) => StorageNode.create({
       sodium, bundleBlob: wasm.bundleBlob, identity: tag,
-      suppressLinkLog: true, channels: net.view(toHex(tag.publicKey)), listen: { host: "127.0.0.1", port: 0 },
+      suppressLinkLog: true, channels: net.view(toHex(tag.publicKey)), listen: [{ label: "tcp", host: "127.0.0.1", port: 0 }],
       config: cfg, timeoutMs: TIMEOUT,
     });
     const owner = await mk(ownerCfg, sodium.crypto_sign_keypair());
@@ -477,7 +477,7 @@ export async function run(t) {
       const identity = sodium.crypto_sign_keypair();
       return StorageNode.create({
         sodium, bundleBlob: wasm.bundleBlob, identity,
-        suppressLinkLog: true, channels: net.view(toHex(identity.publicKey)), listen: { host: "127.0.0.1", port: 0 },
+        suppressLinkLog: true, channels: net.view(toHex(identity.publicKey)), listen: [{ label: "tcp", host: "127.0.0.1", port: 0 }],
         config: { ...cfg, lieOnFetch }, timeoutMs: TIMEOUT,
       });
     };
@@ -540,7 +540,7 @@ export async function run(t) {
     const holderId = sodium.crypto_sign_keypair();
     const mk = (id, extra) => StorageNode.create({
       sodium, bundleBlob: wasm.bundleBlob, identity: id,
-      suppressLinkLog: true, channels: net.view(toHex(id.publicKey)), listen: { host: "127.0.0.1", port: 0 },
+      suppressLinkLog: true, channels: net.view(toHex(id.publicKey)), listen: [{ label: "tcp", host: "127.0.0.1", port: 0 }],
       config: { ...config, k: 1, m: 0 }, quota: 1 << 30, timeoutMs: TIMEOUT, ...extra,
     });
     // A backend that accepts reads and refuses the record write — a full disk, near
