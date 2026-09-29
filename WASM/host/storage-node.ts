@@ -100,7 +100,8 @@ export async function netPeer(
 }
 
 /** Register on a relay and join the room its URL path names: a `ws://`/`wss://` URL, "" to
- *  leave. The transport opens the relay link itself, links the peers it meets there
+ *  leave. Resolves once registered, or once that attempt has failed and the transport is
+ *  redialing. The transport opens the relay link itself, links the peers it meets there
  *  through the relay, and moves each to WebRTC when the node's channels also reach `rtc:`
  *  destinations (seedkernel §12.7). */
 export function netRelay(shell: Pick<Shell, "call">, url: string): Promise<Uint8Array> {

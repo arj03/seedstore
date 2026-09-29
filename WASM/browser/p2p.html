@@ -303,9 +303,7 @@ function watchRelay(relayUrl) {
     }
     setTimeout(tick, 1000);
   };
-  // First look after a second: joining returns once the socket is open, and registering
-  // on the relay takes one more round trip.
-  setTimeout(tick, 1000);
+  void tick();
 }
 
 async function boot() {
