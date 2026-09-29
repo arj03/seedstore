@@ -1,7 +1,7 @@
-// A console storage HOLDER that joins a WebRTC signaling-relay ROOM and serves the
-// holder side of the protocol over real peer-to-peer WebRTC. The relay carries ONLY
-// signaling (SDP/ICE) — file bytes flow directly peer-to-peer via STUN, so the relay
-// is killable once channels are up. Console counterpart of browser/p2p.html: run a
+// A console storage HOLDER that joins a ROOM on a seedrelay and serves the holder side
+// of the protocol. Peers meet and link through the relay, then move to real
+// peer-to-peer WebRTC via STUN, and the relay closes the splice; where WebRTC cannot
+// connect, the link stays on the relay. Console counterpart of browser/p2p.html: run a
 // few of these, open p2p.html on the SAME relay + room, drop a file.
 //
 //   node scripts/serve-rtc-holder.mjs                (npm run serve:rtc-holder)
@@ -53,10 +53,10 @@ const sodium = await loadSodium();
 const wasm = await loadWasmBytes();
 const identity = (() => { const kp = sodium.crypto_sign_keypair(); return { publicKey: kp.publicKey, privateKey: kp.privateKey }; })();
 
-// A browser-edge-style node — no listeners. Its sockets are a node:net factory for the
-// relay and an RtcNetwork for the peer connections; the transport bundle does the
-// signaling over the first and drives the second. Same-room RTC links use this node's
-// own contact secret on both ends.
+// A browser-edge-style node with no listeners. Its sockets are a node:net factory for the
+// relay and an RtcNetwork for the peer connections; the transport bundle registers and
+// links through the first, signals over those links, and drives the second. A room
+// shares one contact secret, so this node's own is the one its peers present.
 const net = combineChannels(
   new NodeChannelFactory(),
   // werift's RTCPeerConnection: pure-JS, no native addon (bundles into `bun --compile`).
@@ -71,7 +71,7 @@ const runtime = await bootTransportShell({
 // A real StorageNode serving HAVE / OFFER / STORE / FETCH over the P2P links. Default
 // store.local is an in-RAM fs, read back through the node's FsBlobView.
 const node = await StorageNode.create({ runtime, sodium, ...wasm, config, quota: 64 * 1024 * 1024, timeoutMs: 6000 });
-await netRelay(runtime.shell, url); // join the room → present peers begin the WebRTC handshake
+await netRelay(runtime.shell, url); // join the room: link through the relay, then move to WebRTC
 
 console.log(`\nseedstore RTC holder ${short(node.peerId)} ready — handlers installed: ${node.handlersInstalled()}`);
 console.log(`joined ${url}  (RS k=${config.k} m=${config.m}, ${config.blockSize} B blocks)`);

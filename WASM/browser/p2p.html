@@ -70,10 +70,10 @@
   across the cohort's nodes; any tab can reconstruct it. Two ways to reach the cohort:
   <strong>Direct WebSocket</strong> — dial a known set of natively-reachable nodes
   (a public IP / LAN / port-forward) straight at their <code>ws</code>-labelled listener,
-  no relay and no STUN (<code>WsNetwork</code>); or <strong>WebRTC</strong> — tabs find
-  each other through a WebSocket relay (signaling only) and then talk directly,
-  peer-to-peer, no server in the data path (the same <code>RtcNetwork</code> a Node peer
-  joins via werift, seedkernel §12.6).
+  no relay and no STUN (<code>WsNetwork</code>); or <strong>WebRTC</strong> — tabs meet
+  and link through a WebSocket relay, then move to a direct peer-to-peer connection, with
+  no server left in the data path (the same <code>RtcNetwork</code> a Node peer joins via
+  werift, seedkernel §12.7). Where WebRTC cannot connect, the link stays on the relay.
 </p>
 <p class="muted">
   Direct WebSocket is the default because its holders are <code>seedkernel</code> processes
@@ -103,8 +103,8 @@
     secret <input id="contact" class="url mono" type="text" placeholder="optional — 32-byte hex, same in every tab (blank = open room)" />
   </div>
   <p class="muted">The secret is the room's credential: a peer that cannot produce it draws no
-    response at all, the relay included. It never leaves this page — only signaling goes to the
-    relay. Blank means an open room, which is fine on localhost. A <em>wrong</em> secret has no
+    response at all, the relay included. It never goes to the relay, which forwards only
+    ciphertext. Blank means an open room, which is fine on localhost. A <em>wrong</em> secret has no
     error: peers simply never link.</p>
 </div>
 <div id="wsConfig">
@@ -303,7 +303,9 @@ function watchRelay(relayUrl) {
     }
     setTimeout(tick, 1000);
   };
-  void tick();
+  // First look after a second: joining returns once the socket is open, and registering
+  // on the relay takes one more round trip.
+  setTimeout(tick, 1000);
 }
 
 async function boot() {
@@ -326,9 +328,9 @@ async function boot() {
 
     // The transport is a signed bundle. Build the socket factories first, then boot the
     // shared shell with them and the bundle admitted. In WebRTC mode the transport opens
-    // the relay as a WebSocket itself and drives the peer connections RtcNetwork holds.
-    // WebRTC links are same-deployment links, so both ends use the node's own room
-    // contact secret; direct WS peers carry THEIR secret in each parsed address.
+    // the relay as a WebSocket itself, links through it, and drives the peer connections
+    // RtcNetwork holds. A room shares one contact secret, so both ends use the node's
+    // own; direct WS peers carry THEIR secret in each parsed address.
     // The geometry does NOT ride in here: app config travels with the bundle load that
     // wants it, so it goes on createStorageNode below.
     let contactSecret;
@@ -336,7 +338,8 @@ async function boot() {
     if (mode === "rtc") {
       const base = $("relay").value.trim().replace(/\/+$/, "");
       const room = $("room").value.trim();
-      relayUrl = room ? `${base}/${encodeURIComponent(room)}` : base;
+      // A bare relay URL joins no room, so a blank room names the default one.
+      relayUrl = `${base}/${encodeURIComponent(room || "global")}`;
       const secretHex = $("contact").value.trim();
       if (secretHex && !/^[0-9a-f]{64}$/i.test(secretHex)) {
         throw new Error("secret must be 32-byte hex (64 chars), or blank for an open room");
@@ -389,7 +392,7 @@ async function boot() {
       $("status").textContent = "dialing"; $("status").className = "pill ok";
       dialWs(); // reads the peers box, dials, and arms the unreachable-peer watchdog
     } else {
-      await netRelay(runtime.shell, relayUrl); // join the room — peers begin the WebRTC handshake
+      await netRelay(runtime.shell, relayUrl); // join the room: link through the relay, then WebRTC
       watchRelay(relayUrl);
       log("waiting for peers — open this page in more tabs (same room).");
     }

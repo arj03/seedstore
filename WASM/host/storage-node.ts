@@ -99,14 +99,15 @@ export async function netPeer(
   return pk;
 }
 
-/** Join a WebRTC signaling room — a `ws://`/`wss://` relay URL, "" to leave. The transport
- *  opens the relay link itself and connects the peers it meets there (seedkernel §12.7);
- *  the node's channels must reach both the relay and `rtc:` destinations. */
+/** Register on a relay and join the room its URL path names: a `ws://`/`wss://` URL, "" to
+ *  leave. The transport opens the relay link itself, links the peers it meets there
+ *  through the relay, and moves each to WebRTC when the node's channels also reach `rtc:`
+ *  destinations (seedkernel §12.7). */
 export function netRelay(shell: Pick<Shell, "call">, url: string): Promise<Uint8Array> {
   return transportOp(shell, new OpArgs("relay").text(url));
 }
 
-/** The relay's state: "none" joined, its link "up", or joined and "redialing". */
+/** The relay's state: "none" joined, registered and "up", or joined and "redialing". */
 export async function netRelayState(shell: Pick<Shell, "call">): Promise<"none" | "up" | "redialing"> {
   const b = await transportOp(shell, new OpArgs("relayState"));
   return b[0] === 1 ? "up" : b[0] === 2 ? "redialing" : "none";

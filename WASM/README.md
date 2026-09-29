@@ -156,9 +156,10 @@ retrieval token. You pick one of two transports on the page:
 - **Direct WebSocket** (the default) dials holders at a `ws`-labelled listener, with
   no relay or STUN. Start holders with `--listen ws=0.0.0.0:47210 …` and paste each
   one's `pubkey[.secret]@host:port` into the peers box.
-- **WebRTC** finds peers through a signaling relay
-  ([seedrelay](https://github.com/arj03/seedrelay)) and then connects directly, using
-  STUN for NAT traversal. Use it when holders have no port you could paste. The
+- **WebRTC** finds peers in a room on a relay
+  ([seedrelay](https://github.com/arj03/seedrelay)), links to them through it, and
+  then moves to a direct connection, using STUN for NAT traversal; where that fails,
+  the link stays on the relay. Use it when holders have no port you could paste. The
   transport bundle joins the room itself (`netRelay`) and negotiates every peer
   connection; the page only supplies the sockets (seedkernel §12.7). For the cohort,
   open 3+ tabs in one room, or one tab plus console holders:
@@ -170,9 +171,9 @@ retrieval token. You pick one of two transports on the page:
   ```
 
   Console holders use werift's pure-JS WebRTC through `scripts/werift-pc.mjs`.
-  `npm run smoke:rtc` runs the same PUT→GET path headless over an in-process relay
-  room, with no relay process and no browser; `RELAY=ws://host:port` points it at a
-  real one.
+  `npm run smoke:rtc` runs the same PUT→GET path headless, with no browser, against
+  the sibling seedrelay checkout's server, which it starts on a free port;
+  `RELAY=ws://host:port` points it at a running one.
 
 A tab's block store is in RAM, because the OPFS/IndexedDB backend isn't built yet.
 Tabs acting as holders therefore forget everything on reload. For now, treat the
