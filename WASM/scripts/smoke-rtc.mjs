@@ -11,13 +11,14 @@ import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { loadSodium, loadWasmBytes } from "../build/host/node.js";
-import { StorageNode, bootTransportShell, netRelay } from "../build/host/storage-node.js";
+import { StorageNode, bootTransportShell } from "../build/host/storage-node.js";
 import { MsgType, encodeHaveReq, decodeMask } from "../build/host/protocol.js";
 import { bytesEqual } from "../build/host/util.js";
 import { RtcNetwork } from "seedkernel-wasm/net-rtc";
 import { NodeChannelFactory } from "seedkernel-wasm/net-node";
 import { combineChannels } from "seedkernel-wasm/socket-seam";
 import { weriftPeerConnectionFactory } from "./werift-pc.mjs";
+import { joinRelayRoom } from "./relay-room.mjs";
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -48,7 +49,6 @@ async function startRelay() {
   });
 }
 const RELAY = await startRelay();
-const RELAY_URL = `${RELAY}/${encodeURIComponent(ROOM)}`;
 
 const sodium = await loadSodium();
 const wasm = await loadWasmBytes();
@@ -73,7 +73,7 @@ const CONTACT = process.env.CONTACT
 // ride here: it goes on StorageNode.create, so the transport guest never sees it.
 async function makeNode(contact = CONTACT) {
   const identity = (() => { const kp = sodium.crypto_sign_keypair(); return { publicKey: kp.publicKey, privateKey: kp.privateKey }; })();
-  const entry = { node: null, runtime: null, net: null };
+  const entry = { node: null, runtime: null, net: null, identity, contact, room: null };
   entry.net = combineChannels(new NodeChannelFactory(), new RtcNetwork({ peerConnectionFactory: pcFactory }));
   entry.runtime = await bootTransportShell({
     sodium, identity, timeoutMs: 8000, contactSecret: contact, channels: entry.net,
@@ -90,7 +90,11 @@ try {
     nodes.push(e);
   }
   const owner = nodes[0];
-  for (const e of nodes) await netRelay(e.runtime.shell, RELAY_URL); // join the room: link through the relay, then WebRTC
+  // Meet in the room: each member is dialed through the relay, then moves to WebRTC.
+  const enter = async (e) => {
+    e.room = await joinRelayRoom({ shell: e.runtime.shell, identity: e.identity, sodium, relay: RELAY, room: ROOM, secret: e.contact });
+  };
+  for (const e of nodes) await enter(e);
 
   console.log(`booted owner + ${HOLDERS} holder(s); linking via relay ${RELAY} room ${ROOM}, then over WebRTC…`);
 
@@ -132,7 +136,7 @@ try {
   nodes.push(stranger);
   stranger.node = await StorageNode.create({
     runtime: stranger.runtime, sodium, ...wasm, config, timeoutMs: 8000 });
-  await netRelay(stranger.runtime.shell, RELAY_URL);
+  await enter(stranger);
   const before = (await owner.node.linkedPeers()).length;
   const t1 = Date.now();
   let strangerPeers = await stranger.node.linkedPeers();
@@ -153,7 +157,7 @@ try {
 } catch (e) {
   console.error("\nFAILED:", e?.message ?? e);
 } finally {
-  for (const e of nodes) { try { e.node?.close(); } catch { /* ignore */ } try { e.net.close(); } catch { /* ignore */ } }
+  for (const e of nodes) { e.room?.close(); try { e.node?.close(); } catch { /* ignore */ } try { e.net.close(); } catch { /* ignore */ } }
   relayProcess?.kill();
 }
 process.exit(ok ? 0 : 1);

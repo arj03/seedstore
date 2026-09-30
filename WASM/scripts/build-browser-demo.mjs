@@ -107,6 +107,16 @@ for (const f of ["codec.wasm", "reputation.wasm"]) {
   await copy(join(build, f), join(out, f));
 }
 
+// seedrelay's room client, which p2p.html meets its room with: rooms are the page's, not
+// the transport's. seedrelay is a sibling checkout, as seedkernel is.
+const roomsSrc = join(root, "..", "..", "seedrelay", "rooms.mjs");
+if (!existsSync(roomsSrc)) {
+  console.error(`seedrelay not found at ${dirname(roomsSrc)} — check it out beside seedstore.`);
+  process.exit(1);
+}
+mkdirSync(join(out, "seedrelay"), { recursive: true });
+await copy(roomsSrc, join(out, "seedrelay", "rooms.mjs"));
+
 // The guest program (the whole protocol) is content the page fetches as text,
 // next to the wasm — browser.js feeds it to StorageNode (no node:fs in the browser).
 await copy(join(build, "host", "tier2-guest.js"), join(out, "tier2-guest.js"));

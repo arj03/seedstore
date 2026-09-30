@@ -54,6 +54,7 @@
     "seedkernel-wasm/transport-bundle": "./seedkernel/host/transport-bundle.js",
     "seedkernel-wasm/net-rtc":        "./seedkernel/services/net-rtc.js",
     "seedkernel-wasm/socket-seam":    "./seedkernel/services/socket-seam.js",
+    "seedrelay/rooms":                "./seedrelay/rooms.mjs",
     "seedkernel-wasm/net-ws":         "./seedkernel/services/net-ws.js",
     "seedkernel-wasm/libsodium":      "./seedkernel/libsodium-wrappers.mjs",
     "seedkernel-wasm/quickjs":        "./seedkernel/quickjs/variant.mjs",
@@ -146,7 +147,10 @@
 import sodium from "seedkernel-wasm/libsodium";
 import { loadCrypto } from "seedkernel-wasm/crypto-browser";
 import { createStorageNode, loadWasmBytes } from "./host/browser.js";
-import { bootTransportShell, netPeer, netReady, netRelay, netRelayState } from "./host/storage-node.js";
+import { bootTransportShell, netAddr, netPeer, netReady, netRelay, netRelayState } from "./host/storage-node.js";
+// Rooms are this page's: it meets peers in a relay room with seedrelay's room client and
+// hands them to the transport, which knows only keys and the relays that reach them.
+import { roomClient } from "seedrelay/rooms";
 import { RtcNetwork } from "seedkernel-wasm/net-rtc";
 import { WsNetwork } from "seedkernel-wasm/net-ws";
 import { combineChannels } from "seedkernel-wasm/socket-seam";
@@ -233,10 +237,6 @@ const realmMemoryBytesFor = () => qNum("heap", 256) * 1024 * 1024;
 // share of a congested link — it weakens no protocol guarantee, but it is not free to
 // neighbours.
 const connsPerPeerFor = (mode) => (mode === "ws" ? qNum("conns", 8) : 1);
-
-// Public STUN so peers on different machines/NATs can still find a path; for
-// same-machine tabs host candidates connect without it.
-const ICE_SERVERS = [{ urls: ["stun:stun.l.google.com:19302", "stun:stun.cloudflare.com:3478"] }];
 
 const $ = (id) => document.getElementById(id);
 const logEl = $("log");
@@ -332,12 +332,13 @@ async function boot() {
     // The geometry does NOT ride in here: app config travels with the bundle load that
     // wants it, so it goes on createStorageNode below.
     let contactSecret;
-    let relayUrl = "";
+    let relayUrl = "", relayRoom = "";
     if (mode === "rtc") {
       const base = $("relay").value.trim().replace(/\/+$/, "");
       const room = $("room").value.trim();
       // A bare relay URL joins no room, so a blank room names the default one.
-      relayUrl = `${base}/${encodeURIComponent(room || "global")}`;
+      relayUrl = base;
+      relayRoom = room || "global";
       const secretHex = $("contact").value.trim();
       if (secretHex && !/^[0-9a-f]{64}$/i.test(secretHex)) {
         throw new Error("secret must be 32-byte hex (64 chars), or blank for an open room");
@@ -345,7 +346,7 @@ async function boot() {
       contactSecret = secretHex
         ? Uint8Array.from(secretHex.match(/../g).map((b) => parseInt(b, 16)))
         : undefined;
-      log(`connecting to relay ${relayUrl} …${contactSecret ? " (gated room)" : ""}`);
+      log(`connecting to relay ${relayUrl}, room ${relayRoom} …${contactSecret ? " (gated room)" : ""}`);
     }
     // The WS/TCP path carries far larger frames than WebRTC, so it gets bigger
     // blocks (fewer chunks → fewer round trips) and a bigger per-message batch cap;
@@ -362,7 +363,6 @@ async function boot() {
       sodium, identity, timeoutMs, contactSecret,
       channels: net,
       connsPerPeer: connsPerPeerFor(mode),
-      ...(mode === "rtc" ? { iceServers: ICE_SERVERS } : {}),
     });
 
     log("booting the storage node on the seedkernel (the staged ./seedstore.skb)…");
@@ -390,7 +390,22 @@ async function boot() {
       $("status").textContent = "dialing"; $("status").className = "pill ok";
       dialWs(); // reads the peers box, dials, and arms the unreachable-peer watchdog
     } else {
-      await netRelay(runtime.shell, relayUrl); // join the room: link through the relay, then WebRTC
+      // Register on the relay, then meet the room: each member is dialed through the relay
+      // (the smaller key of a pair dials), then moves to WebRTC.
+      await netRelay(runtime.shell, relayUrl);
+      const me = hex(identity.publicKey);
+      const rooms = roomClient({
+        relay: relayUrl,
+        publicKey: identity.publicKey,
+        sign: (m) => sodium.crypto_sign_detached(m, identity.privateKey),
+        onMember: (_room, key, present) => {
+          if (!present || key === me) return;
+          void netAddr(runtime.shell, key, "relay+" + relayUrl, contactSecret)
+            .then(() => (me < key ? netReady(runtime.shell, 0) : undefined)).catch(() => {});
+        },
+        onRefused: (name) => log(`room ${name} is full on this relay`),
+      });
+      await rooms.join(relayRoom);
       watchRelay(relayUrl);
       log("waiting for peers — open this page in more tabs (same room).");
     }
