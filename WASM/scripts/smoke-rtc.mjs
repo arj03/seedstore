@@ -9,6 +9,7 @@
 
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
+import { randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { loadSodium, loadWasmBytes } from "../build/host/node.js";
 import { StorageNode, bootTransportShell } from "../build/host/storage-node.js";
@@ -29,15 +30,20 @@ function typed(type, data) {
 }
 const HOLDERS = Number(process.env.HOLDERS) || 3;
 
-// The relay: a running one at RELAY=ws://host:port, or the sibling seedrelay checkout's
-// server, started here on a free port (seedrelay is a sibling checkout, as seedkernel is).
+// The relay: a running one at RELAY=ws://host:port (with RELAY_SECRET if it is private), or
+// the sibling seedrelay checkout's server, started here on a free port (seedrelay is a
+// sibling checkout, as seedkernel is). One started here is private, with a fresh secret,
+// so the smoke covers the relay's credential as it does the room's.
 const ROOM = process.env.ROOM ?? "smoke-rtc-" + Math.random().toString(16).slice(2, 10);
+const RELAY_SECRET = process.env.RELAY ? process.env.RELAY_SECRET || undefined : randomBytes(16).toString("hex");
 let relayProcess = null;
 async function startRelay() {
   if (process.env.RELAY) return process.env.RELAY.replace(/\/+$/, "");
   const server = fileURLToPath(new URL("../../../seedrelay/server.mjs", import.meta.url));
   if (!existsSync(server)) throw new Error(`no seedrelay at ${server}; check it out beside seedstore, or set RELAY`);
-  relayProcess = spawn(process.execPath, [server, "0"], { stdio: ["ignore", "pipe", "inherit"] });
+  relayProcess = spawn(process.execPath, [server, "0"], {
+    stdio: ["ignore", "pipe", "inherit"], env: { ...process.env, RELAY_SECRETS: RELAY_SECRET },
+  });
   return new Promise((resolve, reject) => {
     let out = "";
     relayProcess.stdout.on("data", (d) => {
@@ -92,7 +98,10 @@ try {
   const owner = nodes[0];
   // Meet in the room: each member is dialed through the relay, then moves to WebRTC.
   const enter = async (e) => {
-    e.room = await joinRelayRoom({ shell: e.runtime.shell, identity: e.identity, sodium, relay: RELAY, room: ROOM, secret: e.contact });
+    e.room = await joinRelayRoom({
+      shell: e.runtime.shell, identity: e.identity, sodium, relay: RELAY, room: ROOM, secret: e.contact,
+      relaySecret: RELAY_SECRET,
+    });
   };
   for (const e of nodes) await enter(e);
 

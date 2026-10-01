@@ -103,10 +103,14 @@
   <div class="row">
     secret <input id="contact" class="url mono" type="text" placeholder="optional — 32-byte hex, same in every tab (blank = open room)" />
   </div>
+  <div class="row">
+    relay secret <input id="relaySecret" class="url mono" type="password" autocomplete="off" placeholder="optional — only for a private relay (seedrelay --secret)" />
+  </div>
   <p class="muted">The secret is the room's credential: a peer that cannot produce it draws no
     response at all, the relay included. It never goes to the relay, which forwards only
     ciphertext. Blank means an open room, which is fine on localhost. A <em>wrong</em> secret has no
-    error: peers simply never link.</p>
+    error: peers simply never link. The relay secret is a different thing, the relay's own: a relay
+    started with <code>--secret</code> serves only nodes that prove it, and it never crosses the wire.</p>
 </div>
 <div id="wsConfig">
   <p class="muted">Dial natively-reachable nodes started with <code>seedkernel --listen ws=0.0.0.0:&lt;port&gt;</code>.
@@ -332,7 +336,7 @@ async function boot() {
     // The geometry does NOT ride in here: app config travels with the bundle load that
     // wants it, so it goes on createStorageNode below.
     let contactSecret;
-    let relayUrl = "", relayRoom = "";
+    let relayUrl = "", relayRoom = "", relaySecret;
     if (mode === "rtc") {
       const base = $("relay").value.trim().replace(/\/+$/, "");
       const room = $("room").value.trim();
@@ -346,7 +350,9 @@ async function boot() {
       contactSecret = secretHex
         ? Uint8Array.from(secretHex.match(/../g).map((b) => parseInt(b, 16)))
         : undefined;
-      log(`connecting to relay ${relayUrl}, room ${relayRoom} …${contactSecret ? " (gated room)" : ""}`);
+      // A private relay's secret, which the transport and the room client prove, never send.
+      relaySecret = $("relaySecret").value.trim() || undefined;
+      log(`connecting to ${relaySecret ? "private " : ""}relay ${relayUrl}, room ${relayRoom} …${contactSecret ? " (gated room)" : ""}`);
     }
     // The WS/TCP path carries far larger frames than WebRTC, so it gets bigger
     // blocks (fewer chunks → fewer round trips) and a bigger per-message batch cap;
@@ -392,12 +398,13 @@ async function boot() {
     } else {
       // Register on the relay, then meet the room: each member is dialed through the relay
       // (the smaller key of a pair dials), then moves to WebRTC.
-      await netRelay(runtime.shell, relayUrl);
+      await netRelay(runtime.shell, relayUrl, relaySecret);
       const me = hex(identity.publicKey);
       const rooms = roomClient({
         relay: relayUrl,
         publicKey: identity.publicKey,
         sign: (m) => sodium.crypto_sign_detached(m, identity.privateKey),
+        ...(relaySecret ? { secret: relaySecret, blake2b: (m) => sodium.crypto_generichash(64, m) } : {}),
         onMember: (_room, key, present) => {
           if (!present || key === me) return;
           void netAddr(runtime.shell, key, "relay+" + relayUrl, contactSecret)
@@ -463,7 +470,7 @@ function armDialWatchdog() {
 // stray click can't desync the UI. The WS peers box stays editable — it drives re-dials.
 function lockTransportChoice() {
   for (const r of document.querySelectorAll('input[name="transport"]')) r.disabled = true;
-  $("relay").disabled = true; $("room").disabled = true;
+  $("relay").disabled = true; $("room").disabled = true; $("relaySecret").disabled = true;
 }
 
 $("store").onclick = async () => {

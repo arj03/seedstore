@@ -172,8 +172,13 @@ retrieval token. You pick one of two transports on the page:
 
   Console holders use werift's pure-JS WebRTC through `scripts/werift-pc.mjs`.
   `npm run smoke:rtc` runs the same PUT→GET path headless, with no browser, against
-  the sibling seedrelay checkout's server, which it starts on a free port;
-  `RELAY=ws://host:port` points it at a running one.
+  the sibling seedrelay checkout's server, which it starts on a free port as a private
+  relay with a fresh secret; `RELAY=ws://host:port` points it at a running one.
+
+  A private relay (seedrelay's `--secret`) serves only nodes that prove its secret.
+  Give it to the page's **relay secret** box, or to a console holder or the smoke as
+  `RELAY_SECRET`; `netRelay` passes it to the transport, and the room client proves
+  it with libsodium's BLAKE2b. It never crosses the wire.
 
 A tab's block store is in RAM, because the OPFS/IndexedDB backend isn't built yet.
 Tabs acting as holders therefore forget everything on reload. For now, treat the

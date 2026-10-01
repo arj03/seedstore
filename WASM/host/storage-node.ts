@@ -103,9 +103,12 @@ export async function netPeer(
  *  with no path, "" to leave. Resolves once registered, or once that attempt has failed
  *  and the transport is redialing. Which peers to reach is the app's to say, as `relay+`
  *  addresses (`netAddr`); the transport moves each relayed link to WebRTC when the node's
- *  channels also reach `rtc:` destinations (seedkernel §12.7). */
-export function netRelay(shell: Pick<Shell, "call">, url: string): Promise<Uint8Array> {
-  return transportOp(shell, new OpArgs("relay").text(url));
+ *  channels also reach `rtc:` destinations (seedkernel §12.7). A private relay (seedrelay's
+ *  `--secret`) also wants its `secret`, which the transport proves and never sends. */
+export function netRelay(shell: Pick<Shell, "call">, url: string, secret?: string): Promise<Uint8Array> {
+  const op = new OpArgs("relay").text(url);
+  if (secret) op.text(secret);
+  return transportOp(shell, op);
 }
 
 /** The relay's state: "none", registered and "up", or "redialing". */

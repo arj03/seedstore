@@ -6,6 +6,7 @@
 //
 //   node scripts/serve-rtc-holder.mjs                (npm run serve:rtc-holder)
 //   RELAY=ws://localhost:8080 ROOM=seedstore-demo node scripts/serve-rtc-holder.mjs
+//   RELAY_SECRET=$(cat relay.secret) ...      a private relay, started with --secret
 //
 // The transport bundle speaks the relay itself, over a node:net socket and its own
 // RFC 6455 framing, so no WebSocket global is needed. Start the relay first, on NODE
@@ -23,6 +24,9 @@ import { joinRelayRoom } from "./relay-room.mjs";
 const short = (id) => id.slice(0, 12) + "…";
 const base = (process.env.RELAY ?? "ws://localhost:8080").replace(/\/+$/, "");
 const room = process.env.ROOM ?? "seedstore-demo";
+// RELAY_SECRET — a private relay's secret (seedrelay's `--secret`), proved and never sent.
+// Unset => an open relay.
+const relaySecret = process.env.RELAY_SECRET || undefined;
 
 // CONTACT — the room's shared contact secret, 32 bytes of hex. The cohort is
 // symmetric, so the value we demand of callers and present when dialing is the
@@ -67,10 +71,10 @@ const runtime = await bootTransportShell({
 // store.local is an in-RAM fs, read back through the node's FsBlobView.
 const node = await StorageNode.create({ runtime, sodium, ...wasm, config, quota: 64 * 1024 * 1024, timeoutMs: 6000 });
 // Meet in the room: members are dialed through the relay, then move to WebRTC.
-await joinRelayRoom({ shell: runtime.shell, identity, sodium, relay: base, room, secret: contactSecret });
+await joinRelayRoom({ shell: runtime.shell, identity, sodium, relay: base, room, secret: contactSecret, relaySecret });
 
 console.log(`\nseedstore RTC holder ${short(node.peerId)} ready — handlers installed: ${node.handlersInstalled()}`);
-console.log(`joined room "${room}" on ${base}  (RS k=${config.k} m=${config.m}, ${config.blockSize} B blocks)`);
+console.log(`joined room "${room}" on ${base}${relaySecret ? " (private relay)" : ""}  (RS k=${config.k} m=${config.m}, ${config.blockSize} B blocks)`);
 console.log(`open browser/p2p.html with the SAME relay + room "${room}" (or run more holders), then store a file.`);
 console.log(contactSecret
   ? `contact secret: SET — peers must dial with the same CONTACT value or they draw silence.`
