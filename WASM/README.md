@@ -160,8 +160,9 @@ retrieval token. You pick one of two transports on the page:
   ([seedrelay](https://github.com/arj03/seedrelay)), links to them through it, and
   then moves to a direct connection, using STUN for NAT traversal; where that fails,
   the link stays on the relay. Use it when holders have no port you could paste. The
-  transport bundle joins the room itself (`netRelay`) and negotiates every peer
-  connection; the page only supplies the sockets (seedkernel §12.7). For the cohort,
+  page meets the room with seedrelay's room client and registers on the relay
+  (`netRelay`); the transport bundle links to each member and negotiates every peer
+  connection over sockets the page supplies (seedkernel §12.7). For the cohort,
   open 3+ tabs in one room, or one tab plus console holders:
 
   ```sh
@@ -178,7 +179,8 @@ retrieval token. You pick one of two transports on the page:
   A private relay (seedrelay's `--secret`) serves only nodes that prove its secret.
   Give it to the page's **relay secret** box, or to a console holder or the smoke as
   `RELAY_SECRET`; `netRelay` passes it to the transport, and the room client proves
-  it with libsodium's BLAKE2b. It never crosses the wire.
+  it with libsodium's BLAKE2b. It never crosses the wire, but whoever sees a
+  registration can test guesses at it, so it must be long and random.
 
 A tab's block store is in RAM, because the OPFS/IndexedDB backend isn't built yet.
 Tabs acting as holders therefore forget everything on reload. For now, treat the
