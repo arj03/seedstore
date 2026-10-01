@@ -62,7 +62,7 @@ you trust.
 
 Seedstore builds against a sibling checkout of
 [seedkernel](https://github.com/arj03/seedkernel); the WebRTC demo also needs a
-[seedrelay](https://github.com/arj03/seedrelay) server to signal through:
+[seedrelay](https://github.com/arj03/seedrelay) server, where peers meet and link before moving to WebRTC:
 
 ```
 GitHub/

@@ -99,17 +99,27 @@ export async function netPeer(
   return pk;
 }
 
-/** Join a WebRTC signaling room — a `ws://`/`wss://` relay URL, "" to leave. The transport
- *  opens the relay link itself and connects the peers it meets there (seedkernel §12.7);
- *  the node's channels must reach both the relay and `rtc:` destinations. */
-export function netRelay(shell: Pick<Shell, "call">, url: string): Promise<Uint8Array> {
-  return transportOp(shell, new OpArgs("relay").text(url));
+/** The relay's state: "none", registered and "up", or "redialing". */
+export type RelayState = "none" | "up" | "redialing";
+/** The state byte the transport's `relay` and `relayState` ops both answer. */
+const relayStateOf = (b: Uint8Array): RelayState => (b[0] === 1 ? "up" : b[0] === 2 ? "redialing" : "none");
+
+/** Register on a relay, so peers can reach this node through it: a `ws://`/`wss://` URL
+ *  with no path, "" to leave. Resolves to the relay's state once registered, or once that
+ *  attempt has failed and the transport is redialing. Which peers to reach is the app's to
+ *  say, as `relay+` addresses (`netAddr`); the transport moves each relayed link to WebRTC
+ *  when the node's channels also reach `rtc:` destinations (seedkernel §12.7). A private
+ *  relay (seedrelay's `--secret`) also wants its `secret`, which the transport proves and
+ *  never sends. */
+export async function netRelay(shell: Pick<Shell, "call">, url: string, secret?: string): Promise<RelayState> {
+  const op = new OpArgs("relay").text(url);
+  if (secret) op.text(secret);
+  return relayStateOf(await transportOp(shell, op));
 }
 
-/** The relay's state: "none" joined, its link "up", or joined and "redialing". */
-export async function netRelayState(shell: Pick<Shell, "call">): Promise<"none" | "up" | "redialing"> {
-  const b = await transportOp(shell, new OpArgs("relayState"));
-  return b[0] === 1 ? "up" : b[0] === 2 ? "redialing" : "none";
+/** The relay's state now. */
+export async function netRelayState(shell: Pick<Shell, "call">): Promise<RelayState> {
+  return relayStateOf(await transportOp(shell, new OpArgs("relayState")));
 }
 
 /** The peers this node holds at least one authenticated link to. A fact about links,

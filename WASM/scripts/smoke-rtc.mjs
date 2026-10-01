@@ -1,20 +1,25 @@
 // Headless storage-over-WebRTC smoke: an owner + N holders, all werift-backed
-// RtcNetworks whose transports signal through an IN-PROCESS relay room (no relay
-// process), connect over real WebRTC (ICE -> DTLS -> SCTP on loopback) and
-// PUT -> GET a file. Node-parity of the relay + STUN path browser/p2p.html runs —
-// the same transport signaling and StorageNode, with loopback candidates standing in
-// for STUN-punched ones; RELAY= points the same transports at a real seedrelay.
+// RtcNetworks, meet in a room on a seedrelay, link through it, move to real WebRTC
+// (ICE -> DTLS -> SCTP on loopback) and PUT -> GET a file. Node-parity of the relay +
+// STUN path browser/p2p.html runs: the same transport and StorageNode, with loopback
+// candidates standing in for STUN-punched ones. It starts the sibling seedrelay
+// checkout's server on a free port; RELAY= points it at a running one instead.
 //
 //   node scripts/smoke-rtc.mjs            (or: bun scripts/smoke-rtc.mjs)   HOLDERS=n
 
+import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
+import { randomBytes } from "node:crypto";
+import { fileURLToPath } from "node:url";
 import { loadSodium, loadWasmBytes } from "../build/host/node.js";
-import { StorageNode, bootTransportShell, netRelay } from "../build/host/storage-node.js";
+import { StorageNode, bootTransportShell } from "../build/host/storage-node.js";
 import { MsgType, encodeHaveReq, decodeMask } from "../build/host/protocol.js";
 import { bytesEqual } from "../build/host/util.js";
 import { RtcNetwork } from "seedkernel-wasm/net-rtc";
 import { NodeChannelFactory } from "seedkernel-wasm/net-node";
 import { combineChannels } from "seedkernel-wasm/socket-seam";
 import { weriftPeerConnectionFactory } from "./werift-pc.mjs";
+import { joinRelayRoom } from "./relay-room.mjs";
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -25,49 +30,40 @@ function typed(type, data) {
 }
 const HOLDERS = Number(process.env.HOLDERS) || 3;
 
-// Two modes. Default: an in-process relay room (offline, Node or Bun). With
-// RELAY=ws://host:port set: the REAL seedrelay path against a running server — the
-// exact signaling serve-rtc-holder.mjs + p2p.html use:
-//   RELAY=ws://127.0.0.1:8080 node scripts/smoke-rtc.mjs
-const RELAY = process.env.RELAY ? process.env.RELAY.replace(/\/+$/, "") : null;
+// The relay: a running one at RELAY=ws://host:port (with RELAY_SECRET if it is private), or
+// the sibling seedrelay checkout's server, started here on a free port (seedrelay is a
+// sibling checkout, as seedkernel is). One started here is private, with a fresh secret,
+// so the smoke covers the relay's credential as it does the room's.
 const ROOM = process.env.ROOM ?? "smoke-rtc-" + Math.random().toString(16).slice(2, 10);
-const RELAY_URL = RELAY ? `${RELAY}/${encodeURIComponent(ROOM)}` : "ws://in-process-relay/room";
-
-// An in-memory relay room, as a socket factory: every frame one member sends reaches
-// every OTHER member, verbatim, as seedrelay forwards it. Delivery is deferred, as a
-// socket's is.
-function makeRelayRoom() {
-  const members = new Set();
-  return {
-    connect(dest) {
-      if (dest !== RELAY_URL) return null;
-      const m = { msg: null, dead: false };
-      members.add(m);
-      return {
-        send(bytes) {
-          for (const o of members) {
-            if (o === m) continue;
-            const copy = Uint8Array.from(bytes);
-            setTimeout(() => { if (!o.dead) o.msg?.(copy); }, 0);
-          }
-        },
-        onData(cb) { m.msg = cb; },
-        onClose() {},
-        close() { m.dead = true; members.delete(m); },
-        buffered: () => 0,
-      };
-    },
-    listen: async (addrs) => addrs.map(() => 0),
-    close() {},
-  };
+const RELAY_SECRET = process.env.RELAY ? process.env.RELAY_SECRET || undefined : randomBytes(16).toString("hex");
+let relayProcess = null;
+async function startRelay() {
+  if (process.env.RELAY) return process.env.RELAY.replace(/\/+$/, "");
+  const server = fileURLToPath(new URL("../../../seedrelay/server.mjs", import.meta.url));
+  if (!existsSync(server)) throw new Error(`no seedrelay at ${server}; check it out beside seedstore, or set RELAY`);
+  relayProcess = spawn(process.execPath, [server, "0"], {
+    stdio: ["ignore", "pipe", "inherit"], env: { ...process.env, RELAY_SECRETS: RELAY_SECRET },
+  });
+  return new Promise((resolve, reject) => {
+    let out = "";
+    relayProcess.stdout.on("data", (d) => {
+      out += d;
+      const m = /listening on (ws:\/\/[^/\s]+)\//.exec(out);
+      if (m) resolve(m[1]);
+    });
+    relayProcess.once("exit", (code) => reject(new Error(`seedrelay exited ${code}`)));
+  });
 }
+const RELAY = await startRelay();
 
 const sodium = await loadSodium();
 const wasm = await loadWasmBytes();
-// The relay each node's transport dials: the in-process room, or a real one over node:net.
-const room = RELAY ? null : makeRelayRoom();
 // Loopback host candidate so every pair connects with no STUN (the smoke is offline).
-const pcFactory = weriftPeerConnectionFactory({ iceAdditionalHostAddresses: ["127.0.0.1"] });
+// Every peer connection is kept, to check the peers moved off the relay.
+const werift = weriftPeerConnectionFactory({ iceAdditionalHostAddresses: ["127.0.0.1"] });
+const pcs = [];
+const pcFactory = (cfg) => { const pc = werift(cfg); pcs.push(pc); return pc; };
+const connected = () => pcs.filter((pc) => pc.connectionState === "connected").length;
 // Small file, replicated to every holder; 48 KiB stays under werift's 64 KiB
 // data-channel reassembly cap, and maxMessageBytes holds batched OFFER/STORE/
 // FETCH to the same ceiling.
@@ -79,12 +75,12 @@ const CONTACT = process.env.CONTACT
   ? Uint8Array.from(process.env.CONTACT.match(/../g).map((b) => parseInt(b, 16)))
   : sodium.randombytes_buf(32);
 
-// A WebRTC-edge node (no TCP/WS listeners); storage geometry does not ride
-// here — it goes on StorageNode.create, so the transport guest never sees it.
+// A node with no listeners, reachable only through the relay; storage geometry does not
+// ride here: it goes on StorageNode.create, so the transport guest never sees it.
 async function makeNode(contact = CONTACT) {
   const identity = (() => { const kp = sodium.crypto_sign_keypair(); return { publicKey: kp.publicKey, privateKey: kp.privateKey }; })();
-  const entry = { node: null, runtime: null, net: null };
-  entry.net = combineChannels(room ?? new NodeChannelFactory(), new RtcNetwork({ peerConnectionFactory: pcFactory }));
+  const entry = { node: null, runtime: null, net: null, identity, contact, room: null };
+  entry.net = combineChannels(new NodeChannelFactory(), new RtcNetwork({ peerConnectionFactory: pcFactory }));
   entry.runtime = await bootTransportShell({
     sodium, identity, timeoutMs: 8000, contactSecret: contact, channels: entry.net,
   });
@@ -100,9 +96,16 @@ try {
     nodes.push(e);
   }
   const owner = nodes[0];
-  for (const e of nodes) await netRelay(e.runtime.shell, RELAY_URL); // join the room → the WebRTC dance begins
+  // Meet in the room: each member is dialed through the relay, then moves to WebRTC.
+  const enter = async (e) => {
+    e.room = await joinRelayRoom({
+      shell: e.runtime.shell, identity: e.identity, sodium, relay: RELAY, room: ROOM, secret: e.contact,
+      relaySecret: RELAY_SECRET,
+    });
+  };
+  for (const e of nodes) await enter(e);
 
-  console.log(`booted owner + ${HOLDERS} holder(s); forming the WebRTC mesh (${RELAY ? `via relay ${RELAY} room ${ROOM}` : "in-process signaling, no relay"})…`);
+  console.log(`booted owner + ${HOLDERS} holder(s); linking via relay ${RELAY} room ${ROOM}, then over WebRTC…`);
 
   // Wait for the owner to link every holder (werift's pure-JS DTLS/SCTP is slow).
   const t0 = Date.now();
@@ -114,6 +117,10 @@ try {
   if (ownerPeers.length < HOLDERS) {
     throw new Error(`owner linked only ${ownerPeers.length}/${HOLDERS} holders in time`);
   }
+  // Every pair in the cohort moves to WebRTC: one connected peer connection at each end.
+  const pairs = (HOLDERS + 1) * HOLDERS / 2;
+  while (connected() < 2 * pairs && Date.now() - t0 < 30000) await sleep(150);
+  console.log(`${connected() / 2}/${pairs} pairs moved to WebRTC`);
 
   const data = new Uint8Array(1000);
   for (let i = 0; i < data.length; i++) data[i] = (i * 7 + 3) & 255;
@@ -130,14 +137,15 @@ try {
 
   const got = await owner.node.get(r.root, r.key);
   const roundTrip = bytesEqual(got, data);
+  const direct = connected() >= 2 * pairs;
 
-  // Negative: a stranger with the right room but the WRONG contact secret. Refusal
-  // is SILENT by design (§12.6.2), so we assert "never links" within the same 30 s window.
+  // Negative: a stranger in the room with the WRONG contact secret. Refusal is SILENT by
+  // design (§12.6.2), so we assert "never links" within the same 30 s window.
   const stranger = await makeNode(sodium.randombytes_buf(32));
   nodes.push(stranger);
   stranger.node = await StorageNode.create({
     runtime: stranger.runtime, sodium, ...wasm, config, timeoutMs: 8000 });
-  await netRelay(stranger.runtime.shell, RELAY_URL);
+  await enter(stranger);
   const before = (await owner.node.linkedPeers()).length;
   const t1 = Date.now();
   let strangerPeers = await stranger.node.linkedPeers();
@@ -148,16 +156,17 @@ try {
   const ownerAfter = (await owner.node.linkedPeers()).length;
   const gated = strangerPeers.length === 0 && ownerAfter === before;
   console.log(gated
-    ? `\ngate holds — a peer with the wrong contact secret linked 0 nodes in 30 s (refused in silence)`
-    : `\nGATE FAILED — stranger linked ${strangerPeers.length}, owner links ${before} → ${ownerAfter}`);
+    ? `\ngate holds: a peer with the wrong contact secret linked 0 nodes in 30 s (refused in silence)`
+    : `\nGATE FAILED: stranger linked ${strangerPeers.length}, owner links ${before} → ${ownerAfter}`);
 
-  ok = roundTrip && onAll && gated;
+  ok = roundTrip && onAll && gated && direct;
   console.log(ok
-    ? `\nOK — file replicated to all ${HOLDERS} holders + retrieved over WebRTC (data peer-to-peer; the relay carries signaling only)`
-    : `\nFAIL — roundTrip=${roundTrip}, onAllHolders=${onAll}, gated=${gated}`);
+    ? `\nOK: file replicated to all ${HOLDERS} holders and retrieved; every pair met through the relay and moved to WebRTC`
+    : `\nFAIL: roundTrip=${roundTrip}, onAllHolders=${onAll}, gated=${gated}, direct=${direct}`);
 } catch (e) {
   console.error("\nFAILED:", e?.message ?? e);
 } finally {
-  for (const e of nodes) { try { e.node?.close(); } catch { /* ignore */ } try { e.net.close(); } catch { /* ignore */ } }
+  for (const e of nodes) { e.room?.close(); try { e.node?.close(); } catch { /* ignore */ } try { e.net.close(); } catch { /* ignore */ } }
+  relayProcess?.kill();
 }
 process.exit(ok ? 0 : 1);

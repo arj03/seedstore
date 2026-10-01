@@ -54,6 +54,7 @@
     "seedkernel-wasm/transport-bundle": "./seedkernel/host/transport-bundle.js",
     "seedkernel-wasm/net-rtc":        "./seedkernel/services/net-rtc.js",
     "seedkernel-wasm/socket-seam":    "./seedkernel/services/socket-seam.js",
+    "seedrelay/rooms":                "./seedrelay/rooms.mjs",
     "seedkernel-wasm/net-ws":         "./seedkernel/services/net-ws.js",
     "seedkernel-wasm/libsodium":      "./seedkernel/libsodium-wrappers.mjs",
     "seedkernel-wasm/quickjs":        "./seedkernel/quickjs/variant.mjs",
@@ -70,10 +71,10 @@
   across the cohort's nodes; any tab can reconstruct it. Two ways to reach the cohort:
   <strong>Direct WebSocket</strong> — dial a known set of natively-reachable nodes
   (a public IP / LAN / port-forward) straight at their <code>ws</code>-labelled listener,
-  no relay and no STUN (<code>WsNetwork</code>); or <strong>WebRTC</strong> — tabs find
-  each other through a WebSocket relay (signaling only) and then talk directly,
-  peer-to-peer, no server in the data path (the same <code>RtcNetwork</code> a Node peer
-  joins via werift, seedkernel §12.6).
+  no relay and no STUN (<code>WsNetwork</code>); or <strong>WebRTC</strong> — tabs meet
+  and link through a WebSocket relay, then move to a direct peer-to-peer connection, with
+  no server left in the data path (the same <code>RtcNetwork</code> a Node peer joins via
+  werift, seedkernel §12.7). Where WebRTC cannot connect, the link stays on the relay.
 </p>
 <p class="muted">
   Direct WebSocket is the default because its holders are <code>seedkernel</code> processes
@@ -102,10 +103,14 @@
   <div class="row">
     secret <input id="contact" class="url mono" type="text" placeholder="optional — 32-byte hex, same in every tab (blank = open room)" />
   </div>
+  <div class="row">
+    relay secret <input id="relaySecret" class="url mono" type="password" autocomplete="off" placeholder="optional — only for a private relay (seedrelay --secret)" />
+  </div>
   <p class="muted">The secret is the room's credential: a peer that cannot produce it draws no
-    response at all, the relay included. It never leaves this page — only signaling goes to the
-    relay. Blank means an open room, which is fine on localhost. A <em>wrong</em> secret has no
-    error: peers simply never link.</p>
+    response at all, the relay included. It never goes to the relay, which forwards only
+    ciphertext. Blank means an open room, which is fine on localhost. A <em>wrong</em> secret has no
+    error: peers simply never link. The relay secret is a different thing, the relay's own: a relay
+    started with <code>--secret</code> serves only nodes that prove it, and it never crosses the wire.</p>
 </div>
 <div id="wsConfig">
   <p class="muted">Dial natively-reachable nodes started with <code>seedkernel --listen ws=0.0.0.0:&lt;port&gt;</code>.
@@ -146,7 +151,10 @@
 import sodium from "seedkernel-wasm/libsodium";
 import { loadCrypto } from "seedkernel-wasm/crypto-browser";
 import { createStorageNode, loadWasmBytes } from "./host/browser.js";
-import { bootTransportShell, netPeer, netReady, netRelay, netRelayState } from "./host/storage-node.js";
+import { bootTransportShell, netAddr, netPeer, netReady, netRelay, netRelayState } from "./host/storage-node.js";
+// Rooms are this page's: it meets peers in a relay room with seedrelay's room client and
+// hands them to the transport, which knows only keys and the relays that reach them.
+import { roomClient } from "seedrelay/rooms";
 import { RtcNetwork } from "seedkernel-wasm/net-rtc";
 import { WsNetwork } from "seedkernel-wasm/net-ws";
 import { combineChannels } from "seedkernel-wasm/socket-seam";
@@ -233,10 +241,6 @@ const realmMemoryBytesFor = () => qNum("heap", 256) * 1024 * 1024;
 // share of a congested link — it weakens no protocol guarantee, but it is not free to
 // neighbours.
 const connsPerPeerFor = (mode) => (mode === "ws" ? qNum("conns", 8) : 1);
-
-// Public STUN so peers on different machines/NATs can still find a path; for
-// same-machine tabs host candidates connect without it.
-const ICE_SERVERS = [{ urls: ["stun:stun.l.google.com:19302", "stun:stun.cloudflare.com:3478"] }];
 
 const $ = (id) => document.getElementById(id);
 const logEl = $("log");
@@ -326,17 +330,19 @@ async function boot() {
 
     // The transport is a signed bundle. Build the socket factories first, then boot the
     // shared shell with them and the bundle admitted. In WebRTC mode the transport opens
-    // the relay as a WebSocket itself and drives the peer connections RtcNetwork holds.
-    // WebRTC links are same-deployment links, so both ends use the node's own room
-    // contact secret; direct WS peers carry THEIR secret in each parsed address.
+    // the relay as a WebSocket itself, links through it, and drives the peer connections
+    // RtcNetwork holds. A room shares one contact secret, so both ends use the node's
+    // own; direct WS peers carry THEIR secret in each parsed address.
     // The geometry does NOT ride in here: app config travels with the bundle load that
     // wants it, so it goes on createStorageNode below.
     let contactSecret;
-    let relayUrl = "";
+    let relayUrl = "", relayRoom = "", relaySecret;
     if (mode === "rtc") {
       const base = $("relay").value.trim().replace(/\/+$/, "");
       const room = $("room").value.trim();
-      relayUrl = room ? `${base}/${encodeURIComponent(room)}` : base;
+      // A bare relay URL joins no room, so a blank room names the default one.
+      relayUrl = base;
+      relayRoom = room || "global";
       const secretHex = $("contact").value.trim();
       if (secretHex && !/^[0-9a-f]{64}$/i.test(secretHex)) {
         throw new Error("secret must be 32-byte hex (64 chars), or blank for an open room");
@@ -344,7 +350,9 @@ async function boot() {
       contactSecret = secretHex
         ? Uint8Array.from(secretHex.match(/../g).map((b) => parseInt(b, 16)))
         : undefined;
-      log(`connecting to relay ${relayUrl} …${contactSecret ? " (gated room)" : ""}`);
+      // A private relay's secret, which the transport and the room client prove, never send.
+      relaySecret = $("relaySecret").value.trim() || undefined;
+      log(`connecting to ${relaySecret ? "private " : ""}relay ${relayUrl}, room ${relayRoom} …${contactSecret ? " (gated room)" : ""}`);
     }
     // The WS/TCP path carries far larger frames than WebRTC, so it gets bigger
     // blocks (fewer chunks → fewer round trips) and a bigger per-message batch cap;
@@ -361,7 +369,6 @@ async function boot() {
       sodium, identity, timeoutMs, contactSecret,
       channels: net,
       connsPerPeer: connsPerPeerFor(mode),
-      ...(mode === "rtc" ? { iceServers: ICE_SERVERS } : {}),
     });
 
     log("booting the storage node on the seedkernel (the staged ./seedstore.skb)…");
@@ -389,7 +396,23 @@ async function boot() {
       $("status").textContent = "dialing"; $("status").className = "pill ok";
       dialWs(); // reads the peers box, dials, and arms the unreachable-peer watchdog
     } else {
-      await netRelay(runtime.shell, relayUrl); // join the room — peers begin the WebRTC handshake
+      // Register on the relay, then meet the room: each member is dialed through the relay
+      // (the smaller key of a pair dials), then moves to WebRTC.
+      await netRelay(runtime.shell, relayUrl, relaySecret);
+      const me = hex(identity.publicKey);
+      const rooms = roomClient({
+        relay: relayUrl,
+        publicKey: identity.publicKey,
+        sign: (m) => sodium.crypto_sign_detached(m, identity.privateKey),
+        ...(relaySecret ? { secret: relaySecret, blake2b: (m) => sodium.crypto_generichash(64, m) } : {}),
+        onMember: (_room, key, present) => {
+          if (!present || key === me) return;
+          void netAddr(runtime.shell, key, "relay+" + relayUrl, contactSecret)
+            .then(() => (me < key ? netReady(runtime.shell, 0) : undefined)).catch(() => {});
+        },
+        onRefused: (name) => log(`room ${name} is full on this relay`),
+      });
+      await rooms.join(relayRoom);
       watchRelay(relayUrl);
       log("waiting for peers — open this page in more tabs (same room).");
     }
@@ -447,7 +470,7 @@ function armDialWatchdog() {
 // stray click can't desync the UI. The WS peers box stays editable — it drives re-dials.
 function lockTransportChoice() {
   for (const r of document.querySelectorAll('input[name="transport"]')) r.disabled = true;
-  $("relay").disabled = true; $("room").disabled = true;
+  $("relay").disabled = true; $("room").disabled = true; $("relaySecret").disabled = true;
 }
 
 $("store").onclick = async () => {
