@@ -11,7 +11,7 @@
 // The transport bundle speaks the relay itself, over a node:net socket and its own
 // RFC 6455 framing, so no WebSocket global is needed. Start the relay first, on NODE
 // not Bun (Bun's http upgrade swallows writes):
-//   cd ../../seedchat && npm run relay
+//   cd ../../seedshell && npm run relay
 
 import { loadSodium, loadWasmBytes } from "../build/host/node.js";
 import { StorageNode } from "../build/host/storage-node.js";

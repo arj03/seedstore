@@ -166,7 +166,7 @@ retrieval token. You pick one of two transports on the page:
   open 3+ tabs in one room, or one tab plus console holders:
 
   ```sh
-  (cd ../../seedchat && npm run relay)   # seedrelay on ws://localhost:8080
+  (cd ../../seedshell && npm run relay)  # seedrelay on ws://localhost:8080
   npm run serve:rtc-holder               # a console holder joining the room; run two
   #   then pick WebRTC in p2p.html (relay ws://localhost:8080, room "seedstore-demo")
   ```

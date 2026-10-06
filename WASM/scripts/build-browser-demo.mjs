@@ -346,4 +346,4 @@ console.log("  ── DO NOT use a plain `http-server` without -c-1: its default
 console.log("     the browser keep a STALE codec.wasm after a rebuild → confusing errors.");
 console.log("  in-page cohort:        http://localhost:3000/index.html");
 console.log("  real P2P (direct WS):  seedkernel --listen ws=… nodes, endpoints pasted in → http://localhost:3000/p2p.html");
-console.log("  real P2P (relay+STUN): `seedrelay` (or seedchat's `npm run relay`) + npm run serve:rtc-holder");
+console.log("  real P2P (relay+STUN): `seedrelay` (or seedshell's `npm run relay`) + npm run serve:rtc-holder");
