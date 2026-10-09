@@ -390,7 +390,15 @@ export async function run(t) {
     }
     t.ok(consistent, "every holder's has(id) matches its store.list()");
 
+    // Both holders have every block. A read that asks the best-scored holder for all of
+    // them leaves the other's links idle, so count the ids each one was asked for.
+    const holders = nodes.filter((x) => x !== owner);
+    const asked = async (n) => { const s = (await n.stats()).get(MsgType.FETCH); return s ? (s.recvBytes - 4 * s.recv) / 32 : 0; };
+    await Promise.all(holders.map(asked)); // clear — only the GET below is counted
     t.ok(bytesEqual(await owner.get(put.root, put.key), data), "GET round-trips on a 2-holder cohort");
+    const [askedA, askedB] = await Promise.all(holders.map(asked));
+    t.ok(Math.min(askedA, askedB) * 3 >= askedA + askedB,
+      `a replicated file is read from both its holders (${askedA} and ${askedB} blocks asked)`);
 
     // What the demo user actually did: kill a holder, then read. k=1 means any one
     // surviving copy reconstructs the file.

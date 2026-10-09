@@ -393,14 +393,17 @@ async function cohortPeers() { return decodePeers(await netOp("peers", EMPTY)); 
 // each distinct peer's score (by PROMISE, not settled value, so concurrent lookups
 // share one in-flight call) for its lifetime, so ranking overlapping holder subsets
 // across a round costs one bridge crossing per peer, not one per (peer, id).
+// `inStanding` drops the peers scored below zero while any peer is at or above it, for a
+// caller that spreads work over the list instead of taking its head (gatherBlocks).
 async function makeRanker() {
   const t = Date.now();
   const cache = new Map(); // peerHex → Promise<decayed score>
   const scoreOf = (p) => { let s = cache.get(p); if (s === undefined) cache.set(p, s = repScore(fromHex(p), t)); return s; };
-  return async (peers) => {
+  return async (peers, inStanding = false) => {
     if (peers.length === 0) return [];
-    const scored = await Promise.all(peers.map(async (p) => ({ p, s: await scoreOf(p) })));
-    return scored.sort((a, b) => b.s - a.s).map((x) => x.p);
+    const scored = (await Promise.all(peers.map(async (p) => ({ p, s: await scoreOf(p) })))).sort((a, b) => b.s - a.s);
+    const kept = inStanding && scored[0].s >= 0 ? scored.filter((x) => x.s >= 0) : scored;
+    return kept.map((x) => x.p);
   };
 }
 // One-shot ranker for callers that rank a single list (its own fresh cache).
@@ -871,8 +874,13 @@ async function runFetchTasks(byPeer, maxIds, apply) {
   }
 }
 // Fetch every block the file's chunks need, batched per holder. Each still-missing
-// block is requested from its best untried holder; a coded chunk stops at k. Every
+// block is requested from one untried holder; a coded chunk stops at k. Every
 // returned block is hash-verified (§4.2) and scores its holder (§8).
+//
+// A block several peers hold (a k = 1 replica, §4.1) goes to whichever of them has the
+// fewest blocks queued this round, the better-scored on a tie. Taking the best-scored
+// every time read a whole replicated file from one holder and left the others' links
+// idle. A holder scored below zero is still passed over while another has the block (§10).
 async function gatherBlocks(descriptors, holders) {
   const c = CFG;
   const got = new Map();
@@ -898,7 +906,9 @@ async function gatherBlocks(descriptors, holders) {
     // every id that shares that holder reuses the cached score (§13).
     const rankRound = await makeRanker();
     const byPeer = new Map(); // peer → [idHex]
+    const queuedOn = (p) => { const l = byPeer.get(p); return l ? l.length : 0; };
     const queued = new Set();
+    const me = await myPeer();
     for (const d of descriptors) {
       let need = stillNeeds(d);
       if (need === 0) continue;
@@ -906,9 +916,13 @@ async function gatherBlocks(descriptors, holders) {
         if (need === 0) break;
         const h = toHex(id);
         if (got.has(h) || queued.has(h)) continue;
-        const cands = await rankRound([...(holders.get(h) || new Set())].filter((p) => !triedOf(h).has(p)));
+        const cands = await rankRound([...(holders.get(h) || new Set())].filter((p) => !triedOf(h).has(p)), true);
         if (cands.length === 0) continue;
-        let list = byPeer.get(cands[0]); if (!list) byPeer.set(cands[0], (list = []));
+        // Our own copy costs no round trip, so it is read before any peer's.
+        let peer = cands[0];
+        if (cands.includes(me)) peer = me;
+        else for (const p of cands) if (queuedOn(p) < queuedOn(peer)) peer = p;
+        let list = byPeer.get(peer); if (!list) byPeer.set(peer, (list = []));
         list.push(h);
         queued.add(h);
         need--;
@@ -916,7 +930,6 @@ async function gatherBlocks(descriptors, holders) {
     }
     if (byPeer.size === 0) break;
 
-    const me = await myPeer();
     // Apply one peer-slice's fetched blocks: verify each by hash (§4.2), record the
     // first good copy, and score the holder (§8) — self is never scored. `blocks` is
     // aligned to `ids` (bytes|null per id), or null for the whole slice if the peer

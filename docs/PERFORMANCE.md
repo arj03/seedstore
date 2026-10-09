@@ -82,8 +82,8 @@ per run:
 
 | | rate | |
 |---|---:|---|
-| **PUT** | ~12.5 MB/s wire | ~6.2 MB/s of file, because RS(1,1) ships 2× |
-| **GET** | ~18.5 MB/s | |
+| **PUT** | ~12.0 MB/s wire | ~6.0 MB/s of file, because RS(1,1) ships 2× |
+| **GET** | ~19.3 MB/s | reads alternate between the two holders, which measured ~8% over reading every block from one |
 
 Reproduce it against live nodes with:
 
