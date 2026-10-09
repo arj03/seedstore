@@ -92,6 +92,15 @@ node --experimental-websocket scripts/p2p-cli.mjs --peers … --size 50 \
      --timeout 30000 --guest-deadline 60000
 ```
 
+Most of the gap between the two rows is the link, not the engine. Raw TCP over the
+same path with the same 16 flows (`iperf3 -c <host> -P 16 -t 10`, and `-R` for the
+download direction) carried ~14 MB/s up and ~29 MB/s down. So PUT runs at roughly
+85–90% of what the uplink carries, and GET at about two thirds of the downlink. The
+uplink is half the downlink, and RS(1,1) ships 2×, which is why PUT moves about a
+third of the file bytes GET does. The iperf runs were not taken alongside the table,
+and one of the three rounds ran at half those rates in both directions, so read the
+percentages as approximate.
+
 A real browser↔browser WebRTC link in the `p2p.html` demo reports ~13 MB/s in both
 directions.
 
