@@ -94,7 +94,9 @@ export async function netPeer(
   if (secret !== undefined && !hex32(secret)) throw new Error(`bad peer contact secret (want 64 hex characters): ${spec}`);
   const where = spec.slice(at + 1).trim();
   const dest = where.includes("://") ? where : `${defaultScheme}://${where}`;
-  if (!parseDest(dest)) throw new Error(`bad peer destination (want [scheme://]host:port[/path]): ${spec}`);
+  // A `relay+` destination reaches the peer through that relay (seedkernel §12.7).
+  const relayed = dest.startsWith("relay+") ? dest.slice("relay+".length) : dest;
+  if (!parseDest(relayed)) throw new Error(`bad peer destination (want [relay+][scheme://]host:port[/path]): ${spec}`);
   await netAddr(shell, pk, dest, secret === undefined ? undefined : fromHex(secret));
   return pk;
 }

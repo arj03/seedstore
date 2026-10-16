@@ -17,7 +17,12 @@
 //   node --experimental-websocket scripts/p2p-cli.mjs \
 //     --peers "pk[.secret]@host:port,…" [--size 10] [--file path] \
 //     [--puts 1] [--gets 1] [--author hex|none] [--block 256] [--batch 1024] [--window 64] \
-//     [--timeout 5000] [--guest-deadline 60000]
+//     [--timeout 5000] [--guest-deadline 60000] [--relay ws://host:port]
+//
+// `--relay` meets the peers through that seedrelay instead: a bare `pk[.secret]` is
+// reached through it, the node also holds UDP sockets, and timing starts once every
+// link has moved to its direct UDP path (seedkernel §12.7). The frame/drain report sees
+// only the WebSocket sockets, so in this mode it reads the relay's share, not the bulk.
 //
 // `.secret` is THAT PEER's contact secret (its credential, not ours — we only dial).
 // Omit for an open peer; a wrong secret draws silence, not an error, so "never
@@ -37,6 +42,9 @@ import { readFile } from "node:fs/promises";
 import { randomBytes, timingSafeEqual } from "node:crypto";
 
 import { WsNetwork } from "seedkernel-wasm/net-ws";
+import { UdpNetwork } from "seedkernel-wasm/net-udp";
+import { combineChannels } from "seedkernel-wasm/socket-seam";
+import { OpArgs } from "seedkernel-wasm/op-frame";
 import { createStorageNode, loadSodium, defaultConfig, PRODUCTION_BLOCK_SIZE, toHex } from "../build/host/node.js";
 import { DEFAULT_QUOTA_BYTES } from "../build/host/core.js";
 
@@ -69,7 +77,10 @@ const mParam = num("m", 1);
 // holders-per-chunk); holders must run the multi-link core. --conns 1 to A/B
 // against a single flow. Default 8, the transport's `maxHalfOpenPerSource`: a holder
 // admits no more links than that from one address and closes the rest at handshake.
-const connsN = num("conns", 8);
+// Through a relay every connection is a splice, and the UDP path is one flow whose
+// window already runs as eight, so that mode defaults to one.
+const relayUrl = args.get("relay");
+const connsN = num("conns", relayUrl ? 1 : 8);
 const blockSize = num("block", PRODUCTION_BLOCK_SIZE / 1024) * 1024;
 // Per-message cap, and the real lever on a wire-bound link: a streaming window holds a
 // fixed number of blocks, so SMALLER messages put more of them in flight to feed the
@@ -191,8 +202,9 @@ const config = { ...defaultConfig(blockSize, kParam, mParam), maxMessageBytes, f
 // The transport is a signed bundle: build the WS ChannelFactory first, then boot
 // the shared shell with it installed. Wrapped sodium rides into the shell so
 // record-layer AEAD costs stay instrumented. Storage geometry does NOT ride here.
-const { bootTransportShell, netPeer, netReady } = await import("../build/host/storage-node.js");
-const net = new WsNetwork({ webSocketFactory: wsFactory });
+const { bootTransportShell, netPeer, netReady, netRelay } = await import("../build/host/storage-node.js");
+const ws = new WsNetwork({ webSocketFactory: wsFactory });
+const net = relayUrl ? combineChannels(ws, new UdpNetwork()) : ws;
 const runtime = await bootTransportShell({
   sodium: wrapTransportSodium(sodium),
   identity,
@@ -205,8 +217,11 @@ const runtime = await bootTransportShell({
 let node = await createStorageNode({ runtime, config, quota: DEFAULT_QUOTA_BYTES, timeoutMs, guestDeadlineMs });
 console.log(`node ready: RS(${kParam},${mParam}), ${blockSize / 1024} KiB blocks, batch ${Math.round(maxMessageBytes / 1024)} KiB, window ${windowN}, conns/peer ${connsN}, wtarget ${wtargetMB > 0 ? wtargetMB + " MB" : "4 MiB (default)"}, heap ${heapMB > 0 ? heapMB + " MB" : "64 MiB (default)"}, timeout ${timeoutMs} ms, guest deadline ${guestDeadlineMs ?? "host default"}${guestDeadlineMs == null ? "" : " ms"}`);
 
+if (relayUrl) console.log(`relay ${relayUrl}: ${await netRelay(runtime.shell, relayUrl)}`);
 const expected = new Set();
-for (const spec of specs) expected.add(await netPeer(runtime.shell, spec, "ws"));
+for (const spec of specs) {
+  expected.add(await netPeer(runtime.shell, relayUrl && !spec.includes("@") ? `${spec}@relay+${relayUrl}` : spec, "ws"));
+}
 // The signed transport owns dialing, fan-out, retries and the readiness deadline.
 // ready() is best-effort and resolves on its timeout, so inspect its source-of-truth
 // peer set once afterward to turn a partial CLI startup into a useful error.
@@ -217,6 +232,20 @@ if (![...expected].every((pid) => peerUp.has(pid))) {
   throw new Error(`only ${[...expected].filter((pid) => peerUp.has(pid)).length}/${expected.size} peers linked after 10 s`);
 }
 console.log(`${peerUp.size} peer(s) linked\n`);
+if (relayUrl) {
+  // The transport's `routes`: [key 32][direct u8] per linked peer.
+  const direct = async () => {
+    const r = await runtime.shell.call("_net", new OpArgs("routes").build());
+    let n = 0;
+    for (let off = 0; off + 33 <= r.length; off += 33) if (expected.has(hex(r.subarray(off, off + 32)))) n += r[off + 32];
+    return n;
+  };
+  const t0 = now();
+  while ((await direct()) < expected.size && now() - t0 < 30000) await new Promise((r) => setTimeout(r, 100));
+  const n = await direct();
+  if (n < expected.size) throw new Error(`only ${n}/${expected.size} links moved to UDP after 30 s`);
+  console.log(`${n} link(s) direct over UDP after ${(now() - t0).toFixed(0)} ms\n`);
+}
 
 // Pay the codec + crypto cold-JIT tax now (throwaway encode/decode, no network), so
 // the first measured PUT reflects steady-state encode, not V8 realm warmup.

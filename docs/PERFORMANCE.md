@@ -104,6 +104,35 @@ percentages as approximate.
 A real browser↔browser WebRTC link in the `p2p.html` demo reports ~13 MB/s in both
 directions.
 
+### UDP and TCP on one pair
+
+The same geometry (RS(1,1), 256 KiB blocks, 512 KiB batches, a 24 MB window, 50 MB
+per run) on a second WAN pair: a Node initiator, one remote holder and one local
+holder, both native `seedkernel`. Timing starts only once every link is up. The UDP
+arm meets the holders through a relay and waits for each link to move to its direct
+UDP path (seedkernel §12.7); the TCP arm dials their `ws` listeners. Three runs per
+arm, back to back:
+
+| | PUT (wire) | GET |
+|---|---:|---:|
+| **UDP**, one flow per holder | 17–19 MB/s | 28–37 MB/s |
+| **TCP**, 8 connections per holder | 14–17 MB/s | 33–34 MB/s |
+
+The UDP flow's window behaves as eight NewReno flows at once, the aggregate the eight
+TCP connections give. Only half of each PUT crosses the WAN, since the other holder is
+local, so these rates compare with each other and not with the table above.
+
+`p2p-cli.mjs` runs either arm:
+
+```sh
+# UDP: bare keys are reached through the relay
+node --experimental-websocket scripts/p2p-cli.mjs --relay ws://<relay>:8080 \
+     --peers "<pkA>,<pkB>" --size 50 --timeout 30000 --guest-deadline 60000
+# TCP: each holder's ws listener
+node --experimental-websocket scripts/p2p-cli.mjs --peers "<pkA>@<hostA>:<port>,<pkB>@<hostB>:<port>" \
+     --size 50 --timeout 30000 --guest-deadline 60000
+```
+
 ### The two benches answer different questions
 
 `bench-net.mjs` models a fixed per-message delay with no bandwidth limit and no
