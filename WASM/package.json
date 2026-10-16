@@ -15,16 +15,15 @@
     "build:bundle": "node scripts/build-bundle.mjs",
     "build:browser-demo": "node scripts/build-browser-demo.mjs",
     "serve:demo": "npm run build:browser-demo && npx --yes http-server build/browser-demo -p 3000 -c-1",
-    "serve:rtc-holder": "node --experimental-websocket scripts/serve-rtc-holder.mjs",
-    "smoke:rtc": "node --experimental-websocket scripts/smoke-rtc.mjs",
+    "serve:holder": "node --experimental-websocket scripts/serve-holder.mjs",
+    "smoke:relay": "node --experimental-websocket scripts/smoke-relay.mjs",
     "build": "npm run build:wasm && npm run build:host && npm run build:guest && npm run build:host:min && npm run build:bundle",
     "build:browser": "npm run build && npm run build:browser-demo",
     "build:debug": "asc assembly/codec/index.ts --config asconfig.codec.json --target debug && asc assembly/reputation/index.ts --config asconfig.reputation.json --target debug",
     "test": "npm run build && node tests/run.mjs"
   },
   "dependencies": {
-    "seedkernel-wasm": "file:../../seedkernel/WASM",
-    "werift": "^0.24.4"
+    "seedkernel-wasm": "file:../../seedkernel/WASM"
   },
   "devDependencies": {
     "@types/node": "^20.11.0",

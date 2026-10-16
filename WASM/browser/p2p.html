@@ -73,8 +73,9 @@
   (a public IP / LAN / port-forward) straight at their <code>ws</code>-labelled listener,
   no relay and no STUN (<code>WsNetwork</code>); or <strong>WebRTC</strong> — tabs meet
   and link through a WebSocket relay, then move to a direct peer-to-peer connection, with
-  no server left in the data path (the same <code>RtcNetwork</code> a Node peer joins via
-  werift, seedkernel §12.7). Where WebRTC cannot connect, the link stays on the relay.
+  no server left in the data path (<code>RtcNetwork</code>, seedkernel §12.7). Where WebRTC cannot
+  connect, the link stays on the relay, and so does a link to a console holder, which has no
+  WebRTC.
 </p>
 <p class="muted">
   Direct WebSocket is the default because its holders are <code>seedkernel</code> processes
@@ -95,7 +96,7 @@
   <p class="muted">Needs the app-neutral <code>seedrelay</code> server; from seedshell,
     <code>npm run relay</code> starts it. Then open this page in
     <strong>3+ tabs</strong> using the same room, or one tab plus console holders
-    (<code>npm run serve:rtc-holder</code>).</p>
+    (<code>npm run serve:holder</code>), which a tab reaches through the relay.</p>
   <div class="row">
     relay <input id="relay" class="url mono" type="text" value="ws://localhost:8080" />
     room <input id="room" class="room mono" type="text" value="seedstore-demo" />
@@ -355,8 +356,8 @@ async function boot() {
       log(`connecting to ${relaySecret ? "private " : ""}relay ${relayUrl}, room ${relayRoom} …${contactSecret ? " (gated room)" : ""}`);
     }
     // The WS/TCP path carries far larger frames than WebRTC, so it gets bigger
-    // blocks (fewer chunks → fewer round trips) and a bigger per-message batch cap;
-    // WebRTC stays under the werift ~64 KiB channel on both. realmMemoryBytes is
+    // blocks (fewer chunks → fewer round trips) and a bigger per-message batch cap
+    // than WebRTC mode. realmMemoryBytes is
     // host-only — split back out by createStorageNode and applied as the storage load's
     // own realm bound; the rest of this object is that bundle's LOCAL. Neither half
     // reaches the shell, which also hosts the transport.

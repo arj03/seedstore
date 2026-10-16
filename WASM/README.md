@@ -167,13 +167,14 @@ retrieval token. You pick one of two transports on the page:
 
   ```sh
   (cd ../../seedshell && npm run relay)  # seedrelay on ws://localhost:8080
-  npm run serve:rtc-holder               # a console holder joining the room; run two
+  npm run serve:holder                   # a console holder joining the room; run two
   #   then pick WebRTC in p2p.html (relay ws://localhost:8080, room "seedstore-demo")
   ```
 
-  Console holders use werift's pure-JS WebRTC through `scripts/werift-pc.mjs`.
-  `npm run smoke:rtc` runs the same PUT→GET path headless, with no browser, against
-  the sibling seedrelay checkout's server, which it starts on a free port as a private
+  Console holders have no WebRTC, so a tab's link to one stays on the relay. Between
+  themselves they move to a UDP path (seedkernel's `net-udp`, §12.7). `npm run
+  smoke:relay` runs the PUT→GET path headless, with no browser, through the relay and
+  then over UDP, against the sibling seedrelay checkout's server, which it starts on a free port as a private
   relay with a fresh secret; `RELAY=ws://host:port` points it at a running one.
 
   A private relay (seedrelay's `--secret`) serves only nodes that prove its secret.
@@ -291,7 +292,7 @@ browser/   index.html, p2p.html                        demos
 scripts/   build-guest / build-bundle / storage-bundle build steps
            build-browser-demo / minify / clean
            p2p-cli                                     headless PUT/GET against live nodes
-           serve-rtc-holder / smoke-rtc / werift-pc    WebRTC console holders
+           serve-holder / smoke-relay                  console holders in a relay room
 tests/     *.test.mjs (run.mjs), bench*.mjs, harness + helpers + fixtures
 ```
 

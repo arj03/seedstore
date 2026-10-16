@@ -1,11 +1,11 @@
-// Headless storage-over-WebRTC smoke: an owner + N holders, all werift-backed
-// RtcNetworks, meet in a room on a seedrelay, link through it, move to real WebRTC
-// (ICE -> DTLS -> SCTP on loopback) and PUT -> GET a file. Node-parity of the relay +
-// STUN path browser/p2p.html runs: the same transport and StorageNode, with loopback
-// candidates standing in for STUN-punched ones. It starts the sibling seedrelay
-// checkout's server on a free port; RELAY= points it at a running one instead.
+// Headless storage-over-relay smoke: an owner + N holders meet in a room on a seedrelay,
+// link through it, move to a direct UDP path (seedkernel's net-udp, §12.7) and PUT -> GET
+// a file. The relay half is what browser/p2p.html runs; the direct half is what console
+// nodes take between themselves, with this machine's own addresses as the candidates. It
+// starts the sibling seedrelay checkout's server on a free port; RELAY= points it at a
+// running one instead.
 //
-//   node scripts/smoke-rtc.mjs            (or: bun scripts/smoke-rtc.mjs)   HOLDERS=n
+//   node scripts/smoke-relay.mjs            (or: bun scripts/smoke-relay.mjs)   HOLDERS=n
 
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
@@ -15,10 +15,10 @@ import { loadSodium, loadWasmBytes } from "../build/host/node.js";
 import { StorageNode, bootTransportShell } from "../build/host/storage-node.js";
 import { MsgType, encodeHaveReq, decodeMask } from "../build/host/protocol.js";
 import { bytesEqual } from "../build/host/util.js";
-import { RtcNetwork } from "seedkernel-wasm/net-rtc";
+import { UdpNetwork } from "seedkernel-wasm/net-udp";
 import { NodeChannelFactory } from "seedkernel-wasm/net-node";
 import { combineChannels } from "seedkernel-wasm/socket-seam";
-import { weriftPeerConnectionFactory } from "./werift-pc.mjs";
+import { OpArgs } from "seedkernel-wasm/op-frame";
 import { joinRelayRoom } from "./relay-room.mjs";
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -34,7 +34,7 @@ const HOLDERS = Number(process.env.HOLDERS) || 3;
 // the sibling seedrelay checkout's server, started here on a free port (seedrelay is a
 // sibling checkout, as seedkernel is). One started here is private, with a fresh secret,
 // so the smoke covers the relay's credential as it does the room's.
-const ROOM = process.env.ROOM ?? "smoke-rtc-" + Math.random().toString(16).slice(2, 10);
+const ROOM = process.env.ROOM ?? "smoke-relay-" + Math.random().toString(16).slice(2, 10);
 const RELAY_SECRET = process.env.RELAY ? process.env.RELAY_SECRET || undefined : randomBytes(16).toString("hex");
 let relayProcess = null;
 async function startRelay() {
@@ -58,15 +58,16 @@ const RELAY = await startRelay();
 
 const sodium = await loadSodium();
 const wasm = await loadWasmBytes();
-// Loopback host candidate so every pair connects with no STUN (the smoke is offline).
-// Every peer connection is kept, to check the peers moved off the relay.
-const werift = weriftPeerConnectionFactory({ iceAdditionalHostAddresses: ["127.0.0.1"] });
-const pcs = [];
-const pcFactory = (cfg) => { const pc = werift(cfg); pcs.push(pc); return pc; };
-const connected = () => pcs.filter((pc) => pc.connectionState === "connected").length;
-// Small file, replicated to every holder; 48 KiB stays under werift's 64 KiB
-// data-channel reassembly cap, and maxMessageBytes holds batched OFFER/STORE/
-// FETCH to the same ceiling.
+/** How many of a node's linked peers it reaches over a direct path (the transport's
+ *  `routes` op: `[key 32][direct u8]` apiece). */
+async function directPeers(e) {
+  const routes = await e.runtime.shell.call("_net", new OpArgs("routes").build());
+  let n = 0;
+  for (let off = 32; off < routes.length; off += 33) n += routes[off];
+  return n;
+}
+const directPairs = async () => (await Promise.all(nodes.map(directPeers))).reduce((a, b) => a + b, 0) / 2;
+// Small file, replicated to every holder.
 const config = { k: 1, m: HOLDERS, blockSize: 48 * 1024, maxMessageBytes: 48 * 1024 };
 
 // The room's shared, symmetric contact secret. Gating this smoke (rather than
@@ -80,7 +81,7 @@ const CONTACT = process.env.CONTACT
 async function makeNode(contact = CONTACT) {
   const identity = (() => { const kp = sodium.crypto_sign_keypair(); return { publicKey: kp.publicKey, privateKey: kp.privateKey }; })();
   const entry = { node: null, runtime: null, net: null, identity, contact, room: null };
-  entry.net = combineChannels(new NodeChannelFactory(), new RtcNetwork({ peerConnectionFactory: pcFactory }));
+  entry.net = combineChannels(new NodeChannelFactory(), new UdpNetwork());
   entry.runtime = await bootTransportShell({
     sodium, identity, timeoutMs: 8000, contactSecret: contact, channels: entry.net,
   });
@@ -96,7 +97,7 @@ try {
     nodes.push(e);
   }
   const owner = nodes[0];
-  // Meet in the room: each member is dialed through the relay, then moves to WebRTC.
+  // Meet in the room: each member is dialed through the relay, then moves to a UDP path.
   const enter = async (e) => {
     e.room = await joinRelayRoom({
       shell: e.runtime.shell, identity: e.identity, sodium, relay: RELAY, room: ROOM, secret: e.contact,
@@ -105,9 +106,9 @@ try {
   };
   for (const e of nodes) await enter(e);
 
-  console.log(`booted owner + ${HOLDERS} holder(s); linking via relay ${RELAY} room ${ROOM}, then over WebRTC…`);
+  console.log(`booted owner + ${HOLDERS} holder(s); linking via relay ${RELAY} room ${ROOM}, then over UDP…`);
 
-  // Wait for the owner to link every holder (werift's pure-JS DTLS/SCTP is slow).
+  // Wait for the owner to link every holder.
   const t0 = Date.now();
   let ownerPeers = await owner.node.linkedPeers();
   while (ownerPeers.length < HOLDERS && Date.now() - t0 < 30000) {
@@ -117,10 +118,10 @@ try {
   if (ownerPeers.length < HOLDERS) {
     throw new Error(`owner linked only ${ownerPeers.length}/${HOLDERS} holders in time`);
   }
-  // Every pair in the cohort moves to WebRTC: one connected peer connection at each end.
+  // Every pair in the cohort moves to a UDP path, which each end reads as direct.
   const pairs = (HOLDERS + 1) * HOLDERS / 2;
-  while (connected() < 2 * pairs && Date.now() - t0 < 30000) await sleep(150);
-  console.log(`${connected() / 2}/${pairs} pairs moved to WebRTC`);
+  while ((await directPairs()) < pairs && Date.now() - t0 < 30000) await sleep(150);
+  console.log(`${await directPairs()}/${pairs} pairs moved to a UDP path`);
 
   const data = new Uint8Array(1000);
   for (let i = 0; i < data.length; i++) data[i] = (i * 7 + 3) & 255;
@@ -137,7 +138,7 @@ try {
 
   const got = await owner.node.get(r.root, r.key);
   const roundTrip = bytesEqual(got, data);
-  const direct = connected() >= 2 * pairs;
+  const direct = (await directPairs()) >= pairs;
 
   // Negative: a stranger in the room with the WRONG contact secret. Refusal is SILENT by
   // design (§12.6.2), so we assert "never links" within the same 30 s window.
@@ -161,7 +162,7 @@ try {
 
   ok = roundTrip && onAll && gated && direct;
   console.log(ok
-    ? `\nOK: file replicated to all ${HOLDERS} holders and retrieved; every pair met through the relay and moved to WebRTC`
+    ? `\nOK: file replicated to all ${HOLDERS} holders and retrieved; every pair met through the relay and moved to a UDP path`
     : `\nFAIL: roundTrip=${roundTrip}, onAllHolders=${onAll}, gated=${gated}, direct=${direct}`);
 } catch (e) {
   console.error("\nFAILED:", e?.message ?? e);
