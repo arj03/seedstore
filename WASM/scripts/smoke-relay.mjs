@@ -11,8 +11,8 @@ import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
-import { loadSodium, loadWasmBytes } from "../build/host/node.js";
-import { StorageNode, bootTransportShell } from "../build/host/storage-node.js";
+import { loadSodium, loadWasmBytes, storageRuntime, inProcessStandUp } from "../build/host/node.js";
+import { StorageNode } from "../build/host/storage-node.js";
 import { MsgType, encodeHaveReq, decodeMask } from "../build/host/protocol.js";
 import { bytesEqual } from "../build/host/util.js";
 import { nodeChannels, nodeDatagrams } from "seedkernel-wasm/shell-node";
@@ -79,8 +79,8 @@ const CONTACT = process.env.CONTACT
 async function makeNode(contact = CONTACT) {
   const identity = (() => { const kp = sodium.crypto_sign_keypair(); return { publicKey: kp.publicKey, privateKey: kp.privateKey }; })();
   const entry = { node: null, runtime: null, identity, contact, room: null };
-  entry.runtime = await bootTransportShell({
-    sodium, identity, timeoutMs: 8000, contactSecret: contact, channels: nodeChannels(), datagrams: nodeDatagrams(),
+  entry.runtime = await storageRuntime(inProcessStandUp, {
+    identity, timeoutMs: 8000, contactSecret: contact, channels: nodeChannels(), datagrams: nodeDatagrams(),
   });
   return entry;
 }

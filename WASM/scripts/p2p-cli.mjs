@@ -199,12 +199,16 @@ const config = { ...defaultConfig(blockSize, kParam, mParam), maxMessageBytes, f
   ...(heapMB > 0 ? { realmMemoryBytes: Math.round(heapMB * 1024 * 1024) } : {}) };
 
 // The transport is a signed bundle: build the WS ChannelFactory first, then boot
-// the shared shell with it installed. Wrapped sodium rides into the shell so
+// the shared shell with it installed. The node is assembled by seedkernel's `bootShell`
+// here rather than a host's `standUp`, so the wrapped sodium rides into the shell and
 // record-layer AEAD costs stay instrumented. Storage geometry does NOT ride here.
-const { bootTransportShell, netPeer, netReady, netRelay } = await import("../build/host/storage-node.js");
+const { netPeer, netReady, netRelay } = await import("../build/host/storage-node.js");
+const { storageRuntime } = await import("../build/host/node.js");
+const { bootShell } = await import("seedkernel-wasm/shell-core");
+const { MemoryFs } = await import("seedkernel-wasm/fs-memory");
+const instrumentedStandUp = (cfg) => bootShell({ ...cfg, sodium: wrapTransportSodium(sodium), fs: new MemoryFs() });
 const ws = new WsNetwork({ webSocketFactory: wsFactory });
-const runtime = await bootTransportShell({
-  sodium: wrapTransportSodium(sodium),
+const runtime = await storageRuntime(instrumentedStandUp, {
   identity,
   timeoutMs,
   channels: ws,

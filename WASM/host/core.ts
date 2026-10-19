@@ -8,6 +8,21 @@ export interface Identity {
   privateKey: Uint8Array;
 }
 
+/** This app's label — the bundle manifest's `app`, and so the whole of its signing
+ *  scope: every node running storage under this label derives the same scope, whoever
+ *  authored the bundle. */
+export const STORAGE_APP = "seedstore";
+
+/** The wire protocol id storage speaks (seedkernel §12.10), claimed by the
+ *  bundle's signed manifest (`protocols`, scripts/storage-bundle.mjs) and read by
+ *  the guest's NET_PROTO — stated once here rather than retyped per deployment. */
+export const STORAGE_PROTO = "seedstore";
+
+/** The service the network is reached through: the one the transport bundle claims, and
+ *  so the one storage's bundle requires (scripts/storage-bundle.mjs, which checks it
+ *  against seedkernel's transport) and its guest calls (NET_ID). */
+export const NET_SERVICE = "_net";
+
 /** The durability/overhead dial, set once per deployment (§4.1, §27). */
 export interface StorageConfig {
   k: number;

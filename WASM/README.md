@@ -124,7 +124,7 @@ import { createConnectedCohort, loadSodium, loadWasmBytes, LoopbackNetwork } fro
 const sodium = await loadSodium();
 const wasm = await loadWasmBytes();
 const net = new LoopbackNetwork();
-const nodes = await createConnectedCohort({ count: 6, network: net, sodium, wasm, config: { k: 2, m: 2, blockSize: 64 } });
+const nodes = await createConnectedCohort({ count: 6, network: net, sodium, wasm, config: { k: 2, m: 2, blockSize: 512 } });
 
 const data = new TextEncoder().encode("hello, cohort");
 const put = await nodes[0].put(data);              // chunk → encrypt → RS → place → root
@@ -133,10 +133,12 @@ const got = await nodes[0].get(put.root, put.key); // locate → fetch any k →
 
 `LoopbackNetwork` runs the real transport bundle (AKE, record layer, routing) over
 in-memory channel pairs, so an in-process cohort exercises the shipped stack. There
-is one protocol implementation. `StorageNode` boots the host, admits the signed
-transport and storage bundles, and drives the confined guest, and nothing else. The
-block store defaults to in-memory. A server uses a directory, and a browser would use
-OPFS/IndexedDB (§12).
+is one protocol implementation. Each node is one the seedkernel host stands up, with
+the signed transport installed (`storageRuntime` over a host's `standUp`: an in-memory
+host of its own per node here, `bootNodeShell` on a server, the page's `browserHost` in a
+browser). `StorageNode` installs the signed storage bundle on it and drives the confined
+guest, and nothing else. The block store is the host's: in memory here, a directory on a
+server, OPFS/IndexedDB in a browser (§12).
 
 ## Browser demos
 

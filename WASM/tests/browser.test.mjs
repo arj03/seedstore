@@ -30,14 +30,20 @@ export async function run(t) {
     };
   };
   try {
-    const { createStorageNode, LoopbackNetwork, StorageNode } = await import("../build/host/browser.js");
+    const { createStorageNode, storageRuntime, LoopbackNetwork, StorageNode } = await import("../build/host/browser.js");
+    const { inProcessStandUp } = await import("../build/host/node.js");
 
     t.group("browser entry: fetch-loaded bundle + injected sodium runs a node");
     const net = new LoopbackNetwork();
     const config = { k: 2, m: 2, blockSize: 1024 };
     const nodes = [];
     for (let i = 0; i < 5; i++) {
-      nodes.push(await createStorageNode({ network: net, sodium, baseUrl: "build/", config, timeoutMs: 40 }));
+      const identity = sodium.crypto_sign_keypair();
+      const runtime = await storageRuntime(inProcessStandUp, {
+        identity, timeoutMs: 40, channels: net.view(Buffer.from(identity.publicKey).toString("hex")),
+        listen: [{ label: "tcp", host: "127.0.0.1", port: 0 }],
+      });
+      nodes.push(await createStorageNode({ runtime, sodium, baseUrl: "build/", config }));
     }
     for (let i = 0; i < nodes.length; i++) {
       for (let j = i + 1; j < nodes.length; j++) await StorageNode.connect(nodes[i], nodes[j]);

@@ -1,12 +1,10 @@
-// Browser entry point — fetches the seedstore bundle (.skb) and boots a StorageNode
-// against the caller-provided core libsodium. The page readies libsodium and
-// passes it in. Browser nodes run the same protocol as long-running peers,
-// differing only in backend and default quota (§1, §8).
+// Browser entry point — fetches the seedstore bundle (.skb) and loads it onto a node the
+// page's seedkernel host stood up (seedkernel-wasm/platform-web `browserHost`, then
+// `storageRuntime`). The page readies its own libsodium for what storage computes
+// host-side. Browser nodes run the same protocol as long-running peers, differing only in
+// backend and default quota (§1, §8).
 
-import type { Sodium } from "./sodium.js";
 import { StorageNode, type StorageNodeOptions } from "./storage-node.js";
-import { LoopbackNetwork } from "./loopback.js";
-import { toHex } from "./util.js";
 
 export interface WasmBytes {
   bundleBlob: Uint8Array;
@@ -27,37 +25,20 @@ export async function loadWasmBytes(baseUrl: string | URL = "./"): Promise<WasmB
   return { bundleBlob };
 }
 
-/** Boot one storage node in the browser. Pass a readied core libsodium. */
+/** Load the seedstore bundle onto the page's node (`opts.runtime`), fetching the bundle
+ *  when it is not passed. */
 export async function createStorageNode(
-  opts: Omit<StorageNodeOptions, "bundleBlob" | "sodium"> & {
-    sodium: Sodium; wasm?: WasmBytes; baseUrl?: string | URL;
-    /** An in-process fabric to join: each node binds its own loopback port and
-     *  dials through it (the in-page cohort). Browser WebSocket/WebRTC callers
-     *  instead pass a prebuilt runtime whose ChannelFactory was installed at boot. */
-    network?: LoopbackNetwork;
-  },
+  opts: Omit<StorageNodeOptions, "bundleBlob"> & { wasm?: WasmBytes; baseUrl?: string | URL },
 ): Promise<StorageNode> {
-  const sodium = opts.sodium as Sodium;
-  await sodium.ready;
   const wasm = opts.wasm ?? (await loadWasmBytes(opts.baseUrl));
-  const { network, ...rest } = opts;
-  // The in-process fabric needs the identity BEFORE the node boots (its view is
-  // keyed by peer id), so mint one here when the caller left it to the node. Only
-  // on the build-your-own-runtime path: a prebuilt `runtime` already has both a
-  // socket seam and the identity it registered under.
-  let o = rest;
-  if (network && !o.runtime) {
-    const identity = o.identity ?? (() => { const kp = sodium.crypto_sign_keypair(); return { publicKey: kp.publicKey, privateKey: kp.privateKey }; })();
-    o = { ...o, identity, channels: network.view(toHex(identity.publicKey)), listen: [{ label: "tcp", host: "127.0.0.1", port: 0 }] };
-  }
-  return StorageNode.create({ ...o, bundleBlob: wasm.bundleBlob, sodium });
+  return StorageNode.create({ ...opts, bundleBlob: wasm.bundleBlob });
 }
 
 export { StorageNode } from "./storage-node.js";
 export { LoopbackNetwork } from "./loopback.js";
 export { createConnectedCohort } from "./cluster.js";
+export { storageRuntime, bootStorageNode } from "./runtime.js";
 export type { StorageNodeOptions } from "./storage-node.js";
 export { netAddr, netPeer, netRelay, netRelayState, netContact, netReady, netPeers } from "./storage-node.js";
 export type { StorageConfig, Identity } from "./core.js";
-export { defaultConfig } from "./core.js";
-export { STORAGE_APP, STORAGE_PROTO } from "./descriptor.js";
+export { defaultConfig, STORAGE_APP, STORAGE_PROTO } from "./core.js";

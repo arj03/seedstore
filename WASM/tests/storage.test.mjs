@@ -10,10 +10,11 @@
 
 import {
   LoopbackNetwork, loadWasmBytes, loadSodium, createConnectedCohort, StorageNode,
+  bootStorageNode, inProcessStandUp, inProcessHost,
 } from "../build/host/node.js";
 import { encodeFetchBatchReq, decodeFetchBatchRes, encodeStoreBatch, decodeMask, FETCH_UNANSWERED, VERDICT_ACCEPTED, VERDICT_DECLINED, VERDICT_QUOTA, VERDICT_SIBLING, VERDICT_DESCRIPTOR, MsgType } from "../build/host/protocol.js";
 import { parseSignedDescriptor, signDescriptor, encodeDescriptorList } from "../build/host/descriptor.js";
-import { MemoryFs } from "seedkernel-wasm/fs-memory";
+import { memoryRawFiles } from "seedkernel-wasm/fs-memory";
 import { toHex, fromHex, bytesEqual } from "../build/host/util.js";
 import { liveBlockCount, newKey, plantBlock } from "./helpers.mjs";
 
@@ -241,7 +242,7 @@ export async function run(t) {
     // config would see 2 live copies of a 5-copy chunk and call it healthy.
     const net = new LoopbackNetwork();
     const ownerId = sodium.crypto_sign_keypair();
-    const owner = await StorageNode.create({
+    const owner = await bootStorageNode(inProcessStandUp, {
       sodium, bundleBlob: wasm.bundleBlob, identity: ownerId,
       suppressLinkLog: true, channels: net.view(toHex(ownerId.publicKey)), listen: [{ label: "tcp", host: "127.0.0.1", port: 0 }],
       config: { k: 1, m: 4, blockSize: 1024 }, timeoutMs: TIMEOUT,
@@ -249,7 +250,7 @@ export async function run(t) {
     const holders = [];
     for (let i = 0; i < 7; i++) {
       const id = sodium.crypto_sign_keypair();
-      holders.push(await StorageNode.create({
+      holders.push(await bootStorageNode(inProcessStandUp, {
         sodium, bundleBlob: wasm.bundleBlob, identity: id,
         suppressLinkLog: true, channels: net.view(toHex(id.publicKey)), listen: [{ label: "tcp", host: "127.0.0.1", port: 0 }],
         config: { k: 1, m: 1, blockSize: 1024 }, timeoutMs: TIMEOUT,
@@ -434,7 +435,7 @@ export async function run(t) {
     const net = new LoopbackNetwork();
     const ownerCfg = { k: 2, m: 2, blockSize: 1024, maxMessageBytes: 4480 };
     const holderCfg = { ...ownerCfg, maxMessageBytes: 1600 };
-    const mk = (cfg, tag) => StorageNode.create({
+    const mk = (cfg, tag) => bootStorageNode(inProcessStandUp, {
       sodium, bundleBlob: wasm.bundleBlob, identity: tag,
       suppressLinkLog: true, channels: net.view(toHex(tag.publicKey)), listen: [{ label: "tcp", host: "127.0.0.1", port: 0 }],
       config: cfg, timeoutMs: TIMEOUT,
@@ -483,7 +484,7 @@ export async function run(t) {
     const cfg = { k: 1, m: 1, blockSize: 1024 };  // one block per chunk, m+1 = 2 copies → both holders
     const mk = (lieOnFetch) => {
       const identity = sodium.crypto_sign_keypair();
-      return StorageNode.create({
+      return bootStorageNode(inProcessStandUp, {
         sodium, bundleBlob: wasm.bundleBlob, identity,
         suppressLinkLog: true, channels: net.view(toHex(identity.publicKey)), listen: [{ label: "tcp", host: "127.0.0.1", port: 0 }],
         config: { ...cfg, lieOnFetch }, timeoutMs: TIMEOUT,
@@ -546,21 +547,21 @@ export async function run(t) {
     const net = new LoopbackNetwork();
     const writerId = sodium.crypto_sign_keypair();
     const holderId = sodium.crypto_sign_keypair();
-    const mk = (id, extra) => StorageNode.create({
+    const mk = (id, standUp) => bootStorageNode(standUp, {
       sodium, bundleBlob: wasm.bundleBlob, identity: id,
       suppressLinkLog: true, channels: net.view(toHex(id.publicKey)), listen: [{ label: "tcp", host: "127.0.0.1", port: 0 }],
-      config: { ...config, k: 1, m: 0 }, quota: 1 << 30, timeoutMs: TIMEOUT, ...extra,
+      config: { ...config, k: 1, m: 0 }, quota: 1 << 30, timeoutMs: TIMEOUT,
     });
-    // A backend that accepts reads and refuses the record write — a full disk, near
+    // A store that accepts reads and refuses the record write — a full disk, near
     // enough.
-    const failing = new MemoryFs();
-    const put0 = failing.put.bind(failing);
-    failing.put = async (key, bytes) => {
-      if (key.endsWith(".rec")) throw new Error("ENOSPC: no space left on device");
-      return put0(key, bytes);
+    const failing = memoryRawFiles();
+    const write0 = failing.write.bind(failing);
+    failing.write = (path, bytes) => {
+      if (path.endsWith(".rec")) throw new Error("ENOSPC: no space left on device");
+      return write0(path, bytes);
     };
-    const writer = await mk(writerId);
-    const holder = await mk(holderId, { fs: failing });
+    const writer = await mk(writerId, inProcessStandUp);
+    const holder = await mk(holderId, (cfg) => inProcessHost(failing).standUp(cfg));
     try {
       await StorageNode.connect(writer, holder);
       let err = null;

@@ -1,6 +1,8 @@
-// libsodium access for the storage layer. Seedstore reuses the host's
-// cryptography rather than shipping its own (SPEC §2, §16): hashing,
-// ChaCha20-Poly1305, and key-sealing are all calls on the host's core libsodium.
+// libsodium access for the storage layer: hashing, ChaCha20-Poly1305 and key-sealing. On
+// Node it is the core libsodium the seedkernel runtime loads (`loadSodium`), which is the
+// host's crypto there too (SPEC §2, §16). A page brings its own libsodium (the browser demo
+// vendors libsodium-wrappers) and takes the host's crypto from its seedkernel host
+// (StorageNodeOptions `host`).
 
 /** The subset of libsodium the storage host uses. */
 export interface Sodium {
@@ -31,17 +33,18 @@ export interface Sodium {
     public_nonce: Uint8Array, key: Uint8Array,
   ): Uint8Array;
   crypto_scalarmult(sk: Uint8Array, pk: Uint8Array): Uint8Array;
-  /** The PQ half of seedkernel's one manifest suite (§12.4). Not optional: a manifest
-   *  is signed by both an Ed25519 and an ML-DSA-65 key and requires both to verify, so
-   *  an instance without this verifies no bundle at all. `loadSodium` mixes it in. */
-  ml_dsa65_verify_detached(sig: Uint8Array, message: Uint8Array, pk: Uint8Array): boolean;
+  /** The PQ half of seedkernel's one manifest suite (§12.4), present when this instance
+   *  is also the host's crypto (`loadSodium` mixes it in): a manifest is signed by both
+   *  an Ed25519 and an ML-DSA-65 key and requires both to verify. A page's own libsodium
+   *  has none; its host's crypto is passed apart. */
+  ml_dsa65_verify_detached?(sig: Uint8Array, message: Uint8Array, pk: Uint8Array): boolean;
 }
 
 let cached: Sodium | null = null;
 
-/** Load the core libsodium the seedkernel runtime bundles, returning that one
- *  shared, readied instance. seedstore ships no second crypto library — it
- *  reuses the host's (SPEC §16). Safe to call repeatedly. */
+/** Load the core libsodium the seedkernel runtime bundles on Node, returning that one
+ *  shared, readied instance, which is the host's crypto too (SPEC §16). Safe to call
+ *  repeatedly. */
 export async function loadSodium(): Promise<Sodium> {
   if (cached) return cached;
   const { loadCrypto: kernelLoadCrypto } = await import("seedkernel-wasm");

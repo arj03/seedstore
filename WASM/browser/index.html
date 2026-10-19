@@ -14,35 +14,25 @@
   .muted { color: #666; }
 </style>
 <!-- The host code is platform-neutral. seedkernel is imported with bare,
-     EXTENSIONLESS specifiers ("seedkernel-wasm/shell-core"), so each maps explicitly
+     EXTENSIONLESS specifiers ("seedkernel-wasm/op-frame"), so each maps explicitly
      to its real ./seedkernel/*.js file (a folder-prefix map would resolve to an
      extensionless path a static server 404s). The minified seedkernel tree ships as
-     host/ + services/ (host modules import ../services/* by relative path); the seedstore
-     host needs shell-core, bundle.js, the guest seam, the transport driver +
-     the artifact transport bundle (the signed program that IS the node's network).
-     Only specifiers this page's graph actually NAMES need an entry: shell-core pulls
-     its realm engine (engine-web.js) and its module table in by RELATIVE import, so
-     neither is mapped. The realms run on seedkernel's qjs.wasm, the engine every target
-     runs, which engine-web.js fetches from ./browser/ (staged by
-     scripts/build-browser-demo.mjs), so the demo runs fully offline. Sumo libsodium is
-     NOT vendored: it comes from seedkernel, as the "seedkernel-wasm/libsodium" export
-     — the prebuilt wrapper
-     staged into ./seedkernel/ next to its core and its libsodium.wasm, which is the
-     same crypto binary the native binary embeds. -->
+     host/ + services/ (its modules import each other by relative path), and only
+     specifiers this page's graph actually NAMES need an entry. The seedkernel host
+     itself is the host blob (./host.skb, staged by scripts/build-browser-demo.mjs),
+     whose own script the page's loader runs ("seedkernel-wasm/platform-web"
+     `browserHost`): the same host the Node and native nodes run, with its crypto and
+     realms. seedstore's own code only installs its bundle on that host and calls its
+     guest (op framing, peer addresses), and what it computes host-side runs on its own
+     libsodium ("libsodium-wrappers", staged into ./libsodium/), so the demo runs fully
+     offline. -->
 <script type="importmap">
 {
   "imports": {
-    "seedkernel-wasm/shell-core":     "./seedkernel/host/shell-core.js",
-    "seedkernel-wasm/bundle":         "./seedkernel/host/bundle.js",
-    "seedkernel-wasm/crypto-browser": "./seedkernel/host/crypto-browser.js",
-    "seedkernel-wasm/guest-seam":     "./seedkernel/host/guest-seam.js",
-    "seedkernel-wasm/fs":             "./seedkernel/services/fs.js",
+    "seedkernel-wasm/platform-web":   "./seedkernel/host/platform-web.js",
     "seedkernel-wasm/op-frame":       "./seedkernel/services/op-frame.js",
     "seedkernel-wasm/peer-addr":      "./seedkernel/services/peer-addr.js",
-    "seedkernel-wasm/fs-memory":      "./seedkernel/services/fs-memory.js",
-    "seedkernel-wasm/transport-host": "./seedkernel/host/transport-host.js",
-    "seedkernel-wasm/transport-bundle": "./seedkernel/host/transport-bundle.js",
-    "seedkernel-wasm/libsodium":      "./seedkernel/libsodium-wrappers.mjs"
+    "libsodium-wrappers":             "./libsodium/libsodium-wrappers.mjs"
   }
 }
 </script>
@@ -69,8 +59,8 @@
 <div id="log"></div>
 
 <script type="module">
-import sodium from "seedkernel-wasm/libsodium";
-import { loadCrypto } from "seedkernel-wasm/crypto-browser";
+import sodium, { useWasm } from "libsodium-wrappers";
+import { browserHost, readHostBlob } from "seedkernel-wasm/platform-web";
 import { loadWasmBytes, createConnectedCohort, LoopbackNetwork } from "./host/browser.js";
 
 const logEl = document.getElementById("log");
@@ -80,15 +70,24 @@ const hex = (b) => [...b].map((x) => x.toString(16).padStart(2, "0")).join("");
 let nodes, net, lastPut;
 
 (async () => {
-  log("readying crypto (core libsodium + ML-DSA-65)…");
-  await loadCrypto(sodium, "./");
-  log("loading wasm: libsodium, codec, reputation…");
+  log("readying crypto (libsodium, and the seedkernel host's)…");
+  const hostRes = await fetch("./host.skb", { cache: "no-store" });
+  if (!hostRes.ok) throw new Error(`./host.skb was not served (HTTP ${hostRes.status})`);
+  const hostBlob = new Uint8Array(await hostRes.arrayBuffer());
+  // The page's seedkernel host: the blob's own script, which every node here stands up on.
+  const host = browserHost({ hostBlob });
+  // seedstore's own libsodium, on the libsodium.wasm the host blob already carries.
+  useWasm(readHostBlob(hostBlob).sodium);
+  await sodium.ready;
+  log("loading the seedstore bundle…");
   const wasm = await loadWasmBytes("./");
   net = new LoopbackNetwork();
   log("booting a cohort of 6 nodes on the seedkernel…");
   nodes = await createConnectedCohort({
-    count: 6, network: net, sodium, wasm,
-    config: { k: 2, m: 2, blockSize: 64 }, timeoutMs: 200,
+    count: 6, network: net, sodium, wasm, standUp: host.standUp,
+    // k·blockSize must hold two chunk descriptors (257 B each), so a file's descriptor
+    // list can reach a single root.
+    config: { k: 2, m: 2, blockSize: 512 }, timeoutMs: 200,
   });
   log(`ready. ${nodes.length} nodes, RS(2,2). handlers installed: ${nodes[0].handlersInstalled()}`);
   document.getElementById("store").disabled = false;

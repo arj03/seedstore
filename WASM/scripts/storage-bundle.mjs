@@ -17,8 +17,13 @@ import { dirname, join } from "node:path";
 import { authorBundle, hybridAuthorKeysFromSeed }
   from "seedkernel-wasm/bundle-author";
 import { TRANSPORT_SERVICE } from "seedkernel-wasm/transport-bundle";
-import { defaultConfig, normaliseConfig, PRODUCTION_BLOCK_SIZE } from "../build/host/core.js";
-import { STORAGE_PROTO } from "../build/host/descriptor.js";
+import { defaultConfig, normaliseConfig, PRODUCTION_BLOCK_SIZE, NET_SERVICE, STORAGE_PROTO } from "../build/host/core.js";
+
+// The host side calls the network by its own constant (core.ts), so a page need not load
+// seedkernel's transport module for one string; the bundle must agree with both.
+if (NET_SERVICE !== TRANSPORT_SERVICE) {
+  throw new Error(`core.ts NET_SERVICE "${NET_SERVICE}" is not the transport's service "${TRANSPORT_SERVICE}"`);
+}
 
 // The app label — the manifest `app`, and the whole of the signing scope (SPEC
 // §16). The host scopes the guest's SIGN/VERIFY ops to this label, whoever signed the

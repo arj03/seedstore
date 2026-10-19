@@ -14,7 +14,7 @@
 // not Bun (Bun's http upgrade swallows writes):
 //   cd ../../seedshell && npm run relay
 
-import { loadSodium, loadWasmBytes } from "../build/host/node.js";
+import { loadSodium, loadWasmBytes, storageRuntime, inProcessStandUp } from "../build/host/node.js";
 import { StorageNode } from "../build/host/storage-node.js";
 import { toHex } from "../build/host/util.js";
 import { nodeChannels, nodeDatagrams } from "seedkernel-wasm/shell-node";
@@ -56,9 +56,8 @@ const identity = (() => { const kp = sodium.crypto_sign_keypair(); return { publ
 // the transport bundle registers and links through the first, and signals those paths over
 // the links. A room shares one contact secret, so this node's own is the one its peers
 // present.
-const { bootTransportShell } = await import("../build/host/storage-node.js");
-const runtime = await bootTransportShell({
-  sodium, identity, timeoutMs: 6000, contactSecret, channels: nodeChannels(), datagrams: nodeDatagrams(),
+const runtime = await storageRuntime(inProcessStandUp, {
+  identity, timeoutMs: 6000, contactSecret, channels: nodeChannels(), datagrams: nodeDatagrams(),
   // No app config here — it travels with the storage bundle's own load below.
 });
 

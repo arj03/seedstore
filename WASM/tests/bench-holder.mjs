@@ -29,11 +29,13 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { performance } from "node:perf_hooks";
-import { StorageNode, loadWasmBytes, loadSodium, PRODUCTION_BLOCK_SIZE } from "../build/host/node.js";
+import {
+  StorageNode, loadWasmBytes, loadSodium, PRODUCTION_BLOCK_SIZE, bootStorageNode, inProcessStandUp, inProcessHost,
+} from "../build/host/node.js";
 import { LoopbackNetwork } from "../build/host/loopback.js";
 import { toHex, bytesEqual } from "../build/host/util.js";
 import { blockHashInput } from "../build/host/descriptor-core.js";
-import { NodeFs } from "seedkernel-wasm/fs-node";
+import { nodeRawFiles } from "seedkernel-wasm/fs-node";
 
 const FILE_MB = Number(process.argv[2] ?? 16);
 const BLOCK_KIB = Number(process.argv[3] ?? PRODUCTION_BLOCK_SIZE / 1024);
@@ -77,21 +79,21 @@ const nodes = [];
 for (let i = 0; i < 1 + holders; i++) {
   // Only the holders need a real backend — the initiator stores nothing (durability is
   // the cohort's), so putting it on disk would measure nothing and cost a temp dir.
-  let fs;
+  let standUp = inProcessStandUp, dir;
   if (ON_DISK && i > 0) {
-    const dir = mkdtempSync(join(tmpdir(), "seedstore-bench-holder-"));
+    dir = mkdtempSync(join(tmpdir(), "seedstore-bench-holder-"));
     tmpDirs.push(dir);
-    fs = new NodeFs(dir);
+    standUp = (cfg) => inProcessHost(nodeRawFiles).standUp(cfg);
   }
   const identity = (() => { const kp = sodium.crypto_sign_keypair(); return { publicKey: kp.publicKey, privateKey: kp.privateKey }; })();
   const peerId = toHex(identity.publicKey);
-  nodes.push(await StorageNode.create({
+  nodes.push(await bootStorageNode(standUp, {
     sodium,
     bundleBlob: wasm.bundleBlob,
-    identity,
+    identity, dir,
     suppressLinkLog: true, channels: net.view(peerId),
     listen: [{ label: "tcp", host: "127.0.0.1", port: 0 }],
-    config, fs,
+    config,
     // Generous: each holder takes ~fileBytes plus descriptors and record framing; a §14-full
     // holder would silently decline instead of measuring anything.
     quota: Math.max(64 * MB, fileBytes * 4),
