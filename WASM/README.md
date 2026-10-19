@@ -172,7 +172,7 @@ retrieval token. You pick one of two transports on the page:
   ```
 
   Console holders have no WebRTC, so a tab's link to one stays on the relay. Between
-  themselves they move to a UDP path (seedkernel's `net-udp`, §12.7). `npm run
+  themselves they move to a UDP path (seedkernel's UDP bundle, §12.7). `npm run
   smoke:relay` runs the PUT→GET path headless, with no browser, through the relay and
   then over UDP, against the sibling seedrelay checkout's server, which it starts on a free port as a private
   relay with a fresh secret; `RELAY=ws://host:port` points it at a running one.

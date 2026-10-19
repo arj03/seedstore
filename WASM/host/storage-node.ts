@@ -24,7 +24,7 @@ import type { ChannelFactory, ListenAddress } from "seedkernel-wasm/socket-seam"
 import { parseDest } from "seedkernel-wasm/peer-addr";
 import type { Sodium } from "./sodium.js";
 import {
-  bootShell, type AppHandle, type BootResult, type RealmFactory, type Shell,
+  bootShell, type AppHandle, type BootResult, type RealmFactory, type Shell, type TransportOptions,
 } from "seedkernel-wasm/shell-core";
 
 const NO_ARG = new Uint8Array(0);
@@ -531,6 +531,10 @@ export async function bootTransportShell(
     createRealm?: RealmFactory;
     /** STUN/TURN servers for WebRTC peers, as `RTCConfiguration.iceServers` takes them. */
     iceServers?: { urls: string | string[]; username?: string; credential?: string }[];
+    /** This machine's datagram sockets (seedkernel-wasm/shell-node `nodeDatagrams`): with
+     *  them the transport moves a linked console peer to a direct UDP path (seedkernel
+     *  §12.7). */
+    datagrams?: TransportOptions["datagrams"];
   },
 ): Promise<StorageRuntime> {
   const fs = opts.fs ?? new MemoryFs();
@@ -544,6 +548,7 @@ export async function bootTransportShell(
       channels: opts.channels,
       listen: opts.listen,
       suppressLinkLog: opts.suppressLinkLog,
+      datagrams: opts.datagrams,
       // Selecting these bytes authorizes them as the transport; a later change
       // must replace this slot explicitly. Defaults to the seedkernel-shipped artifact.
       bundle: opts.transportBlob,

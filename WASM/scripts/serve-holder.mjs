@@ -17,9 +17,7 @@
 import { loadSodium, loadWasmBytes } from "../build/host/node.js";
 import { StorageNode } from "../build/host/storage-node.js";
 import { toHex } from "../build/host/util.js";
-import { UdpNetwork } from "seedkernel-wasm/net-udp";
-import { nodeChannels } from "seedkernel-wasm/shell-node";
-import { combineChannels } from "seedkernel-wasm/socket-seam";
+import { nodeChannels, nodeDatagrams } from "seedkernel-wasm/shell-node";
 import { joinRelayRoom } from "./relay-room.mjs";
 
 const short = (id) => id.slice(0, 12) + "…";
@@ -53,14 +51,14 @@ const sodium = await loadSodium();
 const wasm = await loadWasmBytes();
 const identity = (() => { const kp = sodium.crypto_sign_keypair(); return { publicKey: kp.publicKey, privateKey: kp.privateKey }; })();
 
-// A browser-edge-style node with no listeners. Its sockets are a node:net factory for the
-// relay and a UdpNetwork for direct paths; the transport bundle registers and links
-// through the first, signals over those links, and drives the second. A room shares one
-// contact secret, so this node's own is the one its peers present.
-const net = combineChannels(nodeChannels(), new UdpNetwork());
+// A browser-edge-style node with no listeners. Its sockets are node:net for the relay and
+// this machine's datagram sockets, which seedkernel's UDP bundle makes direct paths over;
+// the transport bundle registers and links through the first, and signals those paths over
+// the links. A room shares one contact secret, so this node's own is the one its peers
+// present.
 const { bootTransportShell } = await import("../build/host/storage-node.js");
 const runtime = await bootTransportShell({
-  sodium, identity, timeoutMs: 6000, contactSecret, channels: net,
+  sodium, identity, timeoutMs: 6000, contactSecret, channels: nodeChannels(), datagrams: nodeDatagrams(),
   // No app config here — it travels with the storage bundle's own load below.
 });
 

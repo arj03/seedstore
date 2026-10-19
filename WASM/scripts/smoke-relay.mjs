@@ -1,5 +1,5 @@
 // Headless storage-over-relay smoke: an owner + N holders meet in a room on a seedrelay,
-// link through it, move to a direct UDP path (seedkernel's net-udp, §12.7) and PUT -> GET
+// link through it, move to a direct UDP path (seedkernel's UDP bundle, §12.7) and PUT -> GET
 // a file. The relay half is what browser/p2p.html runs; the direct half is what console
 // nodes take between themselves, with this machine's own addresses as the candidates. It
 // starts the sibling seedrelay checkout's server on a free port; RELAY= points it at a
@@ -15,9 +15,7 @@ import { loadSodium, loadWasmBytes } from "../build/host/node.js";
 import { StorageNode, bootTransportShell } from "../build/host/storage-node.js";
 import { MsgType, encodeHaveReq, decodeMask } from "../build/host/protocol.js";
 import { bytesEqual } from "../build/host/util.js";
-import { UdpNetwork } from "seedkernel-wasm/net-udp";
-import { nodeChannels } from "seedkernel-wasm/shell-node";
-import { combineChannels } from "seedkernel-wasm/socket-seam";
+import { nodeChannels, nodeDatagrams } from "seedkernel-wasm/shell-node";
 import { OpArgs } from "seedkernel-wasm/op-frame";
 import { joinRelayRoom } from "./relay-room.mjs";
 
@@ -80,10 +78,9 @@ const CONTACT = process.env.CONTACT
 // ride here: it goes on StorageNode.create, so the transport guest never sees it.
 async function makeNode(contact = CONTACT) {
   const identity = (() => { const kp = sodium.crypto_sign_keypair(); return { publicKey: kp.publicKey, privateKey: kp.privateKey }; })();
-  const entry = { node: null, runtime: null, net: null, identity, contact, room: null };
-  entry.net = combineChannels(nodeChannels(), new UdpNetwork());
+  const entry = { node: null, runtime: null, identity, contact, room: null };
   entry.runtime = await bootTransportShell({
-    sodium, identity, timeoutMs: 8000, contactSecret: contact, channels: entry.net,
+    sodium, identity, timeoutMs: 8000, contactSecret: contact, channels: nodeChannels(), datagrams: nodeDatagrams(),
   });
   return entry;
 }
@@ -167,7 +164,7 @@ try {
 } catch (e) {
   console.error("\nFAILED:", e?.message ?? e);
 } finally {
-  for (const e of nodes) { e.room?.close(); try { e.node?.close(); } catch { /* ignore */ } try { e.net.close(); } catch { /* ignore */ } }
+  for (const e of nodes) { e.room?.close(); try { e.node?.close(); } catch { /* ignore */ } }
   relayProcess?.kill();
 }
 process.exit(ok ? 0 : 1);

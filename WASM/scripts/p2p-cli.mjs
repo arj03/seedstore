@@ -42,8 +42,7 @@ import { readFile } from "node:fs/promises";
 import { randomBytes, timingSafeEqual } from "node:crypto";
 
 import { WsNetwork } from "seedkernel-wasm/net-ws";
-import { UdpNetwork } from "seedkernel-wasm/net-udp";
-import { combineChannels } from "seedkernel-wasm/socket-seam";
+import { nodeDatagrams } from "seedkernel-wasm/shell-node";
 import { OpArgs } from "seedkernel-wasm/op-frame";
 import { createStorageNode, loadSodium, defaultConfig, PRODUCTION_BLOCK_SIZE, toHex } from "../build/host/node.js";
 import { DEFAULT_QUOTA_BYTES } from "../build/host/core.js";
@@ -204,12 +203,13 @@ const config = { ...defaultConfig(blockSize, kParam, mParam), maxMessageBytes, f
 // record-layer AEAD costs stay instrumented. Storage geometry does NOT ride here.
 const { bootTransportShell, netPeer, netReady, netRelay } = await import("../build/host/storage-node.js");
 const ws = new WsNetwork({ webSocketFactory: wsFactory });
-const net = relayUrl ? combineChannels(ws, new UdpNetwork()) : ws;
 const runtime = await bootTransportShell({
   sodium: wrapTransportSodium(sodium),
   identity,
   timeoutMs,
-  channels: net,
+  channels: ws,
+  // Through a relay, this machine's datagram sockets, for direct UDP paths (seedkernel §12.7).
+  ...(relayUrl ? { datagrams: nodeDatagrams() } : {}),
   connsPerPeer: connsN,
 });
 
