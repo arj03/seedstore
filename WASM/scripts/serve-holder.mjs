@@ -18,7 +18,7 @@ import { loadSodium, loadWasmBytes } from "../build/host/node.js";
 import { StorageNode } from "../build/host/storage-node.js";
 import { toHex } from "../build/host/util.js";
 import { UdpNetwork } from "seedkernel-wasm/net-udp";
-import { NodeChannelFactory } from "seedkernel-wasm/net-node";
+import { nodeChannels } from "seedkernel-wasm/shell-node";
 import { combineChannels } from "seedkernel-wasm/socket-seam";
 import { joinRelayRoom } from "./relay-room.mjs";
 
@@ -57,7 +57,7 @@ const identity = (() => { const kp = sodium.crypto_sign_keypair(); return { publ
 // relay and a UdpNetwork for direct paths; the transport bundle registers and links
 // through the first, signals over those links, and drives the second. A room shares one
 // contact secret, so this node's own is the one its peers present.
-const net = combineChannels(new NodeChannelFactory(), new UdpNetwork());
+const net = combineChannels(nodeChannels(), new UdpNetwork());
 const { bootTransportShell } = await import("../build/host/storage-node.js");
 const runtime = await bootTransportShell({
   sodium, identity, timeoutMs: 6000, contactSecret, channels: net,

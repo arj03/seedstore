@@ -16,7 +16,7 @@ import { join } from "node:path";
 
 import { createConnectedCohort, loadSodium, loadWasmBytes, LoopbackNetwork } from "../build/host/node.js";
 import { StorageNode, netAddr, netReady } from "../build/host/storage-node.js";
-import { NodeChannelFactory } from "seedkernel-wasm/net-node";
+import { nodeChannels } from "seedkernel-wasm/shell-node";
 import { FsBlobView } from "../build/host/store-view.js";
 import { NodeFs } from "seedkernel-wasm/fs-node";
 import { scopedFs } from "seedkernel-wasm/shell-core";
@@ -59,7 +59,7 @@ async function tcpCohort({ count, sodium, wasm, config, baseDir }) {
     // The socket seam is a real node:net factory; the node binds an ephemeral port.
     nodes.push(await StorageNode.create({
       sodium, ...wasm, identity: newKey(sodium), config, timeoutMs: 3000,
-      suppressLinkLog: true, channels: new NodeChannelFactory(),
+      suppressLinkLog: true, channels: nodeChannels(),
       listen: [{ label: "tcp", host: "127.0.0.1", port: 0 }],
       // Give the node a disk-backed fs; its default store view reads that same fs, so
       // what the confined guest holder writes via `fs` lands on disk and node.store
@@ -252,13 +252,13 @@ export async function run(t) {
     const secretS = sodium.randombytes_buf(32);
     const S = await StorageNode.create({
       sodium, ...wasm, identity: idS, timeoutMs: 3000,
-      suppressLinkLog: true, channels: new NodeChannelFactory(),
+      suppressLinkLog: true, channels: nodeChannels(),
       listen: [{ label: "tcp", host: "127.0.0.1", port: 0 }, { label: "ws", host: "127.0.0.1", port: 0 }],
       contactSecret: secretS,
     });
     const B = await StorageNode.create({
       sodium, ...wasm, identity: idB, timeoutMs: 3000,
-      suppressLinkLog: true, channels: new NodeChannelFactory(),
+      suppressLinkLog: true, channels: nodeChannels(),
     });
     await netAddr(B.shell, S.peerId, `ws://127.0.0.1:${S.net.portOf("ws")}`, secretS);
     await netReady(B.shell, 8000);
@@ -300,7 +300,7 @@ export async function run(t) {
       const dialsWith = async (secret, deadlineMs) => {
         const n = await StorageNode.create({
           sodium, ...wasm, identity: newKey(sodium), timeoutMs: 3000,
-          suppressLinkLog: true, channels: new NodeChannelFactory(),
+          suppressLinkLog: true, channels: nodeChannels(),
         });
         try {
           await netAddr(n.shell, S.peerId, `ws://127.0.0.1:${S.net.portOf("ws")}`, secret);

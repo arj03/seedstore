@@ -21,15 +21,12 @@
      host needs shell-core, bundle.js, the guest seam, the transport driver +
      the artifact transport bundle (the signed program that IS the node's network).
      Only specifiers this page's graph actually NAMES need an entry: shell-core pulls
-     its safe-js realm and its module table in by RELATIVE import, so neither is
-     mapped. safe-js is the QuickJS sandbox the storage node runs the guest in, and
-     safe-js.js DOES name "seedkernel-wasm/quickjs" — that entry is live. Its engine
-     is seedkernel's own quickjs-ng build, staged into ./seedkernel/quickjs/ with its
-     .wasm beside it; the JS layer over it (quickjs-emscripten-core and the
-     quickjs-ffi-types it names) is VENDORED into ./vendor/ by
-     scripts/build-browser-demo.mjs, with a map entry per bare specifier in that graph,
-     so the demo runs fully offline. Sumo libsodium is likewise NOT vendored: it comes
-     from seedkernel, as the "seedkernel-wasm/libsodium" export — the prebuilt wrapper
+     its realm engine (engine-web.js) and its module table in by RELATIVE import, so
+     neither is mapped. The realms run on seedkernel's qjs.wasm, the engine every target
+     runs, which engine-web.js fetches from ./browser/ (staged by
+     scripts/build-browser-demo.mjs), so the demo runs fully offline. Sumo libsodium is
+     NOT vendored: it comes from seedkernel, as the "seedkernel-wasm/libsodium" export
+     — the prebuilt wrapper
      staged into ./seedkernel/ next to its core and its libsodium.wasm, which is the
      same crypto binary the native binary embeds. -->
 <script type="importmap">
@@ -45,10 +42,7 @@
     "seedkernel-wasm/fs-memory":      "./seedkernel/services/fs-memory.js",
     "seedkernel-wasm/transport-host": "./seedkernel/host/transport-host.js",
     "seedkernel-wasm/transport-bundle": "./seedkernel/host/transport-bundle.js",
-    "seedkernel-wasm/libsodium":      "./seedkernel/libsodium-wrappers.mjs",
-    "seedkernel-wasm/quickjs":        "./seedkernel/quickjs/variant.mjs",
-    "quickjs-emscripten-core":        "./vendor/quickjs-emscripten-core/index.mjs",
-    "@jitl/quickjs-ffi-types":        "./vendor/quickjs-ffi-types/index.mjs"
+    "seedkernel-wasm/libsodium":      "./seedkernel/libsodium-wrappers.mjs"
   }
 }
 </script>

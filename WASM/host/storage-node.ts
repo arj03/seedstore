@@ -1,6 +1,6 @@
 // StorageNode — a single storage peer running *on* the seedkernel (SPEC §19
 // bootstrap). A THIN host: the entire storage protocol lives in the confined
-// guest (host/tier2-guest.js), run in one seedkernel safe-js realm over the
+// guest (host/tier2-guest.js), run in one seedkernel realm over the
 // generic guest seam. Boots the shared `bootShell()` and loads the signed
 // bundles (§12.4) — first the transport bundle (§12.6), then the seedstore one.
 // Modules arrive only via verified `install`, never raw-bound.
@@ -197,7 +197,7 @@ export interface StorageNodeOptions {
    *  starves a large-block encode before it can finish. Omitted ⇒ the host default. */
   guestDeadlineMs?: number;
   /** The socket seam the transport driver dials/listens through (seedkernel
-   *  §12.6): an in-process fabric for tests, a NodeChannelFactory for TCP, or a
+   *  §12.6): an in-process fabric for tests, `nodeChannels()` for TCP, or a
    *  browser WebSocket/WebRTC factory. A WebRTC factory has no `connect`; its
    *  links arrive through signaling and the factory's `listen` sink. */
   channels?: ChannelFactory;

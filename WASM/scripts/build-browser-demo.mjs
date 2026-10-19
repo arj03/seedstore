@@ -9,10 +9,10 @@
 //   npx http-server build/browser-demo -p 3000   (then open /index.html, /p2p.html)
 //
 // The pages' import maps resolve "seedkernel-wasm/*" → ./seedkernel/* and this
-// project's host → ./host/. Nothing is fetched at runtime — QuickJS, libsodium,
-// and the vendored JS layer all ship under this dir, so it runs offline. Needs
-// both builds' minified host: seedstore `npm run build`, seedkernel
-// `npm run build:host && npm run build:host:min`.
+// project's host → ./host/. Nothing is fetched from elsewhere at runtime — QuickJS
+// (qjs.wasm) and libsodium ship under this dir, so it runs offline. Needs
+// both builds' minified host and seedkernel's browser/ artifacts: seedstore
+// `npm run build`, seedkernel `npm run build`.
 
 import { mkdirSync, copyFileSync, existsSync, readdirSync, statSync, rmSync,
          readFileSync } from "node:fs";
@@ -196,58 +196,19 @@ await copyJs(seedkernelHost, join(out, "seedkernel"));
   }
 }
 
-// ── the QuickJS engine: seedkernel's own build, like everything else ─────────
-// safe-js runs its realms on seedkernel's in-repo quickjs-ng build (package
-// export "seedkernel-wasm/quickjs"), staged from the seedkernel checkout rather
-// than vendored from npm. Its glue picks the browser's fetch path at runtime;
-// the four files must land in ONE dir since variant.mjs imports its siblings
-// relatively and fetches `new URL("emscripten-module.wasm", import.meta.url)`.
+// ── the QuickJS engine: seedkernel's qjs.wasm, the one every target runs ─────
+// Realms run on WebAssembly itself (seedkernel host/engine-web.ts), which fetches
+// `../../browser/qjs.wasm` relative to its own module: from ./seedkernel/host/ that
+// is ./browser/qjs.wasm here.
 {
-  const src = join(root, "..", "..", "seedkernel", "WASM", "quickjs", "dist");
-  mkdirSync(join(out, "seedkernel", "quickjs"), { recursive: true });
-  for (const f of ["variant.mjs", "ffi.mjs", "emscripten-module.mjs", "emscripten-module.wasm"]) {
-    if (!existsSync(join(src, f))) {
-      console.error(`seedkernel quickjs/dist/${f} not found at ${src} — see ` +
-        "seedkernel/WASM/quickjs/README.md.");
-      process.exit(1);
-    }
-    await copy(join(src, f), join(out, "seedkernel", "quickjs", f));
+  const src = join(root, "..", "..", "seedkernel", "WASM", "browser", "qjs.wasm");
+  if (!existsSync(src)) {
+    console.error(`seedkernel qjs.wasm not found at ${src} — build it first ` +
+      "(in seedkernel/WASM:  npm run build).");
+    process.exit(1);
   }
-}
-
-// ── vendor the browser-only npm deps so the demo runs OFFLINE ────────────────
-// What's left from npm is the JS API layer over that engine: quickjs-emscripten-core
-// plus @jitl/quickjs-ffi-types — multi-file ESM packages with their own
-// bare-specifier imports. Copy the exact runtime files into ./vendor/ and let
-// the pages' import map name every bare specifier. NOT the `quickjs-emscripten`
-// umbrella — safe-js passes its own variant. Source from seedkernel's
-// node_modules, falling back to seedstore's; libsodium is staged separately above.
-const nodeModulesDirs = [
-  join(root, "..", "..", "seedkernel", "WASM", "node_modules"),
-  join(root, "node_modules"),
-];
-function pkgDist(pkg, sub) {
-  for (const nm of nodeModulesDirs) {
-    const d = join(nm, ...pkg.split("/"), sub);
-    if (existsSync(d)) return d;
-  }
-  throw new Error(`vendor: ${pkg}/${sub} not found — run npm install (looked in ${nodeModulesDirs.join(", ")}).`);
-}
-// [package, dist subdir, dest under vendor/, explicit files, copy EVERY .mjs in the dir?]
-// quickjs-emscripten-core is chunked/code-split with hashed names (chunk-*.mjs,
-// module-*.mjs), so copy every .mjs from its dist rather than chase hashes; the leaf
-// package needs only its named entry.
-const VENDOR = [
-  ["quickjs-emscripten-core", "dist", "quickjs-emscripten-core", ["index.mjs"], true],
-  ["@jitl/quickjs-ffi-types", "dist", "quickjs-ffi-types",       ["index.mjs"], false],
-];
-for (const [pkg, sub, dest, files, allMjs] of VENDOR) {
-  const src = pkgDist(pkg, sub);
-  const dstDir = join(out, "vendor", dest);
-  mkdirSync(dstDir, { recursive: true });
-  const names = new Set(files);
-  if (allMjs) for (const n of readdirSync(src)) if (n.endsWith(".mjs")) names.add(n);
-  for (const n of names) await copy(join(src, n), join(dstDir, n));
+  mkdirSync(join(out, "browser"), { recursive: true });
+  await copy(src, join(out, "browser", "qjs.wasm"));
 }
 
 // The signed bundle, if one has been built (`npm run build:bundle`). ONE artifact
@@ -339,7 +300,7 @@ function prune(dir) {
 }
 prune(out);
 
-console.log(`browser demo staged at ${out}  (deps vendored under ./vendor — runs offline)`);
+console.log(`browser demo staged at ${out}  (runs offline)`);
 
 console.log("serve it:   npm run serve:demo        (re-stages + http-server with caching OFF)");
 console.log("  ── DO NOT use a plain `http-server` without -c-1: its default max-age=3600 makes");

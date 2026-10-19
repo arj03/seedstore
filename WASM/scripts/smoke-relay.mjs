@@ -16,7 +16,7 @@ import { StorageNode, bootTransportShell } from "../build/host/storage-node.js";
 import { MsgType, encodeHaveReq, decodeMask } from "../build/host/protocol.js";
 import { bytesEqual } from "../build/host/util.js";
 import { UdpNetwork } from "seedkernel-wasm/net-udp";
-import { NodeChannelFactory } from "seedkernel-wasm/net-node";
+import { nodeChannels } from "seedkernel-wasm/shell-node";
 import { combineChannels } from "seedkernel-wasm/socket-seam";
 import { OpArgs } from "seedkernel-wasm/op-frame";
 import { joinRelayRoom } from "./relay-room.mjs";
@@ -81,7 +81,7 @@ const CONTACT = process.env.CONTACT
 async function makeNode(contact = CONTACT) {
   const identity = (() => { const kp = sodium.crypto_sign_keypair(); return { publicKey: kp.publicKey, privateKey: kp.privateKey }; })();
   const entry = { node: null, runtime: null, net: null, identity, contact, room: null };
-  entry.net = combineChannels(new NodeChannelFactory(), new UdpNetwork());
+  entry.net = combineChannels(nodeChannels(), new UdpNetwork());
   entry.runtime = await bootTransportShell({
     sodium, identity, timeoutMs: 8000, contactSecret: contact, channels: entry.net,
   });
