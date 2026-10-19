@@ -73,7 +73,7 @@ echo '{ "authors": ["<author-pubkey-hex>"] }' > allowed-keys.json
 Start a few holders. Each one prints its `<peer-pubkey>`:
 
 ```sh
-SHELL=../../seedkernel/WASM/build/host/main-node.js
+SHELL=../../seedkernel/WASM/build/host/loader-node.js
 
 node "$SHELL" --policy allowed-keys.json --bundle ./bundle/seedstore.skb \
      --dir ./data-A --key ./A.key --listen 127.0.0.1:7401
