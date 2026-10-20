@@ -73,7 +73,7 @@ export async function run(t) {
       try {
         // The hybrid author id (key-set hash) is what policy and host names pin —
         // the bundle is signed under suite 0x02 (§12.4), not the bare Ed25519 key.
-        const authorId = await buildBundle(bundlePath, author, sodium, build);
+        const authorId = await buildBundle(bundlePath, author, build);
         const bundleBlob = new Uint8Array(readFileSync(bundlePath));
       holders = await createConnectedCohort({
         suppressLinkLog: true, // Match the shell's test-scale geometry so this tiny file spreads across the
@@ -164,8 +164,8 @@ export async function run(t) {
     let shell;
     try {
       const hiPath = join(hiDir, "seedstore.skb"), loPath = join(loDir, "seedstore.skb");
-      const authorId = await buildBundle(hiPath, author, sodium, build, 5);
-      await buildBundle(loPath, author, sodium, build, 3);
+      const authorId = await buildBundle(hiPath, author, build, 5);
+      await buildBundle(loPath, author, build, 3);
       const shellId = generateKeyPair(sodium);
       const rt = await bootNodeShell({
         policyJson: JSON.stringify({ authors: [toHex(authorId)] }),

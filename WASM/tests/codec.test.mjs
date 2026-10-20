@@ -8,12 +8,11 @@
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { loadCrypto } from "seedkernel-wasm";
-
-const sodium = await loadCrypto();
-
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = join(__dirname, "..");
+
+const { loadSodium } = await import(new URL("../build/host/sodium.js", import.meta.url));
+const sodium = await loadSodium();
 
 const OP_INFO = 0, OP_ENCODE = 1, OP_DECODE = 2;
 
