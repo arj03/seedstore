@@ -216,11 +216,9 @@ inside the signed descriptor. A block id includes the descriptor's author in the
 `BLAKE2b-256("seedstore:block\0" ‖ authorPk[32] ‖ ciphertext)`. Key-sealing lives
 host-side in `host/crypto.ts`.
 
-**Signatures are scoped.** The guest signs with `node/sign`, and the host signs
-`DOMAIN_guest ‖ scope ‖ core`, deriving the scope from the admitted manifest's `app`
-label. Verification uses `node/verify` under the same scope. The host-side mirror in
-`descriptor.ts` uses the same two names, so neither path ever builds the prefix
-itself. Each signed format opens with its own tag: `TAG_DESCRIPTOR = 0x01`, with
+**Signatures are scoped.** The guest signs with `node/sign` and verifies with
+`node/verify`, which the host scopes to the bundle's `app` label (seedkernel §12.2), and
+the host-side mirror in `descriptor.ts` uses the same two names. Each signed format opens with its own tag: `TAG_DESCRIPTOR = 0x01`, with
 `0x02` (tombstone) and `0x03` (head) reserved for Part II.
 
 **The holder's store.** On first access the guest rebuilds its index of held ids and
@@ -228,10 +226,9 @@ quota usage from `FS_LIST`/`FS_SIZE`. After that it updates the index on each ST
 so sibling checks don't need filesystem calls. A block commits as one
 `<block-id>.rec` file (`[descriptor length][descriptor][ciphertext]`).
 
-**One realm.** The initiator and holder sides share one confined QuickJS realm and
-one `handle` entrypoint (seedkernel §12.3). The realm runs one entrypoint to
-completion before starting the next. So when an initiator is parked on an `await`,
-an inbound request queues behind it. That costs latency on a busy node, but it never
+**One realm.** The initiator and holder sides share one confined realm and its one
+`handle` entrypoint, which runs one invocation at a time (seedkernel §12.3). So when an
+initiator is parked on an `await`, an inbound request queues behind it. That costs latency on a busy node, but it never
 affects correctness.
 
 ## Tests
