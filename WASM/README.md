@@ -3,8 +3,8 @@
 This is an AssemblyScript + TypeScript implementation of **Part I** of the
 [seedstore spec](../docs/SPEC.md), a private, self-healing peer-to-peer storage
 layer that runs on [seedkernel](https://github.com/arj03/seedkernel). A node runs the
-same protocol in Node, Bun and the browser. Spec references in this file and in code
-comments (`§n`, `SPEC §n`) point to that spec.
+same protocol in Node, the browser and seedkernel's native binary. Spec references in
+this file and in code comments (`§n`, `SPEC §n`) point to that spec.
 
 ## Seedstore is content, not a binary
 
@@ -30,7 +30,7 @@ storage or any other signed app, and an upgrade to storage is new content rather
 a new binary (§2.1, §17). The runtime side (the host, the guest seam and its grants,
 the confinement realm, the bundle format) is documented in
 [seedkernel RUNTIME §12](https://github.com/arj03/seedkernel/blob/main/docs/RUNTIME.md)
-and [EXPORTS](https://github.com/arj03/seedkernel/blob/main/docs/EXPORTS.md).
+and [CLIENT](https://github.com/arj03/seedkernel/blob/main/docs/CLIENT.md).
 
 ## Build
 
@@ -77,8 +77,8 @@ SHELL=../../seedkernel/WASM/build/host/loader-node.js
 
 node "$SHELL" --policy allowed-keys.json --bundle ./bundle/seedstore.skb \
      --dir ./data-A --key ./A.key --listen 127.0.0.1:7401
-#   bundle seedstore v1 → installed codec, reputation
-#   holder serving the app's request side from the confined guest
+#   bundle seedstore v1  author <author-pubkey-hex>  serves seedstore
+#   serving the app's request side from the confined guest
 #   tcp    listening on :7401
 ```
 
@@ -174,7 +174,7 @@ retrieval token. You pick one of two transports on the page:
   ```
 
   Console holders have no WebRTC, so a tab's link to one stays on the relay. Between
-  themselves they move to a UDP path (seedkernel's UDP bundle, §12.7). `npm run
+  themselves they move to a UDP path (the transport's, seedkernel §12.7). `npm run
   smoke:relay` runs the PUT→GET path headless, with no browser, through the relay and
   then over UDP, against the sibling seedrelay checkout's server, which it starts on a free port as a private
   relay with a fresh secret; `RELAY=ws://host:port` points it at a running one.
@@ -200,7 +200,8 @@ bytes.
 | Wire format for HAVE/OFFER/STORE/FETCH | `host/protocol.ts` (shared with the guest) | §18 |
 | Descriptor layout, tags, copy targets, loss margin | `host/descriptor-core.ts` (shared with the guest) | §4.1, §4.3, §8 |
 | Scoped descriptor sign/verify, host side | `host/descriptor.ts` | §16 |
-| Boot the host, admit bundles, drive the guest | `host/storage-node.ts`, with entries `host/node.ts` and `host/browser.ts` | §19 |
+| Stand a node up on a seedkernel host | `host/runtime.ts`, with entries `host/node.ts` and `host/browser.ts` | §19 |
+| Install the bundle on that node and drive the guest | `host/storage-node.ts` | §19 |
 | Bundle manifest and signing | `scripts/storage-bundle.mjs`, `scripts/build-bundle.mjs` | §2, §17 |
 
 The guest is assembled from `util`, `reputation-core`, `protocol` and
@@ -287,14 +288,15 @@ assembly/codec/        gf256.ts, rs.ts, index.ts       Reed–Solomon WASM modul
 assembly/reputation/   index.ts                        reciprocity WASM module
 host/  tier2-guest.orchestration.js   the confined guest: the whole protocol
        protocol / descriptor-core / reputation-core / util   pure cores shared with the guest
-       storage-node.ts                boots the host, admits the bundles, drives the guest
+       runtime.ts                     stands a node up on a seedkernel host
+       storage-node.ts                installs the bundle on it, drives the guest
        crypto / descriptor / sodium / store-view / core      host-side helpers
        node.ts / browser.ts / cluster.ts / loopback.ts       entry points, test cohorts
 browser/   index.html, p2p.html                        demos
 scripts/   build-guest / build-bundle / storage-bundle build steps
            build-browser-demo / minify / clean
            p2p-cli                                     headless PUT/GET against live nodes
-           serve-holder / smoke-relay                  console holders in a relay room
+           serve-holder / smoke-relay / relay-room     console holders in a relay room
 tests/     *.test.mjs (run.mjs), bench*.mjs, harness + helpers + fixtures
 ```
 
