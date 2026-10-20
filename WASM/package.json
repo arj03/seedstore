@@ -23,6 +23,7 @@
     "test": "npm run build && node tests/run.mjs"
   },
   "dependencies": {
+    "libsodium-wrappers": "0.8.4",
     "seedkernel-wasm": "file:../../seedkernel/WASM"
   },
   "devDependencies": {

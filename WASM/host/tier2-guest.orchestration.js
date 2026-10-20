@@ -8,8 +8,8 @@
 // realm-queue.ts) keeps them from interleaving.
 //
 // A plain script (no imports/exports/ambient authority), prepended with `APP`/`LOCAL`
-// config and the safe-js preamble by the host before running. Hosted by JSC (Bun)
-// today, WAMR later — one artifact, both runtimes.
+// config and the realm preamble by the host before running. It runs in a seedkernel
+// QuickJS realm, the same engine on every target.
 
 "use strict";
 

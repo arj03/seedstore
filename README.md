@@ -12,7 +12,7 @@ get reliable storage back, with no coin involved.
 
 Seedstore runs on [seedkernel](https://github.com/arj03/seedkernel). It ships as one
 signed bundle that the generic seedkernel host loads. It is not a separate binary,
-and it runs the same way in Node, Bun and the browser.
+and it runs the same way in Node, the browser and seedkernel's native binary.
 
 > **Status:** experimental. [`WASM/`](WASM/) implements Part I of the spec, the complete
 > minimal system. The optional Part II extensions are not implemented. The wire format

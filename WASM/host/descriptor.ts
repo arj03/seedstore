@@ -3,13 +3,16 @@
 // (shared with the guest); this module adds the two scoped-signature pieces:
 // signing and verifying the author signature. Verified from the author's public
 // key alone, never the read key, which preserves keyless repair (§9); a holder
-// additionally anchors that key to a peer its cohort knows (§4.3).
+// additionally anchors that key to a peer its cohort knows (§4.3). The guest signs
+// through its own scoped seam; this host-side mirror serves tests and tooling on Node,
+// and no page imports it.
 
 import type { Sodium } from "./sodium.js";
 import {
   encodeDescriptorCore, parseSignedDescriptor, type Descriptor, type SignedDescriptor,
 } from "./descriptor-core.js";
 import { concatBytes } from "./util.js";
+import { STORAGE_APP } from "./core.js";
 import { appSigner } from "seedkernel-wasm/guest-seam";
 
 export {
@@ -28,15 +31,7 @@ export type { Descriptor, SignedDescriptor } from "./descriptor-core.js";
 // manifest, or a channel handshake, nor in another app's scope. This mirror goes
 // through the host's own signer, so it never reconstructs the prefix bytes either.
 
-/** This app's label — the bundle manifest's `app`, and so the whole of its signing
- *  scope: every node running storage under this label derives the same scope, whoever
- *  authored the bundle. */
-export const STORAGE_APP = "seedstore";
-
-/** The wire protocol id storage speaks (seedkernel §12.10), claimed by the
- *  bundle's signed manifest (`protocols`, scripts/storage-bundle.mjs) and read by
- *  the guest's NET_PROTO — stated once here rather than retyped per deployment. */
-export const STORAGE_PROTO = "seedstore";
+export { STORAGE_APP, STORAGE_PROTO } from "./core.js";
 
 /** The host-side mirror's one seam: derives the byte-identical scope the shell
  *  derives for the admitted bundle (§16). Built per call — nothing worth caching. */

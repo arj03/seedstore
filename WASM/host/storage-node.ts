@@ -1,31 +1,23 @@
 // StorageNode — a single storage peer running *on* the seedkernel (SPEC §19
-// bootstrap). A THIN host: the entire storage protocol lives in the confined
-// guest (host/tier2-guest.js), run in one seedkernel safe-js realm over the
-// generic guest seam. Boots the shared `bootShell()` and loads the signed
-// bundles (§12.4) — first the transport bundle (§12.6), then the seedstore one.
+// bootstrap). A THIN client: the entire storage protocol lives in the confined
+// guest (host/tier2-guest.js), run in one seedkernel realm over the generic guest
+// seam, and the node it runs on is the host's own (runtime.ts stands one up). This
+// loads the signed seedstore bundle (§12.4) onto that node and calls its guest's ops.
 // Modules arrive only via verified `install`, never raw-bound.
-//
-// A caller that already stands a shell up (a WebRTC/WS node) passes the whole
-// `runtime` in; StorageNode then loads only the seedstore bundle on it.
 
 import type { Fs } from "seedkernel-wasm/fs";
 import { writeOp, OpArgs } from "seedkernel-wasm/op-frame";
-import { TRANSPORT_SERVICE } from "seedkernel-wasm/transport-bundle";
-import { MemoryFs } from "seedkernel-wasm/fs-memory";
 import { FsBlobView, type BlobView } from "./store-view.js";
 import { Crypto } from "./crypto.js";
 import {
   type Identity, type PeerId, type StorageConfig, defaultConfig, assertStorageConfig, normaliseConfig, DEFAULT_QUOTA_BYTES,
-  TEST_BLOCK_SIZE,
+  TEST_BLOCK_SIZE, NET_SERVICE,
 } from "./core.js";
 import { Op, decodeStats, type RequestStats } from "./protocol.js";
 import { toHex, fromHex, readU32BE, readU64BE, concatBytes } from "./util.js";
-import type { ChannelFactory, ListenAddress } from "seedkernel-wasm/socket-seam";
 import { parseDest } from "seedkernel-wasm/peer-addr";
 import type { Sodium } from "./sodium.js";
-import {
-  bootShell, type AppHandle, type BootResult, type RealmFactory, type Shell,
-} from "seedkernel-wasm/shell-core";
+import type { AppHandle, BootResult, Shell } from "seedkernel-wasm/shell-core";
 
 const NO_ARG = new Uint8Array(0);
 /** "no contact secret" on the wire: the transport reads all-zero as an open peer. */
@@ -43,8 +35,8 @@ type Transport = NonNullable<BootResult["transport"]>;
  *  claims the id — a node with no transport bundle, which is a legitimate
  *  configuration and so has to be an answer rather than a promise that never settles. */
 function transportOp(shell: Pick<Shell, "call">, args: OpArgs): Promise<Uint8Array> {
-  const answer = shell.call(TRANSPORT_SERVICE, args.build());
-  if (!answer) throw new Error(`transport: no bundle claims ${TRANSPORT_SERVICE}`);
+  const answer = shell.call(NET_SERVICE, args.build());
+  if (!answer) throw new Error(`transport: no bundle claims ${NET_SERVICE}`);
   return answer;
 }
 
@@ -164,8 +156,8 @@ export interface PutResult {
   replicasIntended: number;
 }
 
-/** A prebuilt runtime: the shell, the channel adapter it was built on, and the
- *  identity it registered under. One value, from `bootTransportShell()`. */
+/** A node to install onto: the shell, the channel adapter it was built on, and the
+ *  identity it registered under. One value, from `storageRuntime()` (runtime.ts). */
 export interface StorageRuntime {
   shell: Shell;
   transport: Transport;
@@ -173,63 +165,24 @@ export interface StorageRuntime {
 }
 
 export interface StorageNodeOptions {
-  /** A prebuilt runtime with the transport bundle already admitted and its
-   *  listeners started (a WebRTC/WS node), from `bootTransportShell()`. Present,
-   *  its `identity` is this node's and `opts.identity` is not read. Absent,
-   *  StorageNode builds its own from `channels`/`listen` below. */
-  runtime?: StorageRuntime;
+  /** The node to install onto, with the transport bundle already admitted and its
+   *  listeners started (`storageRuntime()`, runtime.ts). Its `identity` is this node's. */
+  runtime: StorageRuntime;
+  /** This node's own libsodium, for what storage computes host-side (key sharing). */
   sodium: Sodium;
   /** The signed seedstore bundle blob (seedstore.skb), loaded through the §12.4
    *  `install` (verify manifest, govern policy, install modules). */
   bundleBlob: Uint8Array;
-  /** This node's signing identity. Only read when StorageNode builds its own
-   *  runtime; minted if absent. With `runtime`, `runtime.identity` is the one. */
-  identity?: Identity;
   config?: Partial<StorageConfig>;
-  fs?: Fs;
   store?: BlobView;
   quota?: number;
-  timeoutMs?: number;
   /** The realm's invocation budget (seedkernel §12.3): queue wait + guest execution +
-   *  a deferred answer. A DIFFERENT clock from `timeoutMs`, which is the per-request
-   *  stall window a silent peer is given — that one is deliberately short (a cohort
-   *  wants an offline peer written off fast), and the same number as a realm budget
-   *  starves a large-block encode before it can finish. Omitted ⇒ the host default. */
+   *  a deferred answer. A DIFFERENT clock from the transport's `timeoutMs`, the
+   *  per-request stall window a silent peer is given — that one is deliberately short (a
+   *  cohort wants an offline peer written off fast), and the same number as a realm
+   *  budget starves a large-block encode before it can finish. Omitted ⇒ the host
+   *  default. */
   guestDeadlineMs?: number;
-  /** The socket seam the transport driver dials/listens through (seedkernel
-   *  §12.6): an in-process fabric for tests, a NodeChannelFactory for TCP, or a
-   *  browser WebSocket/WebRTC factory. A WebRTC factory has no `connect`; its
-   *  links arrive through signaling and the factory's `listen` sink. */
-  channels?: ChannelFactory;
-  /** The listeners to bind, each labelled for the transport: the shipped one reads `ws`
-   *  as RFC 6455 and any other label as length framing. */
-  listen?: ListenAddress[];
-  /** Silence the host transport driver's link-down diagnostic (seedkernel
-   *  `TransportHostOptions.suppressLinkLog`). Left OFF in production on purpose: a
-   *  cohort that cannot reach its peers should say so on stderr, which is the only
-   *  thing a `p2p-cli` run reporting "only 0/N peers linked" otherwise leaves
-   *  unexplained. Tests set it, because tearing cohorts down is what they DO and the
-   *  `truncated` line per peer per shutdown buries the assertions. */
-  suppressLinkLog?: boolean;
-  /** Optional deployment secret — the gate a caller must produce before this
-   *  node's inbound side opens (seedkernel §12.6.3). It is installation-local
-   *  transport guest config; call `setContactSecret` to rotate it after boot. */
-  contactSecret?: Uint8Array;
-  /** Optional network key — which network this node belongs to (an isolation
-   *  boundary, not a gate; seedkernel §12.6.3). It is installation-local transport
-   *  guest config, like the contact secret. Absent ⇒ the public network. */
-  networkKey?: Uint8Array;
-  /** Optional peer whitelist — 32-byte channel keys this node will talk to,
-   *  supplied to the transport in LOCAL (seedkernel §12.6.3). A lint, not a gate.
-   *  Absent ⇒ admit every peer that completes the handshake. */
-  admitPeers?: Uint8Array[];
-  /** Parallel connections per dialed peer (default 1) — the transport's dial
-   *  fan-out. */
-  connsPerPeer?: number;
-  /** The signed transport bundle blob. Defaults to the one shipped in the
-   *  seedkernel artifact; an operator selecting a different transport passes
-   *  its blob here. Only read when StorageNode builds its own runtime. */
-  transportBlob?: Uint8Array;
 }
 
 export class StorageNode {
@@ -266,29 +219,21 @@ export class StorageNode {
   private repairTimer: ReturnType<typeof setTimeout> | null = null;
   private inFlight: Promise<unknown> = Promise.resolve();
   private closed = false;
-  private readonly ownsShell: boolean;
 
-  private constructor(
-    opts: StorageNodeOptions,
-    shell: Shell,
-    net: Transport,
-    identity: Identity,
-    loaded: AppHandle,
-    ownsShell: boolean,
-  ) {
+  private constructor(opts: StorageNodeOptions, loaded: AppHandle) {
+    const { shell, transport: net, identity } = opts.runtime;
     this.sodium = opts.sodium;
     this.shell = shell;
     this.moduleNames = new Set(loaded.manifest.modules.map((m) => m.name));
     this.identity = identity;
     this.peerId = toHex(identity.publicKey);
-    // Defaults to the shell's scoped view (`loaded.fs`) so the host read view
-    // shares the same backend the guest writes to. A caller's own fs wins.
-    this.fs = opts.fs ?? new MemoryFs();
+    // The load's scoped view (`loaded.fs`), so the host read view shares the backend the
+    // guest writes to.
+    this.fs = loaded.fs!;
     this.quota = opts.quota ?? DEFAULT_QUOTA_BYTES;
     this.store = opts.store ?? new FsBlobView(this.fs);
     this.crypto = new Crypto(opts.sodium);
     this.net = net;
-    this.ownsShell = ownsShell;
     this.handle = loaded;
     this.appScope = loaded.appScope;
 
@@ -305,53 +250,23 @@ export class StorageNode {
     this.config = { ...defaultConfig(merged.blockSize ?? TEST_BLOCK_SIZE, merged.k, merged.m), ...merged };
   }
 
-  /** Boot a storage node: take the caller's prebuilt runtime, or stand one up here
-   *  (shell + transport bundle), then load the seedstore bundle onto it. Handlers
-   *  arrive solely via `install` (§12.4). */
+  /** Load the seedstore bundle onto a node (`opts.runtime`), whose identity is this
+   *  node's, so peerId can never drift from what the transport registered under.
+   *  Handlers arrive solely via `install` (§12.4). A failed load leaves the node to its
+   *  owner. */
   static async create(opts: StorageNodeOptions): Promise<StorageNode> {
     await opts.sodium.ready;
-
-    // The runtime to load onto: the caller's, or one built here — and its identity
-    // is this node's, so peerId can never drift from what the transport registered
-    // under. Either way the fs backend comes back on the load's handle, so host
-    // reads and guest writes share it.
-    const ownsShell = opts.runtime === undefined;
-    const runtime = opts.runtime ?? await bootTransportShell({
-      sodium: opts.sodium,
-      identity: opts.identity ?? (() => {
-        const kp = opts.sodium.crypto_sign_keypair();
-        return { publicKey: kp.publicKey, privateKey: kp.privateKey };
-      })(),
-      fs: opts.fs, channels: opts.channels,
-      listen: opts.listen, suppressLinkLog: opts.suppressLinkLog,
-      networkKey: opts.networkKey,
-      contactSecret: opts.contactSecret, admitPeers: opts.admitPeers,
-      connsPerPeer: opts.connsPerPeer, timeoutMs: opts.timeoutMs,
-      transportBlob: opts.transportBlob,
+    // Admitting the bundle is what routes inbound storage frames to it (the manifest
+    // claims STORAGE_PROTO, §12.10) — nothing else arms it. `localConfig` and
+    // `realmMemoryBytes` ride with THIS load (§12.4/§12.3), not the shell, so they don't
+    // leak into the transport's budget. The guest writes through `loaded.fs` (a scoped
+    // view, seedkernel §12.2), which the host read view reuses.
+    const loaded = await opts.runtime.shell.install(opts.bundleBlob, {
+      localConfig: localConfigFor(opts),
+      realmMemoryBytes: normaliseConfig(opts.config ?? {}).realmMemoryBytes,
+      guestDeadlineMs: opts.guestDeadlineMs,
     });
-    const { shell, transport: net, identity } = runtime;
-
-    // Anything past this point can throw (blob verify, config check), and must not
-    // leave a shell we stood up running with nothing to close it. A caller's own
-    // shell is the caller's to close.
-    try {
-      // Admitting the bundle is what routes inbound storage frames to it (the
-      // manifest claims STORAGE_PROTO, §12.10) — nothing else arms it. `localConfig`
-      // and `realmMemoryBytes` ride with THIS load (§12.4/§12.3), not the shell,
-      // so they reach a caller-supplied shell too and don't leak into the transport's budget.
-      const loaded = await shell.install(opts.bundleBlob, {
-        localConfig: localConfigFor(opts),
-        realmMemoryBytes: normaliseConfig(opts.config ?? {}).realmMemoryBytes,
-        guestDeadlineMs: opts.guestDeadlineMs,
-      });
-
-      // The guest writes through `loaded.fs` (a scopedFs view, seedkernel §12.2);
-      // the host read view reuses the same handle rather than re-deriving the scope.
-      return new StorageNode({ ...opts, fs: loaded.fs }, shell, net, identity, loaded, ownsShell);
-    } catch (err) {
-      if (ownsShell) shell.close();
-      throw err;
-    }
+    return new StorageNode(opts, loaded);
   }
 
   // ── cohort membership (§5.1) ───────────────────────────────────────────
@@ -512,71 +427,6 @@ export class StorageNode {
   handlersInstalled(): boolean {
     return this.moduleNames.has("codec") && this.moduleNames.has("reputation");
   }
-}
-
-/** Build the runtime a StorageNode loads its bundles onto: the platform seam (fs,
- *  channel factory, realm factory) plus the transport bundle admitted first, with
- *  listeners started. Wraps seedkernel's `bootShell`; returns the `StorageRuntime`
- *  StorageNode takes as `runtime` — the shell, the `TransportHost` (the shell
- *  itself doesn't expose it), and the identity both registered under. */
-export async function bootTransportShell(
-  opts: {
-    sodium: Sodium; identity: Identity;
-    fs?: Fs; channels?: ChannelFactory;
-    listen?: ListenAddress[];
-    suppressLinkLog?: boolean;
-    networkKey?: Uint8Array; contactSecret?: Uint8Array;
-    admitPeers?: Uint8Array[]; connsPerPeer?: number;
-    timeoutMs?: number; transportBlob?: Uint8Array;
-    createRealm?: RealmFactory;
-    /** STUN/TURN servers for WebRTC peers, as `RTCConfiguration.iceServers` takes them. */
-    iceServers?: { urls: string | string[]; username?: string; credential?: string }[];
-  },
-): Promise<StorageRuntime> {
-  const fs = opts.fs ?? new MemoryFs();
-  const { shell, transport } = await bootShell({
-    sodium: opts.sodium, identity: opts.identity, fs,
-    createRealm: opts.createRealm,
-    // This node's network, whole (seedkernel §12.6): the sockets AND the signed
-    // program that drives them, one object because they are one decision — the blob
-    // selected here is the transport installed at boot.
-    transport: {
-      channels: opts.channels,
-      listen: opts.listen,
-      suppressLinkLog: opts.suppressLinkLog,
-      // Selecting these bytes authorizes them as the transport; a later change
-      // must replace this slot explicitly. Defaults to the seedkernel-shipped artifact.
-      bundle: opts.transportBlob,
-      // Policies of the signed transport program, not socket-driver facts, so they
-      // ride the LOAD as its LOCAL config. JSON, so omit absent values and spell peer
-      // ids as hex strings.
-      config: {
-        ...(opts.networkKey === undefined
-          ? {}
-          : { networkKey: toHex(opts.networkKey) }),
-        ...(opts.contactSecret === undefined
-          ? {}
-          : { contactSecret: toHex(opts.contactSecret) }),
-        ...(opts.timeoutMs === undefined
-          ? {}
-          : { requestTimeoutMs: opts.timeoutMs }),
-        ...(opts.connsPerPeer === undefined
-          ? {}
-          : { connsPerPeer: opts.connsPerPeer }),
-        ...(opts.admitPeers === undefined
-          ? {}
-          : { admitPeers: opts.admitPeers.map(toHex) }),
-        ...(opts.iceServers === undefined
-          ? {}
-          : { iceServers: opts.iceServers }),
-      },
-    },
-    // The one admission branch that's ours: the operator handing us a bundle IS
-    // the trust decision (the bundle's signature is still verified);
-    // transport selection and the revocation/downgrade guard are bootShell's.
-    admit: () => true,
-  });
-  return { shell, transport: transport!, identity: opts.identity };
 }
 
 /** This installation's settings for the storage bundle, as the `LOCAL` the guest

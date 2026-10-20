@@ -42,8 +42,7 @@ import { readFile } from "node:fs/promises";
 import { randomBytes, timingSafeEqual } from "node:crypto";
 
 import { WsNetwork } from "seedkernel-wasm/net-ws";
-import { UdpNetwork } from "seedkernel-wasm/net-udp";
-import { combineChannels } from "seedkernel-wasm/socket-seam";
+import { nodeDatagrams } from "seedkernel-wasm/shell-node";
 import { OpArgs } from "seedkernel-wasm/op-frame";
 import { createStorageNode, loadSodium, defaultConfig, PRODUCTION_BLOCK_SIZE, toHex } from "../build/host/node.js";
 import { DEFAULT_QUOTA_BYTES } from "../build/host/core.js";
@@ -200,16 +199,21 @@ const config = { ...defaultConfig(blockSize, kParam, mParam), maxMessageBytes, f
   ...(heapMB > 0 ? { realmMemoryBytes: Math.round(heapMB * 1024 * 1024) } : {}) };
 
 // The transport is a signed bundle: build the WS ChannelFactory first, then boot
-// the shared shell with it installed. Wrapped sodium rides into the shell so
+// the shared shell with it installed. The node is assembled by seedkernel's `bootShell`
+// here rather than a host's `standUp`, so the wrapped sodium rides into the shell and
 // record-layer AEAD costs stay instrumented. Storage geometry does NOT ride here.
-const { bootTransportShell, netPeer, netReady, netRelay } = await import("../build/host/storage-node.js");
+const { netPeer, netReady, netRelay } = await import("../build/host/storage-node.js");
+const { storageRuntime } = await import("../build/host/node.js");
+const { bootShell } = await import("seedkernel-wasm/shell-core");
+const { MemoryFs } = await import("seedkernel-wasm/fs-memory");
+const instrumentedStandUp = (cfg) => bootShell({ ...cfg, sodium: wrapTransportSodium(sodium), fs: new MemoryFs() });
 const ws = new WsNetwork({ webSocketFactory: wsFactory });
-const net = relayUrl ? combineChannels(ws, new UdpNetwork()) : ws;
-const runtime = await bootTransportShell({
-  sodium: wrapTransportSodium(sodium),
+const runtime = await storageRuntime(instrumentedStandUp, {
   identity,
   timeoutMs,
-  channels: net,
+  channels: ws,
+  // Through a relay, this machine's datagram sockets, for direct UDP paths (seedkernel §12.7).
+  ...(relayUrl ? { datagrams: nodeDatagrams() } : {}),
   connsPerPeer: connsN,
 });
 

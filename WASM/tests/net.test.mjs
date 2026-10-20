@@ -14,11 +14,13 @@ import { mkdtempSync, rmSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { createConnectedCohort, loadSodium, loadWasmBytes, LoopbackNetwork } from "../build/host/node.js";
+import {
+  createConnectedCohort, loadSodium, loadWasmBytes, LoopbackNetwork, bootStorageNode, inProcessStandUp, inProcessHost,
+} from "../build/host/node.js";
 import { StorageNode, netAddr, netReady } from "../build/host/storage-node.js";
-import { NodeChannelFactory } from "seedkernel-wasm/net-node";
+import { nodeChannels } from "seedkernel-wasm/shell-node";
 import { FsBlobView } from "../build/host/store-view.js";
-import { NodeFs } from "seedkernel-wasm/fs-node";
+import { NodeFs, nodeRawFiles } from "seedkernel-wasm/fs-node";
 import { scopedFs } from "seedkernel-wasm/shell-core";
 import {
   MsgType, encodeHaveReq, decodeMask, encodeStoreBatch, encodeFetchBatchReq, decodeFetchBatchRes,
@@ -57,14 +59,13 @@ async function tcpCohort({ count, sodium, wasm, config, baseDir }) {
     const dir = join(baseDir, `n${i}`);
     dirs.push(dir);
     // The socket seam is a real node:net factory; the node binds an ephemeral port.
-    nodes.push(await StorageNode.create({
-      sodium, ...wasm, identity: newKey(sodium), config, timeoutMs: 3000,
-      suppressLinkLog: true, channels: new NodeChannelFactory(),
+    // The node's host keeps its store on disk under `dir`; its store view reads that same
+    // fs, so what the confined guest holder writes via `fs` lands on disk and node.store
+    // reflects it (the view must read the fs the guest serves).
+    nodes.push(await bootStorageNode((cfg) => inProcessHost(nodeRawFiles).standUp(cfg), {
+      sodium, ...wasm, identity: newKey(sodium), config, timeoutMs: 3000, dir,
+      suppressLinkLog: true, channels: nodeChannels(),
       listen: [{ label: "tcp", host: "127.0.0.1", port: 0 }],
-      // Give the node a disk-backed fs; its default store view reads that same fs, so
-      // what the confined guest holder writes via `fs` lands on disk and node.store
-      // reflects it (the view must read the fs the guest serves).
-      fs: new NodeFs(dir),
     }));
   }
   for (let i = 0; i < count; i++) for (let j = i + 1; j < count; j++) await StorageNode.connect(nodes[i], nodes[j]);
@@ -103,12 +104,12 @@ export async function run(t) {
   {
     const net = new LoopbackNetwork(0, 4096);
     const idS = newKey(sodium), idB = newKey(sodium);
-    const S = await StorageNode.create({
+    const S = await bootStorageNode(inProcessStandUp, {
       sodium, ...wasm, identity: idS, timeoutMs: 3000,
       suppressLinkLog: true, channels: net.view(toHex(idS.publicKey)),
       listen: [{ label: "ws", host: "127.0.0.1", port: 0 }],
     });
-    const B = await StorageNode.create({
+    const B = await bootStorageNode(inProcessStandUp, {
       sodium, ...wasm, identity: idB, timeoutMs: 3000,
       suppressLinkLog: true, channels: net.view(toHex(idB.publicKey)),
     });
@@ -250,15 +251,15 @@ export async function run(t) {
     // S gates its listener; B is a dialer only, so it has no inbound secret of its own —
     // it carries S's on the address it dials.
     const secretS = sodium.randombytes_buf(32);
-    const S = await StorageNode.create({
+    const S = await bootStorageNode(inProcessStandUp, {
       sodium, ...wasm, identity: idS, timeoutMs: 3000,
-      suppressLinkLog: true, channels: new NodeChannelFactory(),
+      suppressLinkLog: true, channels: nodeChannels(),
       listen: [{ label: "tcp", host: "127.0.0.1", port: 0 }, { label: "ws", host: "127.0.0.1", port: 0 }],
       contactSecret: secretS,
     });
-    const B = await StorageNode.create({
+    const B = await bootStorageNode(inProcessStandUp, {
       sodium, ...wasm, identity: idB, timeoutMs: 3000,
-      suppressLinkLog: true, channels: new NodeChannelFactory(),
+      suppressLinkLog: true, channels: nodeChannels(),
     });
     await netAddr(B.shell, S.peerId, `ws://127.0.0.1:${S.net.portOf("ws")}`, secretS);
     await netReady(B.shell, 8000);
@@ -298,9 +299,9 @@ export async function run(t) {
       // A fresh dialer per attempt: the gate is read at the handshake, so what it
       // answers can only be seen by a link that has not been made yet.
       const dialsWith = async (secret, deadlineMs) => {
-        const n = await StorageNode.create({
+        const n = await bootStorageNode(inProcessStandUp, {
           sodium, ...wasm, identity: newKey(sodium), timeoutMs: 3000,
-          suppressLinkLog: true, channels: new NodeChannelFactory(),
+          suppressLinkLog: true, channels: nodeChannels(),
         });
         try {
           await netAddr(n.shell, S.peerId, `ws://127.0.0.1:${S.net.portOf("ws")}`, secret);

@@ -7,6 +7,7 @@
 import type { Sodium } from "./sodium.js";
 import type { StorageConfig } from "./core.js";
 import { StorageNode } from "./storage-node.js";
+import { bootStorageNode, type StandUp } from "./runtime.js";
 import { LoopbackNetwork } from "./loopback.js";
 import { toHex } from "./util.js";
 
@@ -14,6 +15,9 @@ export interface CohortOptions {
   count: number;
   /** The in-process fabric (with online/offline control) the cohort shares. */
   network: LoopbackNetwork;
+  /** What stands each node up (runtime.ts): a page's host, shared by its nodes, or an
+   *  in-memory host of each node's own (node.ts). */
+  standUp: StandUp;
   sodium: Sodium;
   /** The loaded seedstore bundle, as `loadWasmBytes()` returns it — one signed blob,
    *  the ONE install path. Every node in the cohort loads the same bundle, so they all
@@ -40,10 +44,12 @@ export async function createConnectedCohort(opts: CohortOptions): Promise<Storag
       return { publicKey: kp.publicKey, privateKey: kp.privateKey };
     })();
     const peerId = toHex(identity.publicKey);
-    nodes.push(await StorageNode.create({
+    nodes.push(await bootStorageNode(opts.standUp, {
       sodium: opts.sodium,
       bundleBlob: opts.wasm.bundleBlob,
       identity,
+      // A directory of its own, for nodes that share a host.
+      dir: peerId,
       config: opts.config,
       quota: opts.quota,
       timeoutMs: opts.timeoutMs,

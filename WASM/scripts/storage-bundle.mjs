@@ -14,11 +14,21 @@
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 
+import { loadCrypto } from "seedkernel-wasm";
 import { authorBundle, hybridAuthorKeysFromSeed }
   from "seedkernel-wasm/bundle-author";
 import { TRANSPORT_SERVICE } from "seedkernel-wasm/transport-bundle";
-import { defaultConfig, normaliseConfig, PRODUCTION_BLOCK_SIZE } from "../build/host/core.js";
-import { STORAGE_PROTO } from "../build/host/descriptor.js";
+import { defaultConfig, normaliseConfig, PRODUCTION_BLOCK_SIZE, NET_SERVICE, STORAGE_PROTO } from "../build/host/core.js";
+
+// The host side calls the network by its own constant (core.ts), so a page need not load
+// seedkernel's transport module for one string; the bundle must agree with both.
+if (NET_SERVICE !== TRANSPORT_SERVICE) {
+  throw new Error(`core.ts NET_SERVICE "${NET_SERVICE}" is not the transport's service "${TRANSPORT_SERVICE}"`);
+}
+
+// The host's crypto, ML-DSA-65 signing included: a bundle is signed under both halves of
+// the author's key set (seedkernel §12.4).
+const signer = await loadCrypto();
 
 // The app label — the manifest `app`, and the whole of the signing scope (SPEC
 // §16). The host scopes the guest's SIGN/VERIFY ops to this label, whoever signed the
@@ -31,11 +41,10 @@ const APP_NAME = "seedstore";
  * rebuilds. A thin call on seedkernel's `hybridAuthorKeysFromSeed` so this
  * bundle derives it the same way the runtime and other apps do.
  *
- * @param {any}    sodium  loaded libsodium with the ML-DSA-65 signer mixed in
  * @param {Uint8Array} edSk  the author's 64-byte Ed25519 secret key (seed‖pk)
  */
-export function authorKeysFor(sodium, edSk) {
-  return hybridAuthorKeysFromSeed(sodium, edSk.slice(0, 32));
+export function authorKeysFor(edSk) {
+  return hybridAuthorKeysFromSeed(signer, edSk.slice(0, 32));
 }
 
 // Everything the storage guest reaches, EXACTLY (`guest.requires`): a `host.call`
@@ -62,7 +71,6 @@ const STORAGE_REQUIRES = [
  * pinned author id is the key-set hash and the bundle is post-quantum by default.
  * @param {object} o
  * @param {string} o.path     output bundle file (e.g. ./bundle/seedstore.skb)
- * @param {any}    o.sodium   loaded libsodium with the ML-DSA-65 signer (signs the bundle)
  * @param {Uint8Array} o.sk   author secret key — the Ed25519 half, whose seed derives both
  * @param {string} o.build    seedstore build/ dir (holds the codec wasm + staged guest)
  * @param {number} [o.version] monotonic-per-(author,app) freshness mark (seedkernel §12.4);
@@ -71,7 +79,7 @@ const STORAGE_REQUIRES = [
  *  the manifest that was signed, and the derived author id — the key-set hash a policy
  *  `authors` entry pins, on the value rather than re-derived by the caller.
  */
-export function writeStorageBundle({ path, sodium, sk, build, version = 1 }) {
+export function writeStorageBundle({ path, sk, build, version = 1 }) {
   if (!Number.isInteger(version)) throw new Error("writeStorageBundle: version must be an integer");
   // A module's name is its bare manifest name — the seam argument the guest
   // passes; there is no bind name or global namespace (seedkernel §5, §12.4).
@@ -95,7 +103,7 @@ export function writeStorageBundle({ path, sodium, sk, build, version = 1 }) {
   // cannot be signed).
   const cfg = normaliseConfig(defaultConfig(PRODUCTION_BLOCK_SIZE));
 
-  const { blob, manifest, author } = authorBundle(sodium, authorKeysFor(sodium, sk), {
+  const { blob, manifest, author } = authorBundle(signer, authorKeysFor(sk), {
     app: APP_NAME,
     // Monotonic freshness mark per (author, app): the host refuses a downgrade
     // below its high-water mark (seedkernel §12.4). Bump on every publish.

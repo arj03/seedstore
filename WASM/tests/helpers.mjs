@@ -6,13 +6,12 @@
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { loadCrypto } from "seedkernel-wasm";
-
-// One core libsodium instance for the whole stack (§16).
-const sodium = await loadCrypto();
-
 const __dirname = dirname(fileURLToPath(import.meta.url));
 export const root = join(__dirname, "..");
+
+// Storage's own libsodium, one instance for the whole suite (host/sodium.ts).
+const { loadSodium } = await import(new URL("../build/host/sodium.js", import.meta.url));
+const sodium = await loadSodium();
 
 export const paths = {
   codec: join(root, "build/codec.wasm"),

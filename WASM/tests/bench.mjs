@@ -11,9 +11,9 @@ import { performance } from "node:perf_hooks";
 import { Crypto, LEVEL_BODY } from "../build/host/crypto.js";
 import { blockHashInput } from "../build/host/descriptor-core.js";
 import { CodecClient } from "./codec-client.mjs";
-import { loadCrypto } from "seedkernel-wasm";
+import { loadSodium } from "../build/host/sodium.js";
 
-const sodium = await loadCrypto();
+const sodium = await loadSodium();
 const crypto = new Crypto(sodium);
 const codec = await CodecClient.load(new Uint8Array(readFileSync("build/codec.wasm")));
 

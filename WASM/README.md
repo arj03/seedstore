@@ -3,8 +3,8 @@
 This is an AssemblyScript + TypeScript implementation of **Part I** of the
 [seedstore spec](../docs/SPEC.md), a private, self-healing peer-to-peer storage
 layer that runs on [seedkernel](https://github.com/arj03/seedkernel). A node runs the
-same protocol in Node, Bun and the browser. Spec references in this file and in code
-comments (`§n`, `SPEC §n`) point to that spec.
+same protocol in Node, the browser and seedkernel's native binary. Spec references in
+this file and in code comments (`§n`, `SPEC §n`) point to that spec.
 
 ## Seedstore is content, not a binary
 
@@ -30,7 +30,7 @@ storage or any other signed app, and an upgrade to storage is new content rather
 a new binary (§2.1, §17). The runtime side (the host, the guest seam and its grants,
 the confinement realm, the bundle format) is documented in
 [seedkernel RUNTIME §12](https://github.com/arj03/seedkernel/blob/main/docs/RUNTIME.md)
-and [EXPORTS](https://github.com/arj03/seedkernel/blob/main/docs/EXPORTS.md).
+and [CLIENT](https://github.com/arj03/seedkernel/blob/main/docs/CLIENT.md).
 
 ## Build
 
@@ -73,12 +73,12 @@ echo '{ "authors": ["<author-pubkey-hex>"] }' > allowed-keys.json
 Start a few holders. Each one prints its `<peer-pubkey>`:
 
 ```sh
-SHELL=../../seedkernel/WASM/build/host/main-node.js
+SHELL=../../seedkernel/WASM/build/host/loader-node.js
 
 node "$SHELL" --policy allowed-keys.json --bundle ./bundle/seedstore.skb \
      --dir ./data-A --key ./A.key --listen 127.0.0.1:7401
-#   bundle seedstore v1 → installed codec, reputation
-#   holder serving the app's request side from the confined guest
+#   bundle seedstore v1  author <author-pubkey-hex>  serves seedstore
+#   serving the app's request side from the confined guest
 #   tcp    listening on :7401
 ```
 
@@ -124,7 +124,7 @@ import { createConnectedCohort, loadSodium, loadWasmBytes, LoopbackNetwork } fro
 const sodium = await loadSodium();
 const wasm = await loadWasmBytes();
 const net = new LoopbackNetwork();
-const nodes = await createConnectedCohort({ count: 6, network: net, sodium, wasm, config: { k: 2, m: 2, blockSize: 64 } });
+const nodes = await createConnectedCohort({ count: 6, network: net, sodium, wasm, config: { k: 2, m: 2, blockSize: 512 } });
 
 const data = new TextEncoder().encode("hello, cohort");
 const put = await nodes[0].put(data);              // chunk → encrypt → RS → place → root
@@ -133,10 +133,12 @@ const got = await nodes[0].get(put.root, put.key); // locate → fetch any k →
 
 `LoopbackNetwork` runs the real transport bundle (AKE, record layer, routing) over
 in-memory channel pairs, so an in-process cohort exercises the shipped stack. There
-is one protocol implementation. `StorageNode` boots the host, admits the signed
-transport and storage bundles, and drives the confined guest, and nothing else. The
-block store defaults to in-memory. A server uses a directory, and a browser would use
-OPFS/IndexedDB (§12).
+is one protocol implementation. Each node is one the seedkernel host stands up, with
+the signed transport installed (`storageRuntime` over a host's `standUp`: an in-memory
+host of its own per node here, `bootNodeShell` on a server, the page's `browserHost` in a
+browser). `StorageNode` installs the signed storage bundle on it and drives the confined
+guest, and nothing else. The block store is the host's: in memory here, a directory on a
+server, OPFS/IndexedDB in a browser (§12).
 
 ## Browser demos
 
@@ -172,7 +174,7 @@ retrieval token. You pick one of two transports on the page:
   ```
 
   Console holders have no WebRTC, so a tab's link to one stays on the relay. Between
-  themselves they move to a UDP path (seedkernel's `net-udp`, §12.7). `npm run
+  themselves they move to a UDP path (the transport's, seedkernel §12.7). `npm run
   smoke:relay` runs the PUT→GET path headless, with no browser, through the relay and
   then over UDP, against the sibling seedrelay checkout's server, which it starts on a free port as a private
   relay with a fresh secret; `RELAY=ws://host:port` points it at a running one.
@@ -198,7 +200,8 @@ bytes.
 | Wire format for HAVE/OFFER/STORE/FETCH | `host/protocol.ts` (shared with the guest) | §18 |
 | Descriptor layout, tags, copy targets, loss margin | `host/descriptor-core.ts` (shared with the guest) | §4.1, §4.3, §8 |
 | Scoped descriptor sign/verify, host side | `host/descriptor.ts` | §16 |
-| Boot the host, admit bundles, drive the guest | `host/storage-node.ts`, with entries `host/node.ts` and `host/browser.ts` | §19 |
+| Stand a node up on a seedkernel host | `host/runtime.ts`, with entries `host/node.ts` and `host/browser.ts` | §19 |
+| Install the bundle on that node and drive the guest | `host/storage-node.ts` | §19 |
 | Bundle manifest and signing | `scripts/storage-bundle.mjs`, `scripts/build-bundle.mjs` | §2, §17 |
 
 The guest is assembled from `util`, `reputation-core`, `protocol` and
@@ -213,11 +216,9 @@ inside the signed descriptor. A block id includes the descriptor's author in the
 `BLAKE2b-256("seedstore:block\0" ‖ authorPk[32] ‖ ciphertext)`. Key-sealing lives
 host-side in `host/crypto.ts`.
 
-**Signatures are scoped.** The guest signs with `node/sign`, and the host signs
-`DOMAIN_guest ‖ scope ‖ core`, deriving the scope from the admitted manifest's `app`
-label. Verification uses `node/verify` under the same scope. The host-side mirror in
-`descriptor.ts` uses the same two names, so neither path ever builds the prefix
-itself. Each signed format opens with its own tag: `TAG_DESCRIPTOR = 0x01`, with
+**Signatures are scoped.** The guest signs with `node/sign` and verifies with
+`node/verify`, which the host scopes to the bundle's `app` label (seedkernel §12.2), and
+the host-side mirror in `descriptor.ts` uses the same two names. Each signed format opens with its own tag: `TAG_DESCRIPTOR = 0x01`, with
 `0x02` (tombstone) and `0x03` (head) reserved for Part II.
 
 **The holder's store.** On first access the guest rebuilds its index of held ids and
@@ -225,10 +226,9 @@ quota usage from `FS_LIST`/`FS_SIZE`. After that it updates the index on each ST
 so sibling checks don't need filesystem calls. A block commits as one
 `<block-id>.rec` file (`[descriptor length][descriptor][ciphertext]`).
 
-**One realm.** The initiator and holder sides share one confined QuickJS realm and
-one `handle` entrypoint (seedkernel §12.3). The realm runs one entrypoint to
-completion before starting the next. So when an initiator is parked on an `await`,
-an inbound request queues behind it. That costs latency on a busy node, but it never
+**One realm.** The initiator and holder sides share one confined realm and its one
+`handle` entrypoint, which runs one invocation at a time (seedkernel §12.3). So when an
+initiator is parked on an `await`, an inbound request queues behind it. That costs latency on a busy node, but it never
 affects correctness.
 
 ## Tests
@@ -285,14 +285,15 @@ assembly/codec/        gf256.ts, rs.ts, index.ts       Reed–Solomon WASM modul
 assembly/reputation/   index.ts                        reciprocity WASM module
 host/  tier2-guest.orchestration.js   the confined guest: the whole protocol
        protocol / descriptor-core / reputation-core / util   pure cores shared with the guest
-       storage-node.ts                boots the host, admits the bundles, drives the guest
+       runtime.ts                     stands a node up on a seedkernel host
+       storage-node.ts                installs the bundle on it, drives the guest
        crypto / descriptor / sodium / store-view / core      host-side helpers
        node.ts / browser.ts / cluster.ts / loopback.ts       entry points, test cohorts
 browser/   index.html, p2p.html                        demos
 scripts/   build-guest / build-bundle / storage-bundle build steps
            build-browser-demo / minify / clean
            p2p-cli                                     headless PUT/GET against live nodes
-           serve-holder / smoke-relay                  console holders in a relay room
+           serve-holder / smoke-relay / relay-room     console holders in a relay room
 tests/     *.test.mjs (run.mjs), bench*.mjs, harness + helpers + fixtures
 ```
 

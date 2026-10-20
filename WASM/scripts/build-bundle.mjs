@@ -27,8 +27,8 @@ const bundlePath = join(out, "seedstore.skb");
 const { toHex, fromHex } = await import(new URL("../build/host/util.js", import.meta.url));
 
 const sodium = await loadCrypto();
-// Bundle *content* is assembled below from sodium alone, which signs it. No seedkernel host
-// is needed, and a module's name is its bare manifest name — reached by the guest on the
+// The host's crypto, which mints the author key and reads back a prior bundle;
+// storage-bundle.mjs signs with it too. No seedkernel host is needed, and a module's name is its bare manifest name — reached by the guest on the
 // seam, slot-local, with no bind name or global namespace (seedkernel §5).
 
 // Author identity: the key the bundle is signed with (and that installs are
@@ -71,7 +71,7 @@ if (existsSync(versionPath)) {
 }
 const version = prevVersion + 1;
 
-const { manifest, author } = writeStorageBundle({ path: bundlePath, sodium, sk, build, version });
+const { manifest, author } = writeStorageBundle({ path: bundlePath, sk, build, version });
 
 // Record the new high-water mark beside the key, so the next publish counts on from here
 // even if bundle/ is wiped.

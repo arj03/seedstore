@@ -1,6 +1,7 @@
 // Stage a self-contained browser demo into build/browser-demo — ALL browser pages
 // plus the assets they share, so there is ONE staged dir (not one per page):
-//   - the four WASM modules (libsodium, signature, codec, reputation)
+//   - seedkernel's host blob (host.skb: its realm engine and the host's crypto)
+//   - this project's own libsodium (libsodium/), and the signed seedstore bundle
 //   - this project's compiled host, minified (build/host-min → host/)
 //   - seedkernel's node:fs-free browser host, minified (build-min → seedkernel/)
 //   - the pages: index.html (in-page loopback cohort), p2p.html (real P2P)
@@ -9,13 +10,13 @@
 //   npx http-server build/browser-demo -p 3000   (then open /index.html, /p2p.html)
 //
 // The pages' import maps resolve "seedkernel-wasm/*" → ./seedkernel/* and this
-// project's host → ./host/. Nothing is fetched at runtime — QuickJS, libsodium,
-// and the vendored JS layer all ship under this dir, so it runs offline. Needs
-// both builds' minified host: seedstore `npm run build`, seedkernel
-// `npm run build:host && npm run build:host:min`.
+// project's host → ./host/. Nothing is fetched from elsewhere at runtime — QuickJS and
+// the host's crypto (in host.skb) and libsodium ship under this dir, so it runs offline.
+// Needs both builds' minified host and seedkernel's host blob: seedstore `npm run build`,
+// seedkernel `npm run build`.
 
 import { mkdirSync, copyFileSync, existsSync, readdirSync, statSync, rmSync,
-         readFileSync } from "node:fs";
+         readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -160,94 +161,75 @@ async function copyJs(srcDir, dstDir) {
 await copyJs(seedstoreHost, join(out, "host"));
 await copyJs(seedkernelHost, join(out, "seedkernel"));
 
-// ML-DSA-65, the PQ half of seedkernel's one manifest suite (§12.4). p2p.html
-// mixes it into its sodium instance so `verifyBundle` can read the cohort's
-// author id; without it no bundle verifies and the page falls back silently
-// to the zero-author scope.
+// seedkernel's host blob: the host script, the realm engine every guest runs on, and the
+// host's crypto, libsodium and ML-DSA-65 (the PQ half of seedkernel's one manifest suite,
+// §12.4, without which no bundle verifies). The pages' loader runs it
+// (seedkernel-wasm/platform-web `browserHost`): the host the Node and native nodes run.
 {
-  const src = join(root, "..", "..", "seedkernel", "WASM", "browser", "mldsa65.wasm");
+  const src = join(root, "..", "..", "seedkernel", "WASM", "build", "host.skb");
   if (!existsSync(src)) {
-    console.error(`seedkernel mldsa65.wasm not found at ${src} — build it first ` +
-      "(in seedkernel/WASM:  npm run build:pq).");
+    console.error(`seedkernel host.skb not found at ${src} — build it first ` +
+      "(in seedkernel/WASM:  npm run build).");
     process.exit(1);
   }
-  await copy(src, join(out, "mldsa65.wasm"));
+  await copy(src, join(out, "host.skb"));
 }
 
 // ML-KEM-768 is private content of the signed transport bundle now; no loose
 // browser artifact is needed here.
 
-// ── core libsodium: seedkernel's, not a second copy ──────────────────────────
-// The pages import "seedkernel-wasm/libsodium" (seedkernel's published browser
-// entry) rather than the upstream npm package, so browser, Node, and the Go
-// binary all run the SAME crypto binary. These three files must land in ONE
-// directory: the wrapper resolves the core and .wasm relative to its own
-// import.meta.url, and the wasm is a sibling fetch, not a base64 blob.
+// ── this project's own libsodium ─────────────────────────────────────────────
+// What the page's own code computes (block ids, key sealing, ChaCha20-Poly1305) is
+// seedstore's, so it runs on seedstore's own dependency, libsodium-wrappers, the whole
+// API. Its wasm is the libsodium.wasm already in host.skb, so the page fetches it once:
+// the wrapper is staged with its core's embedded base64 copy blanked, and patched to
+// instantiate the bytes the page hands it (`useWasm`, from seedkernel-wasm/platform-web
+// `readHostBlob(blob).sodium`) as its own instance beside the host's. The wrapper
+// starts its init at import, so the bytes arrive through a promise it waits on.
 {
-  const srcDir = join(root, "..", "..", "seedkernel", "WASM", "browser");
-  for (const f of ["libsodium-wrappers.mjs", "libsodium-core.mjs", "libsodium.wasm"]) {
-    const src = join(srcDir, f);
-    if (!existsSync(src)) {
-      console.error(`seedkernel ${f} not found at ${src} — build it first ` +
-        "(in seedkernel/WASM:  npm run build:browser-sodium).");
-      process.exit(1);
-    }
-    await copy(src, join(out, "seedkernel", f));
+  const nm = join(root, "node_modules");
+  const coreSrc = join(nm, "libsodium", "dist", "modules-esm", "libsodium.mjs");
+  const wrapSrc = join(nm, "libsodium-wrappers", "dist", "modules-esm", "libsodium-wrappers.mjs");
+  if (!existsSync(coreSrc) || !existsSync(wrapSrc)) {
+    console.error("libsodium-wrappers not found in node_modules — run `npm install`.");
+    process.exit(1);
   }
-}
-
-// ── the QuickJS engine: seedkernel's own build, like everything else ─────────
-// safe-js runs its realms on seedkernel's in-repo quickjs-ng build (package
-// export "seedkernel-wasm/quickjs"), staged from the seedkernel checkout rather
-// than vendored from npm. Its glue picks the browser's fetch path at runtime;
-// the four files must land in ONE dir since variant.mjs imports its siblings
-// relatively and fetches `new URL("emscripten-module.wasm", import.meta.url)`.
-{
-  const src = join(root, "..", "..", "seedkernel", "WASM", "quickjs", "dist");
-  mkdirSync(join(out, "seedkernel", "quickjs"), { recursive: true });
-  for (const f of ["variant.mjs", "ffi.mjs", "emscripten-module.mjs", "emscripten-module.wasm"]) {
-    if (!existsSync(join(src, f))) {
-      console.error(`seedkernel quickjs/dist/${f} not found at ${src} — see ` +
-        "seedkernel/WASM/quickjs/README.md.");
-      process.exit(1);
-    }
-    await copy(join(src, f), join(out, "seedkernel", "quickjs", f));
+  const core = readFileSync(coreSrc, "utf8");
+  // The embedded wasm is a base64 string literal beginning "AGFzbQ" (the "\0asm" magic).
+  const b64Start = core.indexOf('"AGFzbQ');
+  const b64End = b64Start < 0 ? -1 : core.indexOf('"', b64Start + 1);
+  if (b64End < 0) throw new Error("could not locate the base64 wasm in libsodium.mjs — upstream layout changed?");
+  // Emscripten glue runs only the wasm it was built with, so this package's libsodium
+  // must be the build seedkernel's host blob carries: bump them together.
+  const { readHostBlob } = await import("seedkernel-wasm/platform-web");
+  const blobWasm = readHostBlob(new Uint8Array(readFileSync(join(out, "host.skb")))).sodium;
+  if (!Buffer.from(core.slice(b64Start + 1, b64End), "base64").equals(blobWasm)) {
+    console.error("libsodium-wrappers in node_modules is not the libsodium build in seedkernel's host blob — " +
+      "pin seedstore's libsodium-wrappers to the version seedkernel/WASM/package.json pins, then `npm install`.");
+    process.exit(1);
   }
-}
-
-// ── vendor the browser-only npm deps so the demo runs OFFLINE ────────────────
-// What's left from npm is the JS API layer over that engine: quickjs-emscripten-core
-// plus @jitl/quickjs-ffi-types — multi-file ESM packages with their own
-// bare-specifier imports. Copy the exact runtime files into ./vendor/ and let
-// the pages' import map name every bare specifier. NOT the `quickjs-emscripten`
-// umbrella — safe-js passes its own variant. Source from seedkernel's
-// node_modules, falling back to seedstore's; libsodium is staged separately above.
-const nodeModulesDirs = [
-  join(root, "..", "..", "seedkernel", "WASM", "node_modules"),
-  join(root, "node_modules"),
-];
-function pkgDist(pkg, sub) {
-  for (const nm of nodeModulesDirs) {
-    const d = join(nm, ...pkg.split("/"), sub);
-    if (existsSync(d)) return d;
+  const wrap = readFileSync(wrapSrc, "utf8");
+  const wrapPatched = "let giveWasm;const wasmBytes=new Promise((r)=>{giveWasm=r;});" +
+    "export function useWasm(bytes){giveWasm(bytes);}" +
+    wrap
+      .replace('import e from"libsodium"', 'import e from"./libsodium-core.mjs"')
+      .replace(
+        "a({getRandomValue:function(){",
+        "a({instantiateWasm:async(imports,cb)=>{" +
+          "const{instance}=await WebAssembly.instantiate(await wasmBytes,imports);" +
+          "cb(instance);" +
+        "},getRandomValue:function(){");
+  if (!wrapPatched.includes("./libsodium-core.mjs") || !wrapPatched.includes("instantiateWasm")) {
+    throw new Error("libsodium-wrappers patch failed — upstream layout changed?");
   }
-  throw new Error(`vendor: ${pkg}/${sub} not found — run npm install (looked in ${nodeModulesDirs.join(", ")}).`);
-}
-// [package, dist subdir, dest under vendor/, explicit files, copy EVERY .mjs in the dir?]
-// quickjs-emscripten-core is chunked/code-split with hashed names (chunk-*.mjs,
-// module-*.mjs), so copy every .mjs from its dist rather than chase hashes; the leaf
-// package needs only its named entry.
-const VENDOR = [
-  ["quickjs-emscripten-core", "dist", "quickjs-emscripten-core", ["index.mjs"], true],
-  ["@jitl/quickjs-ffi-types", "dist", "quickjs-ffi-types",       ["index.mjs"], false],
-];
-for (const [pkg, sub, dest, files, allMjs] of VENDOR) {
-  const src = pkgDist(pkg, sub);
-  const dstDir = join(out, "vendor", dest);
-  mkdirSync(dstDir, { recursive: true });
-  const names = new Set(files);
-  if (allMjs) for (const n of readdirSync(src)) if (n.endsWith(".mjs")) names.add(n);
-  for (const n of names) await copy(join(src, n), join(dstDir, n));
+  mkdirSync(join(out, "libsodium"), { recursive: true });
+  const write = (name, data) => {
+    const dst = join(out, "libsodium", name);
+    staged.add(resolve(dst));
+    writeFileSync(dst, data);
+  };
+  write("libsodium-core.mjs", core.slice(0, b64Start) + '""' + core.slice(b64End + 1));
+  write("libsodium-wrappers.mjs", wrapPatched);
 }
 
 // The signed bundle, if one has been built (`npm run build:bundle`). ONE artifact
@@ -339,7 +321,7 @@ function prune(dir) {
 }
 prune(out);
 
-console.log(`browser demo staged at ${out}  (deps vendored under ./vendor — runs offline)`);
+console.log(`browser demo staged at ${out}  (runs offline)`);
 
 console.log("serve it:   npm run serve:demo        (re-stages + http-server with caching OFF)");
 console.log("  ── DO NOT use a plain `http-server` without -c-1: its default max-age=3600 makes");

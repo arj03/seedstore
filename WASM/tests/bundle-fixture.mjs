@@ -10,7 +10,7 @@ import { writeStorageBundle, authorKeysFor } from "../scripts/storage-bundle.mjs
  *  @param version optional manifest freshness mark (README §12.4); defaults to 1.
  *  @returns the hybrid author id (32 bytes) the bundle was signed under — the key-set
  *           hash, which is what a policy `authors` entry and every host name pin. */
-export async function buildBundle(path, author, sodium, build, version = 1) {
-  const keys = authorKeysFor(sodium, author.privateKey);
-  return writeStorageBundle({ path, sodium, sk: keys.ed.privateKey, build, version }).author;
+export async function buildBundle(path, author, build, version = 1) {
+  const keys = authorKeysFor(author.privateKey);
+  return writeStorageBundle({ path, sk: keys.ed.privateKey, build, version }).author;
 }
