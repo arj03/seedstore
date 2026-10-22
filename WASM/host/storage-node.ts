@@ -13,7 +13,7 @@ import {
   type Identity, type PeerId, type StorageConfig, defaultConfig, assertStorageConfig, normaliseConfig, DEFAULT_QUOTA_BYTES,
   TEST_BLOCK_SIZE, NET_SERVICE,
 } from "./core.js";
-import { Op, decodeStats, type RequestStats } from "./protocol.js";
+import { Op, decodeStats, decodePutResult, type PutResult, type RequestStats } from "./protocol.js";
 import { toHex, fromHex, readU32BE, readU64BE, concatBytes } from "./util.js";
 import { parseDest } from "seedkernel-wasm/peer-addr";
 import type { Sodium } from "./sodium.js";
@@ -125,35 +125,21 @@ export async function netPeers(shell: Pick<Shell, "call">): Promise<PeerId[]> {
   return out;
 }
 
-/** Decode the guest's PUT result — the single result format every driver reads
- *  (`encodePutResult` in tier2-guest.orchestration.js):
- *    [K 32][chunkCount u32][placed u32][intended u32][rootLen u32][root ...][idCount u32]{id 32} */
-function decodePutResult(r: Uint8Array): PutResult {
-  const rootLen = readU32BE(r, 44);
-  const tail = 48 + rootLen;
-  const blockIds: Uint8Array[] = [];
-  const idCount = readU32BE(r, tail);
-  for (let i = 0; i < idCount; i++) blockIds.push(r.slice(tail + 4 + i * 32, tail + 4 + (i + 1) * 32));
-  return {
-    key: r.slice(0, 32),
-    root: r.slice(48, tail),
-    chunkCount: readU32BE(r, 32),
-    replicasLanded: readU32BE(r, 36),
-    replicasIntended: readU32BE(r, 40),
-    blockIds,
-  };
+/** Each linked peer, and whether this node reaches it over a direct path (seedkernel
+ *  §12.7) rather than through a relay: the transport's `routes`, `[key 32][direct u8]` apiece. */
+export async function netRoutes(shell: Pick<Shell, "call">): Promise<Map<PeerId, boolean>> {
+  const bytes = await transportOp(shell, new OpArgs("routes"));
+  const out = new Map<PeerId, boolean>();
+  for (let off = 0; off + 33 <= bytes.length; off += 33) out.set(toHex(bytes.subarray(off, off + 32)), bytes[off + 32] !== 0);
+  return out;
 }
 
-export interface PutResult {
-  /** The file's ROOT DESCRIPTOR (§4.3) — the signed envelope a reader is handed, which
-   *  replaced the old 32-byte manifest_id when the manifest stopped being an object. It
-   *  is variable-length: a one-chunk file's root is that chunk's own descriptor. */
-  root: Uint8Array;
-  key: Uint8Array;
-  chunkCount: number;
-  blockIds: Uint8Array[];
-  replicasLanded: number;
-  replicasIntended: number;
+export type { PutResult };
+
+/** The signed seedstore bundle (seedstore.skb), as a driver's `loadWasmBytes` reads it. One
+ *  blob carries everything: manifest + codec.wasm + reputation.wasm + the guest. */
+export interface WasmBytes {
+  bundleBlob: Uint8Array;
 }
 
 /** A node to install onto: the shell, the channel adapter it was built on, and the
@@ -220,7 +206,7 @@ export class StorageNode {
   private inFlight: Promise<unknown> = Promise.resolve();
   private closed = false;
 
-  private constructor(opts: StorageNodeOptions, loaded: AppHandle) {
+  private constructor(opts: StorageNodeOptions, loaded: AppHandle, local: LocalConfig) {
     const { shell, transport: net, identity } = opts.runtime;
     this.sodium = opts.sodium;
     this.shell = shell;
@@ -230,19 +216,18 @@ export class StorageNode {
     // The load's scoped view (`loaded.fs`), so the host read view shares the backend the
     // guest writes to.
     this.fs = loaded.fs!;
-    this.quota = opts.quota ?? DEFAULT_QUOTA_BYTES;
+    this.quota = local.guest.quota;
     this.store = opts.store ?? new FsBlobView(this.fs);
     this.crypto = new Crypto(opts.sodium);
     this.net = net;
     this.handle = loaded;
     this.appScope = loaded.appScope;
 
-    // Mirrors the guest's own CFG precedence rule (tier2-guest CFG) — must not
-    // drift from it. guest.config is untyped JSON, so coerce it here.
-    const override = normaliseConfig(opts.config ?? {});
-    assertStorageConfig(override);
+    // The guest's CFG (signed APP, then LOCAL over it), merged from the very LOCAL the
+    // guest was handed, so the two cannot disagree. guest.config is untyped JSON.
+    const { quota: _quota, ...override } = local.guest;
     const signed = (loaded.manifest.guest?.config ?? {}) as unknown as Partial<StorageConfig>;
-    const merged: Partial<StorageConfig> = { ...signed, ...override };
+    const merged: Partial<StorageConfig> = { ...signed, ...override, realmMemoryBytes: local.realmMemoryBytes };
     // A deployed bundle always signs its geometry into guest.config, so the fallback
     // is reachable only from a synthetic bundle that declared none — a test. Spelled
     // out rather than defaulted, so the one site that can still land on test geometry
@@ -256,17 +241,18 @@ export class StorageNode {
    *  owner. */
   static async create(opts: StorageNodeOptions): Promise<StorageNode> {
     await opts.sodium.ready;
+    const local = localConfigFor(opts);
     // Admitting the bundle is what routes inbound storage frames to it (the manifest
     // claims STORAGE_PROTO, §12.10) — nothing else arms it. `localConfig` and
     // `realmMemoryBytes` ride with THIS load (§12.4/§12.3), not the shell, so they don't
     // leak into the transport's budget. The guest writes through `loaded.fs` (a scoped
     // view, seedkernel §12.2), which the host read view reuses.
     const loaded = await opts.runtime.shell.install(opts.bundleBlob, {
-      localConfig: localConfigFor(opts),
-      realmMemoryBytes: normaliseConfig(opts.config ?? {}).realmMemoryBytes,
+      localConfig: local.guest,
+      realmMemoryBytes: local.realmMemoryBytes,
       guestDeadlineMs: opts.guestDeadlineMs,
     });
-    return new StorageNode(opts, loaded);
+    return new StorageNode(opts, loaded, local);
   }
 
   // ── cohort membership (§5.1) ───────────────────────────────────────────
@@ -429,13 +415,17 @@ export class StorageNode {
   }
 }
 
-/** This installation's settings for the storage bundle, as the `LOCAL` the guest
- *  reads (seedkernel §12.4). `realmMemoryBytes` is split back out (the realm's
- *  bound, not the guest's); `quota` can never be signed, so this is its only door. */
-function localConfigFor(opts: StorageNodeOptions): Record<string, string | number> {
-  const { realmMemoryBytes, ...guestOverride } = normaliseConfig(opts.config ?? {});
-  return {
-    ...(guestOverride as Record<string, string | number>),
-    quota: opts.quota ?? DEFAULT_QUOTA_BYTES,
-  };
+/** This installation's settings for the storage bundle: `guest` is the `LOCAL` the guest
+ *  reads (seedkernel §12.4), and `realmMemoryBytes` is split back out of it (the realm's
+ *  bound, not the guest's). `quota` can never be signed, so LOCAL is its only door. */
+interface LocalConfig {
+  guest: Omit<Partial<StorageConfig>, "realmMemoryBytes"> & { quota: number };
+  realmMemoryBytes?: number;
+}
+/** Normalised and checked once, before the bundle loads. */
+function localConfigFor(opts: StorageNodeOptions): LocalConfig {
+  const config = normaliseConfig(opts.config ?? {});
+  assertStorageConfig(config);
+  const { realmMemoryBytes, ...guest } = config;
+  return { guest: { ...guest, quota: opts.quota ?? DEFAULT_QUOTA_BYTES }, realmMemoryBytes };
 }

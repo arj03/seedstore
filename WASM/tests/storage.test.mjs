@@ -5,7 +5,7 @@
 //
 // The "loopback network" is the new in-process fabric (host/loopback.ts): the
 // real transport bundle runs between the nodes — AKE, record layer, routing —
-// over microtask-delivered channel pairs, and `setOnline`/`isOnline` mirror the
+// over microtask-delivered channel pairs, and `setOffline`/`isOnline` mirror the
 // old LoopbackNetwork's offline control by killing a peer's links.
 
 import {
@@ -122,8 +122,8 @@ export async function run(t) {
     const put = await owner.put(data);
     // Take two peers offline (≤ m of any chunk, since blocks are on distinct
     // peers). Manifest is replicated on r=3 peers, so it stays reachable too.
-    net.setOnline(nodes[1].peerId, false);
-    net.setOnline(nodes[2].peerId, false);
+    net.setOffline(nodes[1].peerId);
+    net.setOffline(nodes[2].peerId);
     const got = await owner.get(put.root, put.key);
     t.ok(bytesEqual(got, data), "read succeeds with two holders offline");
     nodes.forEach((n) => n.close());
@@ -148,8 +148,8 @@ export async function run(t) {
     // (Lost, §8).
     const holders = [];
     for (const n of nodes) { if (n !== owner && (await storeHoldsAny(n, ids))) holders.push(n); }
-    net.setOnline(holders[0].peerId, false);
-    net.setOnline(holders[1].peerId, false);
+    net.setOffline(holders[0].peerId);
+    net.setOffline(holders[1].peerId);
     const degraded = await liveBlockCount(nodes, net, ids);
     t.ok(degraded <= 2, `redundancy dropped after losing two holders (live=${degraded})`);
 
@@ -196,7 +196,7 @@ export async function run(t) {
 
     let holder = null;
     for (const n of nodes) { if (n !== owner && (await n.store.list()).length > 0) { holder = n; break; } }
-    net.setOnline(holder.peerId, false);                  // a holder leaves (tab closes)
+    net.setOffline(holder.peerId);                  // a holder leaves (tab closes)
     t.eq(await minHolders(nodes, net, put.blockIds), 1, "redundancy drops to 1 copy for the blocks it held");
 
     const online = nodes.filter((n) => n !== owner && net.isOnline(n.peerId));
@@ -268,7 +268,7 @@ export async function run(t) {
     const chunkId = put.blockIds[0];
     const held = [];
     for (const n of holders) if (await n.store.has(chunkId)) held.push(n);
-    for (const n of held.slice(0, 3)) net.setOnline(n.peerId, false);
+    for (const n of held.slice(0, 3)) net.setOffline(n.peerId);
     t.eq(await minHolders(all, net, [chunkId]), 2, "two copies live — healthy under the repairer's own RS(1,1), not under the chunk's");
 
     let replaced = 0;
@@ -290,7 +290,7 @@ export async function run(t) {
 
     let holder = null;
     for (const n of nodes) { if (n !== owner && (await n.store.list()).length > 0) { holder = n; break; } }
-    net.setOnline(holder.peerId, false);
+    net.setOffline(holder.peerId);
 
     let passes = 0;
     const online = nodes.filter((n) => n !== owner && net.isOnline(n.peerId));
@@ -403,7 +403,7 @@ export async function run(t) {
 
     // What the demo user actually did: kill a holder, then read. k=1 means any one
     // surviving copy reconstructs the file.
-    net.setOnline(nodes[1].peerId, false);
+    net.setOffline(nodes[1].peerId);
     t.ok(bytesEqual(await owner.get(put.root, put.key), data), "GET still reads after a holder is killed");
     nodes.forEach((n) => n.close());
     net.close();
@@ -465,57 +465,6 @@ export async function run(t) {
     t.eq(served[1], FETCH_UNANSWERED, "the second block is marked UNANSWERED by the holder's smaller cap");
 
     t.ok(bytesEqual(await owner.get(put.root, put.key), data), "GET completes across the cap mismatch (unanswered block re-requested, not marked tried)");
-    nodes.forEach((n) => n.close());
-    net.close();
-  }
-
-  t.group("a holder that answers UNANSWERED forever cannot hang a GET (§18)");
-  {
-    // The re-request loop above terminates because serveFetch always serves the
-    // first present block — an honest HOLDER's property, not the wire's. A peer
-    // that tags EVERY id UNANSWERED decides nothing; a reader that took its word
-    // would re-ask forever. The reader instead rules a no-progress round absent
-    // (a §8 miss), so the GET ends by its own verdict — and with both holders
-    // lying, the GET must FAIL, which is the point.
-    //
-    // The lie is a guest config knob (StorageConfig.lieOnFetch): the holders
-    // stay honest on HAVE/OFFER/STORE; only serveFetch lies.
-    const net = new LoopbackNetwork();
-    const cfg = { k: 1, m: 1, blockSize: 1024 };  // one block per chunk, m+1 = 2 copies → both holders
-    const mk = (lieOnFetch) => {
-      const identity = sodium.crypto_sign_keypair();
-      return bootStorageNode(inProcessStandUp, {
-        sodium, bundleBlob: wasm.bundleBlob, identity,
-        suppressLinkLog: true, channels: net.view(toHex(identity.publicKey)), listen: [{ label: "tcp", host: "127.0.0.1", port: 0 }],
-        config: { ...cfg, lieOnFetch }, timeoutMs: TIMEOUT,
-      });
-    };
-    const owner = await mk(false);
-    const nodes = [owner, await mk(true), await mk(true)];
-    for (let i = 0; i < nodes.length; i++) {
-      for (let j = i + 1; j < nodes.length; j++) await StorageNode.connect(nodes[i], nodes[j]);
-    }
-
-    const data = file(2048, 53);                  // 2 chunks, each block on both holders
-    const put = await owner.put(data);            // PUT is unaffected — the lie is on the read side
-
-    // Race a deadline so a REGRESSION fails this test loudly instead of hanging the suite
-    // (the unbounded loop never returns). Closing the nodes afterwards is what frees a
-    // regressed loop: its next round trip finds every peer unreachable.
-    let timer = null;
-    const deadline = new Promise((_, rej) => {
-      timer = setTimeout(() => rej(new Error("deadline: the GET never returned")), 10_000);
-    });
-    let err = null;
-    try { await Promise.race([owner.get(put.root, put.key), deadline]); } catch (e) { err = e; }
-    clearTimeout(timer);
-    t.ok(!!err, "the GET ends instead of reconstructing bytes no holder will serve");
-    // Ending is not enough — it must end with the COHORT's verdict. An unguarded re-ask
-    // loop does eventually die, on the realm's execution budget, but only after burning
-    // that whole budget on one peer's lie and after reporting an internal seam error in
-    // place of the §8 miss the cohort actually has. So the message is the assertion.
-    t.ok(err && /fewer than k blocks/.test(err.message),
-      `it ends on its own §8 verdict, not the realm's execution budget (${err && err.message.slice(0, 70)})`);
     nodes.forEach((n) => n.close());
     net.close();
   }

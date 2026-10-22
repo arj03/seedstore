@@ -99,13 +99,32 @@ export function parseSignedDescriptor(env: Uint8Array): SignedDescriptor {
   return { authorPk, sig, core, descriptor };
 }
 
+// ASCII "seedstore:block\0", followed by a fixed-size public key and the ciphertext.
+const BLOCK_DOMAIN = new Uint8Array([115,101,101,100,115,116,111,114,101,58,98,108,111,99,107,0]);
+
 /** Domain-separated block identity. The author is inseparable from the bytes,
- *  so re-signing someone else's descriptor cannot claim their stored ids. */
-export function blockHashInput(authorPk: Uint8Array, bytes: Uint8Array): Uint8Array {
+ *  so re-signing someone else's descriptor cannot claim their stored ids. `lead`
+ *  zero bytes go in front, for a caller framing a hash request around the input. */
+export function blockHashInput(authorPk: Uint8Array, bytes: Uint8Array, lead = 0): Uint8Array {
   if (authorPk.length !== 32) throw new Error("block id: author key must be 32 bytes");
-  // ASCII "seedstore:block\0" followed by a fixed-size public key and ciphertext.
-  const domain = new Uint8Array([115,101,101,100,115,116,111,114,101,58,98,108,111,99,107,0]);
-  return concatBytes([domain, authorPk, bytes]);
+  const out = new Uint8Array(lead + BLOCK_DOMAIN.length + 32 + bytes.length);
+  out.set(BLOCK_DOMAIN, lead);
+  out.set(authorPk, lead + BLOCK_DOMAIN.length);
+  out.set(bytes, lead + BLOCK_DOMAIN.length + 32);
+  return out;
+}
+
+/** The nonce's domain byte is the chunk's index-tree LEVEL (§4.3/§4.4): 0 is the file's
+ *  own ciphertext, ℓ > 0 an index chunk over level ℓ−1. There is no manifest domain. */
+export const LEVEL_BODY = 0;
+
+/** 12-byte nonce = [level u8][chunk index u32 BE][0…] (§4.4). A fresh random K per
+ *  file makes this deterministic per-file namespace unique; level separates index data. */
+export function chunkNonce(level: number, index: number): Uint8Array {
+  const n = new Uint8Array(12);
+  n[0] = level & 0xff;
+  writeU32BE(n, 1, index >>> 0);
+  return n;
 }
 
 /** Does this chunk's descriptor list the given block_id? Every peer that

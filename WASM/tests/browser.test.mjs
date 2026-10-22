@@ -9,7 +9,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { ensureSodium } from "./helpers.mjs";
-import { bytesEqual } from "../build/host/util.js";
+import { bytesEqual, toHex } from "../build/host/util.js";
 
 const buildDir = join(dirname(fileURLToPath(import.meta.url)), "..", "build");
 
@@ -40,7 +40,7 @@ export async function run(t) {
     for (let i = 0; i < 5; i++) {
       const identity = sodium.crypto_sign_keypair();
       const runtime = await storageRuntime(inProcessStandUp, {
-        identity, timeoutMs: 40, channels: net.view(Buffer.from(identity.publicKey).toString("hex")),
+        identity, timeoutMs: 40, channels: net.view(toHex(identity.publicKey)),
         listen: [{ label: "tcp", host: "127.0.0.1", port: 0 }],
       });
       nodes.push(await createStorageNode({ runtime, sodium, baseUrl: "build/", config }));

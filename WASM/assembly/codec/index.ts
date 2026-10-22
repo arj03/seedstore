@@ -13,7 +13,8 @@
 //   response = [bytes ...]   (length is handle()'s return value; 0 = no output)
 //
 // Ops:
-//   OP_INFO   (0) → [version u8][poly_lo u8][poly_hi u8][max_k u8][max_m u8]
+//   OP_INFO   (0) → [version u8][poly_lo u8][poly_hi u8][max_k u8][max_m u8][max_io u32 BE]
+//                  max_io = the most one request or answer may carry
 //   OP_ENCODE (1)  args [k u8][m u8][bs u32 BE][data k*bs]      → parity m*bs
 //   OP_DECODE (2)  args [k u8][m u8][bs u32 BE][cnt u8]
 //                       [rowIdx cnt][blocks cnt*bs]             → data k*bs
@@ -29,8 +30,8 @@ const OP_ENCODE: i32 = 1;
 const OP_DECODE: i32 = 2;
 
 // Bounds chosen so the GF matrices fit MATRIX_SIZE (n ≤ 64 → augmented n*2n =
-// 8192 bytes). Defaults are RS(10,6); the cold-archive extension is RS(20,20)
-// → n = 40 (§4.1), comfortably inside these caps.
+// 8192 bytes). Deployments run RS(2,2) or RS(1,m); the cold-archive extension is
+// RS(20,20) → n = 40 (§4.1), comfortably inside these caps.
 const MAX_K: i32 = 32;
 const MAX_M: i32 = 32;
 
@@ -44,6 +45,8 @@ const INV_OFF: i32 = PRIV_MATRIX_OFF + 4096;
 const AUG_OFF: i32 = PRIV_MATRIX_OFF + 8192; // k×2k    (≤ 8192)
 const MATRIX_SIZE: i32 = 24576;
 const PRIV_WORK_OFF: i32 = PRIV_MATRIX_OFF + MATRIX_SIZE; // big output buffer
+// A request is staged in scratch, an answer built in the work buffer and copied back.
+const MAX_IO: i32 = min(SCRATCH_SIZE, PRIV_SIZE - PRIV_WORK_OFF);
 
 export let scratch: i32 = 0;
 // Declare the full 2 MB I/O region to the host (SPEC §4.1 optional export): a
@@ -72,7 +75,11 @@ export function handle(input_len: i32): i32 {
     store<u8>(scratch + 2, GF_POLY_HI as u8);
     store<u8>(scratch + 3, MAX_K as u8);
     store<u8>(scratch + 4, MAX_M as u8);
-    return 5;
+    store<u8>(scratch + 5, (MAX_IO >>> 24) as u8);
+    store<u8>(scratch + 6, (MAX_IO >>> 16) as u8);
+    store<u8>(scratch + 7, (MAX_IO >>> 8) as u8);
+    store<u8>(scratch + 8, MAX_IO as u8);
+    return 9;
   }
 
   if (op == OP_ENCODE) {
@@ -83,8 +90,8 @@ export function handle(input_len: i32): i32 {
     if (k < 1 || k > MAX_K || m < 0 || m > MAX_M || bs < 1) return 0;
     if (input_len != 7 + k * bs) return 0;
     const outLen = m * bs;
-    if (outLen > PRIV_SIZE - PRIV_WORK_OFF || outLen > SCRATCH_SIZE) return 0;
-    if (m == 0) return 0; // nothing to encode (replication path is host-side)
+    if (outLen > MAX_IO) return 0;
+    if (m == 0) return 0; // nothing to encode (a k=1 chunk replicates, and never reaches the codec)
     const work = priv + PRIV_WORK_OFF;
     rsEncode(k, m, bs, scratch + 7, work);
     memory.copy(scratch, work, outLen);
@@ -108,7 +115,7 @@ export function handle(input_len: i32): i32 {
       if ((load<u8>(rowIdxPtr + r) as i32) >= n) return 0;
     }
     const outLen = k * bs;
-    if (outLen > PRIV_SIZE - PRIV_WORK_OFF || outLen > SCRATCH_SIZE) return 0;
+    if (outLen > MAX_IO) return 0;
     const work = priv + PRIV_WORK_OFF;
     const ok = rsDecode(
       k, bs, rowIdxPtr, blocksPtr, work,

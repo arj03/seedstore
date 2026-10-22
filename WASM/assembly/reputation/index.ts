@@ -52,13 +52,12 @@ function readF64(p: i32): f64 {
   return reinterpret<f64>(bits);
 }
 
-// Decay a peer's accumulators forward to `now` — pure function of elapsed time.
-// serve & miss are scaled by exp(-LN2 * dt / HALF_LIFE_MS); last is set to now.
-function decayTo(serve: f64, miss: f64, last: f64, now: f64): f64[] {
+// The factor a peer's accumulators decay by from `last` to `now` — pure function of
+// elapsed time: serve & miss are scaled by exp(-LN2 * dt / HALF_LIFE_MS), and last
+// becomes now. A scalar, so no call allocates.
+function decayFactor(last: f64, now: f64): f64 {
   const dt = now - last;
-  if (dt <= 0.0) return [serve, miss, now];
-  const factor = Math.exp(-LN2 * dt / HALF_LIFE_MS);
-  return [serve * factor, miss * factor, now];
+  return dt <= 0.0 ? 1.0 : Math.exp(-LN2 * dt / HALF_LIFE_MS);
 }
 
 function scoreOf(serve: f64, miss: f64): f64 {
@@ -66,9 +65,8 @@ function scoreOf(serve: f64, miss: f64): f64 {
 }
 
 function writeF64(p: i32, v: f64): void {
-  // little-endian f64 for easy DataView reads on the host
-  const bits = reinterpret<u64>(v);
-  for (let j = 0; j < 8; j++) store<u8>(p + j, ((bits >> (8 * j)) & 0xff) as u8);
+  // little-endian f64 for easy DataView reads on the host (wasm memory is little-endian)
+  store<u64>(p, reinterpret<u64>(v));
 }
 
 function writeU32BE(p: i32, v: u32): void {
@@ -95,26 +93,17 @@ export function handle(input_len: i32): i32 {
     // Input: [op u8][serve f64 LE][miss f64 LE][last u64 BE][now u64 BE][passes u32 LE][misses u32 LE]
     // Output: [serve f64 LE][miss f64 LE][last u64 BE][score f64 LE]
     if (input_len < 1 + 8 + 8 + 8 + 8 + 4 + 4) return 0;
-    let serve = readF64(scratch + 1);
-    let miss = readF64(scratch + 9);
-    let last = readU64BE(scratch + 17);
+    const last = readU64BE(scratch + 17);
     const now = readU64BE(scratch + 25);
-    const passes = load<u32>(scratch + 33);
-    const misses = load<u32>(scratch + 37);
-
-    const decayed = decayTo(serve, miss, last, now);
-    serve = decayed[0];
-    miss = decayed[1];
-    last = decayed[2];
-
-    serve += passes as f64;
-    miss += misses as f64;
+    const factor = decayFactor(last, now);
+    const serve = readF64(scratch + 1) * factor + (load<u32>(scratch + 33) as f64);
+    const miss = readF64(scratch + 9) * factor + (load<u32>(scratch + 37) as f64);
 
     const score = scoreOf(serve, miss);
 
     writeF64(scratch, serve);
     writeF64(scratch + 8, miss);
-    writeU64BE(scratch + 16, last);
+    writeU64BE(scratch + 16, now);
     writeF64(scratch + 24, score);
     return 32;
   }
@@ -123,17 +112,10 @@ export function handle(input_len: i32): i32 {
     // Input: [op u8][serve f64 LE][miss f64 LE][last u64 BE][now u64 BE]
     // Output: [score f64 LE]
     if (input_len < 1 + 8 + 8 + 8 + 8) return 0;
-    const serve = readF64(scratch + 1);
-    const miss = readF64(scratch + 9);
-    const last = readU64BE(scratch + 17);
-    const now = readU64BE(scratch + 25);
-
-    const decayed = decayTo(serve, miss, last, now);
-    const decayedServe = decayed[0];
-    const decayedMiss = decayed[1];
+    const factor = decayFactor(readU64BE(scratch + 17), readU64BE(scratch + 25));
 
     // Read-only: no write-back of accumulators.
-    const score = scoreOf(decayedServe, decayedMiss);
+    const score = scoreOf(readF64(scratch + 1) * factor, readF64(scratch + 9) * factor);
     writeF64(scratch, score);
     return 8;
   }

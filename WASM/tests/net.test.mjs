@@ -16,6 +16,7 @@ import { join } from "node:path";
 
 import {
   createConnectedCohort, loadSodium, loadWasmBytes, LoopbackNetwork, bootStorageNode, inProcessStandUp, inProcessHost,
+  generateKeyPair,
 } from "../build/host/node.js";
 import { StorageNode, netAddr, netReady } from "../build/host/storage-node.js";
 import { nodeChannels } from "seedkernel-wasm/shell-node";
@@ -44,11 +45,6 @@ function file(n, seed = 1) {
   return out;
 }
 
-function newKey(sodium) {
-  const kp = sodium.crypto_sign_keypair();
-  return { publicKey: kp.publicKey, privateKey: kp.privateKey };
-}
-
 // Stand up `count` storage nodes on real TCP loopback sockets, each with its own
 // on-disk store.local directory, fully connected (StorageNode.connect wires the
 // addresses + dials; the transport's own router collapses the simultaneous dials).
@@ -63,7 +59,7 @@ async function tcpCohort({ count, sodium, wasm, config, baseDir }) {
     // fs, so what the confined guest holder writes via `fs` lands on disk and node.store
     // reflects it (the view must read the fs the guest serves).
     nodes.push(await bootStorageNode((cfg) => inProcessHost(nodeRawFiles).standUp(cfg), {
-      sodium, ...wasm, identity: newKey(sodium), config, timeoutMs: 3000, dir,
+      sodium, ...wasm, identity: generateKeyPair(sodium), config, timeoutMs: 3000, dir,
       suppressLinkLog: true, channels: nodeChannels(),
       listen: [{ label: "tcp", host: "127.0.0.1", port: 0 }],
     }));
@@ -103,7 +99,7 @@ export async function run(t) {
   t.group("guest ws framing over the loopback fabric's ws listener");
   {
     const net = new LoopbackNetwork(0, 4096);
-    const idS = newKey(sodium), idB = newKey(sodium);
+    const idS = generateKeyPair(sodium), idB = generateKeyPair(sodium);
     const S = await bootStorageNode(inProcessStandUp, {
       sodium, ...wasm, identity: idS, timeoutMs: 3000,
       suppressLinkLog: true, channels: net.view(toHex(idS.publicKey)),
@@ -247,7 +243,7 @@ export async function run(t) {
   // ── browser ↔ node over a real WebSocket ───────────────────────────────────
   t.group("control plane round-trips over a real WebSocket (browser ↔ node, §16)");
   {
-    const idS = newKey(sodium), idB = newKey(sodium);
+    const idS = generateKeyPair(sodium), idB = generateKeyPair(sodium);
     // S gates its listener; B is a dialer only, so it has no inbound secret of its own —
     // it carries S's on the address it dials.
     const secretS = sodium.randombytes_buf(32);
@@ -300,7 +296,7 @@ export async function run(t) {
       // answers can only be seen by a link that has not been made yet.
       const dialsWith = async (secret, deadlineMs) => {
         const n = await bootStorageNode(inProcessStandUp, {
-          sodium, ...wasm, identity: newKey(sodium), timeoutMs: 3000,
+          sodium, ...wasm, identity: generateKeyPair(sodium), timeoutMs: 3000,
           suppressLinkLog: true, channels: nodeChannels(),
         });
         try {

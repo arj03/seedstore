@@ -31,6 +31,7 @@ import { join } from "node:path";
 import { performance } from "node:perf_hooks";
 import {
   StorageNode, loadWasmBytes, loadSodium, PRODUCTION_BLOCK_SIZE, bootStorageNode, inProcessStandUp, inProcessHost,
+  generateKeyPair,
 } from "../build/host/node.js";
 import { LoopbackNetwork } from "../build/host/loopback.js";
 import { toHex, bytesEqual } from "../build/host/util.js";
@@ -85,7 +86,7 @@ for (let i = 0; i < 1 + holders; i++) {
     tmpDirs.push(dir);
     standUp = (cfg) => inProcessHost(nodeRawFiles).standUp(cfg);
   }
-  const identity = (() => { const kp = sodium.crypto_sign_keypair(); return { publicKey: kp.publicKey, privateKey: kp.privateKey }; })();
+  const identity = generateKeyPair(sodium);
   const peerId = toHex(identity.publicKey);
   nodes.push(await bootStorageNode(standUp, {
     sodium,

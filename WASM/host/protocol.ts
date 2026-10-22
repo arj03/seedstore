@@ -9,6 +9,11 @@
 
 import { writeU32BE, readU32BE, concatBytes } from "./util.js";
 
+/** The wire protocol id storage speaks (seedkernel §12.10), claimed by the
+ *  bundle's signed manifest (`protocols`, scripts/storage-bundle.mjs) and named by
+ *  the guest in every request (NET_PROTO). */
+export const STORAGE_PROTO = "seedstore";
+
 export const MsgType = {
   HAVE: 1,   // disc.have / disc.want (§5)
   OFFER: 2,  // block.offer (batched) → accept-mask (§6)
@@ -74,6 +79,12 @@ export function decodeStats(buf: Uint8Array): Map<number, RequestStats> {
   return out;
 }
 
+// ── entry framing, for a sender sizing a batch to its frame cap ──────────────
+export const BATCH_HEAD = 4;            // every batch opens with its [count u32]
+export const OFFER_ENTRY_HEAD = 32 + 4; // [blockId 32][dlen u32], then the descriptor
+export const STORE_ENTRY_HEAD = 32 + 8; // [blockId 32][dlen u32][blen u32], then descriptor + bytes
+export const FETCH_ENTRY_HEAD = 1 + 4;  // a PRESENT block's [found u8][len u32], then the bytes
+
 // ── the response mask shared by HAVE, OFFER, and STORE ──────────────────────
 // All three replies are the same shape: one byte per batch entry (HAVE: held
 // 1/0; OFFER/STORE: a VERDICT_* code). A verdict ≠ 1 is a decline; codes 2-5
@@ -123,7 +134,7 @@ export interface Offer {
   descriptor: Uint8Array; // signed chunk-descriptor envelope (§4.3) — never absent
 }
 function encodeOfferEntry(o: Offer): Uint8Array {
-  const head = new Uint8Array(32 + 4);
+  const head = new Uint8Array(OFFER_ENTRY_HEAD);
   head.set(o.blockId, 0);
   writeU32BE(head, 32, o.descriptor.length);
   return concatBytes([head, o.descriptor]);
@@ -139,13 +150,14 @@ export function decodeOfferBatch(buf: Uint8Array): Offer[] {
   const out: Offer[] = [];
   let o = 4;
   for (let i = 0; i < count; i++) {
-    if (o + 36 > buf.length) throw new Error("protocol: decodeOfferBatch truncated entry");
+    if (o + OFFER_ENTRY_HEAD > buf.length) throw new Error("protocol: decodeOfferBatch truncated entry");
     const blockId = buf.subarray(o, o + 32);
     const dlen = readU32BE(buf, o + 32);
     if (dlen === 0) throw new Error("protocol: decodeOfferBatch missing descriptor");
-    if (o + 36 + dlen > buf.length) throw new Error("protocol: decodeOfferBatch truncated descriptor");
-    out.push({ blockId, descriptor: buf.subarray(o + 36, o + 36 + dlen) });
-    o += 36 + dlen;
+    o += OFFER_ENTRY_HEAD;
+    if (o + dlen > buf.length) throw new Error("protocol: decodeOfferBatch truncated descriptor");
+    out.push({ blockId, descriptor: buf.subarray(o, o + dlen) });
+    o += dlen;
   }
   return out;
 }
@@ -181,7 +193,7 @@ export function encodeStoreBatchParts(stores: StoreReq[]): Uint8Array[] {
   writeU32BE(head, 0, stores.length);
   const parts: Uint8Array[] = [head];
   for (const s of stores) {
-    const h = new Uint8Array(32 + 4 + 4);
+    const h = new Uint8Array(STORE_ENTRY_HEAD);
     h.set(s.blockId, 0);
     writeU32BE(h, 32, s.descriptor.length);
     writeU32BE(h, 36, s.bytes.length);
@@ -201,16 +213,17 @@ export function decodeStoreBatch(buf: Uint8Array): StoreReq[] {
   const out: StoreReq[] = [];
   let o = 4;
   for (let i = 0; i < count; i++) {
-    if (o + 40 > buf.length) throw new Error("protocol: decodeStoreBatch truncated entry");
+    if (o + STORE_ENTRY_HEAD > buf.length) throw new Error("protocol: decodeStoreBatch truncated entry");
     const blockId = buf.subarray(o, o + 32);
     const dlen = readU32BE(buf, o + 32);
     const blen = readU32BE(buf, o + 36);
     if (dlen === 0) throw new Error("protocol: decodeStoreBatch missing descriptor");
-    if (o + 40 + dlen + blen > buf.length) throw new Error("protocol: decodeStoreBatch truncated data");
-    const descriptor = buf.subarray(o + 40, o + 40 + dlen);
-    const bytes = buf.subarray(o + 40 + dlen, o + 40 + dlen + blen);
+    o += STORE_ENTRY_HEAD;
+    if (o + dlen + blen > buf.length) throw new Error("protocol: decodeStoreBatch truncated data");
+    const descriptor = buf.subarray(o, o + dlen);
+    const bytes = buf.subarray(o + dlen, o + dlen + blen);
     out.push({ blockId, descriptor, bytes });
-    o += 40 + dlen + blen;
+    o += dlen + blen;
   }
   return out;
 }
@@ -254,7 +267,7 @@ export function encodeFetchBatchRes(blocks: FetchEntry[]): Uint8Array {
   for (const b of blocks) {
     if (b === FETCH_UNANSWERED) { parts.push(new Uint8Array([FETCH_UNANSWERED])); continue; }
     if (!b) { parts.push(new Uint8Array([FETCH_ABSENT])); continue; }
-    const h = new Uint8Array(5);
+    const h = new Uint8Array(FETCH_ENTRY_HEAD);
     h[0] = FETCH_PRESENT;
     writeU32BE(h, 1, b.length);
     parts.push(h, b);
@@ -282,4 +295,49 @@ export function decodeFetchBatchRes(buf: Uint8Array, expectedCount?: number): Fe
   }
   if (o !== buf.length) throw new Error("protocol: decodeFetchBatchRes trailing bytes");
   return out;
+}
+
+// ── the PUT result (Op.PUT / Op.PUT_FINISH) ─────────────────────────────────
+// Encoded by the guest, read by every driver:
+//   [K 32][chunkCount u32][placed u32][intended u32][rootLen u32][root ...][idCount u32]{id 32}
+// root is variable-length (there's no manifest object), hence the length prefix.
+export interface PutResult {
+  /** The file's ROOT DESCRIPTOR (§4.3) — the signed envelope a reader is handed, which
+   *  replaced the old 32-byte manifest_id when the manifest stopped being an object. It
+   *  is variable-length: a one-chunk file's root is that chunk's own descriptor. */
+  root: Uint8Array;
+  key: Uint8Array;
+  chunkCount: number;
+  blockIds: Uint8Array[];
+  /** The §8 replica accounting, so a driver can warn on a silently under-replicated PUT. */
+  replicasLanded: number;
+  replicasIntended: number;
+}
+const PUT_RESULT_HEAD = 48;
+export function encodePutResult(r: PutResult): Uint8Array {
+  const tail = PUT_RESULT_HEAD + r.root.length;
+  const out = new Uint8Array(tail + 4 + r.blockIds.length * 32);
+  out.set(r.key, 0);
+  writeU32BE(out, 32, r.chunkCount);
+  writeU32BE(out, 36, r.replicasLanded);
+  writeU32BE(out, 40, r.replicasIntended);
+  writeU32BE(out, 44, r.root.length);
+  out.set(r.root, PUT_RESULT_HEAD);
+  writeU32BE(out, tail, r.blockIds.length);
+  for (let i = 0; i < r.blockIds.length; i++) out.set(r.blockIds[i], tail + 4 + i * 32);
+  return out;
+}
+export function decodePutResult(r: Uint8Array): PutResult {
+  const tail = PUT_RESULT_HEAD + readU32BE(r, 44);
+  const blockIds: Uint8Array[] = [];
+  const idCount = readU32BE(r, tail);
+  for (let i = 0; i < idCount; i++) blockIds.push(r.slice(tail + 4 + i * 32, tail + 4 + (i + 1) * 32));
+  return {
+    key: r.slice(0, 32),
+    root: r.slice(PUT_RESULT_HEAD, tail),
+    chunkCount: readU32BE(r, 32),
+    replicasLanded: readU32BE(r, 36),
+    replicasIntended: readU32BE(r, 40),
+    blockIds,
+  };
 }

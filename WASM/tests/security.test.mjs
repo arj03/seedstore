@@ -95,22 +95,26 @@ export async function run(t) {
                           "encodeFetchBatchRes", "decodeFetchBatchReq", "decodeFetchBatchRes"]) {
         if (typeof globalThis[name] !== "function") throw new Error("fault injection: the guest no longer defines " + name);
       }
-      stub("hash", async b => crypto.hash(b));
-      stub("decrypt", async (...args) => { const out = crypto.decrypt(...args); if (!out) throw new Error("authentication failed"); return out; });
+      stub("blake2b", async req => crypto.hash(req.subarray(2)));
+      stub("decrypt", async (K, level, index, parts, tag) => {
+        const out = crypto.decrypt(K, level, index, concatBytes(parts), tag);
+        if (!out) throw new Error("authentication failed");
+        return out;
+      });
       stub("verifyEnv", async bytes => verifySigned(bytes));
-      stub("myPeer", async () => "self");
+      stub("myPeer", () => "self");
       const observations = [];
       stub("repObserve", async (peer, time, passes, misses) => observations.push({ passes, misses }));
       stub("makeRanker", async () => async peers => peers);
       const bad = "01".repeat(32), healthy = "02".repeat(32);
       stub("haveWant", async ids => new Map(ids.map(id => [toHex(id), new Set([bad, healthy])])));
-      stub("netSendMany", async requests => requests.map(r => ({peer:r.peer, ok:true, bytes:r.peer === bad ? badReply : good})));
+      stub("netSend", async peer => peer === bad ? badReply : good);
       const read = await reconstructChunks([d], K, 0);
       // Audit each distinct id once, matching a one-block replica's evidence.
       // liveHolders may query a replica id multiple times; answer the requested
       // count on the healthy side while keeping the adversary's malformed frame.
-      stub("netSendMany", async requests => requests.map(r => ({peer:r.peer, ok:true,
-        bytes:r.peer === bad ? badReply : encodeFetchBatchRes(decodeFetchBatchReq(r.payload).map(() => decodeFetchBatchRes(good)[0]))})));
+      stub("netSend", async (peer, type, payload) =>
+        peer === bad ? badReply : encodeFetchBatchRes(decodeFetchBatchReq(payload).map(() => decodeFetchBatchRes(good)[0])));
       stub("placeChunksBatched", async jobs => {
         for (const job of jobs) {
           for (let j=0;j<job.slotIds.length;j++) {
@@ -125,6 +129,37 @@ export async function run(t) {
     t.ok(bytesEqual(result.read, plaintext), "malformed response " + i + ": GET retries a healthy holder");
     t.eq(result.repaired, 2, "malformed response " + i + ": repair restores missing replicas");
     t.ok(result.misses > 0, "malformed response " + i + ": the bad holder receives misses");
+  }
+
+  t.group("security: a holder that answers UNANSWERED forever cannot hang a GET (§18)");
+  {
+    // serveFetch always serves the first present block — an honest HOLDER's property, not
+    // the wire's. A peer that tags EVERY id UNANSWERED decides nothing, and a reader that
+    // took its word would re-ask forever. The reader instead rules a no-progress answer
+    // absent (a §8 miss), so with every holder lying the GET must FAIL, on its own verdict.
+    const ctx = vm.createContext({ APP: { k: 1, m: 2, blockSize: 1024, maxMessageBytes: 8192, fanoutWindow: 4 }, LOCAL: {},
+      Uint8Array, d, K });
+    vm.runInContext(source, ctx);
+    const r = await vm.runInContext(`(async () => {
+      for (const name of ["reconstructChunks", "netSend", "haveWant", "makeRanker", "myPeer", "repObserve"]) {
+        if (typeof globalThis[name] !== "function") throw new Error("fault injection: the guest no longer defines " + name);
+      }
+      globalThis.myPeer = () => "self";
+      globalThis.repObserve = async () => {};
+      globalThis.makeRanker = async () => async (peers) => peers;
+      const liars = ["01".repeat(32), "02".repeat(32)];
+      globalThis.haveWant = async (ids) => new Map(ids.map((id) => [toHex(id), new Set(liars)]));
+      // Bounded, so a regressed re-ask loop fails this test instead of hanging the suite.
+      let asked = 0;
+      globalThis.netSend = async (peer, type, payload) => {
+        if (++asked > 100) throw new Error("re-asked the lying holders " + asked + " times");
+        return encodeFetchBatchRes(decodeFetchBatchReq(payload).map(() => FETCH_UNANSWERED));
+      };
+      try { await reconstructChunks([d], K, 0); return { asked, err: null }; }
+      catch (e) { return { asked, err: e.message }; }
+    })()`, ctx);
+    t.ok(r.err && /fewer than k blocks/.test(r.err), `the GET ends on its own §8 verdict (${r.err && r.err.slice(0, 70)})`);
+    t.eq(r.asked, 2, "each lying holder is asked once, and its no-progress answer is final");
   }
 
   t.group("security: a FETCH cannot pull more out of a holder's store than one reply carries");

@@ -14,9 +14,7 @@
 // not Bun (Bun's http upgrade swallows writes):
 //   cd ../../seedshell && npm run relay
 
-import { loadSodium, loadWasmBytes, storageRuntime, inProcessStandUp } from "../build/host/node.js";
-import { StorageNode } from "../build/host/storage-node.js";
-import { toHex } from "../build/host/util.js";
+import { loadSodium, loadWasmBytes, bootStorageNode, inProcessStandUp, generateKeyPair, toHex, fromHex } from "../build/host/node.js";
 import { nodeChannels, nodeDatagrams } from "seedkernel-wasm/shell-node";
 import { joinRelayRoom } from "./relay-room.mjs";
 
@@ -40,7 +38,7 @@ const contactSecret = (() => {
     console.error("CONTACT must be 32-byte hex (64 chars) — e.g. CONTACT=$(openssl rand -hex 32)");
     process.exit(1);
   }
-  return Uint8Array.from(hex.match(/../g).map((b) => parseInt(b, 16)));
+  return fromHex(hex);
 })();
 
 // Defaults match p2p.html's WebRTC mode, so a mixed browser/console cohort agrees on RS
@@ -49,23 +47,20 @@ const config = { k: Number(process.env.K) || 1, m: Number(process.env.M) || 1, b
 
 const sodium = await loadSodium();
 const wasm = await loadWasmBytes();
-const identity = (() => { const kp = sodium.crypto_sign_keypair(); return { publicKey: kp.publicKey, privateKey: kp.privateKey }; })();
+const identity = generateKeyPair(sodium);
 
-// A browser-edge-style node with no listeners. Its sockets are node:net for the relay and
+// A real StorageNode serving HAVE / OFFER / STORE / FETCH over the P2P links, on a
+// browser-edge-style node with no listeners. Its sockets are node:net for the relay and
 // this machine's datagram sockets, which seedkernel's UDP bundle makes direct paths over;
 // the transport bundle registers and links through the first, and signals those paths over
 // the links. A room shares one contact secret, so this node's own is the one its peers
-// present.
-const runtime = await storageRuntime(inProcessStandUp, {
+// present. Default store.local is an in-RAM fs, read back through the node's FsBlobView.
+const node = await bootStorageNode(inProcessStandUp, {
   identity, timeoutMs: 6000, contactSecret, channels: nodeChannels(), datagrams: nodeDatagrams(),
-  // No app config here — it travels with the storage bundle's own load below.
+  sodium, ...wasm, config, quota: 64 * 1024 * 1024,
 });
-
-// A real StorageNode serving HAVE / OFFER / STORE / FETCH over the P2P links. Default
-// store.local is an in-RAM fs, read back through the node's FsBlobView.
-const node = await StorageNode.create({ runtime, sodium, ...wasm, config, quota: 64 * 1024 * 1024, timeoutMs: 6000 });
 // Meet in the room: members are dialed through the relay, and console ones move to UDP.
-await joinRelayRoom({ shell: runtime.shell, identity, sodium, relay: base, room, secret: contactSecret, relaySecret });
+await joinRelayRoom({ shell: node.shell, identity, sodium, relay: base, room, secret: contactSecret, relaySecret });
 
 console.log(`\nseedstore holder ${short(node.peerId)} ready — handlers installed: ${node.handlersInstalled()}`);
 console.log(`joined room "${room}" on ${base}${relaySecret ? " (private relay)" : ""}  (RS k=${config.k} m=${config.m}, ${config.blockSize} B blocks)`);
@@ -89,15 +84,15 @@ if (repairMs > 0) {
 }
 console.log("(Ctrl+C to stop)\n");
 
-// Show blocks landing: poll the store for newly-held ids.
+// Show blocks landing: poll the store for newly-held ids, sizing the store once per tick.
 const known = new Set();
 const timer = setInterval(async () => {
-  for (const id of (await node.store.list()).map(toHex)) {
-    if (!known.has(id)) {
-      known.add(id);
-      const used = await node.store.usedBytes();
-      console.log(`  ✓ stored block ${short(id)}  (${known.size} held, ${(used / 1024).toFixed(1)} KB of ${(node.quota / 1024 / 1024).toFixed(0)} MB)`);
-    }
+  const fresh = (await node.store.list()).map(toHex).filter((id) => !known.has(id));
+  if (fresh.length === 0) return;
+  const used = await node.store.usedBytes();
+  for (const id of fresh) {
+    known.add(id);
+    console.log(`  ✓ stored block ${short(id)}  (${known.size} held, ${(used / 1024).toFixed(1)} KB of ${(node.quota / 1024 / 1024).toFixed(0)} MB)`);
   }
 }, 300);
 

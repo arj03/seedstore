@@ -4,11 +4,7 @@
 // host-side. Browser nodes run the same protocol as long-running peers, differing only in
 // backend and default quota (§1, §8).
 
-import { StorageNode, type StorageNodeOptions } from "./storage-node.js";
-
-export interface WasmBytes {
-  bundleBlob: Uint8Array;
-}
+import { StorageNode, type StorageNodeOptions, type WasmBytes } from "./storage-node.js";
 
 /** Fetch the signed seedstore bundle relative to the page. One fetch replaces
  *  the old three (codec.wasm + reputation.wasm + tier2-guest.js). */
@@ -38,7 +34,7 @@ export { StorageNode } from "./storage-node.js";
 export { LoopbackNetwork } from "./loopback.js";
 export { createConnectedCohort } from "./cluster.js";
 export { storageRuntime, bootStorageNode } from "./runtime.js";
-export type { StorageNodeOptions } from "./storage-node.js";
-export { netAddr, netPeer, netRelay, netRelayState, netContact, netReady, netPeers } from "./storage-node.js";
+export type { StorageNodeOptions, WasmBytes } from "./storage-node.js";
+export { netAddr, netPeer, netRelay, netRelayState, netContact, netReady, netPeers, netRoutes } from "./storage-node.js";
 export type { StorageConfig, Identity } from "./core.js";
 export { defaultConfig, STORAGE_APP, STORAGE_PROTO } from "./core.js";

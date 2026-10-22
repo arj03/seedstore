@@ -63,16 +63,16 @@ final `32` to sweep the window):
 
 | | time | rate | |
 |---|---:|---:|---|
-| **PUT** | ~0.41 s | ~9.7 MB/s | ships the 2× erasure overhead: RS(2,2) is 2 data + 2 parity |
-| **GET** | ~0.24 s | ~16.9 MB/s | downloads any *k* of *n*, i.e. 1× the file |
+| **PUT** | ~0.35 s | ~11.5 MB/s | ships the 2× erasure overhead: RS(2,2) is 2 data + 2 parity |
+| **GET** | ~0.20 s | ~19.7 MB/s | downloads any *k* of *n*, i.e. 1× the file |
 
 The bench applies latency at the wire. Every message pays it in both directions, so
 one request/response costs a full RTT. The physical chunks of one message share a
 single delivery delay, as they would on an ordered byte stream.
 
 A 64 MB file over 40 ms with 1 MiB batches
-(`node tests/bench-net.mjs 40 64 256 1024 48 32`) runs PUT ~2.7 s (~24 MB/s) and GET
-~1.34 s (~48 MB/s).
+(`node tests/bench-net.mjs 40 64 256 1024 48 32`) runs PUT ~2.9 s (~22 MB/s) and GET
+~1.6 s (~41 MB/s). GET is the noisier of the two: 1.4–2.3 s across five runs.
 
 ### Live WAN
 
@@ -151,13 +151,15 @@ slot its own lane over a shared cursor (`runStoreBatches`) measured **+22%** on 
 same holders (paired and order-interleaved runs), and it removed a slow tail that
 was making whole PUTs miss their deadline.
 
+FETCH refills the same way: each reply is verified as soon as it lands, and its lane
+takes the next request without waiting for the rest of the window.
+
 **Pipelined windows.** A streamed PUT keeps one window placing while the next one
 encodes and sends its OFFERs, and the index places alongside the file's last window.
 A streamed GET fetches the next window while the current one is decrypted and handed
 back. Without this, the wire would sit idle at every window boundary. Over a 40 ms
 link (16 MB, RS(2,2), 32 KiB blocks, 4 MiB windows;
-`node tests/bench-net.mjs 40 16 32 256 48 32 4`), pipelining took PUT from ~1.99 s to
-~1.60 s and GET from ~1.10 s to ~0.83 s.
+`node tests/bench-net.mjs 40 16 32 256 48 32 4`), PUT takes ~1.34 s and GET ~0.76 s.
 
 **One host-call ledger.** The two windows in flight share the realm's host-call
 budget through one ledger (`hostBudget`), and every initiator call is charged against
@@ -197,10 +199,10 @@ looks faster.
 ## Holder ingest
 
 `node tests/bench-holder.mjs 16 256 1 1 disk` isolates holder admission and durable
-STORE work on a real filesystem: ~6.6 ms per 256 KiB block, a ~37 MB/s mean holder
-rate, and PUT ~0.67 s (~24 MB/s) with the initiator and the holders sharing one
+STORE work on a real filesystem: ~7.9 ms per 256 KiB block, a ~32 MB/s mean holder
+rate, and PUT ~0.68 s (~23.5 MB/s) with the initiator and the holders sharing one
 process. Most of the per-block time is waiting for that one thread; the crypto floor
-is ~0.36 ms per block. So treat the result as a bound on a co-resident cohort, not on
+is ~0.45 ms per block. So treat the result as a bound on a co-resident cohort, not on
 a dedicated holder machine. The capacity comparison uses total holder payload over
 the complete PUT wall time as a conservative floor. It separately sums the
 co-resident holders' measured rates for the active holder window, without dividing

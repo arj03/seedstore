@@ -2,6 +2,7 @@
 // plus the assets they share, so there is ONE staged dir (not one per page):
 //   - seedkernel's host blob (host.skb: its realm engine and the host's crypto)
 //   - this project's own libsodium (libsodium/), and the signed seedstore bundle
+//     (seedstore.skb: codec, reputation module and guest under one signature)
 //   - this project's compiled host, minified (build/host-min → host/)
 //   - seedkernel's node:fs-free browser host, minified (build-min → seedkernel/)
 //   - the pages: index.html (in-page loopback cohort), p2p.html (real P2P)
@@ -103,11 +104,6 @@ async function copy(src, dst) {
 
 mkdirSync(out, { recursive: true });
 
-// WASM modules the pages fetch relative to themselves.
-for (const f of ["codec.wasm", "reputation.wasm"]) {
-  await copy(join(build, f), join(out, f));
-}
-
 // seedrelay's room client, which p2p.html meets its room with: rooms are the page's, not
 // the transport's. seedrelay is a sibling checkout, as seedkernel is.
 const roomsSrc = join(root, "..", "..", "seedrelay", "rooms.mjs");
@@ -117,10 +113,6 @@ if (!existsSync(roomsSrc)) {
 }
 mkdirSync(join(out, "seedrelay"), { recursive: true });
 await copy(roomsSrc, join(out, "seedrelay", "rooms.mjs"));
-
-// The guest program (the whole protocol) is content the page fetches as text,
-// next to the wasm — browser.js feeds it to StorageNode (no node:fs in the browser).
-await copy(join(build, "host", "tier2-guest.js"), join(out, "tier2-guest.js"));
 
 // Host JS (seedstore + seedkernel). Copy .js recursively — seedkernel's minified
 // tree has host/ and services/ subdirs, and the import maps resolve
@@ -232,13 +224,15 @@ await copyJs(seedkernelHost, join(out, "seedkernel"));
   write("libsodium-wrappers.mjs", wrapPatched);
 }
 
-// The signed bundle, if one has been built (`npm run build:bundle`). ONE artifact
-// for both jobs: a browser page boots a StorageNode on it, fetching ./seedstore.skb
-// exactly like a Node node reads bundle/seedstore.skb, and reads its verified author
-// to auto-derive the cohort's signing scope. Absent -> the zero-author default.
-const bundleBlob = [join(root, "bundle", "seedstore.skb"), join(build, "bundle", "seedstore.skb")]
-  .find((p) => existsSync(p));
-if (bundleBlob) await copy(bundleBlob, join(out, "seedstore.skb"));
+// The signed bundle (`npm run build:bundle`): the codec, the reputation module and the
+// guest all ride inside it, so it is the one storage artifact a page fetches
+// (./seedstore.skb), as a Node node reads bundle/seedstore.skb. Both pages boot on it.
+const bundleBlob = join(root, "bundle", "seedstore.skb");
+if (!existsSync(bundleBlob)) {
+  console.error(`seedstore bundle not found at ${bundleBlob} — run \`npm run build\` first.`);
+  process.exit(1);
+}
+await copy(bundleBlob, join(out, "seedstore.skb"));
 
 // Every browser page, into the one dir.
 for (const page of ["index.html", "p2p.html"]) {
@@ -325,7 +319,7 @@ console.log(`browser demo staged at ${out}  (runs offline)`);
 
 console.log("serve it:   npm run serve:demo        (re-stages + http-server with caching OFF)");
 console.log("  ── DO NOT use a plain `http-server` without -c-1: its default max-age=3600 makes");
-console.log("     the browser keep a STALE codec.wasm after a rebuild → confusing errors.");
+console.log("     the browser keep a STALE seedstore.skb or host JS after a rebuild → confusing errors.");
 console.log("  in-page cohort:        http://localhost:3000/index.html");
 console.log("  real P2P (direct WS):  seedkernel --listen ws=… nodes, endpoints pasted in → http://localhost:3000/p2p.html");
-console.log("  real P2P (relay+STUN): `seedrelay` (or seedshell's `npm run relay`) + npm run serve:rtc-holder");
+console.log("  real P2P (relay+STUN): `seedrelay` (or seedshell's `npm run relay`) + npm run serve:holder");

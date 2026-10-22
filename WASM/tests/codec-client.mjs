@@ -58,7 +58,8 @@ export class CodecClient {
   info() {
     this.write(new Uint8Array([OP_INFO]));
     const r = this.read(this.exports.handle(1));
-    return { version: r[0], polyLo: r[1], polyHi: r[2], maxK: r[3], maxM: r[4] };
+    return { version: r[0], polyLo: r[1], polyHi: r[2], maxK: r[3], maxM: r[4],
+      maxIo: ((r[5] << 24) | (r[6] << 16) | (r[7] << 8) | r[8]) >>> 0 };
   }
 
   /** Systematic RS encode: k data blocks → m parity blocks (§4.1). Stages the

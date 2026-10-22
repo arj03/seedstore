@@ -24,10 +24,10 @@ import { bootNodeShell } from "seedkernel-wasm/shell-node";
 import {
   loadSodium, generateKeyPair, LoopbackNetwork, createConnectedCohort,
 } from "../build/host/node.js";
-import { toHex, bytesEqual, concatBytes, readU32BE } from "../build/host/util.js";
+import { toHex, bytesEqual, concatBytes } from "../build/host/util.js";
 import { writeOp } from "seedkernel-wasm/op-frame";
 import { netAddr, netReady } from "../build/host/storage-node.js";
-import { Op } from "../build/host/protocol.js";
+import { Op, decodePutResult } from "../build/host/protocol.js";
 import { buildBundle } from "./bundle-fixture.mjs";
 import { makeT } from "./harness.mjs";
 
@@ -113,7 +113,7 @@ export async function run(t) {
       // PUT, orchestrated by the confined guest the shell loaded.
       const data = file(9600, 7); // > k blocks → multi-chunk RS path
       const r = await loaded.invoke(writeOp(Op.PUT, data));
-      const key = r.slice(0, 32), root = r.slice(48, 48 + readU32BE(r, 44));
+      const { key, root } = decodePutResult(r);
       let holding = 0;
       for (const h of holders) if ((await h.store.list()).length > 0) holding++;
       t.ok(holding >= 4, "the shell's guest placed blocks across several distinct holders");

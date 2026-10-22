@@ -13,10 +13,8 @@ export interface Identity {
  *  authored the bundle. */
 export const STORAGE_APP = "seedstore";
 
-/** The wire protocol id storage speaks (seedkernel §12.10), claimed by the
- *  bundle's signed manifest (`protocols`, scripts/storage-bundle.mjs) and read by
- *  the guest's NET_PROTO — stated once here rather than retyped per deployment. */
-export const STORAGE_PROTO = "seedstore";
+// The wire protocol id lives with the wire format the guest is stitched from.
+export { STORAGE_PROTO } from "./protocol.js";
 
 /** The service the network is reached through: the one the transport bundle claims, and
  *  so the one storage's bundle requires (scripts/storage-bundle.mjs, which checks it
@@ -47,10 +45,6 @@ export interface StorageConfig {
    *  from it (~/6) when unset. Host-only — passed as THIS BUNDLE's realm bound
    *  (seedkernel §12.3), never shell-wide, so the transport guest doesn't get it. */
   realmMemoryBytes?: number;
-  /** Misbehaving-peer test knob: when true, every FETCH answers FETCH_UNANSWERED
-   *  for every id, exercising the reader's §18 no-progress invariant. Never set
-   *  by a real deployment. */
-  lieOnFetch?: boolean;
 }
 
 /** Default fan-out window (fanoutWindow): how many per-holder STORE/FETCH
@@ -61,10 +55,6 @@ export const DEFAULT_FANOUT_WINDOW = 16;
 /** Default guest realm memory budget when the operator sets none: 64 MiB.
  *  windowTargetBytes is derived from this (~ /6) unless explicitly overridden. */
 export const DEFAULT_REALM_MEMORY_BYTES = 64 * 1024 * 1024;
-
-/** Default target plaintext bytes per streamed PUT/GET window (§3): 4 MiB, used
- *  only when realmMemoryBytes is also unset. An explicit override always wins. */
-export const DEFAULT_WINDOW_TARGET_BYTES = 4 * 1024 * 1024;
 
 /** Default committed-tier byte budget (§14) when the operator sets none: 64 MiB.
  *  Quota is operator policy, never signed into a bundle — a driver supplies it at
@@ -105,7 +95,7 @@ export function defaultConfig(blockSize: number, k = 2, m = 2): StorageConfig {
  *  OPTIONAL ones (which a default cannot show) are named here. The geometry passed
  *  in is immaterial — only the KEYS of the result are read. */
 const CONFIG_KEYS: ReadonlySet<string> = new Set([
-  ...Object.keys(defaultConfig(TEST_BLOCK_SIZE)), "realmMemoryBytes", "windowTargetBytes", "lieOnFetch",
+  ...Object.keys(defaultConfig(TEST_BLOCK_SIZE)), "realmMemoryBytes", "windowTargetBytes",
 ]);
 
 /** Reject unknown keys in a caller-supplied config (StorageConfig is a closed
@@ -135,7 +125,8 @@ export function assertStorageConfig(config?: Partial<StorageConfig>): void {
 
 /** Normalise a caller-supplied partial config into a canonical shape, deriving
  *  windowTargetBytes from the realm budget when not explicitly set (§3). Called once
- *  at boot by StorageNode.create. Explicit overrides always win for benchmarking. */
+ *  at boot by StorageNode.create, and by the bundle author for the config it signs.
+ *  Explicit overrides always win for benchmarking. */
 export function normaliseConfig(raw: Partial<Record<string, unknown>>): Partial<StorageConfig> {
   const c: Partial<StorageConfig> = { ...raw } as Partial<StorageConfig>;
 

@@ -246,8 +246,8 @@ export async function run(t) {
     const put = await owner.put(data);
     t.ok(bytesEqual(await owner.get(put.root, put.key), data), "PUT → GET round-trips on a latency-bearing link");
     // Drop two holders (≤ m of any chunk): any k of n still reads.
-    net.setOnline(nodes[1].peerId, false);
-    net.setOnline(nodes[2].peerId, false);
+    net.setOffline(nodes[1].peerId);
+    net.setOffline(nodes[2].peerId);
     t.ok(bytesEqual(await owner.get(put.root, put.key), data), "batched GET still reads with two holders offline");
     nodes.forEach((nn) => nn.close());
     net.close();
@@ -369,36 +369,38 @@ export async function run(t) {
     t.eq(new Set(r.result.puts.map((p) => toHex(p.root))).size, 3, "the three files got three distinct manifests");
   }
 
-  t.group("a windowed FETCH plan finishes its own re-asks instead of handing them back a round later");
+  t.group("a FETCH plan finishes its own re-asks, in parallel, instead of handing them back a round later");
   {
     // A holder whose cap is smaller than ours serves one block and marks the rest
     // UNANSWERED (§18). Those re-asks are appended to the running task list, so the
-    // window loop must (a) re-ask at the width the holder has shown it can fill and
-    // (b) advance by what each window actually took — stepping by the window WIDTH
-    // over a short first window skips the tasks appended behind it, leaving the caller
-    // to re-plan them, which is what made a cap mismatch cost a round trip per block.
+    // fetch loop must (a) re-ask at the width the holder has shown it can fill, (b) run
+    // them itself rather than leave the caller to re-plan them a round later, and (c) run
+    // them across the fan-out window — one lane taking every re-ask is a round trip per block.
     const source = readFileSync(new URL("../build/host/tier2-guest.js", import.meta.url), "utf8");
     const ctx = vm.createContext({ APP: { k: 2, m: 2, blockSize: 1024, maxMessageBytes: 65536, fanoutWindow: 16 }, LOCAL: {}, Uint8Array });
     vm.runInContext(source, ctx);
     const r = await vm.runInContext(`(async () => {
-      for (const name of ["runFetchTasks", "netSendMany", "myPeer"]) {
+      for (const name of ["runFetchTasks", "netSend", "myPeer", "blockHash", "repObserve"]) {
         if (typeof globalThis[name] !== "function") throw new Error("fault injection: the guest no longer defines " + name);
       }
-      globalThis.myPeer = async () => "self";
-      let rounds = 0, messages = 0;
-      globalThis.netSendMany = async (reqs) => {
-        rounds++; messages += reqs.length;
-        return reqs.map((r) => ({ peer: r.peer, ok: true,   // a smaller-capped holder: one block per reply
-          bytes: encodeFetchBatchRes(decodeFetchBatchReq(r.payload).map((id, i) => i === 0 ? new Uint8Array(1024) : FETCH_UNANSWERED)) }));
+      globalThis.myPeer = () => "self";
+      // A served block "hashes" to its own first 32 bytes, which the holder below sets to the id asked.
+      globalThis.blockHash = async (d, b) => b.subarray(0, 32);
+      globalThis.repObserve = async () => {};
+      let messages = 0, inFlight = 0, peak = 0;
+      globalThis.netSend = async (peer, type, payload) => {
+        messages++; peak = Math.max(peak, ++inFlight);
+        await null;
+        inFlight--;
+        // A smaller-capped holder: one block per reply.
+        return encodeFetchBatchRes(decodeFetchBatchReq(payload).map((id, i) => i === 0 ? concatBytes([id, new Uint8Array(1024 - 32)]) : FETCH_UNANSWERED));
       };
       const ids = Array.from({ length: 32 }, (_, i) => { const b = new Uint8Array(32); b[0] = i; return toHex(b); });
       let applied = 0;
-      await runFetchTasks(new Map([["peerA", ids]]), fetchMaxIds(), async (peer, slice, ids2, blocks) => {
-        if (blocks) for (const b of blocks) if (b) applied++;
-      });
-      return { rounds, messages, applied, window: fanoutWindow() };
+      await runFetchTasks(new Map([["peerA", ids]]), fetchMaxIds(), () => null, (peer, h, b) => { if (b) applied++; });
+      return { messages, peak, applied, window: fanoutWindow() };
     })()`, ctx);
-    t.eq(r.applied, 32, `one pass fetches every block the plan asked for (${r.applied}/32, ${r.messages} messages in ${r.rounds} rounds)`);
-    t.ok(r.rounds <= 1 + Math.ceil(32 / r.window), `the re-asks ride the fan-out window rather than one per round (${r.rounds} rounds, window ${r.window})`);
+    t.eq(r.applied, 32, `one pass fetches every block the plan asked for (${r.applied}/32 in ${r.messages} messages)`);
+    t.eq(r.peak, r.window, `the re-asks fill the fan-out window rather than one lane (${r.peak} in flight, window ${r.window})`);
   }
 }

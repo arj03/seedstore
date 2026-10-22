@@ -16,8 +16,9 @@
 // Usage (Node ≥20 needs the WebSocket global):
 //   node --experimental-websocket scripts/p2p-cli.mjs \
 //     --peers "pk[.secret]@host:port,…" [--size 10] [--file path] \
-//     [--puts 1] [--gets 1] [--author hex|none] [--block 256] [--batch 1024] [--window 64] \
-//     [--timeout 5000] [--guest-deadline 60000] [--relay ws://host:port]
+//     [--puts 1] [--gets 1] [--k 1] [--m 1] [--block 256] [--batch 512] [--window 64] \
+//     [--conns 8] [--wtarget 24] [--heap 256] [--timeout 5000] [--guest-deadline 60000] \
+//     [--relay ws://host:port]
 //
 // `--relay` meets the peers through that seedrelay instead: a bare `pk[.secret]` is
 // reached through it, the node also holds UDP sockets, and timing starts once every
@@ -43,9 +44,13 @@ import { randomBytes, timingSafeEqual } from "node:crypto";
 
 import { WsNetwork } from "seedkernel-wasm/net-ws";
 import { nodeDatagrams } from "seedkernel-wasm/shell-node";
-import { OpArgs } from "seedkernel-wasm/op-frame";
-import { createStorageNode, loadSodium, defaultConfig, PRODUCTION_BLOCK_SIZE, toHex } from "../build/host/node.js";
-import { DEFAULT_QUOTA_BYTES } from "../build/host/core.js";
+import { bootShell } from "seedkernel-wasm/shell-core";
+import { MemoryFs } from "seedkernel-wasm/fs-memory";
+import {
+  createStorageNode, storageRuntime, loadSodium, generateKeyPair, defaultConfig, PRODUCTION_BLOCK_SIZE, toHex,
+  netPeer, netReady, netRelay, netRoutes,
+} from "../build/host/node.js";
+import { DEFAULT_QUOTA_BYTES, DEFAULT_REALM_MEMORY_BYTES } from "../build/host/core.js";
 
 // ── args ─────────────────────────────────────────────────────────────────────
 const args = new Map();
@@ -91,8 +96,8 @@ const maxMessageBytes = num("batch", 512) * 1024;
 const windowN = num("window", 64);
 // Streamed PUT/GET window (--wtarget MB): bigger windows mean fewer inter-window
 // barriers but a larger guest heap footprint (peak ~3x window at RS(1,1)), so raise
-// --heap with it. Defaults 24/256 = measured-best; --wtarget 0 uses the guest's
-// built-in 4 MiB fallback.
+// --heap with it. Defaults 24/256 = measured-best; --wtarget 0 derives it from the
+// heap (a sixth: ~42.7 MB at --heap 256), as an unset knob does everywhere.
 const wtargetMB = num("wtarget", 24);
 const heapMB = num("heap", 256);
 const timeoutMs = num("timeout", 5000);
@@ -187,7 +192,7 @@ function report(e, totalMs, bulk /* "send" | "recv" */) {
 
 // ── boot ─────────────────────────────────────────────────────────────────────
 const sodium = await loadSodium();
-const identity = sodium.crypto_sign_keypair();
+const identity = generateKeyPair(sodium);
 console.log(`me: ${hex(identity.publicKey).slice(0, 16)}…`);
 
 
@@ -202,10 +207,6 @@ const config = { ...defaultConfig(blockSize, kParam, mParam), maxMessageBytes, f
 // the shared shell with it installed. The node is assembled by seedkernel's `bootShell`
 // here rather than a host's `standUp`, so the wrapped sodium rides into the shell and
 // record-layer AEAD costs stay instrumented. Storage geometry does NOT ride here.
-const { netPeer, netReady, netRelay } = await import("../build/host/storage-node.js");
-const { storageRuntime } = await import("../build/host/node.js");
-const { bootShell } = await import("seedkernel-wasm/shell-core");
-const { MemoryFs } = await import("seedkernel-wasm/fs-memory");
 const instrumentedStandUp = (cfg) => bootShell({ ...cfg, sodium: wrapTransportSodium(sodium), fs: new MemoryFs() });
 const ws = new WsNetwork({ webSocketFactory: wsFactory });
 const runtime = await storageRuntime(instrumentedStandUp, {
@@ -218,8 +219,10 @@ const runtime = await storageRuntime(instrumentedStandUp, {
 });
 
 // `config` is this node's LOCAL — it reaches the guest with the bundle load.
-let node = await createStorageNode({ runtime, config, quota: DEFAULT_QUOTA_BYTES, timeoutMs, guestDeadlineMs });
-console.log(`node ready: RS(${kParam},${mParam}), ${blockSize / 1024} KiB blocks, batch ${Math.round(maxMessageBytes / 1024)} KiB, window ${windowN}, conns/peer ${connsN}, wtarget ${wtargetMB > 0 ? wtargetMB + " MB" : "4 MiB (default)"}, heap ${heapMB > 0 ? heapMB + " MB" : "64 MiB (default)"}, timeout ${timeoutMs} ms, guest deadline ${guestDeadlineMs ?? "host default"}${guestDeadlineMs == null ? "" : " ms"}`);
+const node = await createStorageNode({ runtime, config, quota: DEFAULT_QUOTA_BYTES, guestDeadlineMs });
+const wtargetText = wtargetMB > 0 ? `${wtargetMB} MB` : `${(node.config.windowTargetBytes / MB).toFixed(1)} MB (heap/6)`;
+const heapText = heapMB > 0 ? `${heapMB} MB` : `${DEFAULT_REALM_MEMORY_BYTES / MB} MiB (default)`;
+console.log(`node ready: RS(${kParam},${mParam}), ${blockSize / 1024} KiB blocks, batch ${Math.round(maxMessageBytes / 1024)} KiB, window ${windowN}, conns/peer ${connsN}, wtarget ${wtargetText}, heap ${heapText}, timeout ${timeoutMs} ms, guest deadline ${guestDeadlineMs ?? "host default"}${guestDeadlineMs == null ? "" : " ms"}`);
 
 if (relayUrl) console.log(`relay ${relayUrl}: ${await netRelay(runtime.shell, relayUrl)}`);
 const expected = new Set();
@@ -237,11 +240,9 @@ if (![...expected].every((pid) => peerUp.has(pid))) {
 }
 console.log(`${peerUp.size} peer(s) linked\n`);
 if (relayUrl) {
-  // The transport's `routes`: [key 32][direct u8] per linked peer.
   const direct = async () => {
-    const r = await runtime.shell.call("_net", new OpArgs("routes").build());
     let n = 0;
-    for (let off = 0; off + 33 <= r.length; off += 33) if (expected.has(hex(r.subarray(off, off + 32)))) n += r[off + 32];
+    for (const [peer, isDirect] of await netRoutes(runtime.shell)) if (isDirect && expected.has(peer)) n++;
     return n;
   };
   const t0 = now();

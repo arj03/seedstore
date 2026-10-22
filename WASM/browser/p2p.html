@@ -373,7 +373,7 @@ async function boot() {
     });
     // Log the LIVE config the coordinator actually uses (after defaultConfig
     // merge), so a stale/cached build that lost maxMessageBytes is visible here.
-    const winMiB = Math.round((node.config.windowTargetBytes ?? 4 * 1024 * 1024) / (1024 * 1024));
+    const winMiB = Math.round(node.config.windowTargetBytes / (1024 * 1024));
     const heapMiB = Math.round((node.config.realmMemoryBytes ?? 64 * 1024 * 1024) / (1024 * 1024));
     log(`node ready (${node.peerId.slice(0, 8)}…), RS(${node.config.k},${node.config.m}), ${node.config.blockSize / 1024} KiB blocks, batch cap ${Math.round(node.config.maxMessageBytes / 1024)} KiB, window ${winMiB} MiB, heap ${heapMiB} MiB${mode === "ws" ? `, conns/peer ${connsPerPeerFor(mode)}` : ""}. handlers installed: ${node.handlersInstalled()}`);
 

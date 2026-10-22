@@ -14,12 +14,13 @@
 "use strict";
 
 // ── byte helpers ────────────────────────────────────────────────────────────
-// toHex/fromHex/bytesEqual/concatBytes/writeU32BE/readU32BE/callerOf/readOp/writeOp are stitched in from
-// host/util.ts by scripts/build-guest.mjs. Short local aliases for this body.
+// toHex/fromHex/bytesEqual/concatBytes/writeU32BE/readU32BE/writeU64BE/callerOf/readOp/writeOp are stitched
+// in from host/util.ts by scripts/build-guest.mjs. Short local aliases for this body.
 const concat = concatBytes, wU32 = writeU32BE, rU32 = readU32BE;
+// Views, not copies: every consumer of a block (a frame, a hash or AEAD request) copies it anyway.
 function splitBlocks(buf, blockSize) {
   const out = [];
-  for (let o = 0; o < buf.length; o += blockSize) out.push(buf.slice(o, o + blockSize));
+  for (let o = 0; o < buf.length; o += blockSize) out.push(buf.subarray(o, o + blockSize));
   return out;
 }
 function padTo(buf, len) {
@@ -29,17 +30,8 @@ function padTo(buf, len) {
   return out;
 }
 
-// The nonce's domain byte is the chunk's index-tree LEVEL (§4.3/§4.4): 0 is the file's
-// own ciphertext, ℓ > 0 an index chunk over level ℓ−1. There is no manifest domain.
-const LEVEL_BODY = 0;
 const EMPTY = new Uint8Array(0);
 
-function wU64(out, off, ms) {
-  const hi = Math.floor(ms / 0x100000000);
-  wU32(out, off, hi); wU32(out, off + 4, ms >>> 0);
-}
-function rU64(b, off) { return rU32(b, off) * 0x100000000 + rU32(b, off + 4); }
-function readF64LE(b) { return new DataView(b.buffer, b.byteOffset, 8).getFloat64(0, true); }
 // fs keys are ASCII (hex + a short suffix); QuickJS has no TextEncoder, so map
 // chars to bytes by hand, the same way toHex/fromHex avoid Buffer.
 function strBytes(s) { const o = new Uint8Array(s.length); for (let i = 0; i < s.length; i++) o[i] = s.charCodeAt(i) & 255; return o; }
@@ -56,15 +48,10 @@ function bytesToStr(b) { let s = ""; for (let i = 0; i < b.length; i++) s += Str
 // come from the SHARED host/reputation-core.ts, stitched in ahead of this body — the same
 // framing StorageNode.score uses host-side, so the two agree by construction.
 const CODEC_ENCODE = 1, CODEC_DECODE = 2;     // assembly/codec/index.ts
-// Control-plane message types carried over netSend (host/protocol.ts §18).
-const MSG_HAVE = 1, MSG_OFFER = 2, MSG_FETCH = 3, MSG_STORE = 4;
-// This app's wire protocol id (§12.10) — must match the bundle manifest's `protocols`
-// entry (scripts/storage-bundle.mjs) so the receiving host routes frames here.
-const NET_PROTO = strBytes("seedstore");
-const HAVE_ID_LEN = 32;      // a HAVE/FETCH request names 32-byte block_ids (§18)
-const FETCH_FRAME = 5;       // a present block costs [found u8][len u32] in a FETCH response (§18)
-// One record per block: [descriptor length u32][descriptor][ciphertext].
-const STORE_REC = ".rec", STORE_REC_HEAD = 4;
+// Message types (MsgType), their entry framing, and the protocol id (STORAGE_PROTO,
+// which the bundle manifest's `protocols` claims) come from host/protocol.ts; the
+// `<hex>.rec` record layout from host/store-record.ts.
+const NET_PROTO = strBytes(STORAGE_PROTO);
 // The logical names this app's own modules are installed under. The guest calls them
 // by the logical name from its manifest, straight through `host.call` — a name this
 // realm did not declare as a local service, and that is not a host method (`service/call`),
@@ -75,7 +62,7 @@ const REP_NAME = "reputation";
 
 // ── request statistics (§18, for the latency/bench harnesses) ────────────────
 // The host has no host-side inbound seam, so these counters live here: `netSend`
-// counts+peaks outbound requests, `doHandle` counts+times inbound holder work.
+// counts+peaks outbound requests, `handle` counts+times inbound holder work.
 // Read and cleared by the Op.STATS local op. Indexed by MsgType byte (256 slots).
 const statsSent = new Uint32Array(256);
 const statsInFlight = new Uint32Array(256);
@@ -102,78 +89,77 @@ function encodeStats() {
 // `APP` (author-signed) and `LOCAL` (this install) merge with LOCAL winning
 // (seedkernel §12.4, ABI 8) — mixed cohort geometry is fine since reads use the
 // DESCRIPTOR's, not CFG's (§4.1/§4.3). `quota` is deliberately not merged in here;
-// quota() reads LOCAL alone so an author can't sign one. Mirrored by node.config
-// in host/storage-node.ts — keep the two in sync.
+// quota() reads LOCAL alone so an author can't sign one. StorageNode.config is the
+// same merge over the same LOCAL (host/storage-node.ts).
 const CFG = { ...APP, ...LOCAL };
 
 // ── the realm's host-call budget, as one ledger ──
-// The host holds every unresolved call's request, then its answer too, against per-realm
-// ceilings it advertises in HOST, and refuses a call past them outright — which fails the
-// PUT or GET rather than pacing it. The initiator's calls take their charge here first, so
-// phases that run at once — a window placing while the next encodes, a window prefetched
-// while the last one is decrypted — share the budget instead of each sizing itself to all
-// of it. FIFO within a class, so a large charge is never starved by a stream of small ones.
-//
-// FOREGROUND (crypto, codec, OFFER, HAVE) is admitted before BULK (STORE, FETCH), and bulk
-// always leaves room for foreground's largest call — else the next window's encode queues
-// behind the last window's STOREs, the very boundary the pipeline exists to hide.
-//
-// Holder work (`doHandle`) stays off the ledger and calls the host directly: it answers
-// other initiators, and parking it behind this node's own outbound traffic would let two
-// nodes storing to each other wait on each other until their requests time out.
+// The host refuses a call past its advertised per-realm ceilings (HOST) outright, failing
+// the PUT or GET, so every call takes its charge here first and concurrent phases share the
+// budget. FIFO within a class. FOREGROUND (crypto, codec, OFFER, HAVE) goes before BULK
+// (STORE, FETCH), which always leaves room for foreground's largest call. HOLDER work (a
+// peer's message to `handle`) has its own share: behind our own traffic, two nodes storing
+// to each other would wait on each other until their requests time out.
+const FOREGROUND = 0, BULK = 1, HOLDER = 2;
 const hostBudget = (() => {
   const advertised = (key) => {
     const v = typeof HOST === "object" && HOST ? HOST[key] : 0;
     return typeof v === "number" && v > 0 ? v : Infinity;
   };
-  // Held back from the ledger: the call whose answer resumed the continuation now spending
-  // (the host releases it only after that continuation runs), plus the few small calls
-  // left off the ledger — the roster, a root verify.
   // Read on first use: the charge sizes below are declared further down this file.
-  let callCap = 0, byteCap = 0, bulkCallCap = 0, bulkByteCap = 0;
-  let calls = 0, bytes = 0, bulkCalls = 0, bulkBytes = 0;
-  const queues = [[], []]; // [foreground, bulk], admitted in that order
+  let callCap = 0, byteCap = 0, bulkCallCap = 0, bulkByteCap = 0, holderCallCap = 0, holderByteCap = 0;
+  let calls = 0, bytes = 0, bulkCalls = 0, bulkBytes = 0, holderCalls = 0, holderBytes = 0;
+  const queues = [[], [], []]; // by class; foreground is admitted before bulk
   const init = () => {
-    callCap = Math.max(1, advertised("maxOutstandingHostCalls") - 1 - 16);
-    byteCap = advertised("maxOutstandingHostCallBytes") - maxCallChargeBytes();
+    const allCalls = advertised("maxOutstandingHostCalls"), allBytes = advertised("maxOutstandingHostCallBytes");
+    holderCallCap = Math.max(1, Math.min(64, Math.floor(allCalls / 4)));
+    holderByteCap = Math.min(allBytes, maxCallChargeBytes());
+    // The initiator gets the rest, less the call whose answer resumed the continuation now
+    // spending (the host releases it only after that continuation runs).
+    callCap = Math.max(1, allCalls - 1 - holderCallCap);
+    byteCap = allBytes - maxCallChargeBytes() - holderByteCap;
     bulkCallCap = Math.max(1, callCap - (CFG.k + CFG.m + 2));
     bulkByteCap = byteCap - maxCallChargeBytes();
   };
   // A charge over the whole cap still runs once nothing else of its class holds the ledger.
-  const fits = (n, bulk) => {
+  const fits = (n, cls) => {
     if (callCap === 0) init();
+    if (cls === HOLDER) return holderCalls < holderCallCap && (holderBytes === 0 || holderBytes + n <= holderByteCap);
     if (calls >= callCap || (bytes > 0 && bytes + n > byteCap)) return false;
-    return !bulk || (bulkCalls < bulkCallCap && (bulkBytes === 0 || bulkBytes + n <= bulkByteCap));
+    return cls !== BULK || (bulkCalls < bulkCallCap && (bulkBytes === 0 || bulkBytes + n <= bulkByteCap));
   };
-  const take = (n, bulk, sign) => {
+  const take = (n, cls, sign) => {
+    if (cls === HOLDER) { holderCalls += sign; holderBytes += sign * n; return; }
     calls += sign; bytes += sign * n;
-    if (bulk) { bulkCalls += sign; bulkBytes += sign * n; }
+    if (cls === BULK) { bulkCalls += sign; bulkBytes += sign * n; }
   };
   const admit = () => {
     for (const q of queues) {
-      while (q.length > 0 && fits(q[0].n, q[0].bulk)) {
+      while (q.length > 0 && fits(q[0].n, q[0].cls)) {
         const w = q.shift();
-        take(w.n, w.bulk, 1);
+        take(w.n, w.cls, 1);
         w.go();
       }
     }
   };
-  return async function run(n, fn, bulk = false) {
-    const q = queues[bulk ? 1 : 0];
-    if (q.length > 0 || (bulk && queues[0].length > 0) || !fits(n, bulk)) {
-      await new Promise((go) => q.push({ n, bulk, go }));
+  return async function run(n, fn, cls = FOREGROUND) {
+    const q = queues[cls];
+    if (q.length > 0 || (cls === BULK && queues[FOREGROUND].length > 0) || !fits(n, cls)) {
+      await new Promise((go) => q.push({ n, cls, go }));
     } else {
-      take(n, bulk, 1);
+      take(n, cls, 1);
     }
     try { return await fn(); }
-    finally { take(n, bulk, -1); admit(); }
+    finally { take(n, cls, -1); admit(); }
   };
 })();
-// The holder's calls: straight to the host, off the ledger.
-function rawCall(name, payload) { return host.call(name, payload); }
-// One initiator host call, charged its request plus the answer it expects.
+// One host call, charged its request plus the answer it expects: `call` for the
+// initiator's, `holderCall` for the holder's. Helpers both roles share take one as `via`.
 function call(name, payload, answerBytes = MSG_ENVELOPE_BYTES) {
   return hostBudget(payload.length + answerBytes, () => host.call(name, payload));
+}
+function holderCall(name, payload, answerBytes = MSG_ENVELOPE_BYTES) {
+  return hostBudget(payload.length + answerBytes, () => host.call(name, payload), HOLDER);
 }
 
 // ── crypto primitives + storage framing ──
@@ -182,48 +168,64 @@ function call(name, payload, answerBytes = MSG_ENVELOPE_BYTES) {
 // node/sign and node/verify apply the scoped `DOMAIN_guest ‖ scope` prefix on the
 // host side — the guest never holds or reconstructs it. Every seam name answers a
 // Promise now, so every helper here is awaited by its callers.
-// `via` is the ledger by default; the holder passes `rawCall` (see hostBudget).
 // `crypto/blake2b` takes [outLen][keyLen][key][msg]; block-ids are its unkeyed 32 bytes.
-const HASH_256 = Uint8Array.of(32, 0);
-function hash(bytes, via = call) { return via("crypto/blake2b", concat([HASH_256, bytes]), 32); }
-function blockHash(d, bytes, via = call) { return hash(blockHashInput(d.authorPk, bytes), via); }
+function blake2b(req, via) { return via("crypto/blake2b", req, 32); }
+// The request is built around the block in one buffer: blockHashInput leaves room for the head.
+function blockHash(d, bytes, via) {
+  const req = blockHashInput(d.authorPk, bytes, 2);
+  req[0] = 32;
+  return blake2b(req, via);
+}
 const P_SEAL = "crypto/chacha20poly1305-ietf/seal";
 const P_OPEN = "crypto/chacha20poly1305-ietf/open";
 // The AEAD names take [npub 12][key 32][adLen u32][ad][bytes]; chunks bind no associated
-// data (the nonce already names level and index), so adLen is four zero bytes.
-const NO_AD = new Uint8Array(4);
-function randomKey() { const n = new Uint8Array(4); wU32(n, 0, 32); return host.call("crypto/random", n); }
+// data (the nonce already names level and index), so adLen stays four zero bytes. The
+// message's pieces are written straight in, so they need no join of their own.
+const AEAD_HEAD = 12 + 32 + 4;
+function aeadRequest(K, level, index, parts) {
+  let len = AEAD_HEAD;
+  for (const p of parts) len += p.length;
+  const req = new Uint8Array(len);
+  req.set(chunkNonce(level, index), 0);
+  req.set(K, 12);
+  let o = AEAD_HEAD;
+  for (const p of parts) { req.set(p, o); o += p.length; }
+  return req;
+}
+function randomKey() { const n = new Uint8Array(4); wU32(n, 0, 32); return call("crypto/random", n, 32); }
 // This node's channel public key, as the host hands it over in `HOST` (seedkernel §12.4).
 // Read at the call rather than at load, so the unit tests can evaluate this file bare.
 function identity() { return fromHex(HOST.identity); }
 function myPeer() { return HOST.identity; }
-// 12-byte nonce = [level u8][chunk index u32 BE][0…] (§4.4). A fresh random K per
-// file makes this deterministic per-file namespace unique; level separates index data.
-function nonce(level, index) { const n = new Uint8Array(12); n[0] = level & 255; wU32(n, 1, index >>> 0); return n; }
+// The nonce (chunkNonce, LEVEL_BODY) comes from host/descriptor-core.ts.
 // The host's seal result is [ciphertext][tag 16]. Keep the tag in the signed
 // descriptor so the ciphertext remains exactly k·blockSize for systematic RS.
+// The ciphertext is a view of the answer; the tag is copied out, since the signed
+// descriptor keeps it long after the blocks are placed.
 async function encrypt(K, level, index, msg) {
-  const sealed = await call(P_SEAL, concat([nonce(level, index), K, NO_AD, msg]), msg.length + AUTH_TAG_LEN);
+  const sealed = await call(P_SEAL, aeadRequest(K, level, index, [msg]), msg.length + AUTH_TAG_LEN);
   if (sealed.length !== msg.length + AUTH_TAG_LEN) throw new Error("encrypt: unexpected ChaCha20-Poly1305 output length");
-  return { ciphertext: sealed.slice(0, msg.length), authTag: sealed.slice(msg.length) };
+  return { ciphertext: sealed.subarray(0, msg.length), authTag: sealed.slice(msg.length) };
 }
-async function decrypt(K, level, index, ct, authTag) {
+// `ctParts` is the chunk's ciphertext as its blocks, in order (assembleChunk).
+async function decrypt(K, level, index, ctParts, authTag) {
   if (!authTag || authTag.length !== AUTH_TAG_LEN) throw new Error("get: malformed ciphertext authentication tag");
-  const opened = await call(P_OPEN, concat([nonce(level, index), K, NO_AD, ct, authTag]), 1 + ct.length);
-  if (opened.length !== ct.length + 1 || opened[0] !== 1) throw new Error("get: ciphertext authentication failed");
-  return opened.slice(1);
+  const req = aeadRequest(K, level, index, [...ctParts, authTag]);
+  const ctLen = req.length - AEAD_HEAD - AUTH_TAG_LEN;
+  const opened = await call(P_OPEN, req, 1 + ctLen);
+  if (opened.length !== ctLen + 1 || opened[0] !== 1) throw new Error("get: ciphertext authentication failed");
+  return opened.subarray(1);
 }
 // Signed chunk descriptor envelope: [authorPk 32][sig 64][core] (§4.3, §16).
 // node/sign applies the scoped prefix and returns just the signature; the stored
 // envelope carries only [pk][sig][core] — the prefix is preimage-only, never sent.
 async function signCore(core) {
-  const [pk, sig] = await Promise.all([identity(), call("node/sign", core)]);
-  return concat([pk, sig, core]);
+  return concat([identity(), await call("node/sign", core), core]);
 }
-async function verifyEnv(env) {
+async function verifyEnv(env, via) {
   // The seam's argument IS the envelope — [pk 32][sig 64][msg] concatenated is
   // `env` back. Splitting and rejoining it copied every descriptor four times over.
-  const v = await host.call("node/verify", env);
+  const v = await via("node/verify", env, 1);
   return v[0] === 1;
 }
 
@@ -264,6 +266,21 @@ async function rsDecode(k, m, blockSize, present) {
   }
   return data;
 }
+// The codec's limits, from its OP_INFO: [version][poly lo][poly hi][max k][max m][max io u32 BE],
+// max io being the most one request or answer may carry. Asked once, by the first PUT that codes,
+// so a geometry the codec cannot take fails before a byte moves rather than on a short answer.
+const CODEC_INFO = 0;
+let codecInfo = null;
+async function assertCodecFits(k, m, blockSize) {
+  if (!codecInfo) codecInfo = call(CODEC_NAME, Uint8Array.of(CODEC_INFO), 16).catch((e) => { codecInfo = null; throw e; });
+  const info = await codecInfo;
+  const maxIo = rU32(info, 5);
+  // The largest request is a decode of k blocks; the largest answer is k data or m parity blocks.
+  if (k > info[3] || m > info[4] || 8 + k + k * blockSize > maxIo || Math.max(k, m) * blockSize > maxIo) {
+    throw new Error("put: a chunk of RS(" + k + "," + m + ") × " + blockSize + " B blocks exceeds the codec module (k ≤ " +
+      info[3] + ", m ≤ " + info[4] + ", " + maxIo + " B per call) — lower blockSize or k");
+  }
+}
 
 // Per-peer reputation accumulators (module is a pure transform; callers hold state).
 // hex pubkey → {serve, miss, last}. Entries are created only by repObserve — a real
@@ -296,7 +313,7 @@ async function repObserve(peerPk, t, passes, misses) {
   let rep = peerReps.get(peerHex);
   if (rep === undefined) {
     pruneStalePeers(peerReps, t);
-    rep = { serve: 0, miss: 0, last: 0 };
+    rep = { ...ZERO_REP };
     peerReps.set(peerHex, rep);
   }
   const req = encodeObserveReq(rep.serve, rep.miss, rep.last, t, passes, misses);
@@ -329,33 +346,35 @@ function repTally() {
       e.passes += passes; e.misses += misses;
     },
     // One clock read for the round: every outcome in it shares an observation time anyway.
+    // Prune once and seat the round's new peers first, so the parallel observations below
+    // find their entries rather than each pruning the whole map again.
     async settle() {
       if (per.size === 0) return;
       const t = Date.now();
-      for (const [peerHex, { passes, misses }] of per) await repObserve(fromHex(peerHex), t, passes, misses);
+      const round = [...per];
       per.clear();
+      if (round.some(([peerHex]) => !peerReps.has(peerHex))) {
+        pruneStalePeers(peerReps, t);
+        for (const [peerHex] of round) if (!peerReps.has(peerHex)) peerReps.set(peerHex, { ...ZERO_REP });
+      }
+      await Promise.all(round.map(([peerHex, { passes, misses }]) => repObserve(fromHex(peerHex), t, passes, misses)));
     },
   };
 }
 
 // ── local store over fs ─────────────────────────────────────────────────────
-// One <hex>.rec per block.
-function decodeStoreRecord(rec) {
-  if (!rec || rec.length < STORE_REC_HEAD) return null;
-  const dlen = rU32(rec, 0);
-  if (dlen === 0 || dlen > rec.length - STORE_REC_HEAD) return null;
-  return { descriptor: rec.subarray(STORE_REC_HEAD, STORE_REC_HEAD + dlen), bytes: rec.subarray(STORE_REC_HEAD + dlen) };
-}
-async function fsGet(keyStr, via = rawCall) {
+// One <hex>.rec per block (host/store-record.ts). The index of what is held is the
+// holder's, so its fs reads and writes take the holder's share of the budget.
+async function fsGet(keyStr, via) {
   const r = await via("fs/get", strBytes(keyStr), CFG.blockSize + 1024);
   return r[0] === 1 ? r.subarray(1) : null;
 }
 async function storeHas(id) { await ensureStoreIndex(); return heldBlocks.has(toHex(id)); }
 async function storeGet(id, via) { return decodeStoreRecord(await fsGet(toHex(id) + STORE_REC, via)); }
 async function storeGetBytes(id, via) { const r = await storeGet(id, via); return r ? r.bytes : null; }
-async function storeGetDescriptor(id) { const r = await storeGet(id); return r ? r.descriptor : null; }
+async function storeGetDescriptor(id, via) { const r = await storeGet(id, via); return r ? r.descriptor : null; }
 async function storeKeys() {
-  const r = await host.call("fs/list", EMPTY), out = [];
+  const r = await holderCall("fs/list", EMPTY), out = [];
   let o = 0; const n = rU32(r, o); o += 4;
   for (let i = 0; i < n; i++) {
     const klen = rU32(r, o); o += 4;
@@ -377,8 +396,7 @@ const NET_ID = "_net";
 // A rejected cross-realm call (no transport loaded, or torn down mid-flight) maps to
 // the empty answer - same shape as an unreachable peer - so a PUT reports "no holder
 // answered" instead of an uncaught rejection out of a fan-out.
-function netCall(frame) { return host.call(NET_ID, frame).then((r) => r, () => EMPTY); }
-function netOp(op, args) { return netCall(writeOp(op, args)); } // seedkernel op-frame (content) - this app's own framing
+function netOp(op, args, via) { return via(NET_ID, writeOp(op, args)).then((r) => r, () => EMPTY); } // seedkernel op-frame (content) - this app's own framing
 
 // ── peers + ranking by reciprocity (§13) ──
 // The `peers` answer is the raw 32-byte keys back to back — the peers the transport holds at
@@ -388,7 +406,7 @@ function decodePeers(r) {
   for (let o = 0; o + 32 <= r.length; o += 32) out.push(toHex(r.slice(o, o + 32)));
   return out;
 }
-async function cohortPeers() { return decodePeers(await netOp("peers", EMPTY)); }
+async function cohortPeers(via) { return decodePeers(await netOp("peers", EMPTY, via)); }
 // A reciprocity ranker (§13): orders peers best-score-first. `makeRanker` memoizes
 // each distinct peer's score (by PROMISE, not settled value, so concurrent lookups
 // share one in-flight call) for its lifetime, so ranking overlapping holder subsets
@@ -459,19 +477,16 @@ async function netSend(peer, type, payload, answerBytes) {
     if (statsInFlight[type] > statsPeak[type]) statsPeak[type] = statsInFlight[type];
     try { return await host.call(NET_ID, netSendFrame(fromHex(peer), type, parts)); }
     finally { statsInFlight[type]--; }
-  }, type === MSG_STORE || type === MSG_FETCH).then((r) => r, () => EMPTY);
+  }, type === MsgType.STORE || type === MsgType.FETCH ? BULK : FOREGROUND).then((r) => r, () => EMPTY);
   // A view, not a copy: the caller decodes it (and keeps only what it needs) before
   // the answer goes out of scope. null = peer unreachable within the window.
   return r[0] === 1 ? r.subarray(1) : null;
 }
 // Per-peer fan-out (§6/§7): a distinct request per peer, all issued concurrently via
 // Promise.all. `requests` = [{ peer, type, payload }]; results align to input order,
-// an unreachable peer coming back `ok:false`/`bytes:null` rather than a throw.
+// an unreachable peer coming back `bytes: null` rather than a throw.
 function netSendMany(requests) {
-  return Promise.all(requests.map(async (rq) => {
-    const bytes = await netSend(rq.peer, rq.type, rq.payload, rq.answerBytes);
-    return { peer: rq.peer, ok: bytes !== null, bytes };
-  }));
+  return Promise.all(requests.map(async (rq) => ({ peer: rq.peer, bytes: await netSend(rq.peer, rq.type, rq.payload, rq.answerBytes) })));
 }
 // disc.have/want (§5.2): one round of fan-out to the cohort (Promise.all over the
 // same HAVE request to every holder) so the guest overlaps every peer. A node is
@@ -479,17 +494,17 @@ function netSendMany(requests) {
 async function haveWant(ids) {
   const holders = new Map();
   for (const id of ids) holders.set(toHex(id), new Set());
-  const me = await myPeer();
+  const me = myPeer();
   for (const id of ids) if (await storeHas(id)) holders.get(toHex(id)).add(me);
-  const peers = await cohortPeers();
+  const peers = await cohortPeers(call);
   // Split so one HAVE request stays under the frame cap (§18) — the request side
   // (32 B/id) is what binds since the reply is a 1-byte mask. Merge per-slice masks.
-  const maxIds = Math.max(1, Math.floor((maxMsgBytes() - 4) / HAVE_ID_LEN));
+  const maxIds = Math.max(1, Math.floor((maxMsgBytes() - BATCH_HEAD) / BLOCK_ID_LEN));
   for (const slice of sliceN(ids, maxIds)) {
     const haveReq = encodeHaveReq(slice); // one shared request, broadcast to every peer
-    for (const res of await netSendMany(peers.map((p) => ({ peer: p, type: MSG_HAVE, payload: haveReq })))) {
-      if (!res.ok) continue;
+    for (const res of await netSendMany(peers.map((p) => ({ peer: p, type: MsgType.HAVE, payload: haveReq })))) {
       const held = res.bytes;
+      if (held === null) continue;
       for (let i = 0; i < slice.length && i < held.length; i++) {
         if (held[i] === 1) holders.get(toHex(slice[i])).add(res.peer);
       }
@@ -499,17 +514,6 @@ async function haveWant(ids) {
 }
 // The HAVE/OFFER/STORE/FETCH wire codecs (§18) are stitched in from host/protocol.ts.
 
-// Batched fetch from one peer (the GET hot path): one round trip for many blocks.
-// Self reads the local store. Returns an array aligned to `ids` (bytes|null), or
-// null for the whole batch if the peer was unreachable — so the caller can score a
-// reachable-but-didn't-serve as a §8 miss but never an unreachable peer.
-async function fetchBatch(peer, ids) {
-  if (peer === await myPeer()) return Promise.all(ids.map((id) => storeGetBytes(id, call)));
-  const resp = await netSend(peer, MSG_FETCH, encodeFetchBatchReq(ids), fetchAnswerBytes(ids.length));
-  if (resp === null) return null;
-  const blocks = decodeFetchBatchRes(resp);
-  return ids.map((_, i) => blocks[i] || null);
-}
 // One placement engine (placeChunksBatched, below) drives the shared §18 codecs
 // through netSendMany. Nothing places a block any other way — a small file, a
 // window of coded chunks, an index level, and a repair pass all express themselves
@@ -524,32 +528,28 @@ async function fetchBatch(peer, ids) {
 // a signed-but-malformed descriptor (bad id count) is rejected rather than parsed
 // into block-ids that sidestep the §10 sibling rule. Returns the whole envelope —
 // a valid signature is only half the check; knownAuthors below is the other half.
-async function verifyDescriptor(env) {
+// `parsed` is the envelope's parse when the caller already has it (a STORE hashes with it).
+async function verifyDescriptor(env, via, parsed) {
   // Length-gate before the verify seam: the envelope is [pk 32][sig 64][core ≥13]
   // (parseSignedDescriptor's own bound), so anything shorter — an absent descriptor
   // included — is rejected here rather than handed to verify as a short buffer.
   if (!env || env.length < 32 + 64 + 13) return null;
-  if (!(await verifyEnv(env))) return null;
+  if (!(await verifyEnv(env, via))) return null;
+  if (parsed) return parsed;
   try { return parseSignedDescriptor(env); } catch (_e) { return null; }
-}
-async function verifyOfferDescriptors(offers) {
-  // Even a byte-bounded OFFER may exceed the host-call count cap. Leave room
-  // for the roster lookup and the host call settling this continuation.
-  const cap = typeof HOST === "object" && HOST ? HOST.maxOutstandingHostCalls : 0;
-  const width = cap > 0 ? Math.max(1, Math.min(64, Math.floor(cap / 2))) : 64;
-  const out = [];
-  for (let i = 0; i < offers.length; i += width) {
-    out.push(...await Promise.all(offers.slice(i, i + width).map((o) => verifyDescriptor(o.descriptor))));
-  }
-  return out;
 }
 // The §4.3 ANCHOR: a signature checked against a pubkey carried inside the signed
 // object only proves someone held a private key — any peer could self-sign a fresh
 // keypair. The author must also be an identity the cohort knows (§5.1), so forgery
-// costs a known peer its standing (§13) instead of nothing.
-async function knownAuthors() {
-  const [peers, me] = await Promise.all([cohortPeers(), myPeer()]);
-  const s = new Set(peers); s.add(me); return s;
+// costs a known peer its standing (§13) instead of nothing. Holder-only.
+// The caller reached us over an authenticated link, so it is a cohort peer already, as is
+// this node: only a third author (a repairer re-placing another's chunk) needs the roster.
+async function knownAuthors(caller, signed) {
+  const known = new Set([toHex(caller), myPeer()]);
+  if (signed.some((sd) => sd && !known.has(toHex(sd.authorPk)))) {
+    for (const p of await cohortPeers(holderCall)) known.add(p);
+  }
+  return known;
 }
 function signChunk(d) { return signCore(encodeDescriptorCore(d)); }
 
@@ -558,10 +558,10 @@ function signChunk(d) { return signCore(encodeDescriptorCore(d)); }
 // per-transport cap keeping one message inside the frame cap AND request timeout.
 // Operator (LOCAL) policy; default if absent.
 function maxMsgBytes() { const v = CFG.maxMessageBytes; return (typeof v === "number" && v > 0) ? v : (1 << 20); }
-// Ids per FETCH sub-batch, bounded by the RESPONSE frame (blockSize + FETCH_FRAME per
+// Ids per FETCH sub-batch, bounded by the RESPONSE frame (blockSize + FETCH_ENTRY_HEAD per
 // present block) so a full reply stays under the cap. The GET gather and the repair
 // audit both size their batches this way; the holder caps served bytes the same (§18).
-function fetchMaxIds() { return Math.max(1, Math.floor(maxMsgBytes() / (CFG.blockSize + FETCH_FRAME))); }
+function fetchMaxIds() { return Math.max(1, Math.floor(maxMsgBytes() / (CFG.blockSize + FETCH_ENTRY_HEAD))); }
 // A conservative allowance for what the host copies ALONGSIDE a message payload
 // (type, request id, peer address): payload + this is what a call really charges.
 const MSG_ENVELOPE_BYTES = 128;
@@ -569,7 +569,7 @@ const MSG_ENVELOPE_BYTES = 128;
 // FETCH answers a verdict byte per entry, and an entry is at least an id; a FETCH answers
 // the blocks it asked for. No type is full-size both ways.
 function maskAnswerBytes(frameBytes) { return MSG_ENVELOPE_BYTES + Math.ceil(frameBytes / BLOCK_ID_LEN); }
-function fetchAnswerBytes(n) { return MSG_ENVELOPE_BYTES + 4 + n * (CFG.blockSize + FETCH_FRAME); }
+function fetchAnswerBytes(n) { return MSG_ENVELOPE_BYTES + BATCH_HEAD + n * (CFG.blockSize + FETCH_ENTRY_HEAD); }
 // The largest charge one initiator call takes to the ledger: a full-cap message and its
 // verdicts, a full FETCH answer, or a chunk through the cipher (in and out) or the codec
 // (k in, m out; k in, k out).
@@ -591,16 +591,11 @@ function sliceN(arr, size) {
   for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
   return out;
 }
-// Run each peer's groups down `width` lanes drawing from one cursor — the peer's whole
-// admitted width stays on the wire, and one slow acknowledgement holds up only its own
-// lane instead of a whole round. Refilling in COUPLED batches was measured 22% slower to
-// the live holders, and its slow tail ran windows past the 5 s handoff deadline (§12.3),
-// failing whole PUTs; one request per lane is the finest refill that same width allows.
-// Lanes start round-robin across peers, so the ledger's arrival order spreads its budget.
-//
-// A holder admits only so many bytes from one source at once and answers the rest empty
-// (`send` returns false). The refused group goes back to that peer's other lanes and this
-// lane retires, so the peer's width settles at what the holder admits; a last lane's refusal stands.
+// Run each peer's groups down `width` lanes drawing from one cursor, so one slow ack holds
+// up only its own lane (coupled-batch refill measured 22% slower). Lanes start round-robin
+// across peers. A holder answers past its per-source admission empty (`send` returns false):
+// that group goes back to the peer's other lanes and this lane retires, so the width
+// settles at what the holder admits; a last lane's refusal stands.
 async function runStoreBatches(byPeer, width, send) {
   const workers = [];
   let failed = false, failure;
@@ -661,19 +656,23 @@ function makeChunk(d, blocks, descriptor) {
 // `tailBytes` is what a reader trims by, instead of a manifest-wide file_size.
 async function encodeChunk(source, localCi, globalCi, K, level) {
   const c = CFG;
-  const plain = source.slice(localCi * c.k * c.blockSize, (localCi + 1) * c.k * c.blockSize);
+  const plain = source.subarray(localCi * c.k * c.blockSize, (localCi + 1) * c.k * c.blockSize);
   const kc = Math.max(1, Math.ceil(plain.length / c.blockSize));
   const sealed = await encrypt(K, level, globalCi, padTo(plain, kc * c.blockSize));
-  const ct = sealed.ciphertext;
-  const dataBlocks = splitBlocks(ct, c.blockSize);
+  const dataBlocks = splitBlocks(sealed.ciphertext, c.blockSize);
   const blocks = kc === 1 ? new Array(c.m + 1).fill(dataBlocks[0])
                           : [...dataBlocks, ...await rsEncode(kc, c.m, c.blockSize, dataBlocks)];
-  const authorPk = await identity();
-  const ids = kc === 1 ? new Array(c.m + 1).fill(await hash(blockHashInput(authorPk, dataBlocks[0])))
-                       : await Promise.all(blocks.map((b) => hash(blockHashInput(authorPk, b))));
+  const author = { authorPk: identity() };
+  const ids = kc === 1 ? new Array(c.m + 1).fill(await blockHash(author, dataBlocks[0], call))
+                       : await Promise.all(blocks.map((b) => blockHash(author, b, call)));
   const d = { level, k: kc, m: c.m, blockSize: c.blockSize, tailBytes: plain.length, authTag: sealed.authTag, blockIds: ids };
   return makeChunk(d, blocks, await signChunk(d));
 }
+// The decline reasons a holder's verdict can name, for the error a failed PUT throws.
+const VERDICT_REASONS = {
+  [VERDICT_QUOTA]: "quota", [VERDICT_SIBLING]: "sibling",
+  [VERDICT_DESCRIPTOR]: "descriptor-rejected", [VERDICT_ERROR]: "holder-error",
+};
 // THE placement engine (§6/§10). Places every job's slots with one batched OFFER
 // per peer per round, then accepted blocks STORE'd in fanoutWindow()-deep fan-outs.
 // Slot i targets cands[i], cands[i+slots], … — a disjoint residue class per i, so
@@ -681,21 +680,26 @@ async function encodeChunk(source, localCi, globalCi, K, level) {
 // "somewhere new" for repair, all one rule). Fills each job's placedPeer[]/placedIds[].
 //
 // Throws if a job lands fewer than its `floor` distinct ids. `what` names the job in
-// that error; floor 0 (repair) never throws and so passes no name.
-async function placeChunksBatched(jobs, what) {
-  const ranked = await rank(await cohortPeers());
+// that error; floor 0 (repair) never throws and so passes no name. `ranker` lets a PUT
+// stream score each peer once for all its windows (makeRanker). Answers the cohort size
+// it placed across.
+async function placeChunksBatched(jobs, what, ranker = rank) {
+  const roster = await cohortPeers(call);
+  const ranked = await ranker(roster);
   // Each job draws from the ranked cohort minus peers to avoid. PUT excludes nothing;
   // repair excludes peers already holding part of the chunk, so a restored copy lands
   // somewhere new instead of a sibling-declining or silently-overwritten holder.
   const candsOf = new Map();
   for (const job of jobs) candsOf.set(job, job.exclude.size === 0 ? ranked : ranked.filter((p) => !job.exclude.has(p)));
   const maxBytes = maxMsgBytes();
-  const entryBytes = 36 + (jobs.length ? jobs[0].descriptor.length : 0); // one OFFER entry: [blockId 32][dlen u32][descriptor]
+  const entryBytes = OFFER_ENTRY_HEAD + (jobs.length ? jobs[0].descriptor.length : 0); // one OFFER entry
   const maxOffers = Math.max(1, Math.floor(maxBytes / entryBytes));
 
   // Advisory diagnostics collected from holder verdicts — a holder may lie, so the
   // reason is never policy, but the error a failed PUT throws becomes exact.
-  const diag = { quota: 0, sibling: 0, descriptor: 0, error: 0, refused: 0 };
+  const declined = {}; // verdict → count
+  let refused = 0;
+  const noteVerdict = (v) => { if (v in VERDICT_REASONS) declined[v] = (declined[v] ?? 0) + 1; };
 
   for (let r = 0; ; r++) {
     const byPeer = new Map(); // peer → [{ch, i}]
@@ -732,20 +736,16 @@ async function placeChunksBatched(jobs, what) {
     for (let base = 0; base < offerTasks.length; base += offerW) {
       const round = offerTasks.slice(base, base + offerW);
       const results = await netSendMany(round.map(({ peer, slice }) => ({
-        peer, type: MSG_OFFER,
+        peer, type: MsgType.OFFER,
         payload: encodeOfferBatch(slice.map(({ ch, i }) => ({ blockId: ch.slotIds[i], descriptor: ch.descriptor }))),
       })));
       for (let ri = 0; ri < results.length; ri++) {
         const slice = round[ri].slice;
-        const mask = results[ri].ok ? decodeMask(results[ri].bytes) : [];
-        if (results[ri].ok && results[ri].bytes.length === 0) diag.refused++;
+        const bytes = results[ri].bytes;
+        if (bytes !== null && bytes.length === 0) refused++;
+        const mask = bytes !== null ? decodeMask(bytes) : [];
         const accepted = slice.filter((_, j) => mask[j] === VERDICT_ACCEPTED);
-        for (let j = 0; j < slice.length; j++) {
-          if (mask[j] === VERDICT_QUOTA) diag.quota++;
-          else if (mask[j] === VERDICT_SIBLING) diag.sibling++;
-          else if (mask[j] === VERDICT_DESCRIPTOR) diag.descriptor++;
-          else if (mask[j] === VERDICT_ERROR) diag.error++;
-        }
+        for (let j = 0; j < slice.length; j++) noteVerdict(mask[j]);
         if (accepted.length === 0) continue;
         let list = acceptedByPeer.get(results[ri].peer); if (!list) acceptedByPeer.set(results[ri].peer, (list = []));
         for (const it of accepted) list.push(it);
@@ -756,21 +756,18 @@ async function placeChunksBatched(jobs, what) {
     // per lane across fanoutWindow() lanes per peer, each lane refilling on its own
     // ack. Peak is W per peer, as far as the ledger admits.
     const storeGroups = new Map(); // peer → [group]
-    const storeEntryBytes = ({ ch, i }) => 40 + ch.descriptor.length + ch.slotBlocks[i].length;
+    const storeEntryBytes = ({ ch, i }) => STORE_ENTRY_HEAD + ch.descriptor.length + ch.slotBlocks[i].length;
     for (const [peer, accepted] of acceptedByPeer) storeGroups.set(peer, batchBytes(accepted, storeEntryBytes, maxBytes));
     await runStoreBatches(storeGroups, fanoutWindow(), async (peer, group) => {
       // Parts, not a concatenated batch: netSend writes the blocks into the outgoing
       // frame itself, so the ciphertext is never copied to a second buffer.
-      const bytes = await netSend(peer, MSG_STORE, encodeStoreBatchParts(group.map(({ ch, i }) => ({ blockId: ch.slotIds[i], descriptor: ch.descriptor, bytes: ch.slotBlocks[i] }))));
+      const bytes = await netSend(peer, MsgType.STORE, encodeStoreBatchParts(group.map(({ ch, i }) => ({ blockId: ch.slotIds[i], descriptor: ch.descriptor, bytes: ch.slotBlocks[i] }))));
       // Empty is the holder turning the request away unread, not a verdict (runStoreBatches).
-      if (bytes !== null && bytes.length === 0) { diag.refused++; return false; }
+      if (bytes !== null && bytes.length === 0) { refused++; return false; }
       const stored = bytes !== null ? decodeMask(bytes) : [];
       for (let j = 0; j < group.length; j++) {
-        if (stored[j] === VERDICT_ACCEPTED) { group[j].ch.placedPeer[group[j].i] = peer; }
-        else if (stored[j] === VERDICT_QUOTA) diag.quota++;
-        else if (stored[j] === VERDICT_SIBLING) diag.sibling++;
-        else if (stored[j] === VERDICT_DESCRIPTOR) diag.descriptor++;
-        else if (stored[j] === VERDICT_ERROR) diag.error++;
+        if (stored[j] === VERDICT_ACCEPTED) group[j].ch.placedPeer[group[j].i] = peer;
+        else noteVerdict(stored[j]);
       }
     });
   }
@@ -779,45 +776,59 @@ async function placeChunksBatched(jobs, what) {
     const distinct = new Set();
     for (let i = 0; i < ch.slotIds.length; i++) if (ch.placedPeer[i]) distinct.add(toHex(ch.slotIds[i]));
     if (distinct.size < ch.floor) {
-      const parts = []; let total = 0;
-      if (diag.quota) { parts.push("quota"); total += diag.quota; }
-      if (diag.sibling) { parts.push("sibling"); total += diag.sibling; }
-      if (diag.descriptor) { parts.push("descriptor-rejected"); total += diag.descriptor; }
-      if (diag.error) { parts.push("holder-error"); total += diag.error; }
+      // Integer keys iterate in ascending verdict order, so the reasons list is stable.
+      const verdicts = Object.keys(declined);
+      const total = verdicts.reduce((sum, v) => sum + declined[v], 0);
       // No verdicts at all is itself the diagnosis — "holders declined" would point at the
       // wrong place. An empty answer is a holder turning requests away unread; no answer at
       // all is a deadline or an unreachable peer.
-      const why = parts.length
-        ? "holders declined (" + total + " holders: " + parts.join(", ") + "). Check quota (--local-config), signing scope (§16), or connect more holders"
-        : diag.refused
-          ? "no holder returned a verdict — " + diag.refused + " request(s) were answered empty: the holder was over its per-source delivery window, or serves no seedstore app"
+      const why = verdicts.length
+        ? "holders declined (" + total + " holders: " + verdicts.map((v) => VERDICT_REASONS[v]).join(", ") + "). Check quota (--local-config), signing scope (§16), or connect more holders"
+        : refused
+          ? "no holder returned a verdict — " + refused + " request(s) were answered empty: the holder was over its per-source delivery window, or serves no seedstore app"
           : "no holder returned a verdict — the requests timed out or the peers were unreachable rather than refusing. Raise the request deadline if a large PUT is queueing past it (p2p-cli --timeout, seedkernel --guest-timeout)";
       throw new Error("put: " + what + " landed " + distinct.size + "/" + ch.floor + " distinct blocks — " + why);
     }
     ch.placedIds = [...distinct].map(fromHex);  // the distinct ids that landed, for the PUT result
   }
+  return roster.length;
 }
-// Run a windowed batched FETCH over a peer→[idHex] plan. Self reads the local store
-// directly; other holders' sub-batches fan out fanoutWindow() FETCH messages at a
-// time. `apply(peer, sliceHex, ids, blocks)` sees each result — null blocks for the
-// whole slice means unreachable (not a §8 miss). Shared by GET gather and repair audit.
+// Run a windowed batched FETCH over a peer→[idHex] plan: self reads the local store,
+// other holders fan out fanoutWindow() FETCH messages at a time. Every block is
+// hash-verified against `descriptorOf(idHex)` (§4.2) and scores its holder (§8, never
+// self); `onResult(peer, idHex, bytes)` then sees each asked id once, with the verified
+// bytes or null. Shared by GET gather and repair audit.
 //
-// Truncation vs miss is a wire bit: a holder bounds its FETCH response by its own
-// maxMessageBytes (serveFetch), which can differ from ours. A block it has but
-// couldn't fit comes back FETCH_UNANSWERED, distinct from an ABSENT genuine miss
-// (§18); it's re-requested as a fresh task. An honest holder always serves the first
-// present block, so each round resolves ≥1 — the loop CHECKS that (below) rather than
-// trusting the peer, ruling no-progress a miss instead of looping forever.
-async function runFetchTasks(byPeer, maxIds, apply) {
-  const me = await myPeer();
+// A holder bounds its reply by its own cap, so a block it has but couldn't fit comes back
+// FETCH_UNANSWERED (§18) and is re-asked. Each round must resolve ≥1 id — checked below,
+// not trusted, so a peer that never progresses is ruled a miss instead of looping forever.
+//
+// Up to fanoutWindow() requests are in flight, each verified as its own answer lands and its
+// lane refilled at once, as the STORE lanes are (runStoreBatches): one slow holder then holds
+// up only its own lane, not the verification of every answer that came back beside it.
+async function runFetchTasks(byPeer, maxIds, descriptorOf, onResult) {
+  const me = myPeer();
+  const tally = repTally();
+  // `blocks` aligns to `ids` (bytes|null each), or is null for an unreachable peer — not a §8 miss.
+  const apply = async (peer, slice, ids, blocks) => {
+    const hashes = blocks === null ? [] : await Promise.all(blocks.map((b, i) => b ? blockHash(descriptorOf(slice[i]), b, call) : null));
+    let passes = 0, misses = 0;
+    for (let i = 0; i < slice.length; i++) {
+      const b = blocks === null ? null : blocks[i];
+      const good = b !== null && bytesEqual(hashes[i], ids[i]);
+      if (good) passes++; else if (blocks !== null) misses++;
+      onResult(peer, slice[i], good ? b : null);
+    }
+    if (peer !== me) tally.note(peer, passes, misses);
+  };
   if (byPeer.has(me)) {
     for (const slice of sliceN(byPeer.get(me), maxIds)) {
       const ids = slice.map(fromHex);
-      await apply(me, slice, ids, await fetchBatch(me, ids));
+      await apply(me, slice, ids, await Promise.all(ids.map((id) => storeGetBytes(id, call))));
     }
   }
-  // { peer, slice, ids } — re-requested unanswered blocks are appended and picked up by later
-  // windows. Round-robin over peers, as the STORE lanes start (runStoreBatches): the ledger
+  // { peer, slice, ids } — re-requested unanswered blocks are appended, and the next free lane
+  // takes them. Round-robin over peers, as the STORE lanes start (runStoreBatches): the ledger
   // admits in order, so one peer's slices first would idle every other holder.
   const tasks = [];
   const slicesOf = [...byPeer.keys()].filter((peer) => peer !== me).map((peer) => ({ peer, slices: sliceN(byPeer.get(peer), maxIds) }));
@@ -825,53 +836,60 @@ async function runFetchTasks(byPeer, maxIds, apply) {
     more = false;
     for (const { peer, slices } of slicesOf) if (s < slices.length) { tasks.push({ peer, slice: slices[s], ids: slices[s].map(fromHex) }); more = true; }
   }
-  const getW = fanoutWindow();  // one flat cohort-wide list
-  // Advance by what the window actually took, not by getW: a partial window (the last
-  // one, before re-asks were appended behind it) would otherwise step over the tasks
-  // appended into the gap, leaving the caller to re-plan them a whole round later.
-  for (let base = 0; base < tasks.length; ) {
-    const window = tasks.slice(base, base + getW);
-    base += window.length;
-    const results = await netSendMany(window.map(({ peer, ids }) => ({ peer, type: MSG_FETCH, payload: encodeFetchBatchReq(ids), answerBytes: fetchAnswerBytes(ids.length) })));
-    for (let ri = 0; ri < results.length; ri++) {
-      const { peer, slice, ids } = window[ri];
-      if (!results[ri].ok) { await apply(results[ri].peer, slice, ids, null); continue; } // unreachable
-      let decoded;
-      try { decoded = decodeFetchBatchRes(results[ri].bytes, ids.length); }
-      catch {
-        // A bad response is this holder's miss, not a failure of the whole read
-        // or repair pass. Mark it tried and let the caller use healthy holders.
-        await apply(peer, slice, ids, new Array(ids.length).fill(null));
-        continue;
-      }
-      // Split the holder's answers over the ids we asked: FETCH_UNANSWERED blocks (no room
-      // under the holder's cap) re-queue as a fresh task; present/absent are final verdicts
-      // for `apply`. Malformed responses were rejected as a whole above.
-      const reSlice = [], reIds = [], aSlice = [], aIds = [], aBlocks = [];
-      for (let i = 0; i < slice.length; i++) {
-        if (decoded[i] === FETCH_UNANSWERED) { reSlice.push(slice[i]); reIds.push(ids[i]); }
-        else { aSlice.push(slice[i]); aIds.push(ids[i]); aBlocks.push(decoded[i] || null); }
-      }
-      // Re-queue only if this round decided something (checked, not assumed): a peer
-      // answering UNANSWERED for every id has resolved nothing, and re-queueing would
-      // loop forever. No progress rules those ids absent — a §8 miss for this peer.
-      if (reSlice.length && aSlice.length === 0) {
-        for (let i = 0; i < reSlice.length; i++) { aSlice.push(reSlice[i]); aIds.push(reIds[i]); aBlocks.push(null); }
-        reSlice.length = 0;
-      }
-      // Re-ask in slices this holder has SHOWN it can fill, not the width we asked at:
-      // fetchMaxIds sizes a request by OUR cap, so against a smaller-capped holder the
-      // original width re-asks the whole tail every round — n ids costing n round trips.
-      // Nothing served is no capacity signal (the tail was unread, not capped): keep the width.
-      if (reSlice.length) {
-        let served = 0;
-        for (const b of aBlocks) if (b) served++;
-        const w = served > 0 ? served : reSlice.length;
-        for (let i = 0; i < reSlice.length; i += w) tasks.push({ peer, slice: reSlice.slice(i, i + w), ids: reIds.slice(i, i + w) });
-      }
-      if (aSlice.length) await apply(results[ri].peer, aSlice, aIds, aBlocks);
+  const fetchOne = async ({ peer, slice, ids }) => {
+    const bytes = await netSend(peer, MsgType.FETCH, encodeFetchBatchReq(ids), fetchAnswerBytes(ids.length));
+    if (bytes === null) return apply(peer, slice, ids, null); // unreachable
+    let decoded;
+    try { decoded = decodeFetchBatchRes(bytes, ids.length); }
+    catch {
+      // A bad response is this holder's miss, not a failure of the whole read
+      // or repair pass. Mark it tried and let the caller use healthy holders.
+      return apply(peer, slice, ids, new Array(ids.length).fill(null));
     }
-  }
+    // Split the holder's answers over the ids we asked: FETCH_UNANSWERED blocks (no room
+    // under the holder's cap) re-queue as a fresh task; present/absent are final verdicts
+    // for `apply`. Malformed responses were rejected as a whole above.
+    const reSlice = [], reIds = [], aSlice = [], aIds = [], aBlocks = [];
+    for (let i = 0; i < slice.length; i++) {
+      if (decoded[i] === FETCH_UNANSWERED) { reSlice.push(slice[i]); reIds.push(ids[i]); }
+      else { aSlice.push(slice[i]); aIds.push(ids[i]); aBlocks.push(decoded[i] || null); }
+    }
+    // Re-queue only if this round decided something (checked, not assumed): a peer
+    // answering UNANSWERED for every id has resolved nothing, and re-queueing would
+    // loop forever. No progress rules those ids absent — a §8 miss for this peer.
+    if (reSlice.length && aSlice.length === 0) {
+      for (let i = 0; i < reSlice.length; i++) { aSlice.push(reSlice[i]); aIds.push(reIds[i]); aBlocks.push(null); }
+      reSlice.length = 0;
+    }
+    // Re-ask in slices this holder has SHOWN it can fill, not the width we asked at:
+    // fetchMaxIds sizes a request by OUR cap, so against a smaller-capped holder the
+    // original width re-asks the whole tail every round — n ids costing n round trips.
+    // Nothing served is no capacity signal (the tail was unread, not capped): keep the width.
+    if (reSlice.length) {
+      let served = 0;
+      for (const b of aBlocks) if (b) served++;
+      const w = served > 0 ? served : reSlice.length;
+      for (let i = 0; i < reSlice.length; i += w) tasks.push({ peer, slice: reSlice.slice(i, i + w), ids: reIds.slice(i, i + w) });
+    }
+    if (aSlice.length) await apply(peer, aSlice, aIds, aBlocks);
+  };
+  // A pump rather than fixed lanes: re-asks are appended while requests are in flight, so
+  // every completion refills up to the width, and the run ends when nothing is left or running.
+  const width = fanoutWindow();
+  let next = 0, running = 0, failure = null;
+  await new Promise((resolve, reject) => {
+    const pump = () => {
+      while (failure === null && running < width && next < tasks.length) {
+        running++;
+        fetchOne(tasks[next++])
+          .catch((err) => { if (failure === null) failure = err; })
+          .finally(() => { running--; pump(); });
+      }
+      if (running === 0) failure === null ? resolve() : reject(failure);
+    };
+    pump();
+  });
+  await tally.settle();
 }
 // Fetch every block the file's chunks need, batched per holder. Each still-missing
 // block is requested from one untried holder; a coded chunk stops at k. Every
@@ -882,14 +900,13 @@ async function runFetchTasks(byPeer, maxIds, apply) {
 // every time read a whole replicated file from one holder and left the others' links
 // idle. A holder scored below zero is still passed over while another has the block (§10).
 async function gatherBlocks(descriptors, holders) {
-  const c = CFG;
   const got = new Map();
   const descriptorOf = new Map();
   for (const d of descriptors) for (const id of d.blockIds) descriptorOf.set(toHex(id), d);
   const tried = new Map();
   const triedOf = (h) => { let s = tried.get(h); if (!s) tried.set(h, (s = new Set())); return s; };
   // Bound a FETCH sub-batch by the RESPONSE size: each present block is blockSize +
-  // FETCH_FRAME on the wire, so dividing by blockSize alone would let a full response
+  // FETCH_ENTRY_HEAD on the wire, so dividing by blockSize alone would let a full response
   // slip just past the cap (the request side, 32 B/id, is smaller and never binds).
   const maxIds = fetchMaxIds();
 
@@ -908,7 +925,7 @@ async function gatherBlocks(descriptors, holders) {
     const byPeer = new Map(); // peer → [idHex]
     const queuedOn = (p) => { const l = byPeer.get(p); return l ? l.length : 0; };
     const queued = new Set();
-    const me = await myPeer();
+    const me = myPeer();
     for (const d of descriptors) {
       let need = stillNeeds(d);
       if (need === 0) continue;
@@ -930,39 +947,18 @@ async function gatherBlocks(descriptors, holders) {
     }
     if (byPeer.size === 0) break;
 
-    // Apply one peer-slice's fetched blocks: verify each by hash (§4.2), record the
-    // first good copy, and score the holder (§8) — self is never scored. `blocks` is
-    // aligned to `ids` (bytes|null per id), or null for the whole slice if the peer
-    // was unreachable (not a §8 miss).
-    const tally = repTally();
-    const applyFetch = async (peer, slice, ids, blocks) => {
-      const isSelf = peer === me;
-      let passes = 0, misses = 0;
-      const hashes = blocks === null ? [] : await Promise.all(blocks.map((b, i) => b ? blockHash(descriptorOf.get(slice[i]), b) : null));
-      for (let i = 0; i < slice.length; i++) {
-        triedOf(slice[i]).add(peer);
-        if (blocks === null) continue;            // unreachable — not a §8 miss
-        const b = blocks[i];
-        if (b && bytesEqual(hashes[i], ids[i])) {
-          if (!got.has(slice[i])) got.set(slice[i], b);
-          if (!isSelf) passes++;
-        } else if (!isSelf) {
-          misses++;
-        }
-      }
-      if (!isSelf) tally.note(peer, passes, misses);
-    };
-
-    // Self reads local; every other holder's sub-batches window by fanoutWindow() (§8/§13).
-    await runFetchTasks(byPeer, maxIds, applyFetch);
-    await tally.settle();
+    // Keep the first verified copy; a holder asked once is not asked for that id again.
+    await runFetchTasks(byPeer, maxIds, (h) => descriptorOf.get(h), (peer, h, b) => {
+      triedOf(h).add(peer);
+      if (b && !got.has(h)) got.set(h, b);
+    });
   }
   return got;
 }
-// Assemble one chunk's ciphertext from the gathered blocks (§4.1/§7): take the first
-// k DISTINCT listed blocks, and if they're the k data blocks in order just concatenate
-// (systematic RS). Distinct matters: a k=1 descriptor lists its block m+1 times, so
-// the same bytes must not fill two rows.
+// Assemble one chunk's ciphertext from the gathered blocks (§4.1/§7), as its k data blocks
+// in order for decrypt to frame: take the first k DISTINCT listed blocks, and if they're
+// the k data blocks in order they are it (systematic RS). Distinct matters: a k=1
+// descriptor lists its block m+1 times, so the same bytes must not fill two rows.
 async function assembleChunk(d, got) {
   const k = d.k;
   const present = [], seen = new Set();
@@ -973,12 +969,9 @@ async function assembleChunk(d, got) {
     if (b) { seen.add(h); present.push({ index: i, bytes: b }); }
   }
   if (present.length < k) throw new Error("get: fewer than k blocks retrievable — chunk unavailable");
-  const allData = present.slice(0, k).every((p) => p.index < k);
-  if (allData) {
-    const ordered = present.filter((p) => p.index < k).sort((a, b) => a.index - b.index).slice(0, k);
-    if (ordered.length === k && ordered.every((p, i) => p.index === i)) return concat(ordered.map((p) => p.bytes));
-  }
-  return concat(await rsDecode(k, d.m, d.blockSize, present));
+  // `present` is k distinct rows in ascending order, so the last being row k−1 means rows 0..k−1.
+  if (present[k - 1].index === k - 1) return present.map((p) => p.bytes);
+  return rsDecode(k, d.m, d.blockSize, present);
 }
 
 // ── PUT (§6) ─────────────────────────────────────────────────────────────────
@@ -988,9 +981,14 @@ async function assembleChunk(d, got) {
 // the whole-file `put` entry drives the same loop over its own in-memory argument.
 
 // Target footprint for one window's plaintext slice, derived by the host driver
-// from realmMemoryBytes (~/6: two windows in flight, core.ts) as CFG.windowTargetBytes.
+// from realmMemoryBytes (~/6: two windows in flight, core.ts) as CFG.windowTargetBytes,
+// and signed into every bundle the same way, so it is always set.
 // A too-small window idles the wire between OFFER→STORE→ack rounds on a fat link.
-function windowTarget() { return CFG.windowTargetBytes ?? 4 * 1024 * 1024; }
+function windowTarget() {
+  const v = CFG.windowTargetBytes;
+  if (!(v > 0)) throw new Error("config: no windowTargetBytes — the host derives it (core.ts normaliseConfig)");
+  return v;
+}
 // A chunk-aligned window size: as many whole chunks (k·blockSize) as fit under the
 // target, at least one, so window boundaries never split a chunk.
 function putWindowBytes() { const chunkData = CFG.k * CFG.blockSize; return Math.max(1, Math.floor(windowTarget() / chunkData)) * chunkData; }
@@ -998,9 +996,9 @@ function putWindowBytes() { const chunkData = CFG.k * CFG.blockSize; return Math
 // (§4.3), passed in by the reader, never config's.
 function getWindowChunks(chunkData) { return Math.max(1, Math.floor(windowTarget() / chunkData)); }
 
-// Chunks one window encodes at once, overlapping the codec worker with neighboring chunks'
-// encryption/hash/sign work.
-const ENCODE_DEPTH = 4;
+// Chunks one window encodes (PUT) or decodes and opens (GET) at once, overlapping the codec
+// worker with neighboring chunks' cipher/hash/sign work.
+const CHUNK_DEPTH = 4;
 // Encode the chunks wholly contained in `slice` — a chunk-aligned slice of a LEVEL's
 // byte stream at offset `baseByteOffset`. Each chunk codes at its own k (§4.1).
 // Level 0 (the file) and level ℓ > 0 (an index) are the same call.
@@ -1010,9 +1008,9 @@ async function encodeWindow(slice, baseByteOffset, K, level) {
   const baseCi = Math.floor(baseByteOffset / chunkData);
   const numChunks = Math.max(1, Math.ceil(slice.length / chunkData));
   const chunks = [];
-  for (let base = 0; base < numChunks; base += ENCODE_DEPTH) {
+  for (let base = 0; base < numChunks; base += CHUNK_DEPTH) {
     const work = [];
-    for (let lc = base; lc < Math.min(base + ENCODE_DEPTH, numChunks); lc++) work.push(encodeChunk(slice, lc, baseCi + lc, K, level));
+    for (let lc = base; lc < Math.min(base + CHUNK_DEPTH, numChunks); lc++) work.push(encodeChunk(slice, lc, baseCi + lc, K, level));
     chunks.push(...await Promise.all(work));
   }
   return chunks;
@@ -1034,7 +1032,7 @@ async function placeStream(s, bytes, level, base) {
   for (let off = 0; off === 0 || off < bytes.length; off += wb) {   // an empty file is still one chunk
     const chunks = await encodeWindow(bytes.subarray(off, Math.min(off + wb, bytes.length)), base + off, s.K, level);
     for (const ch of chunks) out.push(ch.descriptor);
-    await pipePlacement(s, placeChunksBatched(chunks, "chunk").then(() => recordPlacements(s, chunks)));
+    await pipePlacement(s, placeChunksBatched(chunks, "chunk", s.rank).then((peerCount) => recordPlacements(s, chunks, peerCount)));
   }
   return out;
 }
@@ -1081,24 +1079,27 @@ function descriptorBytes() { return 4 + 32 + 64 + 13 + AUTH_TAG_LEN + (CFG.k + C
 // File size is no longer an argument — each chunk signs its own `tailBytes` (§4.3).
 //
 // A chunk must hold at least two descriptors, or a descriptor list could never
-// shrink to a single root — checked here, once, before a byte moves. Production
-// geometry clears it ~2000×.
+// shrink to a single root — checked here, once, before a byte moves, as is a coded
+// chunk against the codec's limits. Production geometry clears the first ~2000×.
+//
+// The stream keeps one ranker: each peer is scored once for every window, not per window.
 async function putStart() {
   const chunkData = CFG.k * CFG.blockSize;
   if (chunkData < 2 * descriptorBytes()) {
     throw new Error("put: k·blockSize (" + chunkData + " B) must hold two chunk descriptors ("
       + descriptorBytes() + " B each) so a file's descriptor list can reach a single root — raise blockSize or k");
   }
-  putStream = { K: await randomKey(), offset: 0, descriptors: [], placedIds: [], placed: 0, intended: 0, placing: null };
+  if (CFG.k > 1) await assertCodecFits(CFG.k, CFG.m, CFG.blockSize);
+  putStream = { K: await randomKey(), rank: await makeRanker(), offset: 0, descriptors: [], placedIds: [], placed: 0, intended: 0, placing: null };
   return putWindowBytes();
 }
 // Fold placed chunks into the stream's durability accounting (§8). Counts REPLICA
 // PLACEMENTS (one filled slot), not distinct ids — a k=1 chunk is one id on m+1
 // peers, so counting ids would under-report. `intended` caps at the reachable
-// cohort (the §6/§10 sibling rule caps one block per peer), so a small cohort isn't
-// flagged while a declining (full) holder makes placed < intended.
-async function recordPlacements(s, chunks) {
-  const peerCount = (await cohortPeers()).length;
+// cohort the chunks were placed across (the §6/§10 sibling rule caps one block per
+// peer), so a small cohort isn't flagged while a declining (full) holder makes
+// placed < intended.
+function recordPlacements(s, chunks, peerCount) {
   for (const ch of chunks) {
     for (const id of ch.placedIds) s.placedIds.push(id);
     for (const p of ch.placedPeer) if (p) s.placed++;
@@ -1130,36 +1131,18 @@ async function putFinish() {
     let envs = s.descriptors;
     for (let level = 1; envs.length > 1; level++) envs = await placeStream(s, encodeDescriptorList(envs), level, 0);
     await settlePlacements(s);
-    return encodePutResult(envs[0], s);
+    // The ONE PUT result format, shared with every driver (host/protocol.ts).
+    return encodePutResult({
+      key: s.K, root: envs[0], chunkCount: s.descriptors.length,
+      replicasLanded: s.placed, replicasIntended: s.intended, blockIds: s.placedIds,
+    });
   });
-}
-// The ONE PUT result format, read by every driver:
-//   [K 32][chunkCount u32][placed u32][intended u32][rootLen u32][root ...]
-//   [idCount u32]{id 32}
-// root is the signed ROOT DESCRIPTOR (§4.3), variable-length (there's no manifest
-// object), hence the length prefix. Offsets 0-47 are fixed. (placed, intended) is
-// the §8 replica accounting, so a driver can warn on a silently under-replicated PUT.
-function encodePutResult(root, s) {
-  const out = new Uint8Array(48 + root.length + 4 + s.placedIds.length * 32);
-  out.set(s.K, 0);
-  wU32(out, 32, s.descriptors.length);
-  wU32(out, 36, s.placed);
-  wU32(out, 40, s.intended);
-  wU32(out, 44, root.length);
-  out.set(root, 48);
-  const tail = 48 + root.length;
-  wU32(out, tail, s.placedIds.length);
-  for (let i = 0; i < s.placedIds.length; i++) out.set(s.placedIds[i], tail + 4 + i * 32);
-  return out;
 }
 
 // No argument → [windowBytes u32]: open the stream, report the feed size.
 async function doPutStart() { const out = new Uint8Array(4); wU32(out, 0, await putStart()); return out; }
 // The window's plaintext, raw — no framing, since the stream holds everything else.
 async function doPutWindow(arg) { await putFeed(arg); return EMPTY; }
-// No argument — the stream is the argument.
-function doPutFinish() { return putFinish(); }
-
 // Whole-file PUT: one call, bytes in, result out — for drivers with no protocol
 // structure of their own. Runs the same session as the streamed path; only the 1×
 // plaintext is resident.
@@ -1183,14 +1166,15 @@ async function reconstructChunks(ds, K, chunkStart) {
   for (const d of ds) for (const id of d.blockIds) allIds.push(id);
   const holders = await haveWant(allIds);
   const got = await gatherBlocks(ds, holders);
-  const parts = [];
-  for (let i = 0; i < ds.length; i++) {
-    const d = ds[i];
-    // Nonce = (this chunk's own level, its index within that level) (§4.4), matching
-    // encodeChunk; tailBytes trims this chunk's zero padding, whether it is the file's
-    // last chunk or an index level's.
-    const plain = await decrypt(K, d.level, chunkStart + i, await assembleChunk(d, got), d.authTag);
-    parts.push(plain.length === d.tailBytes ? plain : plain.subarray(0, d.tailBytes));
+  const parts = new Array(ds.length);
+  for (let base = 0; base < ds.length; base += CHUNK_DEPTH) {
+    await Promise.all(ds.slice(base, base + CHUNK_DEPTH).map(async (d, j) => {
+      // Nonce = (this chunk's own level, its index within that level) (§4.4), matching
+      // encodeChunk; tailBytes trims this chunk's zero padding, whether it is the file's
+      // last chunk or an index level's.
+      const plain = await decrypt(K, d.level, chunkStart + base + j, await assembleChunk(d, got), d.authTag);
+      parts[base + j] = plain.length === d.tailBytes ? plain : plain.subarray(0, d.tailBytes);
+    }));
   }
   return concat(parts);
 }
@@ -1205,7 +1189,7 @@ let getStream = null;
 // The root has no authenticated parent. Verify its signature before trusting its
 // size, geometry or block ids; AEAD authenticates ciphertext, not tailBytes.
 async function getStart(rootEnv, K) {
-  const root = await verifyDescriptor(rootEnv);
+  const root = await verifyDescriptor(rootEnv, call);
   if (!root) throw new Error("get: invalid root descriptor signature or format");
   let ds = [root.descriptor];
   while (ds[0].level > 0) {
@@ -1260,11 +1244,9 @@ async function getNext() {
 // the variable-length root can be the tail — the root replaced the fixed 32-byte id.
 async function doGetStart(arg) {
   const out = new Uint8Array(8);
-  wU64(out, 0, await getStart(arg.slice(32), arg.slice(0, 32)));
+  writeU64BE(out, 0, await getStart(arg.slice(32), arg.slice(0, 32)));
   return out;
 }
-// No argument — the stream is the argument.
-function doGetNext() { return getNext(); }
 
 // Whole-file GET: the counterpart of the whole-file `put`, draining the same stream in
 // one call for the byte-in/byte-out drivers.
@@ -1284,7 +1266,6 @@ async function doGet(arg) {
 async function liveHolders(d) {
   const ids = d.blockIds;
   const advertised = await haveWant(ids);
-  const me = await myPeer();
   const live = new Map();
   const bytes = new Map(); // hex → first hash-verifying copy seen this audit
   for (const id of ids) live.set(toHex(id), new Set());
@@ -1298,26 +1279,11 @@ async function liveHolders(d) {
       list.push(h);
     }
   }
-  const tally = repTally();
-  const applyAudit = async (peer, slice, idBytes, blocks) => { // async: the hashes cross the seam
-    const isSelf = peer === me;
-    let passes = 0, misses = 0;
-    const hashes = blocks === null ? [] : await Promise.all(blocks.map((b) => b ? blockHash(d, b) : null));
-    for (let i = 0; i < slice.length; i++) {
-      if (blocks === null) continue;              // unreachable — not a §8 miss
-      const b = blocks[i];
-      if (b && bytesEqual(hashes[i], idBytes[i])) {
-        live.get(slice[i]).add(peer);
-        if (!bytes.has(slice[i])) bytes.set(slice[i], b);
-        if (!isSelf) passes++;
-      } else if (!isSelf) {
-        misses++;
-      }
-    }
-    if (!isSelf) tally.note(peer, passes, misses);
-  };
-  await runFetchTasks(byPeer, fetchMaxIds(), applyAudit);
-  await tally.settle();
+  await runFetchTasks(byPeer, fetchMaxIds(), () => d, (peer, h, b) => {
+    if (!b) return;
+    live.get(h).add(peer);
+    if (!bytes.has(h)) bytes.set(h, b);
+  });
   return { live, bytes };
 }
 // Heal one chunk back toward full redundancy (§9). Wanted copies per block = its
@@ -1341,7 +1307,7 @@ async function heal(d, descEnv, holders, verified) {
       for (let i = 0; i < all.length; i++) {
         // Re-certify against the already-signed id (§9): a mismatch means a bad
         // input/decode — drop it, never propagate (a poisoned descriptor can't mint).
-        if (bytesEqual(await blockHash(d, all[i]), d.blockIds[i])) regenerated.set(toHex(d.blockIds[i]), all[i]);
+        if (bytesEqual(await blockHash(d, all[i], call), d.blockIds[i])) regenerated.set(toHex(d.blockIds[i]), all[i]);
       }
     }
   }
@@ -1373,7 +1339,7 @@ async function heal(d, descEnv, holders, verified) {
 }
 // Audit and, if under-replicated, heal one chunk from its signed descriptor.
 async function repairChunk(descEnv) {
-  const sd = await verifyDescriptor(descEnv);               // forged/unsigned/malformed → null (§4.3)
+  const sd = await verifyDescriptor(descEnv, call);         // forged/unsigned/malformed → null (§4.3)
   if (!sd) return 0;
   const d = sd.descriptor;
   const { live: holders, bytes: verified } = await liveHolders(d);
@@ -1384,14 +1350,16 @@ async function repairChunk(descEnv) {
   if (lossMargin(d, copies) >= lowWaterMargin(d)) return 0;          // healthy
   return heal(d, descEnv, holders, verified);
 }
-// Run the repair loop over every chunk this node holds a block of (§9).
+// Run the repair loop over every chunk this node holds a block of (§9). A chunk is told
+// apart by its descriptor's signature, with no hash call: every stored descriptor was
+// verified on admission, and two verified envelopes sharing a signature is a forgery.
 async function doRepair() {
   const seen = new Set();
   let replaced = 0;
   for (const id of await storeList()) {
-    const descriptor = await storeGetDescriptor(id);
+    const descriptor = await storeGetDescriptor(id, call);
     if (!descriptor) continue;
-    const key = toHex(await hash(descriptor));
+    const key = toHex(descriptor.subarray(32, 96));
     if (seen.has(key)) continue;
     seen.add(key);
     replaced += await repairChunk(descriptor);
@@ -1414,24 +1382,9 @@ let storeReservationVersion = 0;
 // author-signed `quota` in CFG would let a bundle grant itself disk). No generous
 // default either — an under-injecting driver falls to 0 and FAILS CLOSED.
 function quota() { return LOCAL.quota != null ? LOCAL.quota : 0; }
-async function fsSizeRaw(keyStr) { return rU32(await host.call("fs/size", strBytes(keyStr)), 0); }
-async function fsSize(keyStr) { const v = await fsSizeRaw(keyStr); return v === 0xffffffff ? 0 : v; }
-// Rebuilding a cold holder's index can require thousands of fs/size calls. Launching
-// all of them in one Promise.all crosses the host's per-realm outstanding-call cap
-// as soon as the store has more than 256 records, and the holder then answers HAVE /
-// OFFER with an empty error response. Consume the advertised cap in bounded rounds,
-// reserving the one slot still held by the host call whose answer resumed this guest
-// continuation; 64 is a conservative window for older kernels that did not advertise one.
-async function fsSizes(keyStrs) {
-  const advertised = typeof HOST === "object" && HOST ? HOST.maxOutstandingHostCalls : 0;
-  const window = (typeof advertised === "number" && advertised > 0)
-    ? Math.max(1, Math.floor(advertised) - 1) : 64;
-  const out = [];
-  for (let i = 0; i < keyStrs.length; i += window) {
-    out.push(...await Promise.all(keyStrs.slice(i, i + window).map(fsSize)));
-  }
-  return out;
-}
+async function fsSize(keyStr) { const v = rU32(await holderCall("fs/size", strBytes(keyStr), 4), 0); return v === 0xffffffff ? 0 : v; }
+// A cold holder's index can take thousands of fs/size calls; the holder's share of the
+// host-call budget (hostBudget) paces them under the host's per-realm cap.
 async function ensureStoreIndex() {
   if (!storeIndexDirty && heldBlocks !== null && bytesUsed >= 0) return;
   if (storeIndexPromise === null) storeIndexPromise = (async () => {
@@ -1447,7 +1400,7 @@ async function ensureStoreIndex() {
       for (const key of keys) {
         if (key.length === 68 && key.endsWith(STORE_REC)) rebuilt.add(key.slice(0, 64));
       }
-      const sizes = await fsSizes([...rebuilt].map((hex) => hex + STORE_REC));
+      const sizes = await Promise.all([...rebuilt].map((hex) => fsSize(hex + STORE_REC)));
       if (reservationVersion !== storeReservationVersion || activeStoreWrites > 0) continue;
       let rebuiltBytes = sizes.reduce((sum, size) => sum + size, 0);
       for (const [hex, cost] of liveStoreReservations) {
@@ -1462,18 +1415,12 @@ async function ensureStoreIndex() {
   })();
   try { await storeIndexPromise; } finally { storeIndexPromise = null; }
 }
-async function fsPut(keyStr, bytes) {
-  const kb = strBytes(keyStr);
-  const head = new Uint8Array(4); wU32(head, 0, kb.length);
-  await host.call("fs/put", concat([head, kb, bytes]));
-}
 async function fsPutStoreRecord(keyStr, descriptor, bytes) {
   const kb = strBytes(keyStr);
   const head = new Uint8Array(4); wU32(head, 0, kb.length);
-  const recordHead = new Uint8Array(STORE_REC_HEAD); wU32(recordHead, 0, descriptor.length);
   // Frame the fs call and durable record in one pass. Building a record first and
-  // passing it through fsPut would copy every block-sized payload twice in the guest.
-  await host.call("fs/put", concat([head, kb, recordHead, descriptor, bytes]));
+  // framing it again would copy every block-sized payload twice in the guest.
+  await holderCall("fs/put", concat([head, kb, storeRecordHead(descriptor.length), descriptor, bytes]));
 }
 // The one write path into store.local: one framed record, under the quota budget.
 //
@@ -1499,26 +1446,18 @@ async function storeWrite(id, bytes, descriptor) {
     }
   }
 }
-// Admission (§4.3 descriptor check, §6 sibling rule, §14 quota): a holder verifies
-// the signed descriptor and enforces no-two-blocks-of-a-chunk itself, so the §10
-// invariant survives a careless or malicious placer, not just an honest coordinator.
-// `size` is the length of the block actually in hand (STORE only); OFFER carries
-// none on the wire and passes null.
-// Batched admission: one OFFER's worth of blocks checked cumulatively — the §14 quota
-// budget shrinks as blocks are provisionally accepted, and a block whose sibling (§6)
-// is already held OR provisionally accepted in this same batch is declined, so two
-// blocks of one chunk never both pass. STORE re-checks each block with `reserve=true`,
-// so this is the advisory pre-check, never the enforcement.
-//
-// The signed descriptor is REQUIRED on every path (§4.3). Deliberately no
-// descriptor-less branch — that would let any peer push arbitrary bytes past the
-// sibling rule under quota alone.
-async function admitBatch(offers, reserve = false) {
+// Admission (§4.3 descriptor, §6 sibling rule, §14 quota), enforced by the holder itself so
+// the §10 invariant survives a malicious placer. A batch is checked cumulatively: quota
+// shrinks and siblings count as blocks are provisionally accepted. OFFER is the advisory
+// pre-check; STORE re-checks with `reserve=true` and passes `size`, the block in hand, and
+// `parsed`, the descriptor it already parsed to hash it. The signed descriptor is required
+// on every path — no descriptor-less branch past the sibling rule. `caller` sent the batch.
+async function admitBatch(offers, caller, reserve = false) {
   // A batch is one immutable admission snapshot. Issue its independent seam work
-  // together, then apply quota + provisional-sibling decisions in wire order.
-  const [known, signed] = await Promise.all([
-    knownAuthors(), verifyOfferDescriptors(offers),
-  ]);
+  // together (the holder's budget share paces it), then apply quota +
+  // provisional-sibling decisions in wire order.
+  const signed = await Promise.all(offers.map((o) => verifyDescriptor(o.descriptor, holderCall, o.parsed)));
+  const known = await knownAuthors(caller, signed);
   // Do this after crypto/roster awaits: once it returns, the quota/sibling decision
   // and optional STORE reservations below run without yielding, making the snapshot
   // atomic with respect to other inbound calls while disk writes remain concurrent.
@@ -1566,21 +1505,22 @@ async function admitBatch(offers, reserve = false) {
   }
   return verdicts;
 }
-async function acceptStoreBatch(stores) {
+async function acceptStoreBatch(stores, caller) {
   // Hashes are independent. Binding admission atomically reserves quota + ids in the
-  // holder index, then the independent single-record writes can overlap safely.
+  // holder index, then the independent single-record writes can overlap safely. Each
+  // descriptor is parsed once, here, and admission verifies its signature over that parse.
   const parsed = stores.map((s) => {
-    try { return parseSignedDescriptor(s.descriptor).descriptor; } catch { return null; }
+    try { return parseSignedDescriptor(s.descriptor); } catch { return null; }
   });
-  const hashes = await Promise.all(stores.map((s, i) => parsed[i] ? blockHash(parsed[i], s.bytes, rawCall) : null));
-  const verdicts = parsed.map((d) => d ? VERDICT_DECLINED : VERDICT_DESCRIPTOR);
+  const hashes = await Promise.all(stores.map((s, i) => parsed[i] ? blockHash(parsed[i].descriptor, s.bytes, holderCall) : null));
+  const verdicts = parsed.map((sd) => sd ? VERDICT_DECLINED : VERDICT_DESCRIPTOR);
   const valid = [];
   for (let i = 0; i < stores.length; i++) {
     if (hashes[i] && bytesEqual(hashes[i], stores[i].blockId)) valid.push({ index: i, store: stores[i] });
   }
-  const admitted = await admitBatch(valid.map(({ store: s }) => ({
-    blockId: s.blockId, descriptor: s.descriptor, size: s.bytes.length,
-  })), true);
+  const admitted = await admitBatch(valid.map(({ index, store: s }) => ({
+    blockId: s.blockId, descriptor: s.descriptor, size: s.bytes.length, parsed: parsed[index],
+  })), caller, true);
   await Promise.all(valid.map(async ({ index, store: s }, i) => {
     if (admitted[i] !== VERDICT_ACCEPTED) { verdicts[index] = admitted[i]; return; }
     try { await storeWrite(s.blockId, s.bytes, s.descriptor); verdicts[index] = VERDICT_ACCEPTED; }
@@ -1588,22 +1528,13 @@ async function acceptStoreBatch(stores) {
   }));
   return verdicts;
 }
-// Serve a batched FETCH, capped at maxMsgBytes so a hostile cohort member can't name
-// one id thousands of times and force an oversized reply. A held block that won't
-// fit is tagged FETCH_UNANSWERED (re-requested by runFetchTasks); the FIRST present
-// block is always served even alone over cap, so every request makes progress.
-//
-// The READS are bounded by that same cap, not by the request: an id costs 32 bytes to
-// ask for and a whole block to look up, so reading every id first let one message pull
-// far more off the store than any reply can carry — n ids re-asked n times cost n²/2
-// reads, and enough concurrent reads to exceed what the host's outstanding-call
-// budget admits. An id never read answers UNANSWERED, exactly as an over-cap one does.
-const FETCH_READS_IN_FLIGHT = 64;   // concurrent store reads; `room` already bounds their BYTES
+// Serve a batched FETCH, capped at maxMsgBytes. A held block that won't fit, or an id never
+// read, answers FETCH_UNANSWERED (re-asked); the first present block is always served, so
+// every request makes progress. Reads stop at the cap too: an id costs 32 bytes to ask for
+// and a whole block to look up, so reading the whole request let one message pull far more
+// off the store than any reply carries.
 const FETCH_MISS_ALLOWANCE = 256;   // reads past one full reply's worth, since a miss costs no reply bytes
 async function serveFetch(ids) {
-  // Misbehaving-peer simulator (StorageConfig.lieOnFetch): answer UNANSWERED for
-  // everything, exercising the reader's §18 no-progress invariant in tests.
-  if (CFG.lieOnFetch) return ids.map(() => FETCH_UNANSWERED);
   const cap = maxMsgBytes();
   // Unread ids answer UNANSWERED: "ask again" is the only honest verdict for one we
   // never looked up. A genuine miss (read, not held) overwrites it with null → ABSENT.
@@ -1612,7 +1543,7 @@ async function serveFetch(ids) {
   for (const id of ids) { const h = toHex(id); if (!queued.has(h)) { queued.add(h); order.push([h, id]); } }
   const maxReads = Math.min(order.length, fetchMaxIds() + FETCH_MISS_ALLOWANCE);
   const seen = new Map();  // idHex → bytes | null, for the ids read so far
-  let used = 4;            // the [count u32] response header
+  let used = BATCH_HEAD;   // the [count u32] response header
   let servedAny = false, read = 0;
   for (let i = 0; i < ids.length; i++) {
     const h = toHex(ids[i]);
@@ -1620,16 +1551,16 @@ async function serveFetch(ids) {
       if (read >= maxReads) break;  // read enough to fill a reply; the tail re-asks
       // Read ahead by what the REMAINING budget could still hold, at OUR blockSize — a
       // foreign author's may differ, so this sizes the read, never the cap check below.
-      const room = Math.max(1, Math.floor((cap - used) / (CFG.blockSize + FETCH_FRAME)));
-      const upto = Math.min(maxReads, read + Math.min(room, FETCH_READS_IN_FLIGHT));
+      const room = Math.max(1, Math.floor((cap - used) / (CFG.blockSize + FETCH_ENTRY_HEAD)));
+      const upto = Math.min(maxReads, read + room);
       const batch = order.slice(read, upto);
-      const bytes = await Promise.all(batch.map(([, id]) => storeGetBytes(id)));
+      const bytes = await Promise.all(batch.map(([, id]) => storeGetBytes(id, holderCall)));
       for (let j = 0; j < batch.length; j++) seen.set(batch[j][0], bytes[j]);
       read = upto;
     }
     const bytes = seen.get(h);
     if (!bytes) { out[i] = null; continue; } // genuine miss — ABSENT
-    const framed = bytes.length + FETCH_FRAME;
+    const framed = bytes.length + FETCH_ENTRY_HEAD;
     // Full: stop here rather than scanning on for a smaller block that still fits —
     // reading the rest is the amplification, and this id re-asks either way.
     if (servedAny && used + framed > cap) break;
@@ -1643,15 +1574,15 @@ async function serveFetch(ids) {
 // from the shared host/protocol.ts — the holder admits over the same §18 format the
 // initiator speaks, by construction.
 
-// Dispatch one incoming control message: arg = [type u8][payload]. Async since the
-// fs seam is async. A STORE batch is processed SEQUENTIALLY, not in parallel: a
-// parallel fan-out would race `bytesUsed` (two blocks both seeing the pre-batch
-// budget). A HAVE batch is independent reads and may fan out.
-async function doHandle(arg) {
+// The one entrypoint, declared top-level: the host invokes `handle` with
+// `[caller 32][body …]` and nothing else (seedkernel §12.2). A peer's control message
+// is `[type u8][payload]`; a STORE batch's writes overlap, its quota and sibling
+// reservations already taken atomically in admitBatch.
+async function handle(arg) {
   // The host's part of the argument is exactly the 32-byte caller; everything
-  // after it is THIS app's own shape (util.ts `callerOf`/`readOp`) - same shape
-  // `handle` and the host-side `invoke` share.
-  const { fromHost, body } = callerOf(arg);
+  // after it is THIS app's own shape (util.ts `callerOf`/`readOp`) - the same shape
+  // the host-side `invoke` uses.
+  const { fromHost, caller, body } = callerOf(arg);
   // The host's loopback (caller = 32 zero bytes) drives the initiator ops; a peer's
   // frame carries a MsgType byte instead of an op name, and the caller id tells them apart.
   if (fromHost) {
@@ -1660,10 +1591,10 @@ async function doHandle(arg) {
       case Op.PUT: return doPut(payload);
       case Op.PUT_START: return doPutStart();
       case Op.PUT_WINDOW: return doPutWindow(payload);
-      case Op.PUT_FINISH: return doPutFinish();
+      case Op.PUT_FINISH: return putFinish();
       case Op.GET: return doGet(payload);
       case Op.GET_START: return doGetStart(payload);
-      case Op.GET_NEXT: return doGetNext();
+      case Op.GET_NEXT: return getNext();
       case Op.REPAIR: return doRepair();
       case Op.REQUEST: return doRequest(payload);
       case Op.WARM: return doWarm();
@@ -1677,13 +1608,10 @@ async function doHandle(arg) {
   const type = body[0], payload = body.subarray(1); // a view — the decoders below own no bytes
   const t0 = Date.now();
   let out;
-  if (type === MSG_HAVE) out = await encodeMask(await Promise.all(decodeHaveReq(payload).map((id) => storeHas(id))));
-  else if (type === MSG_OFFER) out = await encodeMask(await admitBatch(decodeOfferBatch(payload)));
-  else if (type === MSG_STORE) {
-    const stores = decodeStoreBatch(payload);
-    out = await encodeMask(await acceptStoreBatch(stores));
-  }
-  else if (type === MSG_FETCH) out = await encodeFetchBatchRes(await serveFetch(decodeFetchBatchReq(payload)));
+  if (type === MsgType.HAVE) out = encodeMask(await Promise.all(decodeHaveReq(payload).map((id) => storeHas(id))));
+  else if (type === MsgType.OFFER) out = encodeMask(await admitBatch(decodeOfferBatch(payload), caller));
+  else if (type === MsgType.STORE) out = encodeMask(await acceptStoreBatch(decodeStoreBatch(payload), caller));
+  else if (type === MsgType.FETCH) out = encodeFetchBatchRes(await serveFetch(decodeFetchBatchReq(payload)));
   else out = EMPTY;
   statsRecv[type]++;
   statsRecvBytes[type] += payload.length;
@@ -1719,7 +1647,7 @@ async function doWarm() {
     // or this becomes a two-time pad (nothing here leaves the realm, but don't copy
     // this loop as an example with a fixed counter).
     const chunk = await encodeChunk(buf, 0, r, K, LEVEL_BODY);                       // encrypt + RS-encode + hash + sign
-    const sd = await verifyDescriptor(chunk.descriptor);                         // Ed25519 verify (+ §16 scope preimage)
+    const sd = await verifyDescriptor(chunk.descriptor, call);                   // Ed25519 verify (+ §16 scope preimage)
     // Warm the decode seam too, at k ≥ 2 only — a k=1 deployment never reaches the
     // codec on PUT/GET/repair, so there's no cold-JIT tax there to pay down.
     if (sd && sd.descriptor.k > 1) {
@@ -1727,11 +1655,4 @@ async function doWarm() {
     }
   }
   return EMPTY;
-}
-
-// The one entrypoint, declared top-level: the host invokes `handle` -
-// `[caller 32][body …]` - and nothing else (seedkernel §12.2). The call is
-// asynchronous precisely because the async host names round-trip.
-function handle(arg) {
-  return doHandle(arg);
 }

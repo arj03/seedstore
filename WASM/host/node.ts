@@ -11,7 +11,7 @@ import { platformHost, type PlatformHost } from "seedkernel-wasm/platform";
 import { browserPlatform, type BrowserPlatformOptions } from "seedkernel-wasm/platform-web";
 
 import { loadSodium, generateKeyPair } from "./sodium.js";
-import { StorageNode, type StorageNodeOptions } from "./storage-node.js";
+import { StorageNode, type StorageNodeOptions, type WasmBytes } from "./storage-node.js";
 import { bootStorageNode, type StandUp, type StorageRuntimeOptions } from "./runtime.js";
 import { createConnectedCohort as cohortOn, type CohortOptions } from "./cluster.js";
 import { LoopbackNetwork } from "./loopback.js";
@@ -20,13 +20,7 @@ import { toHex } from "./util.js";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const buildDir = join(__dirname, "..");
 
-export interface WasmBytes {
-  /** The signed seedstore bundle blob (bundle/seedstore.skb). One file carries
-   *   everything: manifest + codec.wasm + reputation.wasm + guest.js. */
-  bundleBlob: Uint8Array;
-}
-
-/** Read the signed seedstore bundle from the build tree. */
+/** Read the signed seedstore bundle (bundle/seedstore.skb) from the build tree. */
 export async function loadWasmBytes(dir = buildDir): Promise<WasmBytes> {
   const bundleBlob = new Uint8Array(
     await readFile(join(dir, "..", "bundle", "seedstore.skb")),
@@ -86,10 +80,10 @@ export {
 };
 export { storageRuntime, bootStorageNode } from "./runtime.js";
 export type { StandUp, StorageRuntimeOptions } from "./runtime.js";
-export type { StorageNodeOptions, StorageRuntime, PutResult } from "./storage-node.js";
+export type { StorageNodeOptions, StorageRuntime, PutResult, WasmBytes } from "./storage-node.js";
 // The host's door into the signed transport: peers and cohort readiness live in that
 // guest, so they are calls to the id it claims rather than methods on the socket driver.
-export { netAddr, netPeer, netRelay, netRelayState, netContact, netReady, netPeers } from "./storage-node.js";
+export { netAddr, netPeer, netRelay, netRelayState, netContact, netReady, netPeers, netRoutes } from "./storage-node.js";
 export type { StorageConfig, Identity } from "./core.js";
 export { defaultConfig, PRODUCTION_BLOCK_SIZE, TEST_BLOCK_SIZE, STORAGE_APP, STORAGE_PROTO } from "./core.js";
 export { toHex, fromHex } from "./util.js";

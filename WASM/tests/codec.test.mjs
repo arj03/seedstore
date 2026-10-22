@@ -106,6 +106,10 @@ export async function run(t) {
     t.eq(info[0], 1, "version 1");
     t.eq(info[1], 0x1d, "poly low byte 0x1d");
     t.eq(info[2], 0x01, "poly high byte 0x01 (0x11D)");
+    const maxIo = ((info[5] << 24) | (info[6] << 16) | (info[7] << 8) | info[8]) >>> 0;
+    t.ok(maxIo >= 2 * 256 * 1024 + 10, `reports its per-call limit, and a production RS(2,2) chunk fits it (${maxIo} B)`);
+    const bs = Math.ceil((maxIo + 1) / 2);
+    t.eq(codec.encode(1, 2, bs, new Uint8Array(bs)), null, "an answer over that limit is refused (no output)");
   }
 
   t.group("codec: encode is deterministic (keyless repair, §9)");

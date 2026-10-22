@@ -1,20 +1,20 @@
 // LoopbackNetwork — the in-process network fabric for tests and single-process
 // demos. The transport is a signed bundle driven by the shared TransportHost over
 // the ChannelFactory seam (seedkernel §12.6); this file is that seam (a loopback
-// fabric, one `view()` per node) plus offline/online control. Vendored here
+// fabric, one `view()` per node) plus offline control. Vendored here
 // because seedkernel moved this test/demo infra out of its own runtime.
 //
 // Going offline kills every link a node holds (dialed or accepted), so the
 // transport forgets it and a later dial draws a dead channel (ECONNREFUSED-like) —
 // requests then fail within the transport's stall window like a real offline peer.
-// There is no re-online in the tests, so going back online is a bookkeeping toggle.
+// Nothing brings a peer back online.
 
 // A destination is opaque to everything above the factory (seedkernel §12.10), so the
 // seedkernel's own parser takes one apart here rather than a second copy of the grammar:
 // this fabric routes `tcp://` and `ws://` by port, and nothing else (`wss://` asks
 // for a TLS stack no in-process pair has).
 import { parseDest } from "seedkernel-wasm/peer-addr";
-import type { ChannelFactory, ListenAddress, RawLink } from "seedkernel-wasm/socket-seam";
+import type { ChannelFactory, RawLink } from "seedkernel-wasm/socket-seam";
 
 /** One end of an in-process socket pair. Delivery is asynchronous (a microtask, or a
  *  `setTimeout(delayMs)` when the fabric models a latency-bearing link), mirroring a
@@ -85,36 +85,45 @@ class LoopbackChannel implements RawLink {
   }
 }
 
-/** In-process socket fabric for the transport driver: `listen` registers a
- *  listener per port and `connect` opens a microtask-delivered pipe pair into
- *  it. The fabric is SHARED by every driver in a process (like a real network),
- *  so closing one driver only clears the listeners — it does not poison the
- *  fabric for the others. */
-class LoopbackChannels implements ChannelFactory {
-  private listeners = new Map<number, (channel: RawLink) => void>();
+/** The in-process network: one socket fabric SHARED by every node in a process (like a
+ *  real network), plus offline control. `view()` is one node's door into it. */
+export class LoopbackNetwork {
+  private readonly listeners = new Map<number, (channel: RawLink) => void>();
   private nextPort = 10000;
-  private readonly delayMs: number;
-  private readonly chunkBytes: number;
+  /** Bound port → the peer that owns it (for offline dial refusal). */
+  private readonly portOf = new Map<number, string>();
+  private readonly offline = new Set<string>();
+  /** Every live channel of a peer (dialed and accepted) — killed on offline. */
+  private readonly links = new Map<string, LoopbackChannel[]>();
 
-  constructor(delayMs = 0, chunkBytes = 0) {
-    this.delayMs = delayMs;
-    this.chunkBytes = chunkBytes;
-  }
+  /** `delayMs` > 0 makes every delivered message take `delayMs` ms to arrive — a
+   *  wire-level round-trip latency (one request/response costs 2×delayMs), the model
+   *  the latency/concurrency harnesses use now that the host's shell has no host
+   *  side inbound seam to time against. */
+  constructor(private readonly delayMs = 0, private readonly chunkBytes = 0) {}
 
-  /** One port per address. Framing selection belongs to the transport guest; the socket
-   *  factory says only which listener accepted, by its label. */
-  async listen(
-    addrs: readonly ListenAddress[],
-    onAccept: Parameters<ChannelFactory["listen"]>[1],
-  ): Promise<number[]> {
-    return addrs.map((a) => this.bind(a.port, (ch) => onAccept(ch, { listener: a.label })));
-  }
-
-  private bind(requested: number, onAccept: (channel: RawLink) => void): number {
-    const port = requested > 0 ? requested : this.nextPort++;
-    if (this.listeners.has(port)) throw new Error("LoopbackChannels: port already bound");
-    this.listeners.set(port, onAccept);
-    return port;
+  /** A per-node view of the fabric — hand it to a node as its `channels`. `listen` binds
+   *  one port per address; framing selection belongs to the transport guest, so the
+   *  factory says only which listener accepted, by its label. `close` unbinds only the
+   *  ports this view bound: an in-place transport upgrade closing its driver must not
+   *  unbind every other node sharing this fabric. */
+  view(peerId: string): ChannelFactory {
+    const mine: number[] = [];
+    return {
+      connect: (dest) => this.connect(peerId, dest),
+      listen: async (addrs, onAccept) => addrs.map((a) => {
+        const port = a.port > 0 ? a.port : this.nextPort++;
+        if (this.listeners.has(port)) throw new Error("LoopbackNetwork: port already bound");
+        this.listeners.set(port, (ch) => {
+          this.track(peerId, ch as LoopbackChannel);
+          onAccept(ch, { listener: a.label });
+        });
+        this.portOf.set(port, peerId);
+        mine.push(port);
+        return port;
+      }),
+      close: () => { for (const p of mine.splice(0)) this.listeners.delete(p); },
+    };
   }
 
   /** Dial an opaque destination, as a real `ChannelFactory` does: this fabric speaks
@@ -122,141 +131,41 @@ class LoopbackChannels implements ChannelFactory {
    *  scheme is the DIALER's half of the framing decision (the acceptor's is the
    *  listener label `listen` hands out), so a ws dial has to name the ws port — the
    *  two ends would otherwise pick different codecs for the same pipe. */
-  connect(dest: string): RawLink | null {
+  private connect(peerId: string, dest: string): RawLink | null {
     const d = parseDest(dest);
     if (!d || (d.scheme !== "tcp" && d.scheme !== "ws")) return null;
-    const onAccept = this.listeners.get(d.port);
-    if (!onAccept) {
-      // A dial to a dead port: the channel fails immediately on the DIAL side
-      // (mirroring ECONNREFUSED → the socket's error/close events), so the
-      // transport forgets the link instead of holding it until the deadline.
-      const [dial] = LoopbackChannel.pair(d.host, this.delayMs, this.chunkBytes);
-      queueMicrotask(() => dial.kill());
-      return dial;
-    }
     // The destination's host is the "far end" both sides see — it is what the
     // half-open limiter buckets accepts by (the per-source cap; §12.6.2).
     const [dial, accepted] = LoopbackChannel.pair(d.host, this.delayMs, this.chunkBytes);
+    const onAccept = this.listeners.get(d.port);
+    const owner = this.portOf.get(d.port);
+    if (!onAccept || (owner !== undefined && this.offline.has(owner))) {
+      // A dead port, or an offline peer's: the channel fails at once on the DIAL side
+      // (mirroring ECONNREFUSED → the socket's error/close events), so the transport
+      // forgets the link instead of holding it until the deadline.
+      queueMicrotask(() => dial.kill());
+      return dial;
+    }
+    this.track(peerId, dial);
     queueMicrotask(() => onAccept(accepted));
     return dial;
   }
 
-  close(): void {
-    this.listeners.clear();
-  }
-
-  /** A per-node view of this fabric: dials/listens through the same registry, but
-   *  its `close` unbinds only the ports *it* bound — an in-place transport upgrade
-   *  closing its driver must not unbind every other node sharing this fabric. */
-  view(): ChannelFactory {
-    const fabric = this;
-    const mine: number[] = [];
-    return {
-      connect: (dest) => fabric.connect(dest),
-      async listen(addrs, onAccept) {
-        const ports = await fabric.listen(addrs, onAccept);
-        mine.push(...ports);
-        return ports;
-      },
-      close() {
-        for (const p of mine.splice(0)) fabric.unbind(p);
-      },
-    };
-  }
-
-  /** Release one bound port. The per-node `view()` is the only caller — the fabric's
-   *  own `close` drops everything. */
-  private unbind(port: number): void {
-    this.listeners.delete(port);
-  }
-}
-
-/** A channel that dies immediately — what a dial to an offline peer's port draws,
- *  mirroring the fabric's own dead-port dial (the dial side's onClose fires and
- *  the transport forgets the link before it ever authenticates). */
-function deadChannel(): RawLink {
-  const cbHolder: { cb?: () => void } = {};
-  queueMicrotask(() => cbHolder.cb?.());
-  return {
-    send: () => {},
-    onData: () => {},
-    onClose: (cb) => { cbHolder.cb = cb; },
-    close: () => {},
-    remoteAddr: "offline",
-  };
-}
-
-export class LoopbackNetwork {
-  private readonly fabric: LoopbackChannels;
-  /** Bound port → the peer that owns it (for offline dial refusal). */
-  private readonly portOf = new Map<number, string>();
-  private readonly offline = new Set<string>();
-  /** Every live channel of a peer (dialed and accepted) — killed on offline. */
-  private readonly links = new Map<string, RawLink[]>();
-
-  /** `delayMs` > 0 makes every delivered message take `delayMs` ms to arrive — a
-   *  wire-level round-trip latency (one request/response costs 2×delayMs), the model
-   *  the latency/concurrency harnesses use now that the host's shell has no host
-   *  side inbound seam to time against. */
-  constructor(delayMs = 0, chunkBytes = 0) {
-    this.fabric = new LoopbackChannels(delayMs, chunkBytes);
-  }
-
-  /** A per-node view of the fabric — hand it to a node as its `channels`. */
-  view(peerId: string): ChannelFactory {
-    const inner = this.fabric.view();
-    const net = this;
-    return {
-      connect: (dest) => {
-        const d = parseDest(dest);
-        // Any port this fabric bound, under whichever scheme names it — only ports it
-        // owns are in `portOf`, so a destination it cannot route still falls through.
-        if (d && net.isOfflinePort(d.port)) return deadChannel();
-        const ch = inner.connect!(dest); // this fabric is dial-capable; ChannelFactory need not be
-        // A destination the fabric does not route opened nothing, so there is no
-        // channel to hold against this peer's offline switch.
-        if (ch) net.track(peerId, ch);
-        return ch;
-      },
-      listen: async (addrs, onAccept) => {
-        const ports = await inner.listen(addrs, (ch, arrival) => {
-          net.track(peerId, ch);
-          onAccept(ch, arrival);
-        });
-        for (const port of ports) net.portOf.set(port, peerId);
-        return ports;
-      },
-      close: () => inner.close(),
-    };
-  }
-
-  /** Take a peer offline (its links die; dials to it draw nothing) or back online. */
-  setOnline(peerId: string, online: boolean): void {
-    if (online) {
-      this.offline.delete(peerId);
-      return;
-    }
+  /** Take a peer offline: its links die, and dials to it draw a dead channel. */
+  setOffline(peerId: string): void {
     this.offline.add(peerId);
-    const links = this.links.get(peerId);
-    if (links) {
-      this.links.delete(peerId);
-      for (const ch of links) {
-        try { (ch as { kill?: () => void }).kill?.(); } catch { /* already gone */ }
-      }
+    for (const ch of this.links.get(peerId) ?? []) {
+      try { ch.kill(); } catch { /* already gone */ }
     }
+    this.links.delete(peerId);
   }
 
   isOnline(peerId: string): boolean { return !this.offline.has(peerId); }
 
   /** The shared fabric, for teardown. */
-  close(): void { this.fabric.close(); }
+  close(): void { this.listeners.clear(); }
 
-  private isOfflinePort(port: number): boolean {
-    const owner = this.portOf.get(port);
-    return owner !== undefined && this.offline.has(owner);
-  }
-
-  private track(peerId: string, ch: RawLink): void {
+  private track(peerId: string, ch: LoopbackChannel): void {
     let list = this.links.get(peerId);
     if (!list) this.links.set(peerId, (list = []));
     list.push(ch);

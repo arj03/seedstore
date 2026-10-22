@@ -21,10 +21,10 @@ import { bootNodeShell } from "seedkernel-wasm/shell-node";
 import {
   loadSodium, generateKeyPair, LoopbackNetwork, createConnectedCohort,
 } from "../build/host/node.js";
-import { toHex, bytesEqual, concatBytes, readU32BE } from "../build/host/util.js";
+import { toHex, bytesEqual, concatBytes } from "../build/host/util.js";
 import { writeOp } from "seedkernel-wasm/op-frame";
 import { netAddr, netReady } from "../build/host/storage-node.js";
-import { Op } from "../build/host/protocol.js";
+import { Op, decodePutResult } from "../build/host/protocol.js";
 import { buildBundle } from "./bundle-fixture.mjs";
 import { makeT } from "./harness.mjs";
 
@@ -99,7 +99,7 @@ export async function run(t) {
       try {
         const data = file(12800, 7); // several blocks → the RS path, placed across the cohort
         const r = await shells[0].app.invoke(writeOp(Op.PUT, data));
-        const key = r.slice(0, 32), root = r.slice(48, 48 + readU32BE(r, 44));
+        const { key, root } = decodePutResult(r);
 
         let holding = 0;
         for (const e of shells.slice(1)) if ((await e.shell.fs.list()).length > 0) holding++;
@@ -138,7 +138,7 @@ export async function run(t) {
           shells[0].app.invoke(writeOp(Op.PUT, dataA)),
           sn.put(dataB),
         ]);
-        const keyA = rA.slice(0, 32), rootA = rA.slice(48, 48 + readU32BE(rA, 44));
+        const { key: keyA, root: rootA } = decodePutResult(rA);
 
         const [gotA, gotB] = await Promise.all([
           shells[0].app.invoke(writeOp(Op.GET, concatBytes([keyA, rootA]))),

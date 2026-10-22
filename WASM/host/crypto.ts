@@ -7,20 +7,10 @@
 // carried in the signed descriptor.
 
 import type { Sodium } from "./sodium.js";
-import { concatBytes, writeU32BE } from "./util.js";
-import { blockHashInput } from "./descriptor-core.js";
+import { concatBytes } from "./util.js";
+import { blockHashInput, chunkNonce, BLOCK_ID_LEN, AUTH_TAG_LEN } from "./descriptor-core.js";
 
-// The nonce's domain byte is the chunk's own index-tree LEVEL (§4.3): 0 for the
-// file's ciphertext, ℓ > 0 for the index chunks above it. Levels never share a
-// (K, nonce) pair with each other or with the body, and there is no separate
-// manifest domain to keep in step (§4.4).
-export const LEVEL_BODY = 0x00;
-
-/** Content-address hash for block_id (§4.2). BLAKE2b (`crypto_generichash`):
- *  fast in software and already in the libsodium the host loads (§16), so it
- *  ships no new bytes. (A future BLAKE3 + SIMD step is discussed in docs/PERFORMANCE.md.) */
-export const BLOCK_ID_BYTES = 32;
-export const AUTH_TAG_BYTES = 16;
+export { LEVEL_BODY } from "./descriptor-core.js";
 
 export interface SealedChunk {
   ciphertext: Uint8Array;
@@ -29,15 +19,13 @@ export interface SealedChunk {
 
 export class Crypto {
   readonly keyBytes: number;
-  readonly nonceBytes: number;
   constructor(private readonly sodium: Sodium) {
     this.keyBytes = 32;
-    this.nonceBytes = 12;
   }
 
-  /** General BLAKE2b-256 byte hash. A block's id is blockId() below, not this. */
+  /** General BLAKE2b-256 byte hash (§4.2). A block's id is blockId() below, not this. */
   hash(bytes: Uint8Array): Uint8Array {
-    return this.sodium.crypto_generichash(BLOCK_ID_BYTES, bytes);
+    return this.sodium.crypto_generichash(BLOCK_ID_LEN, bytes);
   }
 
   /** Current block identity, bound to the descriptor's author. */
@@ -45,35 +33,26 @@ export class Crypto {
     return this.hash(blockHashInput(authorPk, bytes));
   }
 
-  /** 12-byte nonce = [domain u8][index u32 BE][zero padding] (§4.4). One nonce
-   *  per chunk, so (K, nonce) never repeats for a fresh K. */
-  nonce(domain: number, index: number): Uint8Array {
-    const n = new Uint8Array(this.nonceBytes);
-    n[0] = domain & 0xff;
-    writeU32BE(n, 1, index >>> 0);
-    return n;
-  }
-
   /** Seal padded chunk bytes, splitting the AEAD output so RS still sees exactly the
    *  original ciphertext length and the signed descriptor carries the tag. */
   encrypt(key: Uint8Array, domain: number, index: number, message: Uint8Array): SealedChunk {
     const sealed = this.sodium.crypto_aead_chacha20poly1305_ietf_encrypt(
-      message, null, null, this.nonce(domain, index), key,
+      message, null, null, chunkNonce(domain, index), key,
     );
     return {
-      ciphertext: sealed.slice(0, sealed.length - AUTH_TAG_BYTES),
-      authTag: sealed.slice(sealed.length - AUTH_TAG_BYTES),
+      ciphertext: sealed.slice(0, sealed.length - AUTH_TAG_LEN),
+      authTag: sealed.slice(sealed.length - AUTH_TAG_LEN),
     };
   }
   decrypt(
     key: Uint8Array, domain: number, index: number,
     ciphertext: Uint8Array, authTag: Uint8Array,
   ): Uint8Array | null {
-    if (authTag.length !== AUTH_TAG_BYTES) return null;
+    if (authTag.length !== AUTH_TAG_LEN) return null;
     try {
       return this.sodium.crypto_aead_chacha20poly1305_ietf_decrypt(
         null, concatBytes([ciphertext, authTag]), null,
-        this.nonce(domain, index), key,
+        chunkNonce(domain, index), key,
       );
     } catch {
       return null;
@@ -83,9 +62,6 @@ export class Crypto {
   /** A fresh random per-file content key K (§4.4). */
   randomKey(): Uint8Array {
     return this.sodium.randombytes_buf(this.keyBytes);
-  }
-  randomBytes(n: number): Uint8Array {
-    return this.sodium.randombytes_buf(n);
   }
 
   /** Seal K to a recipient's node public key — converting the Ed25519 key to

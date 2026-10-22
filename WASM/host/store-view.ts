@@ -1,40 +1,16 @@
 // The host's READ VIEW of what this node's holder has stored (SPEC §12).
 //
 // The confined guest holder owns store.local outright (admission, quota, the
-// `<hex>.rec` layout — see the guest). This module implements NONE of that policy —
+// `<hex>.rec` layout — store-record.ts). This module implements NONE of that policy —
 // no put, no delete — only reads the layout back for a host-side caller (tests, demo
 // counts, operator scripts).
 // Reads the backend live rather than caching, since the guest writes out of band.
 
 import { toHex, fromHex } from "./util.js";
+import { STORE_REC as REC, decodeStoreRecord, type StoredBlock } from "./store-record.js";
 import type { Fs } from "seedkernel-wasm/fs";
 
-const REC = ".rec"; // [descriptor length u32 BE][descriptor][ciphertext]
-const REC_HEAD = 4;
-
-function readU32BE(bytes: Uint8Array): number {
-  return ((bytes[0] << 24) | (bytes[1] << 16) | (bytes[2] << 8) | bytes[3]) >>> 0;
-}
-
-function decodeRecord(record: Uint8Array): StoredBlock | null {
-  if (record.length < REC_HEAD) return null;
-  const descriptorLength = readU32BE(record);
-  if (descriptorLength === 0 || descriptorLength > record.length - REC_HEAD) return null;
-  return {
-    descriptor: record.subarray(REC_HEAD, REC_HEAD + descriptorLength),
-    bytes: record.subarray(REC_HEAD + descriptorLength),
-  };
-}
-
-/** What a holder keeps for one block: the ciphertext and the signed descriptor
- *  envelope its chunk travels under (§4.3). The descriptor is stored verbatim
- *  so a repairer that lacks the file's index still has the chunk's shape. */
-export interface StoredBlock {
-  bytes: Uint8Array;
-  /** The author-signed chunk-descriptor envelope (wire bytes). Every block has one:
-   *  the §18 placement messages make it mandatory, an index chunk's blocks included. */
-  descriptor: Uint8Array;
-}
+export type { StoredBlock };
 
 /** A read-only view of the holder's blobs. All ids are 32-byte block_ids; keys are
  *  their hex. There is no write half by design — see the header.
@@ -62,7 +38,7 @@ export class FsBlobView implements BlobView {
 
   async get(id: Uint8Array): Promise<StoredBlock | null> {
     const record = await this.fs.get(toHex(id) + REC);
-    return record ? decodeRecord(record) : null;
+    return decodeStoreRecord(record);
   }
 
   async has(id: Uint8Array): Promise<boolean> {
@@ -82,13 +58,8 @@ export class FsBlobView implements BlobView {
   }
 
   async usedBytes(): Promise<number> {
-    let used = 0;
-    for (const key of await this.fs.list()) {
-      if (key.endsWith(REC)) {
-        const sz = await this.fs.size(key);
-        if (sz > 0) used += sz;
-      }
-    }
-    return used;
+    const records = (await this.fs.list()).filter((key) => key.endsWith(REC));
+    const sizes = await Promise.all(records.map((key) => this.fs.size(key)));
+    return sizes.reduce((used, sz) => used + Math.max(0, sz), 0);
   }
 }

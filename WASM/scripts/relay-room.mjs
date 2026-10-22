@@ -4,8 +4,7 @@
 
 import { roomClient } from "../../../seedrelay/rooms.mjs";
 import { netAddr, netReady, netRelay } from "../build/host/storage-node.js";
-
-const hex = (b) => Buffer.from(b).toString("hex");
+import { toHex } from "../build/host/util.js";
 
 /** Register `shell`'s node on the relay at `relay` (`ws://host:port`) and stay in `room`
  *  there: each member goes into the address book behind that relay under `secret`, the
@@ -17,7 +16,7 @@ export async function joinRelayRoom({ shell, identity, sodium, relay, room, secr
     throw new Error("a relay room needs a global WebSocket: Node 22+, or node --experimental-websocket");
   }
   await netRelay(shell, relay, relaySecret);
-  const me = hex(identity.publicKey);
+  const me = toHex(identity.publicKey);
   const client = roomClient({
     relay,
     publicKey: identity.publicKey,

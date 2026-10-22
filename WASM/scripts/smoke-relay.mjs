@@ -11,12 +11,12 @@ import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
-import { loadSodium, loadWasmBytes, storageRuntime, inProcessStandUp } from "../build/host/node.js";
-import { StorageNode } from "../build/host/storage-node.js";
+import {
+  loadSodium, loadWasmBytes, bootStorageNode, inProcessStandUp, generateKeyPair, fromHex, netRoutes,
+} from "../build/host/node.js";
 import { MsgType, encodeHaveReq, decodeMask } from "../build/host/protocol.js";
 import { bytesEqual } from "../build/host/util.js";
 import { nodeChannels, nodeDatagrams } from "seedkernel-wasm/shell-node";
-import { OpArgs } from "seedkernel-wasm/op-frame";
 import { joinRelayRoom } from "./relay-room.mjs";
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -56,12 +56,10 @@ const RELAY = await startRelay();
 
 const sodium = await loadSodium();
 const wasm = await loadWasmBytes();
-/** How many of a node's linked peers it reaches over a direct path (the transport's
- *  `routes` op: `[key 32][direct u8]` apiece). */
+/** How many of a node's linked peers it reaches over a direct path. */
 async function directPeers(e) {
-  const routes = await e.runtime.shell.call("_net", new OpArgs("routes").build());
   let n = 0;
-  for (let off = 32; off < routes.length; off += 33) n += routes[off];
+  for (const isDirect of (await netRoutes(e.node.shell)).values()) if (isDirect) n++;
   return n;
 }
 const directPairs = async () => (await Promise.all(nodes.map(directPeers))).reduce((a, b) => a + b, 0) / 2;
@@ -70,34 +68,28 @@ const config = { k: 1, m: HOLDERS, blockSize: 48 * 1024, maxMessageBytes: 48 * 1
 
 // The room's shared, symmetric contact secret. Gating this smoke (rather than
 // running it open) covers the credential path the real demos use too.
-const CONTACT = process.env.CONTACT
-  ? Uint8Array.from(process.env.CONTACT.match(/../g).map((b) => parseInt(b, 16)))
-  : sodium.randombytes_buf(32);
+const CONTACT = process.env.CONTACT ? fromHex(process.env.CONTACT) : sodium.randombytes_buf(32);
 
-// A node with no listeners, reachable only through the relay; storage geometry does not
-// ride here: it goes on StorageNode.create, so the transport guest never sees it.
+// A node with no listeners, reachable only through the relay. Storage geometry rides the
+// storage bundle's own load, so the transport guest never sees it.
 async function makeNode(contact = CONTACT) {
-  const identity = (() => { const kp = sodium.crypto_sign_keypair(); return { publicKey: kp.publicKey, privateKey: kp.privateKey }; })();
-  const entry = { node: null, runtime: null, identity, contact, room: null };
-  entry.runtime = await storageRuntime(inProcessStandUp, {
+  const identity = generateKeyPair(sodium);
+  const node = await bootStorageNode(inProcessStandUp, {
     identity, timeoutMs: 8000, contactSecret: contact, channels: nodeChannels(), datagrams: nodeDatagrams(),
+    sodium, ...wasm, config, quota: 64 * 1024 * 1024,
   });
-  return entry;
+  return { node, identity, contact, room: null };
 }
 
 const nodes = [];
 let ok = false;
 try {
-  for (let i = 0; i < HOLDERS + 1; i++) {
-    const e = await makeNode();
-    e.node = await StorageNode.create({ runtime: e.runtime, sodium, ...wasm, config, quota: 64 * 1024 * 1024, timeoutMs: 8000 });
-    nodes.push(e);
-  }
+  for (let i = 0; i < HOLDERS + 1; i++) nodes.push(await makeNode());
   const owner = nodes[0];
   // Meet in the room: each member is dialed through the relay, then moves to a UDP path.
   const enter = async (e) => {
     e.room = await joinRelayRoom({
-      shell: e.runtime.shell, identity: e.identity, sodium, relay: RELAY, room: ROOM, secret: e.contact,
+      shell: e.node.shell, identity: e.identity, sodium, relay: RELAY, room: ROOM, secret: e.contact,
       relaySecret: RELAY_SECRET,
     });
   };
@@ -141,8 +133,6 @@ try {
   // design (§12.6.2), so we assert "never links" within the same 30 s window.
   const stranger = await makeNode(sodium.randombytes_buf(32));
   nodes.push(stranger);
-  stranger.node = await StorageNode.create({
-    runtime: stranger.runtime, sodium, ...wasm, config, timeoutMs: 8000 });
   await enter(stranger);
   const before = (await owner.node.linkedPeers()).length;
   const t1 = Date.now();

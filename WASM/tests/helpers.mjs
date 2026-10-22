@@ -5,12 +5,14 @@
 
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { concatBytes } from "../build/host/util.js";
+import { STORE_REC, storeRecordHead } from "../build/host/store-record.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 export const root = join(__dirname, "..");
 
 // Storage's own libsodium, one instance for the whole suite (host/sodium.ts).
-const { loadSodium } = await import(new URL("../build/host/sodium.js", import.meta.url));
+const { loadSodium, generateKeyPair } = await import(new URL("../build/host/sodium.js", import.meta.url));
 const sodium = await loadSodium();
 
 export const paths = {
@@ -24,8 +26,7 @@ export async function ensureSodium() {
 }
 
 export function newKey() {
-  const kp = sodium.crypto_sign_keypair();
-  return { publicKey: kp.publicKey, privateKey: kp.privateKey };
+  return generateKeyPair(sodium);
 }
 
 /** Count block-ids with ≥1 *live* holder — an online cohort node whose store
@@ -44,16 +45,12 @@ export async function liveBlockCount(nodes, net, ids) {
 
 /** Plant a block straight into a node's store.local, bypassing the protocol —
  *  for tests that need a holder to already have something. Writes the guest's
- *  `<hex>.rec` record directly (`[descriptor length u32 BE][descriptor][bytes]`),
- *  since admission is the guest holder's alone.
+ *  `<hex>.rec` record (host/store-record.ts) directly, since admission is the
+ *  guest holder's alone.
  *
  *  Seed BEFORE the holder is otherwise exercised: the guest rebuilds its §14
  *  byte total from the fs lazily, so a later plant is invisible to it until
  *  the realm is rebuilt. */
 export async function plantBlock(fs, idHex, bytes, descriptor) {
-  const record = new Uint8Array(4 + descriptor.length + bytes.length);
-  new DataView(record.buffer).setUint32(0, descriptor.length);
-  record.set(descriptor, 4);
-  record.set(bytes, 4 + descriptor.length);
-  await fs.put(idHex + ".rec", record);
+  await fs.put(idHex + STORE_REC, concatBytes([storeRecordHead(descriptor.length), descriptor, bytes]));
 }
