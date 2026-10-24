@@ -102,9 +102,9 @@ export async function run(t) {
         const { key, root } = decodePutResult(r);
 
         let holding = 0;
-        for (const e of shells.slice(1)) if ((await e.shell.fs.list()).length > 0) holding++;
+        for (const e of shells.slice(1)) if (e.shell.fs.list().length > 0) holding++;
         t.ok(holding >= 4, "the confined holders admitted + stored blocks (fs writes via the guest)");
-        t.eq((await shells[0].shell.fs.list()).length, 0, "the initiator holds nothing — durability is the cohort's");
+        t.eq(shells[0].shell.fs.list().length, 0, "the initiator holds nothing — durability is the cohort's");
 
         const got = await shells[0].app.invoke(writeOp(Op.GET, concatBytes([key, root])));
         t.ok(bytesEqual(got, data), "PUT → GET round-trips: a generic shell served the holder side from the confined guest");
@@ -147,7 +147,7 @@ export async function run(t) {
         t.ok(bytesEqual(gotA, dataA), "the shell's own file round-trips despite serving holder requests mid-PUT");
         t.ok(bytesEqual(gotB, dataB), "the StorageNode's file round-trips — the shell held + served its blocks concurrently");
         let shellsHeld = false;
-        for (const e of shells) if ((await e.shell.fs.list()).length > 0) shellsHeld = true;
+        for (const e of shells) if (e.shell.fs.list().length > 0) shellsHeld = true;
         t.ok(shellsHeld, "shells held blocks for the concurrent host-side initiator");
       } finally {
         shells.forEach((e) => e.shell.close());
@@ -180,7 +180,7 @@ export async function run(t) {
         const data = file(12800, 21);
         const put = await sn.put(data);
         let holding = 0;
-        for (const e of shells) if ((await e.shell.fs.list()).length > 0) holding++;
+        for (const e of shells) if (e.shell.fs.list().length > 0) holding++;
         t.ok(holding >= 4, "the host-side initiator placed blocks across the confined shell holders");
         const got = await sn.get(put.root, put.key);
         t.ok(bytesEqual(got, data), "host-side PUT reads back through the confined holders — the guest holder is wire-compatible");

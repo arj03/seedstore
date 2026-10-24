@@ -115,9 +115,9 @@ export async function run(t) {
       const r = await loaded.invoke(writeOp(Op.PUT, data));
       const { key, root } = decodePutResult(r);
       let holding = 0;
-      for (const h of holders) if ((await h.store.list()).length > 0) holding++;
+      for (const h of holders) if (h.store.list().length > 0) holding++;
       t.ok(holding >= 4, "the shell's guest placed blocks across several distinct holders");
-      t.eq((await shell.fs.list()).length, 0, "the shell itself holds nothing — durability is the cohort's");
+      t.eq(shell.fs.list().length, 0, "the shell itself holds nothing — durability is the cohort's");
 
       // GET, same confined guest, reconstructing from the holders.
       const got = await loaded.invoke(writeOp(Op.GET, concatBytes([key, root])));

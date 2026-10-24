@@ -128,7 +128,7 @@ export async function run(t) {
       // path launched one fs/size call per record in a single Promise.all, so record
       // 257 made initialization throw and every HAVE/OFFER returned an empty reply.
       for (let i = 0; i < 257; i++) {
-        await b.fs.put(i.toString(16).padStart(64, "0") + ".rec", new Uint8Array(4));
+        b.fs.put(i.toString(16).padStart(64, "0") + ".rec", new Uint8Array(4));
       }
       const known = fromHex((256).toString(16).padStart(64, "0"));
       const absent = new Uint8Array(32).fill(255);
@@ -197,7 +197,7 @@ export async function run(t) {
       ])).map((reply) => decodeMask(reply)[0]);
       t.eq(verdicts.filter((v) => v === VERDICT_ACCEPTED).length, 1, "exactly one concurrent sibling is accepted");
       t.eq(verdicts.filter((v) => v === VERDICT_SIBLING).length, 1, "the other sees the atomic in-memory reservation");
-      t.eq((await b.store.list()).length, 1, "only one sibling reaches durable storage");
+      t.eq(b.store.list().length, 1, "only one sibling reaches durable storage");
     } finally { a.close(); b.close(); }
   }
 
@@ -260,7 +260,7 @@ export async function run(t) {
       ]))));
       t.eq(stored[0], VERDICT_ACCEPTED, "first block stored");
       t.eq(stored[1], VERDICT_QUOTA, "second rejected — its predecessor in the batch already spent the quota (§14)");
-      t.ok((await b.store.has(i0)) && !(await b.store.has(i1)), "only the first block actually committed to the store");
+      t.ok(b.store.has(i0) && !b.store.has(i1), "only the first block actually committed to the store");
     } finally { a.close(); b.close(); }
   }
 
@@ -279,7 +279,7 @@ export async function run(t) {
         { blockId: jid, descriptor: bytes(136, 1), bytes: junk }, // unsigned garbage of descriptor shape
       ]))));
       t.eq(stored[0], VERDICT_DESCRIPTOR, "STORE declined — the descriptor carries no valid author signature");
-      t.ok(!(await b.store.has(jid)), "nothing committed to the store");
+      t.ok(!b.store.has(jid), "nothing committed to the store");
 
       // Signed, but for a DIFFERENT chunk: the signature verifies and yet this block is
       // not one of its block_ids (§4.3's block_id ∈ block_ids check).
@@ -290,7 +290,7 @@ export async function run(t) {
         { blockId: jid, descriptor: other, bytes: junk },
       ]))));
       t.eq(stored2[0], VERDICT_DESCRIPTOR, "STORE declined — validly signed, but the block is not of that chunk");
-      t.ok(!(await b.store.has(jid)), "still nothing committed");
+      t.ok(!b.store.has(jid), "still nothing committed");
 
       // Signed, of this chunk, but the bytes disagree with the signed blockSize: the
       // geometry is the descriptor's, so bytes that aren't blockSize long are not the
@@ -302,7 +302,7 @@ export async function run(t) {
         { blockId: jid, descriptor: wrongSize, bytes: junk }, // 100 bytes vs a signed blockSize of 99
       ]))));
       t.eq(stored3[0], VERDICT_DESCRIPTOR, "STORE declined — the bytes in hand aren't the descriptor's blockSize");
-      t.ok(!(await b.store.has(jid)), "still nothing committed");
+      t.ok(!b.store.has(jid), "still nothing committed");
 
       // Correctly signed descriptor, correct blockSize, but the BYTES don't hash to the
       // claimed blockId — a content-address mismatch the holder checks before admission (§4.2).
@@ -313,7 +313,7 @@ export async function run(t) {
         { blockId: id(99), descriptor: goodDesc, bytes: junk }, // blockId ≠ hash(bytes)
       ]))));
       t.eq(stored4[0], VERDICT_DECLINED, "STORE declined — bytes don't hash to the claimed blockId (§4.2 content-address check)");
-      t.ok(!(await b.store.has(id(99))), "nothing committed to the store");
+      t.ok(!b.store.has(id(99)), "nothing committed to the store");
     } finally { a.close(); b.close(); }
   }
 
@@ -326,7 +326,7 @@ export async function run(t) {
       const heldId = b.crypto.hash(held);
       // Seed the holder directly, bypassing the protocol. FETCH serves bytes and never
       // reads the descriptor, so any non-empty one will do.
-      await plantBlock(b.fs, toHex(heldId), held, new Uint8Array([1]));
+      plantBlock(b.fs, toHex(heldId), held, new Uint8Array([1]));
       const absentId = id(99);
 
       const res = decodeFetchBatchRes(await a.request(b.peerId, typed(MsgType.FETCH, encodeFetchBatchReq([heldId, absentId]))));

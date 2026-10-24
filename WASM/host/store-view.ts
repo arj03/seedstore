@@ -13,41 +13,36 @@ import type { Fs } from "seedkernel-wasm/fs";
 export type { StoredBlock };
 
 /** A read-only view of the holder's blobs. All ids are 32-byte block_ids; keys are
- *  their hex. There is no write half by design — see the header.
- *
- *  Every method is async, because the `fs` seam it reads through is async
- *  (seedkernel services/fs.ts): a synchronous `get` is a shape no browser backend can
- *  implement — IndexedDB is asynchronous by construction. An in-RAM backend
- *  resolves in a microtask; a caller that needs one await. */
+ *  their hex. There is no write half by design — see the header. Synchronous, as the
+ *  `fs` seam it reads through is (seedkernel services/fs.ts). */
 export interface BlobView {
-  get(id: Uint8Array): Promise<StoredBlock | null>;
-  has(id: Uint8Array): Promise<boolean>;
+  get(id: Uint8Array): StoredBlock | null;
+  has(id: Uint8Array): boolean;
   /** All stored ids (optionally restricted to a hex prefix). */
-  list(prefix?: string): Promise<Uint8Array[]>;
+  list(prefix?: string): Uint8Array[];
   /** Committed-tier bytes on the backend (§14): every `.rec`. What the holder
    *  charges against its quota — but this view only
    *  reports it; the quota itself is the node's (operator) policy and the guest's
    *  to enforce. */
-  usedBytes(): Promise<number>;
+  usedBytes(): number;
 }
 
 /** The read view over the host's flat-key `fs` service: a node directory on
- *  a server, OPFS/IndexedDB in a browser, an in-RAM MemoryFs for tests. */
+ *  a server, an in-RAM MemoryFs for tests and the browser. */
 export class FsBlobView implements BlobView {
   constructor(private readonly fs: Fs) {}
 
-  async get(id: Uint8Array): Promise<StoredBlock | null> {
-    const record = await this.fs.get(toHex(id) + REC);
-    return decodeStoreRecord(record);
+  get(id: Uint8Array): StoredBlock | null {
+    return decodeStoreRecord(this.fs.get(toHex(id) + REC));
   }
 
-  async has(id: Uint8Array): Promise<boolean> {
-    return (await this.fs.size(toHex(id) + REC)) >= 0;
+  has(id: Uint8Array): boolean {
+    return this.fs.size(toHex(id) + REC) >= 0;
   }
 
-  async list(prefix?: string): Promise<Uint8Array[]> {
+  list(prefix?: string): Uint8Array[] {
     const ids = new Set<string>();
-    for (const key of await this.fs.list()) {
+    for (const key of this.fs.list()) {
       if (!key.endsWith(REC)) continue;
       const hex = key.slice(0, -REC.length);
       if (hex.length !== 64) continue;
@@ -57,9 +52,7 @@ export class FsBlobView implements BlobView {
     return [...ids].map(fromHex);
   }
 
-  async usedBytes(): Promise<number> {
-    const records = (await this.fs.list()).filter((key) => key.endsWith(REC));
-    const sizes = await Promise.all(records.map((key) => this.fs.size(key)));
-    return sizes.reduce((used, sz) => used + Math.max(0, sz), 0);
+  usedBytes(): number {
+    return this.fs.list().filter((key) => key.endsWith(REC)).reduce((used, key) => used + Math.max(0, this.fs.size(key)), 0);
   }
 }

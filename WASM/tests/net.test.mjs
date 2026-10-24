@@ -145,31 +145,31 @@ export async function run(t) {
       const id = sodium.crypto_generichash(32, bytes);
       const desc = new Uint8Array([9, 8, 7, 6]);
 
-      t.ok(!(await view.has(id)), "absent before anything is written");
-      t.eq(await view.usedBytes(), 0, "used starts at zero");
+      t.ok(!view.has(id), "absent before anything is written");
+      t.eq(view.usedBytes(), 0, "used starts at zero");
 
-      await plantBlock(fs, toHex(id), bytes, desc);
-      t.ok(await view.has(id), "present once the block is on the backend");
-      const got = await view.get(id);
+      plantBlock(fs, toHex(id), bytes, desc);
+      t.ok(view.has(id), "present once the block is on the backend");
+      const got = view.get(id);
       t.ok(got && bytesEqual(got.bytes, bytes), "get returns the bytes");
       t.ok(got && bytesEqual(got.descriptor, desc), "descriptor read back from the record");
       const rec1 = 4 + desc.length + bytes.length;
-      t.eq(await view.usedBytes(), rec1, "used counts the whole record — what the holder charges (§14)");
-      t.eq((await view.list()).length, 1, "list sees the one block");
+      t.eq(view.usedBytes(), rec1, "used counts the whole record — what the holder charges (§14)");
+      t.eq(view.list().length, 1, "list sees the one block");
 
       // The view holds no index of its own, so it sees writes it did not make —
       // which is the point: on a live node the guest is the one writing.
       const bytes2 = file(32, 5);
       const id2 = sodium.crypto_generichash(32, bytes2);
       const desc2 = new Uint8Array([5, 4]);
-      await plantBlock(fs, toHex(id2), bytes2, desc2);
-      t.eq((await view.list()).length, 2, "a write made behind the view's back still shows up");
+      plantBlock(fs, toHex(id2), bytes2, desc2);
+      t.eq(view.list().length, 2, "a write made behind the view's back still shows up");
 
       // Durability: a fresh view over the same directory sees the same blocks.
       const reopened = new FsBlobView(new NodeFs(dir));
-      t.ok(await reopened.has(id), "reopened view still has the block");
-      t.eq(await reopened.usedBytes(), rec1 + 4 + desc2.length + bytes2.length, "reopened used is correct (both records)");
-      t.ok(bytesEqual((await reopened.get(id)).bytes, bytes), "reopened get returns the bytes");
+      t.ok(reopened.has(id), "reopened view still has the block");
+      t.eq(reopened.usedBytes(), rec1 + 4 + desc2.length + bytes2.length, "reopened used is correct (both records)");
+      t.ok(bytesEqual(reopened.get(id).bytes, bytes), "reopened get returns the bytes");
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -192,11 +192,11 @@ export async function run(t) {
       t.ok(bytesEqual(got, data), "GET reconstructs the file over the wire");
 
       const holders = [];
-      for (const n of nodes) { if (n !== owner && (await n.store.list()).length > 0) holders.push(n); }
+      for (const n of nodes) { if (n !== owner && n.store.list().length > 0) holders.push(n); }
       t.ok(holders.length >= 4, "blocks placed across several distinct peers");
-      t.eq((await owner.store.list()).length, 0, "owner holds no blocks");
+      t.eq(owner.store.list().length, 0, "owner holds no blocks");
 
-      t.ok((await holders[0].store.list()).length > 0, "a holder kept at least one block");
+      t.ok(holders[0].store.list().length > 0, "a holder kept at least one block");
       // The driver's `framesDelivered` mirror is gone with the request facade it counted:
       // frames are the transport's now, and the host holds only sockets. What proves the same
       // thing — that this ran over real sockets rather than in-process — is the transport's
@@ -223,14 +223,14 @@ export async function run(t) {
 
       // Find a holder index with blocks and reopen *its* directory cold.
       let holderIdx = -1;
-      for (let i = 1; i < nodes.length; i++) if ((await nodes[i].store.list()).length > 0) { holderIdx = i; break; }
+      for (let i = 1; i < nodes.length; i++) if (nodes[i].store.list().length > 0) { holderIdx = i; break; }
       t.ok(holderIdx > 0, "located a holder with blocks");
-      const idsBefore = (await nodes[holderIdx].store.list()).map(toHex).sort();
+      const idsBefore = nodes[holderIdx].store.list().map(toHex).sort();
       // Cold reopen enters through the app's fs scope, exactly as the live node does
       // (seedkernel §12.2): the holder's keys are `appScope + <hex>.rec` on the raw
       // backend, so a view over the unwrapped NodeFs would list nothing.
       const cold = new FsBlobView(scopedFs(new NodeFs(dirs[holderIdx]), nodes[holderIdx].appScope));
-      const idsAfter = (await cold.list()).map(toHex).sort();
+      const idsAfter = cold.list().map(toHex).sort();
       t.eq(idsAfter.join(","), idsBefore.join(","), "cold reopen sees exactly the same block ids");
       const onDisk = readdirSync(dirs[holderIdx]).filter((f) => f.endsWith(".rec"));
       t.eq(onDisk.length, idsBefore.length, "one .rec file per held block on disk");
@@ -275,7 +275,7 @@ export async function run(t) {
 
       const stored = decodeMask(await B.request(S.peerId, typed(MsgType.STORE, encodeStoreBatch([{ blockId: bid, descriptor: desc, bytes }]))));
       t.eq(stored[0], VERDICT_ACCEPTED, "STORE acknowledged over ws");
-      t.ok(await S.store.has(bid), "server now holds the block");
+      t.ok(S.store.has(bid), "server now holds the block");
 
       const have1 = await B.request(S.peerId, typed(MsgType.HAVE, encodeHaveReq([bid])));
       t.eq(decodeMask(have1)[0], VERDICT_ACCEPTED, "HAVE → true after STORE (over ws)");

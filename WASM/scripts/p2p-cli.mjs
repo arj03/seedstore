@@ -46,8 +46,9 @@ import { WsNetwork } from "seedkernel-wasm/net-ws";
 import { nodeDatagrams } from "seedkernel-wasm/shell-node";
 import { bootShell } from "seedkernel-wasm/shell-core";
 import { MemoryFs } from "seedkernel-wasm/fs-memory";
+import { loadCrypto } from "seedkernel-wasm";
 import {
-  createStorageNode, storageRuntime, loadSodium, generateKeyPair, defaultConfig, PRODUCTION_BLOCK_SIZE, toHex,
+  createStorageNode, storageRuntime, generateKeyPair, defaultConfig, PRODUCTION_BLOCK_SIZE, toHex,
   netPeer, netReady, netRelay, netRoutes,
 } from "../build/host/node.js";
 import { DEFAULT_QUOTA_BYTES, DEFAULT_REALM_MEMORY_BYTES } from "../build/host/core.js";
@@ -191,7 +192,8 @@ function report(e, totalMs, bulk /* "send" | "recv" */) {
 }
 
 // ── boot ─────────────────────────────────────────────────────────────────────
-const sodium = await loadSodium();
+// The host crypto, not bare libsodium: bundles are hybrid-signed, so the shell needs ML-DSA-65.
+const sodium = await loadCrypto();
 const identity = generateKeyPair(sodium);
 console.log(`me: ${hex(identity.publicKey).slice(0, 16)}…`);
 

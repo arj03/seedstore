@@ -33,11 +33,11 @@ export function newKey() {
  *  holds the id. On the loopback this is the redundancy the old
  *  cohort.liveBlockCount measured (reachable + serves), without a protocol round
  *  trip: a test can read every node's store directly. */
-export async function liveBlockCount(nodes, net, ids) {
+export function liveBlockCount(nodes, net, ids) {
   let live = 0;
   for (const id of ids) {
     for (const n of nodes) {
-      if (net.isOnline(n.peerId) && (await n.store.has(id))) { live++; break; }
+      if (net.isOnline(n.peerId) && n.store.has(id)) { live++; break; }
     }
   }
   return live;
@@ -51,6 +51,6 @@ export async function liveBlockCount(nodes, net, ids) {
  *  Seed BEFORE the holder is otherwise exercised: the guest rebuilds its §14
  *  byte total from the fs lazily, so a later plant is invisible to it until
  *  the realm is rebuilt. */
-export async function plantBlock(fs, idHex, bytes, descriptor) {
-  await fs.put(idHex + STORE_REC, concatBytes([storeRecordHead(descriptor.length), descriptor, bytes]));
+export function plantBlock(fs, idHex, bytes, descriptor) {
+  fs.put(idHex + STORE_REC, concatBytes([storeRecordHead(descriptor.length), descriptor, bytes]));
 }

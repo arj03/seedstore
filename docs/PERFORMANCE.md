@@ -201,8 +201,8 @@ looks faster.
 `node tests/bench-holder.mjs 16 256 1 1 disk` isolates holder admission and durable
 STORE work on a real filesystem. Each holder runs in a process of its own, reached over
 loopback TCP through the real transport, as a deployed holder is. The mean of three runs:
-~2.95 ms per 256 KiB block, a ~86 MB/s mean holder rate, and PUT ~0.49 s (~33 MB/s).
+~2.3 ms per 256 KiB block, a ~110 MB/s mean holder rate, and PUT ~0.44 s (~36 MB/s).
 The crypto floor is ~0.40 ms per block; the rest is the fs write, seam crossings and
 QuickJS. The capacity comparison uses total holder payload over the complete PUT wall
-time as a conservative floor (~67 MB/s, 9.3× the live run's demand). It separately sums
-the holders' measured rates for the active holder window (~173 MB/s).
+time as a conservative floor (~73 MB/s, 10.2× the live run's demand). It separately sums
+the holders' measured rates for the active holder window (~213 MB/s).

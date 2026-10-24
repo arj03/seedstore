@@ -33,10 +33,10 @@ export async function run(t) {
       typed(MsgType.STORE, encodeStoreBatch([{ blockId, descriptor, bytes }]))))[0];
     t.ok(verifyDescriptor(sodium, forged) !== null, "the attack carries a valid cohort signature");
     t.ok(await store(forged) !== VERDICT_ACCEPTED, "re-signed ciphertext is rejected even on a fresh holder");
-    t.ok(!(await holder.store.has(id)), "the attack cannot squat on the original block id");
+    t.ok(!holder.store.has(id), "the attack cannot squat on the original block id");
     t.eq(await store(legitimate), VERDICT_ACCEPTED, "a third-party repairer can relay the authentic descriptor");
     t.ok(await store(forged) !== VERDICT_ACCEPTED, "re-signing cannot replace an existing record either");
-    t.ok(bytesEqual((await holder.store.get(id)).descriptor, legitimate), "the author's repair metadata stays intact");
+    t.ok(bytesEqual(holder.store.get(id).descriptor, legitimate), "the author's repair metadata stays intact");
     t.ok(!bytesEqual(id, crypto.blockId(attacker.identity.publicKey, bytes)), "identical ciphertext under another author has a different id");
     // The construction the binding replaces: a bare content hash names no author,
     // so it is not a block id whoever signs the descriptor around it.

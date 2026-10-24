@@ -34,11 +34,11 @@ function file(n, seed = 1) {
 
 // Collect each distinct chunk's block-ids by scanning holders' stores (every
 // holder carries the chunk's signed descriptor, §4.3).
-async function chunkBlockIds(nodes) {
+function chunkBlockIds(nodes) {
   const seen = new Map();
   for (const node of nodes) {
-    for (const id of await node.store.list()) {
-      const sb = await node.store.get(id);
+    for (const id of node.store.list()) {
+      const sb = node.store.get(id);
       if (!sb) continue;
       const sd = parseSignedDescriptor(sb.descriptor);
       const key = toHex(node.crypto.hash(sb.descriptor));
@@ -74,9 +74,9 @@ export async function run(t) {
     t.ok(bytesEqual(got, data), "GET reconstructs the original file");
     // Blocks really live on distinct peers, not the owner.
     const holders = [];
-    for (const n of nodes) { if (n !== owner && (await n.store.list()).length > 0) holders.push(n); }
+    for (const n of nodes) { if (n !== owner && n.store.list().length > 0) holders.push(n); }
     t.ok(holders.length >= 4, "blocks placed across several distinct peers");
-    t.eq((await owner.store.list()).length, 0, "owner holds no blocks — durability leans on the cohort");
+    t.eq(owner.store.list().length, 0, "owner holds no blocks — durability leans on the cohort");
     nodes.forEach((n) => n.close());
     net.close();
   }
@@ -137,20 +137,20 @@ export async function run(t) {
     const owner = nodes[0];
     const data = file(2048, 5); // 2 blocks → 1 RS chunk (n=4)
     const put = await owner.put(data);
-    const chunks = await chunkBlockIds(nodes.filter((n) => n !== owner));
+    const chunks = chunkBlockIds(nodes.filter((n) => n !== owner));
     t.ok(chunks.length >= 1, "found the chunk descriptor among holders");
     const ids = chunks[0];
 
-    const before = await liveBlockCount(nodes, net, ids);
+    const before = liveBlockCount(nodes, net, ids);
     t.eq(before, 4, "all n=4 blocks live after PUT");
 
     // Find two online peers holding a block of this chunk and take them offline
     // (Lost, §8).
     const holders = [];
-    for (const n of nodes) { if (n !== owner && (await storeHoldsAny(n, ids))) holders.push(n); }
+    for (const n of nodes) { if (n !== owner && storeHoldsAny(n, ids)) holders.push(n); }
     net.setOffline(holders[0].peerId);
     net.setOffline(holders[1].peerId);
-    const degraded = await liveBlockCount(nodes, net, ids);
+    const degraded = liveBlockCount(nodes, net, ids);
     t.ok(degraded <= 2, `redundancy dropped after losing two holders (live=${degraded})`);
 
     // Any online block-holder runs the repair loop; it reconstructs the missing
@@ -158,7 +158,7 @@ export async function run(t) {
     const online = nodes.filter((n) => n !== owner && net.isOnline(n.peerId));
     for (const n of online) await n.runRepair();
 
-    const healed = await liveBlockCount(nodes, net, ids);
+    const healed = liveBlockCount(nodes, net, ids);
     t.ok(healed >= config.k + Math.ceil(config.m / 2), `repair lifted redundancy back above low-water (live=${healed})`);
     const got = await owner.get(put.root, put.key);
     t.ok(bytesEqual(got, data), "file still reads after loss + repair");
@@ -169,11 +169,11 @@ export async function run(t) {
   // Fewest distinct online holders across a set of block-ids — the redundancy that
   // matters for a k=1 (RS(1,1)) chunk: one id per chunk, replicated onto r peers, so
   // the count of distinct *ids* maxes out at 1 and hides the loss of a copy.
-  const minHolders = async (nodes, net, ids) => {
+  const minHolders = (nodes, net, ids) => {
     const perId = [];
     for (const id of ids) {
       let n = 0;
-      for (const node of nodes) if (net.isOnline(node.peerId) && (await node.store.has(id))) n++;
+      for (const node of nodes) if (net.isOnline(node.peerId) && node.store.has(id)) n++;
       perId.push(n);
     }
     return Math.min(...perId);
@@ -192,18 +192,18 @@ export async function run(t) {
     const data = file(4096, 11);                           // 4 blocks → 4 RS(1,1) chunks
     const put = await owner.put(data);
     // put.blockIds = each chunk's single (replicated) block id + the manifest.
-    t.eq(await minHolders(nodes, net, put.blockIds), 2, "every block — chunks and manifest — is on 2 holders after PUT");
+    t.eq(minHolders(nodes, net, put.blockIds), 2, "every block — chunks and manifest — is on 2 holders after PUT");
 
     let holder = null;
-    for (const n of nodes) { if (n !== owner && (await n.store.list()).length > 0) { holder = n; break; } }
+    for (const n of nodes) { if (n !== owner && n.store.list().length > 0) { holder = n; break; } }
     net.setOffline(holder.peerId);                  // a holder leaves (tab closes)
-    t.eq(await minHolders(nodes, net, put.blockIds), 1, "redundancy drops to 1 copy for the blocks it held");
+    t.eq(minHolders(nodes, net, put.blockIds), 1, "redundancy drops to 1 copy for the blocks it held");
 
     const online = nodes.filter((n) => n !== owner && net.isOnline(n.peerId));
     let replaced = 0;
     for (const n of online) replaced += await n.runRepair();
     t.ok(replaced >= 1, `repair re-replicated the lost copies (placed=${replaced})`);
-    t.ok((await minHolders(nodes, net, put.blockIds)) >= 2, "every block — incl. the index — is back on >= 2 holders");
+    t.ok(minHolders(nodes, net, put.blockIds) >= 2, "every block — incl. the index — is back on >= 2 holders");
     t.ok(bytesEqual(await owner.get(put.root, put.key), data), "file still reads after loss + repair");
 
     // Idempotent: a second pass over now-healthy chunks re-places nothing (§9).
@@ -261,20 +261,20 @@ export async function run(t) {
 
     const data = file(1024, 47);                           // 1 block → k=1 chunk
     const put = await owner.put(data);
-    t.eq(await minHolders(all, net, put.blockIds), 5, "r = m+1 = 5 copies of every block, per the WRITER's geometry");
+    t.eq(minHolders(all, net, put.blockIds), 5, "r = m+1 = 5 copies of every block, per the WRITER's geometry");
 
     // Lose three copies of the chunk's block: margin 5−1 = 4 drops to 1, under the
     // descriptor's low-water margin of 2.
     const chunkId = put.blockIds[0];
     const held = [];
-    for (const n of holders) if (await n.store.has(chunkId)) held.push(n);
+    for (const n of holders) if (n.store.has(chunkId)) held.push(n);
     for (const n of held.slice(0, 3)) net.setOffline(n.peerId);
-    t.eq(await minHolders(all, net, [chunkId]), 2, "two copies live — healthy under the repairer's own RS(1,1), not under the chunk's");
+    t.eq(minHolders(all, net, [chunkId]), 2, "two copies live — healthy under the repairer's own RS(1,1), not under the chunk's");
 
     let replaced = 0;
     for (const n of holders) if (net.isOnline(n.peerId)) replaced += await n.runRepair();
     t.ok(replaced > 0, `a differently-configured holder still healed the chunk (placed=${replaced})`);
-    t.ok((await minHolders(all, net, [chunkId])) > 2, `copies restored toward the descriptor's r=5 (now ${await minHolders(all, net, [chunkId])})`);
+    t.ok(minHolders(all, net, [chunkId]) > 2, `copies restored toward the descriptor's r=5 (now ${minHolders(all, net, [chunkId])})`);
     t.ok(bytesEqual(await owner.get(put.root, put.key), data), "the file still reads after the mixed-geometry repair");
     all.forEach((n) => n.close());
     net.close();
@@ -289,7 +289,7 @@ export async function run(t) {
     const put = await owner.put(file(4096, 13));           // multi-block → windowed replication
 
     let holder = null;
-    for (const n of nodes) { if (n !== owner && (await n.store.list()).length > 0) { holder = n; break; } }
+    for (const n of nodes) { if (n !== owner && n.store.list().length > 0) { holder = n; break; } }
     net.setOffline(holder.peerId);
 
     let passes = 0;
@@ -299,7 +299,7 @@ export async function run(t) {
     for (const n of online) n.stopRepairLoop();
 
     t.ok(passes > 0, `the loop fired at least one pass on its own (passes=${passes})`);
-    t.ok((await minHolders(nodes, net, put.blockIds)) >= 2, "the loop restored redundancy with no manual call");
+    t.ok(minHolders(nodes, net, put.blockIds) >= 2, "the loop restored redundancy with no manual call");
     // stopRepairLoop() must actually stop it — no further passes after a settle.
     const at = passes;
     await new Promise((r) => setTimeout(r, 150));
@@ -386,8 +386,8 @@ export async function run(t) {
     // holder does not actually store would be the bug we shipped.
     let consistent = true;
     for (const n of nodes.filter((x) => x !== owner)) {
-      const held = new Set((await n.store.list()).map(toHex));
-      for (const h of hexes) if ((await n.store.has(fromHex(h))) !== held.has(h)) consistent = false;
+      const held = new Set(n.store.list().map(toHex));
+      for (const h of hexes) if (n.store.has(fromHex(h)) !== held.has(h)) consistent = false;
     }
     t.ok(consistent, "every holder's has(id) matches its store.list()");
 
@@ -456,12 +456,12 @@ export async function run(t) {
     // marked UNANSWERED (over the holder's 1600-byte cap, but held). If this ever stops
     // hitting the cap, the GET below no longer exercises the mismatch.
     let holder = null;
-    for (const h of holders) { if ((await h.store.list()).length >= 2) { holder = h; break; } }
+    for (const h of holders) { if (h.store.list().length >= 2) { holder = h; break; } }
     t.ok(!!holder, "a holder carries at least two blocks");
-    const [idA, idB] = await holder.store.list();
+    const [idA, idB] = holder.store.list();
     const raw = await owner.request(holder.peerId, typed(MsgType.FETCH, encodeFetchBatchReq([idA, idB])));
     const served = decodeFetchBatchRes(raw);
-    t.ok(served[0] !== null && bytesEqual(served[0], (await holder.store.get(idA)).bytes), "the first present block is always served, even near the cap");
+    t.ok(served[0] !== null && bytesEqual(served[0], holder.store.get(idA).bytes), "the first present block is always served, even near the cap");
     t.eq(served[1], FETCH_UNANSWERED, "the second block is marked UNANSWERED by the holder's smaller cap");
 
     t.ok(bytesEqual(await owner.get(put.root, put.key), data), "GET completes across the cap mismatch (unanswered block re-requested, not marked tried)");
@@ -553,7 +553,7 @@ export async function run(t) {
       );
       const unknown = decodeMask(await a.request(b.peerId, typed(MsgType.STORE, encodeStoreBatch([{ blockId: bid2, descriptor: forged, bytes: bytes2 }]))));
       t.eq(unknown[0], VERDICT_DESCRIPTOR, "a self-signed descriptor from a fresh keypair is declined — the signature is not anchored");
-      t.ok(!(await b.store.has(bid2)), "nothing committed for the unanchored descriptor");
+      t.ok(!b.store.has(bid2), "nothing committed for the unanchored descriptor");
     } finally { [a, b].forEach((n) => n.close()); }
   }
 
@@ -605,7 +605,7 @@ export async function run(t) {
       const outerPlain = new Uint8Array(cfg.blockSize);
       outerPlain.set(list);
       const outer = at(1, owner.crypto.encrypt(K, 1, 0, outerPlain), list.length);
-      await plantBlock(nodes[1].fs, toHex(outer.id), outer.ciphertext, outer.env);
+      plantBlock(nodes[1].fs, toHex(outer.id), outer.ciphertext, outer.env);
 
       let err = null;
       try { await owner.get(outer.env, K); } catch (e) { err = e; }
@@ -634,8 +634,8 @@ export async function run(t) {
       // manifest, which is what put a ceiling on file size in the first place.
       let oversize = 0;
       for (const n of nodes) {
-        for (const id of await n.store.list()) {
-          if ((await n.store.get(id)).bytes.length !== cfg.blockSize) oversize++;
+        for (const id of n.store.list()) {
+          if (n.store.get(id).bytes.length !== cfg.blockSize) oversize++;
         }
       }
       t.eq(oversize, 0, "no block on the wire exceeds blockSize — the index has no size ceiling");
@@ -644,7 +644,7 @@ export async function run(t) {
 }
 
 // Does `node` hold any of `ids`?
-async function storeHoldsAny(node, ids) {
-  for (const id of ids) if (await node.store.has(id)) return true;
+function storeHoldsAny(node, ids) {
+  for (const id of ids) if (node.store.has(id)) return true;
   return false;
 }

@@ -86,10 +86,10 @@ console.log("(Ctrl+C to stop)\n");
 
 // Show blocks landing: poll the store for newly-held ids, sizing the store once per tick.
 const known = new Set();
-const timer = setInterval(async () => {
-  const fresh = (await node.store.list()).map(toHex).filter((id) => !known.has(id));
+const timer = setInterval(() => {
+  const fresh = node.store.list().map(toHex).filter((id) => !known.has(id));
   if (fresh.length === 0) return;
-  const used = await node.store.usedBytes();
+  const used = node.store.usedBytes();
   for (const id of fresh) {
     known.add(id);
     console.log(`  ✓ stored block ${short(id)}  (${known.size} held, ${(used / 1024).toFixed(1)} KB of ${(node.quota / 1024 / 1024).toFixed(0)} MB)`);
