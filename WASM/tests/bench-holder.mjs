@@ -2,41 +2,44 @@
 // compute and bench-net.mjs measures round-trip economy; neither isolates what
 // the RECEIVING side costs per block — the open question behind a live PUT
 // that fills socket buffers (receiver-limited vs. path-limited). Answer: holder
-// STORE-processing is measured on real disk with the all-async host seam. The
-// verdict reports both conservative whole-process payload/wall throughput and the
-// sum of the co-resident holders' independently measured active-window rates.
+// STORE-processing is measured on real disk. The verdict reports both conservative
+// payload/wall throughput and the sum of the holders' independently measured
+// active-window rates.
 //
-// Isolates the holder by running over a zero-latency loopback and timing each
-// inbound request inside the guest's own `handle` (the `recv` half of
-// Op.STATS): admit -> hash -> verify -> fs write -> reply, no initiator work
-// and no wire.
+// Each holder runs in a process of its own (this script with `--holder`), reached over
+// loopback TCP through the real transport, as a deployed holder is: a holder that blocks
+// its loop on its own disk write stalls only itself, not the initiator or another holder.
+// Each times every inbound request inside the guest's own `handle` (the `recv` half of
+// Op.STATS): admit -> hash -> verify -> fs write -> reply, no initiator work.
 //
 // Per STORE'd block: BLAKE2b, one Ed25519 verify, the §6 sibling check against
 // the holder-owned index, then one framed-record fsPut. Geometry defaults to the
 // live deployment's (RS(1,1), 256 KiB blocks) for comparability with p2p-cli runs.
 //
-// NOT priced: the transport's own receive cost (loopback hands over a
-// Uint8Array directly), disk persistence unless `disk` is passed for a NodeFs temp
-// dir, or a weaker deployment CPU. Read the result as an upper bound on
-// holder ingest.
+// NOT priced: a real network's latency and bandwidth, disk persistence unless `disk` is
+// passed for a NodeFs temp dir, or a weaker deployment CPU. Read the result as an upper
+// bound on holder ingest.
 //
 // Run:  node tests/bench-holder.mjs [fileMB] [blockKiB] [k] [m] [disk]
 //   e.g. node tests/bench-holder.mjs 16            (the live geometry, in-RAM fs)
 //        node tests/bench-holder.mjs 16 256 1 1 disk  (same, holders on real disk)
 //        node tests/bench-holder.mjs 16 256 2 2    (RS(2,2) — 4 holders)
 
+import { fork } from "node:child_process";
+import { once } from "node:events";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { performance } from "node:perf_hooks";
+import { fileURLToPath } from "node:url";
 import {
-  StorageNode, loadWasmBytes, loadSodium, PRODUCTION_BLOCK_SIZE, bootStorageNode, inProcessStandUp, inProcessHost,
-  generateKeyPair,
+  loadWasmBytes, loadSodium, PRODUCTION_BLOCK_SIZE, bootStorageNode, inProcessStandUp, inProcessHost,
+  generateKeyPair, netAddr, netReady,
 } from "../build/host/node.js";
-import { LoopbackNetwork } from "../build/host/loopback.js";
-import { toHex, bytesEqual } from "../build/host/util.js";
+import { bytesEqual } from "../build/host/util.js";
 import { blockHashInput } from "../build/host/descriptor-core.js";
 import { nodeRawFiles } from "seedkernel-wasm/fs-node";
+import { nodeChannels } from "seedkernel-wasm/shell-node";
 
 const FILE_MB = Number(process.argv[2] ?? 16);
 const BLOCK_KIB = Number(process.argv[3] ?? PRODUCTION_BLOCK_SIZE / 1024);
@@ -56,56 +59,61 @@ const TYPE_NAME = { [HAVE]: "HAVE", [OFFER]: "OFFER", [FETCH]: "FETCH", [STORE]:
 const fmt = (n, d = 1) => n.toFixed(d);
 const rate = (bytes, ms) => (ms <= 0 ? Infinity : bytes / MB / (ms / 1000));
 
+const sodium = await loadSodium();
+const wasm = await loadWasmBytes();
+
+/** One node on real loopback TCP, on disk when `dir` is set. */
+const bootNode = (dir) => bootStorageNode(dir ? (cfg) => inProcessHost(nodeRawFiles).standUp(cfg) : inProcessStandUp, {
+  sodium,
+  bundleBlob: wasm.bundleBlob,
+  identity: generateKeyPair(sodium), dir,
+  suppressLinkLog: true, channels: nodeChannels(),
+  listen: [{ label: "tcp", host: "127.0.0.1", port: 0 }],
+  config,
+  // Generous: each holder takes ~fileBytes plus descriptors and record framing; a §14-full
+  // holder would silently decline instead of measuring anything.
+  quota: Math.max(64 * MB, fileBytes * 4),
+  timeoutMs: 20000,
+});
+
+// A holder process: say where it listens, then answer each `stats` with Op.STATS.
+const holderArg = process.argv.indexOf("--holder");
+if (holderArg >= 0) {
+  const node = await bootNode(process.argv[holderArg + 1] || undefined);
+  process.on("message", async () => { process.send([...await node.stats()]); });
+  process.send({ peerId: node.peerId, port: node.net.portOf("tcp") });
+  await new Promise(() => {}); // until the bench kills it
+}
+
+// One initiator + exactly k+m holders, so every chunk's blocks fill the cohort and each
+// holder takes one block per chunk (the §6 sibling rule) — the live shape. Only the
+// holders need a real backend — the initiator stores nothing (durability is the
+// cohort's), so putting it on disk would measure nothing and cost a temp dir.
+const holders = K + M;
+const tmpDirs = [];
+const children = [];
+const initiator = await bootNode();
+for (let i = 0; i < holders; i++) {
+  const dir = ON_DISK ? mkdtempSync(join(tmpdir(), "seedstore-bench-holder-")) : "";
+  if (dir) tmpDirs.push(dir);
+  const child = fork(fileURLToPath(import.meta.url), [...process.argv.slice(2), "--holder", dir]);
+  const [{ peerId, port }] = await once(child, "message");
+  children.push({ child, peerId });
+  await netAddr(initiator.shell, peerId, `tcp://127.0.0.1:${port}`);
+}
+await netReady(initiator.shell);
+const holderIds = children.map((c) => c.peerId);
+
 /** One holder's received-request stats (the guest's read-and-clear Op.STATS), shaped
  *  as `{ [MsgType]: { n, ms, payloadBytes } }` for the per-type reporting below. */
 async function holderStats(id) {
-  const node = nodes.find((n) => n.peerId === id);
-  const map = await node.stats();
+  const { child } = children.find((c) => c.peerId === id);
+  child.send("stats");
+  const [map] = await once(child, "message");
   const out = {};
   for (const [type, rs] of map) out[type] = { n: rs.recv, ms: rs.recvMs, payloadBytes: rs.recvBytes };
   return out;
 }
-
-const sodium = await loadSodium();
-const wasm = await loadWasmBytes();
-const net = new LoopbackNetwork();
-
-// One initiator + exactly k+m holders, so every chunk's blocks fill the cohort and each
-// holder takes one block per chunk (the §6 sibling rule) — the live shape. Built node by
-// node rather than via createConnectedCohort so each holder can be given its own fs
-// backend (the `disk` mode); the wiring is what that helper does.
-const holders = K + M;
-const tmpDirs = [];
-const nodes = [];
-for (let i = 0; i < 1 + holders; i++) {
-  // Only the holders need a real backend — the initiator stores nothing (durability is
-  // the cohort's), so putting it on disk would measure nothing and cost a temp dir.
-  let standUp = inProcessStandUp, dir;
-  if (ON_DISK && i > 0) {
-    dir = mkdtempSync(join(tmpdir(), "seedstore-bench-holder-"));
-    tmpDirs.push(dir);
-    standUp = (cfg) => inProcessHost(nodeRawFiles).standUp(cfg);
-  }
-  const identity = generateKeyPair(sodium);
-  const peerId = toHex(identity.publicKey);
-  nodes.push(await bootStorageNode(standUp, {
-    sodium,
-    bundleBlob: wasm.bundleBlob,
-    identity, dir,
-    suppressLinkLog: true, channels: net.view(peerId),
-    listen: [{ label: "tcp", host: "127.0.0.1", port: 0 }],
-    config,
-    // Generous: each holder takes ~fileBytes plus descriptors and record framing; a §14-full
-    // holder would silently decline instead of measuring anything.
-    quota: Math.max(64 * MB, fileBytes * 4),
-    timeoutMs: 20000,
-  }));
-}
-for (let i = 0; i < nodes.length; i++) {
-  for (let j = i + 1; j < nodes.length; j++) await StorageNode.connect(nodes[i], nodes[j]);
-}
-const initiator = nodes[0];
-const holderIds = nodes.slice(1).map((n) => n.peerId);
 
 const data = new Uint8Array(fileBytes);
 for (let i = 0; i < fileBytes; i++) data[i] = (i * 1103515245 + 12345) & 255;
@@ -113,7 +121,7 @@ for (let i = 0; i < fileBytes; i++) data[i] = (i * 1103515245 + 12345) & 255;
 const numChunks = Math.ceil(Math.ceil(fileBytes / blockSize) / K);
 
 console.log(`holder STORE-processing bench — RS(${K},${M}), ${BLOCK_KIB} KiB blocks, ${fmt(FILE_MB)} MB file`);
-console.log(`  ${numChunks} chunks over ${holders} holder(s), ~1 MiB batches, zero-latency loopback`);
+console.log(`  ${numChunks} chunks over ${holders} holder(s), ~1 MiB batches, one process per holder over loopback TCP`);
 console.log(`  holder fs: ${ON_DISK ? "NodeFs (real disk, temp dir)" : "MemoryFs (in-RAM — pass `disk` for the honest write cost)"}\n`);
 
 // Warm the initiator's codec/crypto so its cold-JIT tax doesn't land inside the measured
@@ -148,12 +156,12 @@ for (const id of holderIds) {
 // is what scales with the file.
 const totalBlocks = numChunks * holders;
 // Bytes and elapsed handler time are both summed, so this is the weighted mean of the
-// already co-resident, already contending holders — not a serialized box rate.
+// holders, each in its own process — not a serialized box rate.
 const ingestMBs = rate(storeBytes, storeMs);
 console.log(`\nSTORE (the ingest path — hash + descriptor verify + indexed sibling check + 1 fs write per block):`);
 console.log(`  ${storeReqs} batched requests carrying ${totalBlocks} blocks (${fmt(storeBytes / MB)} MB of payload)`);
 console.log(`  holder time total   ${fmt(storeMs)} ms  →  ${fmt(storeMs / Math.max(1, totalBlocks), 2)} ms per block`);
-console.log(`  MEAN HOLDER RATE    ${fmt(ingestMBs, 1)} MB/s (weighted across co-resident holders)`);
+console.log(`  MEAN HOLDER RATE    ${fmt(ingestMBs, 1)} MB/s (weighted across the holders)`);
 if (offerReqs) {
   console.log(`\nOFFER (admission only — same verify + sibling check, NO block hash, NO fs write):`);
   console.log(`  ${offerReqs} requests, ${fmt(offerMs)} ms total → ${fmt(offerMs / Math.max(1, totalBlocks), 2)} ms per offered block`);
@@ -202,23 +210,21 @@ for (const id of holderIds) {
 console.log(`\nFETCH (serve path, for contrast — a store read + a copy, no verify, no write):`);
 console.log(`  ${fetchReqs} requests, ${fmt(fetchMs)} ms total → ${fmt(fetchMs / Math.max(1, totalBlocks), 2)} ms per block served`);
 
-console.log(`\nwall-clock (in-process, so this is initiator + holder on one CPU, not a wire rate):`);
+console.log(`\nwall-clock (the initiator here, each holder in its own process, over loopback TCP):`);
 console.log(`  PUT ${fmt(putMs)} ms (${fmt(rate(fileBytes, putMs), 1)} MB/s)   GET ${fmt(getMs)} ms (${fmt(rate(fileBytes, getMs), 1)} MB/s)`);
 console.log(`  holder share of PUT: ${fmt((storeMs + offerMs) / putMs * 100)}%`);
 console.log(`  bytes verified: ${bytesEqual(got, data) ? "round-trip OK" : "MISMATCH"}`);
 
-// Compare against a reference live run. The old calculation divided the measured mean
-// holder rate by `holders`, even though every holder was already co-resident and
-// contending during the run. That charged contention twice. Sum their observed rates for
-// the active holder-window estimate; also report total holder payload / whole PUT wall
-// time as the deliberately conservative, whole-process comparison.
+// Compare against a reference live run: the sum of the holders' observed rates for the
+// active holder-window estimate, and total holder payload / whole PUT wall time as the
+// deliberately conservative comparison.
 const LIVE_WIRE_MBS = 7.2;   // 50 MB file, 100.2 MB on the wire in 13.87 s (p2p-cli, 2026-07-21)
 const holderWindowMBs = holderRateSum;
 const processMBs = rate(storeBytes, putMs);
 const margin = processMBs / LIVE_WIRE_MBS;
 console.log(`\nverdict vs a reference live run (${LIVE_WIRE_MBS} MB/s of wire into ONE box running the cohort):`);
-console.log(`  whole-process floor ${fmt(processMBs, 1)} MB/s (${fmt(margin, 1)}× demand): holder payload ÷ full PUT wall time`);
-console.log(`  holder-window rate  ${fmt(holderWindowMBs, 1)} MB/s (${fmt(holderWindowMBs / LIVE_WIRE_MBS, 1)}× demand): sum of ${holders} co-resident measured rates`);
+console.log(`  whole-PUT floor     ${fmt(processMBs, 1)} MB/s (${fmt(margin, 1)}× demand): holder payload ÷ full PUT wall time`);
+console.log(`  holder-window rate  ${fmt(holderWindowMBs, 1)} MB/s (${fmt(holderWindowMBs / LIVE_WIRE_MBS, 1)}× demand): sum of ${holders} holders' measured rates`);
 console.log(margin > 3
   ? `  even the conservative comparison is ${fmt(margin, 1)}× live demand on THIS machine. For holder ingest to have been the limit,\n` +
     `  the holder box would have to be ~${fmt(margin, 0)}× slower at hash+verify+write than this one — and the\n` +
@@ -226,5 +232,9 @@ console.log(margin > 3
     `  To close it properly, run this same bench ON the holder box and compare.`
   : `  the conservative comparison is only ${fmt(margin, 1)}× live demand — holder processing is a plausible limiter.`);
 
+for (const { child } of children) {
+  child.kill();
+  await once(child, "exit");
+}
 for (const d of tmpDirs) rmSync(d, { recursive: true, force: true });
 process.exit(0);

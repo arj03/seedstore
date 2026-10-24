@@ -199,11 +199,10 @@ looks faster.
 ## Holder ingest
 
 `node tests/bench-holder.mjs 16 256 1 1 disk` isolates holder admission and durable
-STORE work on a real filesystem: ~7.9 ms per 256 KiB block, a ~32 MB/s mean holder
-rate, and PUT ~0.68 s (~23.5 MB/s) with the initiator and the holders sharing one
-process. Most of the per-block time is waiting for that one thread; the crypto floor
-is ~0.45 ms per block. So treat the result as a bound on a co-resident cohort, not on
-a dedicated holder machine. The capacity comparison uses total holder payload over
-the complete PUT wall time as a conservative floor. It separately sums the
-co-resident holders' measured rates for the active holder window, without dividing
-by the holder count a second time.
+STORE work on a real filesystem. Each holder runs in a process of its own, reached over
+loopback TCP through the real transport, as a deployed holder is. The mean of three runs:
+~2.95 ms per 256 KiB block, a ~86 MB/s mean holder rate, and PUT ~0.49 s (~33 MB/s).
+The crypto floor is ~0.40 ms per block; the rest is the fs write, seam crossings and
+QuickJS. The capacity comparison uses total holder payload over the complete PUT wall
+time as a conservative floor (~67 MB/s, 9.3× the live run's demand). It separately sums
+the holders' measured rates for the active holder window (~173 MB/s).
