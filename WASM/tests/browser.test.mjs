@@ -1,7 +1,7 @@
 // Browser entry-point test. We exercise host/browser.js — which fetches the
 // bundle via fetch() and takes an injected libsodium — by shimming fetch over
 // the local build dir. This proves the same StorageNode boots and serves
-// PUT/GET through the browser code path, without node:fs (§1, §20: browser and
+// PUT/GET through the browser code path, without node:fs (§1, §12: browser and
 // long-running nodes run the same protocol).
 
 import { readFileSync } from "node:fs";

@@ -1,15 +1,14 @@
 // LoopbackNetwork — the in-process network fabric for tests and single-process
 // demos. The transport is a signed bundle driven by the shared TransportHost over
 // the ChannelFactory seam (seedkernel §12.6); this file is that seam (a loopback
-// fabric, one `view()` per node) plus offline control. Vendored here
-// because seedkernel moved this test/demo infra out of its own runtime.
+// fabric, one `view()` per node) plus offline control.
 //
 // Going offline kills every link a node holds (dialed or accepted), so the
 // transport forgets it and a later dial draws a dead channel (ECONNREFUSED-like) —
 // requests then fail within the transport's stall window like a real offline peer.
 // Nothing brings a peer back online.
 
-// A destination is opaque to everything above the factory (seedkernel §12.10), so the
+// A destination is opaque to everything above the factory (seedkernel §12.10), so
 // seedkernel's own parser takes one apart here rather than a second copy of the grammar:
 // this fabric routes `tcp://` and `ws://` by port, and nothing else (`wss://` asks
 // for a TLS stack no in-process pair has).
@@ -98,8 +97,8 @@ export class LoopbackNetwork {
 
   /** `delayMs` > 0 makes every delivered message take `delayMs` ms to arrive — a
    *  wire-level round-trip latency (one request/response costs 2×delayMs), the model
-   *  the latency/concurrency harnesses use now that the host's shell has no host
-   *  side inbound seam to time against. */
+   *  the latency/concurrency harnesses use, since the host has no inbound seam to
+   *  time against. */
   constructor(private readonly delayMs = 0, private readonly chunkBytes = 0) {}
 
   /** A per-node view of the fabric — hand it to a node as its `channels`. `listen` binds
@@ -135,7 +134,7 @@ export class LoopbackNetwork {
     const d = parseDest(dest);
     if (!d || (d.scheme !== "tcp" && d.scheme !== "ws")) return null;
     // The destination's host is the "far end" both sides see — it is what the
-    // half-open limiter buckets accepts by (the per-source cap; §12.6.2).
+    // half-open limiter buckets accepts by (the per-source cap; seedkernel §12.6.2).
     const [dial, accepted] = LoopbackChannel.pair(d.host, this.delayMs, this.chunkBytes);
     const onAccept = this.listeners.get(d.port);
     const owner = this.portOf.get(d.port);

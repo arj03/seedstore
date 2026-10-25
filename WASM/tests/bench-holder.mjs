@@ -1,8 +1,8 @@
 // HOLDER-SIDE STORE-processing throughput. bench.mjs measures the initiator's
 // compute and bench-net.mjs measures round-trip economy; neither isolates what
 // the RECEIVING side costs per block — the open question behind a live PUT
-// that fills socket buffers (receiver-limited vs. path-limited). Answer: holder
-// STORE-processing is measured on real disk. The verdict reports both conservative
+// that fills socket buffers (receiver-limited vs. path-limited). It measures holder
+// STORE processing, on real disk when `disk` is passed. The verdict reports both conservative
 // payload/wall throughput and the sum of the holders' independently measured
 // active-window rates.
 //

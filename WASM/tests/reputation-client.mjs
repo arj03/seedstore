@@ -1,4 +1,4 @@
-// Test-only host-owned instance of the reputation WASM (README §13, §17). Lets
+// Test-only host-owned instance of the reputation WASM (SPEC §13, §17). Lets
 // a test drive the decayed-reciprocity counters directly — it is pure (no host
 // calls), so it instantiates with only the env imports. The ABI is owned by
 // assembly/reputation/index.ts.

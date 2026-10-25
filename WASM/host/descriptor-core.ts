@@ -4,9 +4,9 @@
 // verbatim into the guest bundle (scripts/build-guest.mjs). Synchronous and
 // QuickJS-safe (Uint8Array only, no TextEncoder/Buffer).
 //
-// There is no manifest object: a file's index is an ordered list of these same
-// descriptors (§4.3). Signing/verifying lives in descriptor.ts, not here — the
-// author signature is checked from the public key alone, preserving keyless repair (§9).
+// A file's index is an ordered list of these same descriptors (§4.3). Signing/verifying
+// lives in descriptor.ts, not here — the author signature is checked from the public
+// key alone, preserving keyless repair (§9).
 
 import { bytesEqual, toHex, writeU32BE, readU32BE, concatBytes } from "./util.js";
 
@@ -28,8 +28,8 @@ export const TAG_HEAD = 0x03;      // reserved: the §27.3 mutable file head (no
 // count, no branch needed.
 //
 // `level` places the chunk in the file's index tree (§4.3) and doubles as the
-// nonce domain (§4.4). `tailBytes` is how much of the chunk's plaintext is real —
-// replaces the old manifest `file_size`; each chunk trims by its own signed number.
+// nonce domain (§4.4). `tailBytes` is how much of the chunk's plaintext is real, so
+// each chunk trims by its own signed number.
 export interface Descriptor {
   /** The author, filled in by parseSignedDescriptor from the envelope — the core
    *  never carries it. Absent until there is an envelope to take it from. */
@@ -115,7 +115,7 @@ export function blockHashInput(authorPk: Uint8Array, bytes: Uint8Array, lead = 0
 }
 
 /** The nonce's domain byte is the chunk's index-tree LEVEL (§4.3/§4.4): 0 is the file's
- *  own ciphertext, ℓ > 0 an index chunk over level ℓ−1. There is no manifest domain. */
+ *  own ciphertext, ℓ > 0 an index chunk over level ℓ−1. */
 export const LEVEL_BODY = 0;
 
 /** 12-byte nonce = [level u8][chunk index u32 BE][0…] (§4.4). A fresh random K per

@@ -30,8 +30,8 @@ const OP_ENCODE: i32 = 1;
 const OP_DECODE: i32 = 2;
 
 // Bounds chosen so the GF matrices fit MATRIX_SIZE (n ≤ 64 → augmented n*2n =
-// 8192 bytes). Deployments run RS(2,2) or RS(1,m); the cold-archive extension is
-// RS(20,20) → n = 40 (§4.1), comfortably inside these caps.
+// 8192 bytes). The code defaults to RS(2,2), the spec to RS(10,6), and the
+// cold-archive extension is RS(20,20) → n = 40 (§4.1): all comfortably inside these caps.
 const MAX_K: i32 = 32;
 const MAX_M: i32 = 32;
 
@@ -49,7 +49,7 @@ const PRIV_WORK_OFF: i32 = PRIV_MATRIX_OFF + MATRIX_SIZE; // big output buffer
 const MAX_IO: i32 = min(SCRATCH_SIZE, PRIV_SIZE - PRIV_WORK_OFF);
 
 export let scratch: i32 = 0;
-// Declare the full 2 MB I/O region to the host (SPEC §4.1 optional export): a
+// Declare the full 2 MB I/O region to the host (seedkernel's optional `scratchSize` export): a
 // storage chunk is up to k·blockSize data (or m·blockSize parity) bytes, far past
 // the 128 KB default, so without this the host would reject a large-block encode
 // request and the codec would silently return no parity.
@@ -110,7 +110,8 @@ export function handle(input_len: i32): i32 {
     const rowIdxPtr = scratch + 8;
     const blocksPtr = rowIdxPtr + cnt;
     if (input_len != 8 + cnt + cnt * bs) return 0;
-    // Validate row indices are in range and distinct enough to be a basis.
+    // Validate row indices are in range. Repeated rows leave the matrix singular,
+    // which rsDecode rejects.
     for (let r = 0; r < k; r++) {
       if ((load<u8>(rowIdxPtr + r) as i32) >= n) return 0;
     }

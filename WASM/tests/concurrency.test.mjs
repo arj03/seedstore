@@ -89,7 +89,7 @@ export async function run(t) {
     const source = readFileSync(new URL("../build/host/tier2-guest.js", import.meta.url), "utf8");
     const ctx = vm.createContext({ APP: {}, LOCAL: {}, Uint8Array });
     vm.runInContext(source, ctx);
-    // A holder that answers empty past ADMIT requests in flight from us (router.js `admits`).
+    // A holder that answers empty past ADMIT requests in flight from us (seedkernel router.js `admits`).
     const ADMIT = 5;
     let active = 0, peak = 0, refused = 0;
     const stored = new Set();
@@ -117,7 +117,7 @@ export async function run(t) {
   const config = { k: 2, m: 2, blockSize: 4096 };
   const N = 12;
   const n = config.k + config.m;        // blocks per chunk
-  const replicas = config.m + 1;        // manifest copies (defaultConfig: m+1)
+  const replicas = config.m + 1;        // copies of the one-block index (defaultConfig: m+1)
   const data = file(N * config.k * config.blockSize, 7); // exactly N RS chunks (N > W)
 
   // Stand up a fresh cohort, run `body(owner, net)`, and return its wall-clock
@@ -153,9 +153,9 @@ export async function run(t) {
     const offers = put.stats.get(OFFER)?.sent ?? 0;
     const stores = put.stats.get(STORE)?.sent ?? 0;
 
-    // A per-block PUT issues N×n OFFERs AND N×n STOREs (+ the manifest's replicas).
+    // A per-block PUT issues N×n OFFERs AND N×n STOREs (+ the index's replicas).
     // Batching folds EACH to ≈ one message per holder offered to (≤ n) + the
-    // manifest's per-replica messages — the OFFER handshake and the bulk STORE both
+    // index's per-replica messages — the OFFER handshake and the bulk STORE both
     // collapse from per-block to per-holder.
     t.ok(offers <= n + replicas, `OFFER batched: ${offers} for ${N * n} chunk blocks (≤ one per holder + ${replicas} manifest)`);
     t.ok(stores <= n + replicas, `STORE batched: ${stores} for ${N * n} chunk blocks (≤ one per holder + ${replicas} manifest)`);
@@ -173,10 +173,10 @@ export async function run(t) {
     const cap = bs + 2000;                           // one ~4 KiB block + headers fits a STORE; two don't.
     const webrtcData = file(Nw * config.k * bs, 9);  // exactly Nw RS chunks
     const cfg = { ...config, blockSize: bs, maxMessageBytes: cap };
-    const replicas = config.m + 1;                   // manifest copies (defaultConfig: m+1)
+    const replicas = config.m + 1;                   // copies of the one-block index (defaultConfig: m+1)
 
     // Same file/cohort/cap — only the window differs. fanoutWindow=1 is strictly
-    // serial (the old behavior); 64 is the fix. Measured as time SAVED, not a
+    // serial; 64 pipelines. Measured as time SAVED, not a
     // ratio of noisy totals (see `pipelinedSavesWallClock`).
     const serial = await onCohort({ ...cfg, fanoutWindow: 1 }, (o) => o.put(webrtcData), WC_DELAY);
     const windowed = await onCohort({ ...cfg, fanoutWindow: 64 }, (o) => o.put(webrtcData), WC_DELAY);
@@ -186,10 +186,10 @@ export async function run(t) {
     const offersW = windowed.stats.get(OFFER)?.sent ?? 0;
 
     // The cap really did force one block per STORE: the STORE *count* is per-block
-    // (Nw·n chunk blocks + the manifest's replicas), the case batching can't shrink.
+    // (Nw·n chunk blocks + the index's replicas), the case batching can't shrink.
     t.eq(windowed.stats.get(STORE)?.sent ?? 0, Nw * n + replicas, `the cap forces one block per STORE: ${Nw * n} chunk blocks + ${replicas} manifest`);
     // Point 1 still holds under the tight cap: OFFER collapses to ≈ one batched
-    // message per holder (≤ n + the manifest replicas), not one per block.
+    // message per holder (≤ n + the index replicas), not one per block.
     t.ok(offersW <= n + replicas, `OFFER stays batched per holder under the WebRTC cap: ${offersW} for ${Nw * n} blocks`);
 
     // BEFORE — serial per holder: at most one STORE in flight per holder per placing
@@ -208,15 +208,15 @@ export async function run(t) {
     t.ok(saved >= floor,
       `windowed PUT saved the pipelined round trips: ${saved.toFixed(0)} ms (≥ ${floor} = half of ${Nw - 1} × RTT on the latency wire)`);
 
-    // Correctness is unchanged: the windowed PUT still places every block + manifest.
+    // Correctness is unchanged: the windowed PUT still places every block + the index.
     t.eq(windowed.result.blockIds.length, Nw * n + 1, "windowed PUT placed every chunk block + the manifest");
   }
 
   t.group("GET pulls every block a holder serves in one FETCH, not one per block");
   {
     // One PUT, then read it back. A per-block GET would issue N×k fetches + the
-    // manifest; the batched GET issues ≈ one FETCH per distinct holder + the
-    // manifest, and assembles byte-identically.
+    // index; the batched GET issues ≈ one FETCH per distinct holder + the index,
+    // and assembles byte-identically.
     const net = new LatencyNetwork(DELAY);
     const nodes = await createConnectedCohort({ suppressLinkLog: true, count: 6, network: net, sodium, wasm, config: { ...config, fanoutWindow: W }, timeoutMs: TIMEOUT });
     const owner = nodes[0];
@@ -228,7 +228,7 @@ export async function run(t) {
 
     t.ok(bytesEqual(bytes, data), "batched GET reconstructs the file byte-identically");
     // ≤ one FETCH per cohort holder (each serves a batch of the blocks it holds) +
-    // one for the manifest — far below the N×k a per-block GET would issue.
+    // one for the index — far below the N×k a per-block GET would issue.
     t.ok(fetches <= nodes.length,
       `batched FETCH: ${fetches} FETCHes to recover ${N} chunks (≤ one per holder + manifest, vs ${N * config.k} per-block)`);
     t.ok(fetches * 3 < N * config.k, `FETCH round trips are a fraction of the per-block count (${fetches} vs ${N * config.k})`);
@@ -328,7 +328,7 @@ export async function run(t) {
       const putStats = await owner.stats();
       // Assert the BYTES, not a message count. A count bound just re-encodes whatever the
       // clamp happens to compute, so it stays green while the window silently shrinks — which
-      // is how a 2× over-charge cut the production window from 8 to 3 under a "≤ 32" test.
+      // is how a 2× over-charge could cut the production window from 8 to 3 under a "≤ 32" test.
       const KERNEL_BUDGET = 16 * 1024 * 1024;              // seedkernel DEFAULT_MAX_OUTSTANDING_HOST_CALL_BYTES
       const chargeOf = (msg) => msg + 32 * Math.ceil(msg / bs) + 128;
       const blockMsg = Math.floor(cap / (bs + 5)) * (bs + 5); // STORE/FETCH pack whole framed blocks

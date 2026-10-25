@@ -1,7 +1,7 @@
-// Networking + filesystem integration (README §16, §12). Exercises both the
+// Networking + filesystem integration (SPEC §16, §12). Exercises both the
 // chunked loopback byte-stream model and the real socket fabric:
 //   - guest-owned stream framing reassembles split physical deliveries
-//   - FsBlobView reads the durable store.local layout back, across reopen
+//   - FsBlobView reads the durable store layout back, across reopen
 //   - a full cohort over real TCP sockets, blocks landing on holders' disks
 //   - a browser-like node reaching a server node over a real WebSocket
 //
@@ -46,7 +46,7 @@ function file(n, seed = 1) {
 }
 
 // Stand up `count` storage nodes on real TCP loopback sockets, each with its own
-// on-disk store.local directory, fully connected (StorageNode.connect wires the
+// on-disk store directory, fully connected (StorageNode.connect wires the
 // addresses + dials; the transport's own router collapses the simultaneous dials).
 async function tcpCohort({ count, sodium, wasm, config, baseDir }) {
   const dirs = [];
@@ -131,7 +131,7 @@ export async function run(t) {
   }
 
   // ── FsBlobView ─────────────────────────────────────────────────────────────
-  // A pure READ view of the durable store.local layout (§12) — the write half
+  // A pure READ view of the durable store layout (§12) — the write half
   // (admission, quota, the writes) belongs to the confined guest holder alone
   // (protocol.test.mjs drives it over the real wire). This writes the layout
   // the way the guest does, through `fs`, and checks the view reads it back.
@@ -197,10 +197,9 @@ export async function run(t) {
       t.eq(owner.store.list().length, 0, "owner holds no blocks");
 
       t.ok(holders[0].store.list().length > 0, "a holder kept at least one block");
-      // The driver's `framesDelivered` mirror is gone with the request facade it counted:
-      // frames are the transport's now, and the host holds only sockets. What proves the same
-      // thing — that this ran over real sockets rather than in-process — is the transport's
-      // own authenticated set, which only a completed AKE over a live channel fills.
+      // Frames are the transport's, and the host holds only sockets, so what proves this
+      // ran over real sockets rather than in-process is the transport's own authenticated
+      // set, which only a completed AKE over a live channel fills.
       const linked = await Promise.all(nodes.map((n) => n.linkedPeers()));
       t.ok(linked.some((peers) => peers.length > 0), "links authenticated over real sockets");
     } finally {

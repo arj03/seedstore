@@ -30,9 +30,9 @@ export function newKey() {
 }
 
 /** Count block-ids with ≥1 *live* holder — an online cohort node whose store
- *  holds the id. On the loopback this is the redundancy the old
- *  cohort.liveBlockCount measured (reachable + serves), without a protocol round
- *  trip: a test can read every node's store directly. */
+ *  holds the id. On the loopback this is the redundancy an audit would measure
+ *  (reachable + serves), without a protocol round trip: a test can read every
+ *  node's store directly. */
 export function liveBlockCount(nodes, net, ids) {
   let live = 0;
   for (const id of ids) {
@@ -43,7 +43,7 @@ export function liveBlockCount(nodes, net, ids) {
   return live;
 }
 
-/** Plant a block straight into a node's store.local, bypassing the protocol —
+/** Plant a block straight into a node's store, bypassing the protocol —
  *  for tests that need a holder to already have something. Writes the guest's
  *  `<hex>.rec` record (host/store-record.ts) directly, since admission is the
  *  guest holder's alone.

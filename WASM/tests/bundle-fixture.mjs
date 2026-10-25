@@ -7,7 +7,7 @@ import { writeStorageBundle, authorKeysFor } from "../scripts/storage-bundle.mjs
 
 /** @param path   where to write the bundle blob (seedkernel §12.4 — one file).
  *  @param build  absolute path to seedstore's build/ dir (holds the codec wasm + the staged guest).
- *  @param version optional manifest freshness mark (README §12.4); defaults to 1.
+ *  @param version optional manifest freshness mark (seedkernel §12.4); defaults to 1.
  *  @returns the hybrid author id (32 bytes) the bundle was signed under — the key-set
  *           hash, which is what a policy `authors` entry and every host name pin. */
 export async function buildBundle(path, author, build, version = 1) {

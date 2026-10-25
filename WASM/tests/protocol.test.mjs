@@ -81,7 +81,7 @@ export async function run(t) {
   // The descriptor is mandatory on the wire, not merely expected: §4.3 says every peer
   // that accepts a block first verifies its descriptor, which only holds if a
   // descriptor-less entry cannot be expressed. Both decoders reject one as malformed —
-  // hand-framed here, since the encoders can no longer produce it.
+  // hand-framed here, since the encoders cannot produce it.
   t.group("the wire refuses a descriptor-less entry outright (§4.3)");
   {
     const offerEntry = new Uint8Array(4 + 32 + 4); // [count 1][blockId][dlen 0]
@@ -124,9 +124,9 @@ export async function run(t) {
     const net = new LoopbackNetwork();
     const [a, b] = await createConnectedCohort({ suppressLinkLog: true, count: 2, network: net, sodium, wasm, timeoutMs: TIMEOUT });
     try {
-      // The host admits 256 unresolved host calls per realm. The old cold-index
-      // path launched one fs/size call per record in a single Promise.all, so record
-      // 257 made initialization throw and every HAVE/OFFER returned an empty reply.
+      // The host admits 256 unresolved host calls per realm. A cold index that launched
+      // one fs/size call per record in a single Promise.all would make record 257 throw
+      // at initialization, and every HAVE/OFFER would return an empty reply.
       for (let i = 0; i < 257; i++) {
         b.fs.put(i.toString(16).padStart(64, "0") + ".rec", new Uint8Array(4));
       }
@@ -203,8 +203,8 @@ export async function run(t) {
 
   // Quota reaches the holder as a sibling option, not through the typed StorageConfig —
   // but a seedkernel shell spells the same operator knob INSIDE its boot config, and
-  // both drivers appear in one file (holder-guest.test.mjs). Getting it wrong here used
-  // to be silent: the node would run on the 64 MiB default while the caller believed it
+  // both drivers appear in one file (holder-guest.test.mjs). Getting it wrong must not
+  // be silent: the node would run on the 64 MiB default while the caller believed it
   // had set a budget, so a quota test could "pass" without testing a quota at all.
   t.group("a StorageConfig rejects unknown keys instead of ignoring them");
   {
@@ -246,7 +246,7 @@ export async function run(t) {
   t.group("a holder commits a batched STORE block-by-block (quota + sibling)");
   {
     const net = new LoopbackNetwork();
-    // Room for one 1000-byte block + its 136-byte descriptor, not two.
+    // Room for one 1000-byte block + its 157-byte descriptor, not two.
     const [a, b] = await createConnectedCohort({ suppressLinkLog: true, count: 2, network: net, sodium, wasm, quota: 1500, timeoutMs: TIMEOUT });
     try {
       const b0 = bytes(1000, 1), b1 = bytes(1000, 2);
@@ -276,7 +276,7 @@ export async function run(t) {
       const junk = bytes(100, 8);
       const jid = b.crypto.blockId(a.identity.publicKey, junk);
       const stored = decodeMask(await a.request(b.peerId, typed(MsgType.STORE, encodeStoreBatch([
-        { blockId: jid, descriptor: bytes(136, 1), bytes: junk }, // unsigned garbage of descriptor shape
+        { blockId: jid, descriptor: bytes(136, 1), bytes: junk }, // unsigned garbage in the descriptor slot
       ]))));
       t.eq(stored[0], VERDICT_DESCRIPTOR, "STORE declined — the descriptor carries no valid author signature");
       t.ok(!b.store.has(jid), "nothing committed to the store");
@@ -294,7 +294,7 @@ export async function run(t) {
 
       // Signed, of this chunk, but the bytes disagree with the signed blockSize: the
       // geometry is the descriptor's, so bytes that aren't blockSize long are not the
-      // block that was admitted (this is what makes OFFER's old size field redundant).
+      // block that was admitted (which is why OFFER carries no size field).
       const wrongSize = signDescriptor(
         sodium, { level: 0, k: 1, m: 0, blockSize: 99, tailBytes: 99, authTag: authTag(), blockIds: [jid] }, a.identity.publicKey, a.identity.privateKey,
       );

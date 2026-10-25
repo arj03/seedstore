@@ -1,8 +1,7 @@
 // Build the seedstore app bundle: the signed content a generic seedkernel-shell
 // loads to *become* a storage node — codec.wasm + reputation.wasm +
 // tier2-guest.js + a signed manifest declaring the guest's required services.
-// This script is
-// the offline producer holding the author key; bundle content is assembled in
+// This script is the offline producer holding the author key; bundle content is assembled in
 // scripts/storage-bundle.mjs (shared with the test fixture, so they can't drift).
 //
 //   node scripts/build-bundle.mjs   (writes ./bundle, signs with ./seedstore-author.key)
@@ -28,11 +27,10 @@ const { toHex, fromHex } = await import(new URL("../build/host/util.js", import.
 
 const sodium = await loadCrypto();
 // The host's crypto, which mints the author key and reads back a prior bundle;
-// storage-bundle.mjs signs with it too. No seedkernel host is needed, and a module's name is its bare manifest name — reached by the guest on the
-// seam, slot-local, with no bind name or global namespace (seedkernel §5).
+// storage-bundle.mjs signs with it too. No seedkernel host is needed.
 
 // Author identity: the key the bundle is signed with (and that installs are
-// signed with). Policy pins the derived key-set id (§12.4), not this Ed25519 key.
+// signed with). Policy pins the derived key-set id (seedkernel §12.4), not this Ed25519 key.
 const keyPath = join(root, "seedstore-author.key");
 const versionPath = join(root, "seedstore-author.version");
 let sk, mintedKey = false;
@@ -77,7 +75,7 @@ const { manifest, author } = writeStorageBundle({ path: bundlePath, sk, build, v
 // even if bundle/ is wiped.
 writeFileSync(versionPath, `${manifest.version}\n`);
 
-// The pinned id is the derived author id (the key-set hash, §12.4) — a manifest is
+// The pinned id is the derived author id (the key-set hash, seedkernel §12.4) — a manifest is
 // signed by both halves of the key set, so the Ed25519 key is not what policy lists.
 // It is carried on the writeStorageBundle value, not re-derived here.
 console.log(`  author ${toHex(author)} (hybrid 0x02)`);

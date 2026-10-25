@@ -26,8 +26,7 @@ const root = join(__dirname, "..");
 const build = join(root, "build");
 const out = process.env.BROWSER_DEMO_OUT ?? join(build, "browser-demo");
 const seedstoreHost = join(build, "host-min");
-// seedkernel's minified tree: build-min (host/ + services/ subdirs) — its minifier
-// moved the output there from the old build/host-min.
+// seedkernel's minified tree: build-min (host/ + services/ subdirs).
 const seedkernelHost = join(root, "..", "..", "seedkernel", "WASM", "build-min");
 
 if (!existsSync(join(seedstoreHost, "browser.js"))) {
@@ -155,7 +154,7 @@ await copyJs(seedkernelHost, join(out, "seedkernel"));
 
 // seedkernel's host blob: the host script, the realm engine every guest runs on, and the
 // host's crypto, libsodium and ML-DSA-65 (the PQ half of seedkernel's one manifest suite,
-// §12.4, without which no bundle verifies). The pages' loader runs it
+// seedkernel §12.4, without which no bundle verifies). The pages' loader runs it
 // (seedkernel-wasm/platform-web `browserHost`): the host the Node and native nodes run.
 {
   const src = join(root, "..", "..", "seedkernel", "WASM", "build", "host.skb");
@@ -166,9 +165,6 @@ await copyJs(seedkernelHost, join(out, "seedkernel"));
   }
   await copy(src, join(out, "host.skb"));
 }
-
-// ML-KEM-768 is private content of the signed transport bundle now; no loose
-// browser artifact is needed here.
 
 // ── this project's own libsodium ─────────────────────────────────────────────
 // What the page's own code computes (block ids, key sealing, ChaCha20-Poly1305) is
@@ -269,8 +265,8 @@ function checkPage(page) {
         target = resolve(out, map[spec]);
       } else if (spec.startsWith("node:")) {
         // STATIC is fatal wherever it appears (catches a Node-host module that
-        // slipped past copyJs). DYNAMIC is a branch, not a dependency (e.g. the
-        // seedkernel's glue reaches for `node:module` only inside its
+        // slipped past copyJs). DYNAMIC is a branch, not a dependency (e.g.
+        // Emscripten glue reaches for `node:module` only inside its
         // ENVIRONMENT_IS_NODE test) — nothing to resolve, so skip it.
         if (dynamic) continue;
         fail(file, spec, "a Node builtin: this module should not be in the browser graph.");

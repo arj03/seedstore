@@ -1,6 +1,6 @@
 // The host's READ VIEW of what this node's holder has stored (SPEC §12).
 //
-// The confined guest holder owns store.local outright (admission, quota, the
+// The confined guest holder owns the store outright (admission, quota, the
 // `<hex>.rec` layout — store-record.ts). This module implements NONE of that policy —
 // no put, no delete — only reads the layout back for a host-side caller (tests, demo
 // counts, operator scripts).

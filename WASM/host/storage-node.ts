@@ -1,8 +1,9 @@
 // StorageNode — a single storage peer running *on* the seedkernel (SPEC §19
 // bootstrap). A THIN client: the entire storage protocol lives in the confined
-// guest (host/tier2-guest.js), run in one seedkernel realm over the generic guest
-// seam, and the node it runs on is the host's own (runtime.ts stands one up). This
-// loads the signed seedstore bundle (§12.4) onto that node and calls its guest's ops.
+// guest (host/tier2-guest.orchestration.js), run in one seedkernel realm over the
+// generic guest seam, and the node it runs on is the host's own (runtime.ts stands one
+// up). This loads the signed seedstore bundle (seedkernel §12.4) onto that node and
+// calls its guest's ops.
 // Modules arrive only via verified `install`, never raw-bound.
 
 import type { Fs } from "seedkernel-wasm/fs";
@@ -28,8 +29,9 @@ type Transport = NonNullable<BootResult["transport"]>;
 //
 // Peers and cohort readiness are the transport GUEST's — its address book dies with
 // its realm — so they are claim calls on the id that bundle claims, through the same
-// door a co-resident guest reaches with `host.call`. `OpArgs` also encodes the host's link events; these service ops use it as optional
-// application framing, which the shell passes through and never reads.
+// door a co-resident guest reaches with `host.call`. `OpArgs` also encodes the host's
+// link events; these service ops use it as optional application framing, which the
+// shell passes through and never reads.
 
 /** One op to the transport, with the shell's caller-id prefix. Throws when nothing
  *  claims the id — a node with no transport bundle, which is a legitimate
@@ -156,7 +158,7 @@ export interface StorageNodeOptions {
   runtime: StorageRuntime;
   /** This node's own libsodium, for what storage computes host-side (key sharing). */
   sodium: Sodium;
-  /** The signed seedstore bundle blob (seedstore.skb), loaded through the §12.4
+  /** The signed seedstore bundle blob (seedstore.skb), loaded through the seedkernel §12.4
    *  `install` (verify manifest, govern policy, install modules). */
   bundleBlob: Uint8Array;
   config?: Partial<StorageConfig>;
@@ -187,7 +189,7 @@ export class StorageNode {
   readonly sodium: Sodium;
   readonly config: StorageConfig;
   /** The logical names of the modules this deployment's bundle installs — read off the
-   *  verified manifest, which is the whole of what a host may know about them now: a
+   *  verified manifest, which is the whole of what a host may know about them: a
    *  slot's modules are private to its guest, so there is no table to ask. */
   readonly moduleNames: ReadonlySet<string>;
 
@@ -237,14 +239,14 @@ export class StorageNode {
 
   /** Load the seedstore bundle onto a node (`opts.runtime`), whose identity is this
    *  node's, so peerId can never drift from what the transport registered under.
-   *  Handlers arrive solely via `install` (§12.4). A failed load leaves the node to its
+   *  Handlers arrive solely via `install` (seedkernel §12.4). A failed load leaves the node to its
    *  owner. */
   static async create(opts: StorageNodeOptions): Promise<StorageNode> {
     await opts.sodium.ready;
     const local = localConfigFor(opts);
     // Admitting the bundle is what routes inbound storage frames to it (the manifest
-    // claims STORAGE_PROTO, §12.10) — nothing else arms it. `localConfig` and
-    // `realmMemoryBytes` ride with THIS load (§12.4/§12.3), not the shell, so they don't
+    // claims STORAGE_PROTO, seedkernel §12.10) — nothing else arms it. `localConfig` and
+    // `realmMemoryBytes` ride with THIS load (seedkernel §12.4/§12.3), not the shell, so they don't
     // leak into the transport's budget. The guest writes through `loaded.fs` (a scoped
     // view, seedkernel §12.2), which the host read view reuses.
     const loaded = await opts.runtime.shell.install(opts.bundleBlob, {

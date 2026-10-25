@@ -1,4 +1,4 @@
-// Test-only host-owned instance of the codec WASM (README §17). Lets a test drive
+// Test-only host-owned instance of the codec WASM (SPEC §17). Lets a test drive
 // the Reed–Solomon codec directly — instantiating the same codec.wasm the way the
 // seedkernel host does: a PURE transform that imports only the AssemblyScript runtime
 // shims (env.*) and makes no host calls. The runtime never uses this: a node reaches
@@ -46,8 +46,7 @@ export class CodecClient {
     return new Uint8Array(this.exports.memory.buffer, this.scratch, len);
   }
   /** Slice `len` bytes of scratch into one owned block per blockSize. Each slice
-   *  is a single copy straight out of wasm memory — no intermediate whole-buffer
-   *  read() + re-slice (which copied the output twice). */
+   *  is a single copy straight out of wasm memory, with no whole-buffer read() first. */
   readBlocks(len, blockSize) {
     const src = this.scratchView(len);
     const out = [];
@@ -64,7 +63,7 @@ export class CodecClient {
 
   /** Systematic RS encode: k data blocks → m parity blocks (§4.1). Stages the
    *  request directly in the codec's scratch — one copy of the k data blocks
-   *  into wasm, versus the old concat-then-write which copied them twice. */
+   *  into wasm. */
   rsEncode(k, m, blockSize, dataBlocks) {
     if (dataBlocks.length !== k) throw new Error("rsEncode: need exactly k data blocks");
     const reqLen = 7 + k * blockSize;

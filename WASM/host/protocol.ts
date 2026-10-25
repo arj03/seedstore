@@ -1,11 +1,11 @@
-// Control-plane message catalog (SPEC §18) for the storage RPC carried over
-// net.send.
+// Control-plane message catalog (SPEC §18) for the storage RPC carried over the
+// transport's `send` op.
 //
-// OFFER and FETCH are *batched*: one OFFER lists every block headed to a peer,
+// All four messages are *batched*: one OFFER lists every block headed to a peer,
 // answered with a per-block verdict; one FETCH names every block wanted from a
-// peer, returned together — collapsing N round trips into one per peer. STORE
-// stays per-block and is the BINDING admission point (re-checked there, §4.2/§6/
-// §14); the batched OFFER is only an advisory pre-check.
+// peer, returned together — collapsing N round trips into one per peer. STORE is
+// batched the same way and is the BINDING admission point (re-checked there,
+// §4.2/§6/§14); OFFER is only an advisory pre-check.
 
 import { writeU32BE, readU32BE, concatBytes } from "./util.js";
 
@@ -15,9 +15,9 @@ import { writeU32BE, readU32BE, concatBytes } from "./util.js";
 export const STORAGE_PROTO = "seedstore";
 
 export const MsgType = {
-  HAVE: 1,   // disc.have / disc.want (§5)
-  OFFER: 2,  // block.offer (batched) → accept-mask (§6)
-  FETCH: 3,  // block.fetch_req (batched) → block.data[] (§7, also the §8 verification-fetch)
+  HAVE: 1,   // have/want (§5)
+  OFFER: 2,  // batched offer → verdict mask (§6)
+  FETCH: 3,  // batched fetch → the blocks (§7, also the §8 verification-fetch)
   STORE: 4,  // the push after accept (§6 step 4). In the base bulk plane this is
              // an unsigned, hash-verified frame (§3); here it is an awaited
              // request so placement is deterministic. A dedicated bulk channel
@@ -101,9 +101,9 @@ export function decodeMask(buf: Uint8Array): number[] {
   return Array.from(buf);
 }
 
-// ── HAVE (disc.have/want, §5) ──────────────────────────────────────────────
+// ── HAVE (have/want, §5) ───────────────────────────────────────────────────
 // "I want these block_ids" / "of those, here is what I hold." A have/want only
-// ever names ids the asker already holds — there is no list-all (§5.2).
+// ever names ids the asker already knows — there is no list-all (§5.2).
 export function encodeHaveReq(ids: Uint8Array[]): Uint8Array {
   const head = new Uint8Array(4);
   writeU32BE(head, 0, ids.length);
@@ -120,10 +120,10 @@ export function decodeHaveReq(buf: Uint8Array): Uint8Array[] {
 // The HAVE response ("of those, here is what I hold") is a plain held-mask —
 // encodeMask / decodeMask above.
 
-// ── OFFER (block.offer, §6) ────────────────────────────────────────────────
+// ── OFFER (§6) ─────────────────────────────────────────────────────────────
 // Each entry carries block_id and the signed chunk descriptor so the holder can
 // verify it and enforce the sibling rule (§6). A batch is a count + self-delimiting
-// entries; response is one accept byte per entry.
+// entries; the response is one verdict byte per entry.
 //
 // The descriptor is MANDATORY — a descriptor-less entry is a malformed message,
 // rejected by the decoder, never a block admitted on quota alone. No size field
@@ -229,7 +229,7 @@ export function decodeStoreBatch(buf: Uint8Array): StoreReq[] {
 }
 // The STORE response is a per-block verdict — encodeMask / decodeMask above.
 
-// ── FETCH (block.fetch_req / block.data, §7, §8) ────────────────────────────
+// ── FETCH (§7, §8) ──────────────────────────────────────────────────────────
 // A batch names every block wanted from one peer; the response returns them in
 // request order, each tagged by a found byte. Each block is still hash-verified
 // by the reader (§4.2) — the holder is never trusted to have served the right bytes.
@@ -300,10 +300,9 @@ export function decodeFetchBatchRes(buf: Uint8Array, expectedCount?: number): Fe
 // ── the PUT result (Op.PUT / Op.PUT_FINISH) ─────────────────────────────────
 // Encoded by the guest, read by every driver:
 //   [K 32][chunkCount u32][placed u32][intended u32][rootLen u32][root ...][idCount u32]{id 32}
-// root is variable-length (there's no manifest object), hence the length prefix.
+// root is a variable-length signed descriptor, hence the length prefix.
 export interface PutResult {
-  /** The file's ROOT DESCRIPTOR (§4.3) — the signed envelope a reader is handed, which
-   *  replaced the old 32-byte manifest_id when the manifest stopped being an object. It
+  /** The file's ROOT DESCRIPTOR (§4.3) — the signed envelope a reader is handed. It
    *  is variable-length: a one-chunk file's root is that chunk's own descriptor. */
   root: Uint8Array;
   key: Uint8Array;

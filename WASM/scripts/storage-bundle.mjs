@@ -48,7 +48,7 @@ export function authorKeysFor(edSk) {
 //   • `node` — sign/verify scoped to this bundle's app label.
 //   • `fs` — this app's own keyspace.
 //   • the network — a bundle (the transport) claiming `_net` under its own `services`
-//     list, reached over the same `host.call` by one cross-realm call (§12.10).
+//     list, reached over the same `host.call` by one cross-realm call (seedkernel §12.10).
 //
 // Pure transforms (BLAKE2b, ChaCha20-Poly1305, entropy, and this bundle's own
 // codec/reputation modules) are not grants and are never listed here; time is the
@@ -87,7 +87,7 @@ export function writeStorageBundle({ path, sk, build, version = 1 }) {
 
   // Ship the comment-stripped guest (scripts/minify.mjs, `node --check`-gated) to
   // keep the signed bundle small; the signature covers these exact bytes (the guest
-  // is authored as TEXT — what verification decodes back, bundle.ts).
+  // is authored as TEXT — what verification decodes back, seedkernel's bundle.ts).
   const guestSource = readFileSync(join(build, "host-min", "tier2-guest.js"), "utf8");
 
   // This is a DEPLOYED config, so it carries production geometry; one named constant

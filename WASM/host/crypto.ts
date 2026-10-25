@@ -1,5 +1,5 @@
-// Host crypto wrappers (SPEC §16). Thin wrappers over the core libsodium the
-// host already loads. The guest reaches the same BLAKE2b-256 and
+// Host-side crypto wrappers (SPEC §16), over seedstore's own libsodium (sodium.ts).
+// The guest reaches the same BLAKE2b-256 and
 // ChaCha20-Poly1305 transforms through the host's ungated `crypto/*` table.
 //
 // Confidentiality is added client-side here (§4.4). The ciphertext remains
@@ -28,7 +28,7 @@ export class Crypto {
     return this.sodium.crypto_generichash(BLOCK_ID_LEN, bytes);
   }
 
-  /** Current block identity, bound to the descriptor's author. */
+  /** A block's id (§4.2), bound to the descriptor's author. */
   blockId(authorPk: Uint8Array, bytes: Uint8Array): Uint8Array {
     return this.hash(blockHashInput(authorPk, bytes));
   }

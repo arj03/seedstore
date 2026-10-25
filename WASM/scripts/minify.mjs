@@ -2,8 +2,8 @@
 // the gzipped wire size, no bundler/terser needed. Reads build/host (kept as-is
 // for debugging), emits build/host-min (for shipping).
 //
-// The host has no regex literals (verified), so a bare `/` is never a regex
-// start and a small string/template-aware scanner suffices. Every emitted file
+// The host's few regex literals hold no quote, backtick or comment opener, so a bare
+// `/` can pass through as code and a small string/template-aware scanner suffices. Every emitted file
 // is syntax-checked with `node --check` as a safety net against scanner bugs.
 
 import { readFileSync, writeFileSync, mkdirSync, rmSync, readdirSync, statSync } from "node:fs";

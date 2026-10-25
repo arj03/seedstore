@@ -2,12 +2,12 @@
 // page's seedkernel host stood up (seedkernel-wasm/platform-web `browserHost`, then
 // `storageRuntime`). The page readies its own libsodium for what storage computes
 // host-side. Browser nodes run the same protocol as long-running peers, differing only in
-// backend and default quota (§1, §8).
+// backend and default quota (§1, §12).
 
 import { StorageNode, type StorageNodeOptions, type WasmBytes } from "./storage-node.js";
 
-/** Fetch the signed seedstore bundle relative to the page. One fetch replaces
- *  the old three (codec.wasm + reputation.wasm + tier2-guest.js). */
+/** Fetch the signed seedstore bundle relative to the page: one blob carrying
+ *  codec.wasm, reputation.wasm and the guest. */
 export async function loadWasmBytes(baseUrl: string | URL = "./"): Promise<WasmBytes> {
   const base = typeof baseUrl === "string" ? baseUrl : baseUrl.href;
   const url = base + "seedstore.skb";

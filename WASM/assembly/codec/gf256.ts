@@ -17,7 +17,7 @@ export const LOG = new Uint8Array(256);
 // nibble table the SIMD path swizzles (so it needs no separate table).
 export const MUL = new Uint8Array(256 * 256);
 // HIGH nibble table for the SIMD split-multiply: MUL_HI[(a<<4) | i] = a·(i<<4),
-// i.e. a times each possible high nibble (§4.1 SIMD). 16 contiguous bytes per
+// i.e. a times each possible high nibble. 16 contiguous bytes per
 // coefficient, ready for a v128.load + i8x16.swizzle.
 export const MUL_HI = new Uint8Array(256 * 16);
 

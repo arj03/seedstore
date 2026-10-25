@@ -1,5 +1,5 @@
 // Shared types + deployment configuration for the storage layer (SPEC §17).
-// The protocol itself is the confined guest (host/tier2-guest.js); StorageNode
+// The protocol itself is the confined guest (host/tier2-guest.orchestration.js); StorageNode
 // runs it. This module only holds the identity + the durability/overhead dial
 // every node agrees on.
 
@@ -21,7 +21,7 @@ export { STORAGE_PROTO } from "./protocol.js";
  *  against seedkernel's transport) and its guest calls (NET_ID). */
 export const NET_SERVICE = "_net";
 
-/** The durability/overhead dial, set once per deployment (§4.1, §27). */
+/** The durability/overhead dial, set once per deployment (§4.1, §28). */
 export interface StorageConfig {
   k: number;
   m: number;
@@ -58,7 +58,7 @@ export const DEFAULT_REALM_MEMORY_BYTES = 64 * 1024 * 1024;
 
 /** Default committed-tier byte budget (§14) when the operator sets none: 64 MiB.
  *  Quota is operator policy, never signed into a bundle — a driver supplies it at
- *  boot and it's injected into the guest's APP; the holder alone enforces it. */
+ *  boot and it's injected into the guest's LOCAL; the holder alone enforces it. */
 export const DEFAULT_QUOTA_BYTES = 64 * 1024 * 1024;
 
 /** The block size a real DEPLOYMENT uses — one named constant so "production

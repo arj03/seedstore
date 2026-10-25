@@ -1,12 +1,12 @@
 // End-to-end multi-node tests over the loopback network: a storage node booted
 // on the real seedkernel, then PUT → place → GET → repair across simulated
-// peers (README Part I). These are the integration tests that exercise the
+// peers (SPEC Part I). These are the integration tests that exercise the
 // whole onion together.
 //
-// The "loopback network" is the new in-process fabric (host/loopback.ts): the
-// real transport bundle runs between the nodes — AKE, record layer, routing —
-// over microtask-delivered channel pairs, and `setOffline`/`isOnline` mirror the
-// old LoopbackNetwork's offline control by killing a peer's links.
+// The "loopback network" is the in-process fabric (host/loopback.ts): the real
+// transport bundle runs between the nodes — AKE, record layer, routing — over
+// microtask-delivered channel pairs, and `setOffline` takes a peer offline by
+// killing its links.
 
 import {
   LoopbackNetwork, loadWasmBytes, loadSodium, createConnectedCohort, StorageNode,
@@ -121,7 +121,7 @@ export async function run(t) {
     const data = file(3200, 3);
     const put = await owner.put(data);
     // Take two peers offline (≤ m of any chunk, since blocks are on distinct
-    // peers). Manifest is replicated on r=3 peers, so it stays reachable too.
+    // peers). The index is one block replicated on m+1 = 3 peers, so it stays reachable too.
     net.setOffline(nodes[1].peerId);
     net.setOffline(nodes[2].peerId);
     const got = await owner.get(put.root, put.key);
@@ -185,13 +185,13 @@ export async function run(t) {
     const cfg = { k: 1, m: 1, blockSize: 1024 };            // the p2p.html demo config
     const nodes = await createConnectedCohort({ suppressLinkLog: true, count: 5, network: net, sodium, wasm, config: cfg, timeoutMs: TIMEOUT });
     const owner = nodes[0];
-    // Nothing about durability is a config field any more: r = m+1 and the low-water
+    // Nothing about durability is a config field: r = m+1 and the low-water
     // mark come off each chunk's signed descriptor, so overriding k/m cannot leave a
     // stale knob behind (an unreachable low-water would make repair never settle). The
     // "2 holders" + idempotence checks below exercise both end-to-end.
     const data = file(4096, 11);                           // 4 blocks → 4 RS(1,1) chunks
     const put = await owner.put(data);
-    // put.blockIds = each chunk's single (replicated) block id + the manifest.
+    // put.blockIds = each chunk's single (replicated) block id + the index chunk's.
     t.eq(minHolders(nodes, net, put.blockIds), 2, "every block — chunks and manifest — is on 2 holders after PUT");
 
     let holder = null;
@@ -338,7 +338,7 @@ export async function run(t) {
     const wrongK = owner.crypto.randomKey();
     let leaked = false;
     try { leaked = bytesEqual(await owner.get(put.root, wrongK), data); }
-    catch { leaked = false; } // manifest fails to parse under the wrong key
+    catch { leaked = false; } // the index fails to decrypt under the wrong key
     t.ok(!leaked, "ciphertext on holders is permanent noise once K is gone");
     nodes.forEach((n) => n.close());
     net.close();
@@ -354,7 +354,7 @@ export async function run(t) {
     let anyPositive = false;
     for (const n of nodes) {
       if (n === owner) continue;
-      // Reputation now lives in the installed reputation module the guest scores
+      // Reputation lives in the installed reputation module the guest scores
       // through; the owner reads a holder's standing the same way (§13).
       if (await owner.score(n.identity.publicKey) > 0) anyPositive = true;
     }
@@ -364,9 +364,9 @@ export async function run(t) {
   }
 
   // The browser demos run k=1 on two or three holders — a shape the groups
-  // above never use (all RS(2,2) on a full cohort), which is why two real bugs
-  // shipped here: a duplicate-id leak in the old degenerate coded k=1, and a
-  // cohort smaller than n=k+m failing the whole PUT. Cover both.
+  // above never use (all RS(2,2) on a full cohort). Cover the two ways it breaks:
+  // a duplicate id leaking into blockIds, and a cohort smaller than n=k+m failing
+  // the whole PUT.
   t.group("k=1 replication on a 2-holder cohort (RS(1,9) on an undersized cohort)");
   {
     const net = new LoopbackNetwork();
@@ -377,13 +377,13 @@ export async function run(t) {
 
     const put = await owner.put(data);
 
-    // The returned set must name each placed id once: the 13/13 probe was a
-    // duplicate id leaking into blockIds (the old degenerate coded k=1), not the store lying.
+    // The returned set must name each placed id once: a duplicate would make a holder
+    // probe read as storing more blocks than it does.
     const hexes = put.blockIds.map(toHex);
     t.eq(new Set(hexes).size, hexes.length, "PUT reports each placed block id once (no dup-id leak)");
 
     // has() must agree with list() on every holder — has reporting an id the
-    // holder does not actually store would be the bug we shipped.
+    // holder does not actually store would misreport redundancy.
     let consistent = true;
     for (const n of nodes.filter((x) => x !== owner)) {
       const held = new Set(n.store.list().map(toHex));
@@ -418,7 +418,7 @@ export async function run(t) {
     const nodes = await createConnectedCohort({ suppressLinkLog: true, count: 4, network: net, sodium, wasm, config: cfg, timeoutMs: TIMEOUT }); // owner + 3 holders < n=4
     const owner = nodes[0];
     const data = file(4800, 29);
-    const put = await owner.put(data); // threw before best-effort placement
+    const put = await owner.put(data); // best-effort: places what the cohort takes, no throw
     t.ok(put.blockIds.length > 0, "PUT places across the 3 available holders instead of failing");
     t.ok(bytesEqual(await owner.get(put.root, put.key), data), "GET reconstructs from a sub-n placement");
     nodes.forEach((n) => n.close());
@@ -489,7 +489,7 @@ export async function run(t) {
   // ── §14 a holder that FAILS is not a holder that is FULL ───────────────────
   t.group("a holder whose backend write fails answers VERDICT_ERROR, not VERDICT_QUOTA (§14)");
   {
-    // These were one verdict once, and the conflation is expensive in the field: a
+    // Conflating the two is expensive in the field: a
     // holder has no console, so the verdict byte is its only voice, and reporting a
     // broken backend as "quota" sends an operator to raise a budget that was never the
     // constraint. Here the budget is enormous and the write still fails.
@@ -630,8 +630,8 @@ export async function run(t) {
       t.ok(put.root.length === 32 + 64 + 13 + 16 + 4 * 32, "the root is a signed descriptor envelope, not a 32-byte id");
       t.ok(parseSignedDescriptor(put.root).descriptor.level >= 2, "the roll-up needed more than one index level");
       t.ok(bytesEqual(await nodes[0].get(put.root, put.key), data), "a multi-level index round-trips");
-      // Every block placed is exactly blockSize — the old manifest block was the whole
-      // manifest, which is what put a ceiling on file size in the first place.
+      // Every block placed is exactly blockSize, index blocks included, so no block
+      // grows with the file and nothing caps its size.
       let oversize = 0;
       for (const n of nodes) {
         for (const id of n.store.list()) {

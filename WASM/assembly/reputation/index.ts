@@ -22,7 +22,7 @@
 const OP_OBSERVE: i32 = 1;
 const OP_SCORE: i32 = 2;
 
-// Half-life of the local score (§13.1 recency / §27 tuning knob): 7 days.
+// Half-life of the local score (§13.1 recency / §28 tuning knob): 7 days.
 const HALF_LIFE_MS: f64 = 7.0 * 24.0 * 3600.0 * 1000.0;
 const LN2: f64 = 0.6931471805599453;
 // A miss costs more standing than a pass earns, so an unreliable holder decays

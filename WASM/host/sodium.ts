@@ -7,10 +7,7 @@
 /** The subset of libsodium the storage host uses. */
 export interface Sodium {
   ready: Promise<void>;
-  // content-address hash for block_id (§4.2). Block-ids never cross into the
-  // host, so the storage layer hashes them with BLAKE2b (crypto_generichash)
-  // — fast and already in libsodium — rather than the host's BLAKE2b-256 genesis
-  // hash. (BLAKE2b-256 is the host's hash for module-name inputs too.)
+  // content-address hash for block_id (§4.2): BLAKE2b-256, libsodium's crypto_generichash
   crypto_generichash(hashLength: number, message: Uint8Array, key?: Uint8Array | null): Uint8Array;
   // key sealing to a recipient's node key (§4.4)
   crypto_box_seal(message: Uint8Array, recipientCurvePk: Uint8Array): Uint8Array;

@@ -18,7 +18,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // `bootNodeShell` where the test drives the channel adapter (addresses, listeners) and
-// where only the shell is wanted — the adapter is the platform's now, so it comes back
+// where only the shell is wanted — the adapter is the platform's, so it comes back
 // beside the shell rather than on it.
 import { bootNodeShell } from "seedkernel-wasm/shell-node";
 import {
@@ -33,11 +33,10 @@ import { makeT } from "./harness.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const build = join(__dirname, "..", "build");
-// The per-request deadline. Generous, and it has to be: a request now crosses two
+// The per-request deadline. Generous, and it has to be: a request crosses two
 // confined realms on each side — the app's guest calls the transport, the transport
 // returns the delivery the host routes to the far end's app, and that realm answers —
-// where it used to cross a host-side facade. 40 ms was a wire budget, not a realm
-// budget.
+// so a wire-scale budget is too tight.
 const TIMEOUT = 200;
 
 function file(n, seed = 1) {
@@ -60,7 +59,7 @@ export async function run(t) {
 
   t.group("shell: a generic seedkernel-shell runs the seedstore guest end-to-end (step 7)");
   {
-    // The bundle's app label fixes the deployment's signing scope (README §16). The shell
+    // The bundle's app label fixes the deployment's signing scope (SPEC §16). The shell
     // running the bundle signs descriptors under it, so the host-side StorageNode holders
     // verify under the SAME scope — they run storage under the same label.
     const author = generateKeyPair(sodium);
@@ -72,11 +71,12 @@ export async function run(t) {
       let shell, holders = [];
       try {
         // The hybrid author id (key-set hash) is what policy and host names pin —
-        // the bundle is signed under suite 0x02 (§12.4), not the bare Ed25519 key.
+        // the bundle is signed under suite 0x02 (seedkernel §12.4), not the bare Ed25519 key.
         const authorId = await buildBundle(bundlePath, author, build);
         const bundleBlob = new Uint8Array(readFileSync(bundlePath));
       holders = await createConnectedCohort({
-        suppressLinkLog: true, // Match the shell's test-scale geometry so this tiny file spreads across the
+        suppressLinkLog: true,
+        // Match the shell's test-scale geometry so this tiny file spreads across the
         // cohort (the signed bundle ships PRODUCTION 256 KiB blocks).
         count: 6, network: net, sodium, wasm: { bundleBlob }, config: { blockSize: 1024 }, timeoutMs: TIMEOUT,
       });
@@ -99,10 +99,10 @@ export async function run(t) {
       // single-block/replicated instead of RS across the cohort).
       const loaded = await shell.installFile(bundlePath, { localConfig: { blockSize: 1024 } });
       // A node with a network has at least two apps loaded — the storage bundle and the
-      // transport, an ordinary app claiming `_net` under its `services` list (§12.10), a
+      // transport, an ordinary app claiming `_net` under its `services` list (seedkernel §12.10), a
       // co-resident guest's to reach and never a peer's — so each claim names its label.
       const app = loaded.manifest.app;
-      // A slot's modules are private to its guest now, so there is no table to ask what
+      // A slot's modules are private to its guest, so there is no table to ask what
       // landed: the load is all-or-none (seedkernel §12.4), so what proves the modules
       // stood up is the app answering on the claim it made — and, below, a PUT that
       // cannot complete without the codec.

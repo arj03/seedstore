@@ -130,7 +130,7 @@ try {
   const direct = (await directPairs()) >= pairs;
 
   // Negative: a stranger in the room with the WRONG contact secret. Refusal is SILENT by
-  // design (§12.6.2), so we assert "never links" within the same 30 s window.
+  // design (seedkernel §12.6.2), so we assert "never links" within the same 30 s window.
   const stranger = await makeNode(sodium.randombytes_buf(32));
   nodes.push(stranger);
   await enter(stranger);

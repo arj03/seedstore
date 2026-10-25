@@ -1,5 +1,5 @@
 // The one object that describes a file (SPEC §4.3): the per-chunk *signed*
-// descriptor — no separate manifest object. Pure codecs live in descriptor-core.ts
+// descriptor. Pure codecs live in descriptor-core.ts
 // (shared with the guest); this module adds the two scoped-signature pieces:
 // signing and verifying the author signature. Verified from the author's public
 // key alone, never the read key, which preserves keyless repair (§9); a holder

@@ -151,10 +151,10 @@ import { combineChannels } from "seedkernel-wasm/socket-seam";
 // peers (three tabs). Bump m with more tabs for more redundancy.
 //
 // blockSize sets the chunk count. The network cost is batched PER HOLDER, not per
-// block (host/coordinator.ts), so each holder takes a handful of round trips total
+// block (the guest's placement engine), so each holder takes a handful of round trips total
 // regardless of how many blocks it carries — the blocks to/from a peer ride streamed
 // batches, not a message per block:
-//   - PUT: ONE OFFER per holder (the holder replies an accept-mask: quota + the §6
+//   - PUT: ONE OFFER per holder (the holder replies a verdict mask: quota + the §6
 //     sibling rule over the whole batch), then a streamed STORE per holder carrying
 //     the accepted blocks (the holder hash-verifies + admits each and replies a
 //     stored-mask — STORE is still the binding gate, just framed once).
@@ -172,7 +172,7 @@ import { combineChannels } from "seedkernel-wasm/socket-seam";
 // measures ~8% faster PUT / ~25% faster GET than 256 KiB (fewer chunks, half the
 // per-block CPU on both ends). A per-holder batch is itself split under
 // maxMessageBytes (below) into one or a few messages, so no single transfer outruns
-// the logical batch cap — the bug a 10 MB one-shot STORE hit on WS. WebRTC records
+// the logical batch cap, as a 10 MB one-shot STORE would on WS. WebRTC records
 // are split below that layer to stay inside its physical channel bound. blockSize
 // is signed into every descriptor (§4.3), so PUT-encode and
 // GET-decode of one file always agree.
@@ -195,9 +195,10 @@ const blockSizeFor = (mode) => qNum("block", mode === "ws" ? 512 : 32) * 1024;
 // physical messages of at most 48 KiB.
 const maxMessageBytesFor = (mode) => (mode === "ws" ? 1 << 20 : 256 * 1024);
 // fanoutWindow windows the per-holder FETCH sub-batches on GET and the per-holder
-// STOREs on PUT. Without batching/windowing a file pays one serial round trip per block — visibly slower
-// than GET on a low-latency link. PUT and GET share one fanoutWindow (they have
-// never been tuned apart), so both holders pipeline at the same width. */
+// STOREs on PUT. Without batching/windowing a file pays one serial round trip per
+// block — visibly slower than GET on a low-latency link. PUT and GET share one
+// fanoutWindow (they have never been tuned apart), so both holders pipeline at the
+// same width.
 const CONFIG = { k: 1, m: 1, blockSize: 32 * 1024, fanoutWindow: 64 };
 const REQUIRED_PEERS = CONFIG.k + CONFIG.m; // distinct holders a PUT needs
 
@@ -207,8 +208,8 @@ const REQUIRED_PEERS = CONFIG.k + CONFIG.m; // distinct holders a PUT needs
 // ≈ 3× window at RS(1,1), so the heap must stay well above it (24 MiB window ⇒ ~72 MiB,
 // ≪ the 256 MiB default). WebRTC's ~48 KiB frames make it round-trip-bound anyway, so a
 // smaller window there keeps the per-window frame count sane. NB `?window=0` falls back to
-// this page default (qNum treats ≤0 as unset) — unlike p2p-cli's `--wtarget 0`, which means
-// "use the guest's built-in 4 MiB fallback"; same knob, different zero across the two tools.
+// this page default (qNum treats ≤0 as unset) — unlike p2p-cli's `--wtarget 0`, which
+// derives the window from the heap (a sixth); same knob, different zero across the two tools.
 const windowTargetBytesFor = (mode) => qNum("window", mode === "ws" ? 24 : 8) * 1024 * 1024;
 const realmMemoryBytesFor = () => qNum("heap", 256) * 1024 * 1024;
 // Parallel TCP flows per holder — WS only (WebRTC is one data channel). Stripes bulk
@@ -280,7 +281,7 @@ async function refreshPeers() {
   }
 }
 
-// There is no host-side link callback any more, so the peer count is polled. Each tick is
+// There is no host-side link callback, so the peer count is polled. Each tick is
 // a realm round trip, so the next is armed only after the last RETURNS: a plain interval
 // would queue `peers` ops behind a realm busy with a PUT and never catch up.
 function startPeerPolling() {
@@ -351,8 +352,8 @@ async function boot() {
     }
     // The WS/TCP path carries far larger frames than WebRTC, so it gets bigger
     // blocks (fewer chunks → fewer round trips) and a bigger per-message batch cap
-    // than WebRTC mode. realmMemoryBytes is
-    // host-only — split back out by createStorageNode and applied as the storage load's
+    // than WebRTC mode. realmMemoryBytes is host-only — split back out by
+    // createStorageNode and applied as the storage load's
     // own realm bound; the rest of this object is that bundle's LOCAL. Neither half
     // reaches the shell, which also hosts the transport.
     const config = { ...CONFIG, blockSize: blockSizeFor(mode), maxMessageBytes: maxMessageBytesFor(mode),
@@ -420,9 +421,10 @@ async function boot() {
 
 // First click boots the node + network; in WebSocket mode every later click re-announces
 // the (still-editable) peers box to the transport's address book — which lives in the
-// signed transport's own realm now (seedkernel §12.10), so this is the only thing that
-// puts a peer there. Its guest tops each peer up to connsPerPeer and re-dials dead links. This is the recovery path: an unreachable
-// node no longer wedges the page behind a permanently-disabled Connect button.
+// signed transport's own realm (seedkernel §12.10), so this is the only thing that puts
+// a peer there. Its guest tops each peer up to connsPerPeer and re-dials dead links. This
+// is the recovery path: an unreachable node never wedges the page behind a disabled
+// Connect button.
 $("connect").onclick = async () => {
   if (!node) { await boot(); return; }
   if (transport() === "ws") dialWs();
@@ -499,19 +501,13 @@ $("store").onclick = async () => {
   } catch (e) {
     const msg = e?.message ?? String(e);
     log("  PUT failed: " + msg);
-    // TWO different failures wear the same "holders declined" sentence, and only the
-    // parenthetical separates them — so read that, never the prose. The guest counts a
-    // verdict only for a reply it actually received (`results[ri].ok ? decodeMask(…) :
-    // []`), so it appends "(N holders: quota, sibling, descriptor-rejected)" when holders
-    // answered and refused, and appends NOTHING when no holder answered at all.
-    //
-    // This branch used to fire on the bare word "declined" and announce OUT OF STORAGE
-    // either way, which is the expensive kind of wrong: it sends you to clear disks on
-    // holders that were never asked. (It also matched "out of storage" and "no peer
-    // accepted", two phrases no longer produced anywhere in the tree — the prose moved and
-    // the pattern silently kept matching only the one word that stayed.) Report the
-    // holders' own verdicts when there are some, and say plainly that there are none when
-    // there aren't.
+    // Read the parenthetical, never the prose. The guest counts a verdict only for a reply
+    // it actually received (`bytes !== null ? decodeMask(bytes) : []`), so its error names
+    // "(N holders: quota, sibling, descriptor-rejected)" when holders answered and refused,
+    // and "no holder returned a verdict" when none answered at all. Calling the second case
+    // OUT OF STORAGE would send you to clear disks on holders that were never asked, so
+    // report the holders' own verdicts when there are some, and say plainly that there are
+    // none when there aren't.
     const verdicts = /\((\d+) holders?: ([^)]+)\)/.exec(msg);
     if (verdicts) {
       const [, count, reasons] = verdicts;
@@ -535,7 +531,7 @@ $("store").onclick = async () => {
       // distinguishable from here: `linkedPeers()` is the transport's authenticated set,
       // which is exactly the set the guest fans its OFFERs out over.
       //
-      // It is a QUESTION now, not a field — the set lives in the transport guest, so this
+      // It is a question, not a field — the set lives in the transport guest, so this
       // is a round trip through the realm and has to be awaited. A node with no transport
       // standing has nothing to ask, and that is a diagnosis too: read it as 0 links
       // rather than letting a rejection replace the report we are in the middle of.

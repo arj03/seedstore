@@ -1,7 +1,8 @@
 // The Tier-2 guest: the whole storage protocol (SPEC §6/§7/§9) as zero-authority
 // JS running inside the QuickJS realm (§2.1) — placement, k-of-n, admission, wire
-// format, and repair. Reached only through `host.call(name, bytes)` (seedkernel §12.2);
-// net/fs/module calls resolve async, crypto/clock resolve sync.
+// format, and repair. Reached only through `host.call(name, bytes)` (seedkernel §12.2),
+// whose every name answers a Promise: module and `_net` calls settle on a later turn,
+// crypto, fs and node calls within the same one.
 //
 // Both roles (initiator and holder) share this one realm/entrypoint (`handle`,
 // split by `callerOf`/`readOp`); the realm's per-realm FIFO (seedkernel
@@ -41,7 +42,7 @@ function bytesToStr(b) { let s = ""; for (let i = 0; i < b.length; i++) s += Str
 // Thin wrappers over the seam's application-neutral names (crypto/fs/module/
 // clock/node, seedkernel host/guest-seam.ts). All storage STRUCTURE — nonce
 // convention, signed-descriptor envelope, wire format, store layout — lives here,
-// never in the host. Crypto calls resolve sync; fs/net/module calls are async.
+// never in the host.
 
 // The op bytes of the codec module (the guest owns its ABI). The reputation module's
 // op bytes + request framing (REP_OBSERVE/REP_SCORE, encodeScoreReq/encodeObserveReq)
@@ -167,7 +168,7 @@ function holderCall(name, payload, answerBytes = MSG_ENVELOPE_BYTES) {
 // BLAKE2b-256 for block-ids and ChaCha20-Poly1305 for at-rest encryption.
 // node/sign and node/verify apply the scoped `DOMAIN_guest ‖ scope` prefix on the
 // host side — the guest never holds or reconstructs it. Every seam name answers a
-// Promise now, so every helper here is awaited by its callers.
+// Promise, so every helper here is awaited by its callers.
 // `crypto/blake2b` takes [outLen][keyLen][key][msg]; block-ids are its unkeyed 32 bytes.
 function blake2b(req, via) { return via("crypto/blake2b", req, 32); }
 // The request is built around the block in one buffer: blockHashInput leaves room for the head.
@@ -224,22 +225,22 @@ async function signCore(core) {
 }
 async function verifyEnv(env, via) {
   // The seam's argument IS the envelope — [pk 32][sig 64][msg] concatenated is
-  // `env` back. Splitting and rejoining it copied every descriptor four times over.
+  // `env` itself, so it is passed whole, uncopied.
   const v = await via("node/verify", env, 1);
   return v[0] === 1;
 }
 
 // ── codec + reputation ──
 // Both are ordinary `host.call`s (module name IS the seam's name arg, no header to
-// build). Module calls are async (the module runs in its own worker), so encode/decode
-// and their callers (encodeChunk, assembleChunk, the ranker) are async in turn.
+// build). A module call settles on a later turn, so encode/decode and their callers
+// (encodeChunk, assembleChunk, the ranker) are async in turn.
 async function rsEncode(k, m, blockSize, dataBlocks) {
   const head = new Uint8Array(7);
   head[0] = CODEC_ENCODE; head[1] = k; head[2] = m; wU32(head, 3, blockSize);
   const parity = splitBlocks(await call(CODEC_NAME, concat([head, ...dataBlocks]), m * blockSize), blockSize);
   // A trapped or over-length codec rejects at the seam (seedkernel §12.2); this catches
   // the well-formed answer of the wrong shape, where the cause is, rather than as a
-  // far-away "blockIds.length must be k or k+m" error or a chunk silently signed wrong.
+  // far-away "blockIds.length must be k+m" error or a chunk silently signed wrong.
   if (parity.length !== m) {
     throw new Error("rsEncode: codec returned " + parity.length + " parity blocks, expected " + m +
       " — chunk (k=" + k + " × blockSize=" + blockSize + ") likely exceeds the codec module's scratch");
@@ -247,7 +248,7 @@ async function rsEncode(k, m, blockSize, dataBlocks) {
   return parity;
 }
 async function rsDecode(k, m, blockSize, present) {
-  // Callers (assembleChunk, healCoded) already gate on present.length >= k, but
+  // Callers (assembleChunk, heal) already gate on present.length >= k, but
   // guard the codec seam itself so a short set is a clean throw, never a silently
   // truncated decode request (head[7] = use.length under k → garbage out).
   if (present.length < k) throw new Error("rsDecode: need at least k blocks to reconstruct");
@@ -433,18 +434,17 @@ async function rank(peers) { return (await makeRanker())(peers); }
 // No deadline field: the round trip runs under THIS invocation's remaining segment,
 // which the host carries across every handoff (seedkernel §12.3) — a caller naming
 // its own would be minting time. Answer is `[ok u8][response]`; an unreachable peer
-// comes back `[0]`, mapped to null below. `proto` is the routing id (§12.10); the
+// comes back `[0]`, mapped to null below. `proto` is the routing id (seedkernel §12.10); the
 // storage message type leads the payload, opaque in between.
 const NET_SEND_OP = strBytes("send");
-// The whole frame in ONE allocation — op envelope, blobs and payload written straight
-// in. Nesting the buffers instead (payload → body → blob → args → op frame) copied a
-// STORE batch five times before it left the realm; `parts` also lets the caller pass
-// the batch's pieces uncopied, so a block's bytes land in the frame directly off the
-// codec. The result must stay a WHOLE buffer: host.call copies any view it is handed.
 // A frame's length for a payload of `payloadLen` bytes, addressed to a 32-byte peer key.
 function netFrameBytes(payloadLen) {
   return 1 + NET_SEND_OP.length + 1 + 4 + 32 + 4 + NET_PROTO.length + 4 + 1 + payloadLen;
 }
+// The whole frame in ONE allocation — op envelope, blobs and payload written straight
+// in, so a STORE batch is copied once before it leaves the realm. `parts` lets the
+// caller pass the batch's pieces uncopied, so a block's bytes land in the frame directly
+// off the codec. The result must stay a WHOLE buffer: host.call copies any view it is handed.
 function netSendFrame(to, type, parts) {
   let payloadLen = 0;
   for (const p of parts) payloadLen += p.length;
@@ -488,7 +488,7 @@ async function netSend(peer, type, payload, answerBytes) {
 function netSendMany(requests) {
   return Promise.all(requests.map(async (rq) => ({ peer: rq.peer, bytes: await netSend(rq.peer, rq.type, rq.payload, rq.answerBytes) })));
 }
-// disc.have/want (§5.2): one round of fan-out to the cohort (Promise.all over the
+// have/want (§5.2): one round of fan-out to the cohort (Promise.all over the
 // same HAVE request to every holder) so the guest overlaps every peer. A node is
 // itself a holder of whatever its own store keeps (repair runs on holders).
 async function haveWant(ids) {
@@ -653,7 +653,7 @@ function makeChunk(d, blocks, descriptor) {
 // deployment's k. At k=1, RS(1,m) parity ≡ data, so the codec is skipped and the
 // chunk simply lists its lone block m+1 times (§4.1). Nonce = (level, GLOBAL index
 // within that level) (§4.4), so a windowed encode matches a whole-level one.
-// `tailBytes` is what a reader trims by, instead of a manifest-wide file_size.
+// `tailBytes` is how much of the chunk a reader keeps (§4.3).
 async function encodeChunk(source, localCi, globalCi, K, level) {
   const c = CFG;
   const plain = source.subarray(localCi * c.k * c.blockSize, (localCi + 1) * c.k * c.blockSize);
@@ -896,9 +896,9 @@ async function runFetchTasks(byPeer, maxIds, descriptorOf, onResult) {
 // returned block is hash-verified (§4.2) and scores its holder (§8).
 //
 // A block several peers hold (a k = 1 replica, §4.1) goes to whichever of them has the
-// fewest blocks queued this round, the better-scored on a tie. Taking the best-scored
-// every time read a whole replicated file from one holder and left the others' links
-// idle. A holder scored below zero is still passed over while another has the block (§10).
+// fewest blocks queued this round, the better-scored on a tie. Always taking the
+// best-scored would read a whole replicated file from one holder and leave the others'
+// links idle. A holder scored below zero is still passed over while another has the block (§7).
 async function gatherBlocks(descriptors, holders) {
   const got = new Map();
   const descriptorOf = new Map();
@@ -1076,11 +1076,11 @@ function requirePut() {
 // own (k, m), since a partial chunk lists fewer ids (§4.3).
 function descriptorBytes() { return 4 + 32 + 64 + 13 + AUTH_TAG_LEN + (CFG.k + CFG.m) * BLOCK_ID_LEN; }
 // Open a stream: mint K and answer with the plaintext window the driver should feed.
-// File size is no longer an argument — each chunk signs its own `tailBytes` (§4.3).
+// It takes no file size: each chunk signs its own `tailBytes` (§4.3).
 //
 // A chunk must hold at least two descriptors, or a descriptor list could never
 // shrink to a single root — checked here, once, before a byte moves, as is a coded
-// chunk against the codec's limits. Production geometry clears the first ~2000×.
+// chunk against the codec's limits. Realistic geometries clear the first by orders of magnitude.
 //
 // The stream keeps one ranker: each peer is scored once for every window, not per window.
 async function putStart() {
@@ -1195,9 +1195,9 @@ async function getStart(rootEnv, K) {
   while (ds[0].level > 0) {
     const above = ds[0].level;
     ds = decodeDescriptorList(await reconstructChunks(ds, K, 0)).map((env) => parseSignedDescriptor(env).descriptor);
-    // Descent MUST strictly decrease — a hostile sharer (unauthenticated stream
-    // cipher, §4.4) could hand out an index whose chunk decrypts to a list naming
-    // itself, which content-addressing wouldn't catch. Unchecked, the walk hangs.
+    // Descent MUST strictly decrease (§7). A hostile sharer holds K, so it can hand
+    // out an index chunk that authenticates and decrypts to a list naming its own
+    // level, which content addressing wouldn't catch. Unchecked, the walk never ends.
     if (!ds.length || ds[0].level >= above) throw new Error("get: index does not descend at level " + above + " — malformed or hostile root");
   }
   let fileSize = 0, maxChunkBytes = 0;
@@ -1241,7 +1241,7 @@ async function getNext() {
 }
 
 // [K 32][root ...] → [fileSize u64]: open the stream, report how much to drain. K leads so
-// the variable-length root can be the tail — the root replaced the fixed 32-byte id.
+// the variable-length root can be the tail.
 async function doGetStart(arg) {
   const out = new Uint8Array(8);
   writeU64BE(out, 0, await getStart(arg.slice(32), arg.slice(0, 32)));
@@ -1373,7 +1373,7 @@ async function doRepair() {
 // The request side a node serves to its cohort: admission control (§6 sibling rule
 // + §14 quota), content-addressing (§4.2), and durable record writes — confined
 // here; the host keeps only a read view (host/store-view.ts), no write path. Async,
-// since the fs seam is async on every backend (seedkernel services/fs.ts).
+// since every seam name answers a Promise (seedkernel §12.2), fs included.
 let bytesUsed = -1, heldBlocks = null, storeIndexPromise = null, storeIndexDirty = false;
 let activeStoreWrites = 0, resolveStoreWritesIdle = null, storeWritesIdle = Promise.resolve();
 const liveStoreReservations = new Map();
@@ -1422,7 +1422,7 @@ async function fsPutStoreRecord(keyStr, descriptor, bytes) {
   // framing it again would copy every block-sized payload twice in the guest.
   await holderCall("fs/put", concat([head, kb, storeRecordHead(descriptor.length), descriptor, bytes]));
 }
-// The one write path into store.local: one framed record, under the quota budget.
+// The one write path into the store: one framed record, under the quota budget.
 //
 // Backend failures (full disk, backend error, realm OOM) surface as holder errors:
 // a holder has no console, so the verdict byte is its only way to report them.
@@ -1621,7 +1621,7 @@ async function handle(arg) {
 
 // ── one control message, on the host's behalf ────────────────────────────────
 // arg = [to 32][type u8][payload] — the mirror image of `handle`, and the only way
-// a host-side caller reaches a peer (§12.10). Grants nothing new: the same netSend
+// a host-side caller reaches a peer (seedkernel §12.10). Grants nothing new: the same netSend
 // the placement engine drives, exposed as a local op (Op.REQUEST) rather than a
 // second entrypoint. Answers `[ok u8][response]`; unreachable is `[0]`.
 async function doRequest(arg) {
@@ -1631,7 +1631,7 @@ async function doRequest(arg) {
 
 // ── warm (boot-time JIT warmup) ──────────────────────────────────────────────
 // One throwaway RS encode + decode + verify under a random key, no network/store,
-// run once at boot. Pays V8's cold-JIT tax on codec + crypto up front, since a cold
+// run once at boot. Pays the engine's cold-JIT tax on codec + crypto up front, since a cold
 // realm's first real PUT would otherwise pay it (~0.25s for 10 MB) in front of the
 // transfer. Self-contained and idempotent; the result is discarded.
 async function doWarm() {

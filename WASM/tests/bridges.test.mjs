@@ -1,8 +1,8 @@
 // Storage host-service tests: the crypto primitives (§16). There are no
-// storage-specific host services — the guest reaches crypto/fs/clock/module
-// through the seam's generic names. store.local is not
-// tested here: the host only has a read view (net.test.mjs); admission/quota
-// policy is the confined holder's, covered in protocol.test.mjs.
+// storage-specific host services — the guest reaches crypto, fs, node and its
+// modules through the seam's generic names. The store is not tested here: the host
+// only has a read view (net.test.mjs); admission/quota policy is the confined
+// holder's, covered in protocol.test.mjs.
 
 import { Crypto, LEVEL_BODY } from "../build/host/crypto.js";
 import { bytesEqual, toHex } from "../build/host/util.js";

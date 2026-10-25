@@ -83,7 +83,7 @@ export async function run(t) {
     t.eq(back.m, 6, "a k=1 descriptor records m, not 0");
     t.eq(back.blockIds.length, 7, "and still lists its block m+1 times after the round trip");
 
-    // Health is one number and now one FORMULA, full at m and low-water at ceil(m/2).
+    // Health is one number and one FORMULA, full at m and low-water at ceil(m/2).
     t.eq(lowWaterMargin(coded), 3, "low-water is ceil(m/2), from the descriptor alone");
     t.eq(lowWaterMargin(repl), 3, "the same mark for a k=1 chunk of the same m");
     t.eq(lossMargin(coded, new Array(16).fill(1)), 6, "a fully-live coded chunk has margin m");
@@ -98,7 +98,7 @@ export async function run(t) {
     t.eq(lossMargin(coded, new Array(16).fill(9)), 6, "an over-replicated coded block is still worth one");
     t.eq(lossMargin(repl, new Array(7).fill(99)), 6, "an over-replicated k=1 chunk caps at m too");
 
-    // n must be exactly k+m now — there is no second accepted id count.
+    // n must be exactly k+m — there is no second accepted id count.
     let threw = false;
     try { encodeDescriptorCore({ level: 0, k: 1, m: 6, blockSize: 4096, tailBytes: 1, authTag: tag(), blockIds: ids(1, 200) }); } catch { threw = true; }
     t.ok(threw, "a k=1 descriptor listing its id ONCE is rejected — n must be k+m");
@@ -126,9 +126,9 @@ export async function run(t) {
     t.ok(ok !== null, "valid descriptor verifies");
     t.ok(ok && bytesEqual(ok.authorPk, author.publicKey), "author pubkey recovered");
 
-    // A holder alters a block id to misdirect repair → signature breaks.
+    // A holder alters the signed core to misdirect repair → signature breaks.
     const tampered = env.slice();
-    tampered[96 + 13] ^= 0xff; // flip a byte inside the authenticated tag of the core
+    tampered[96 + 13] ^= 0xff; // flip a byte of the core's auth tag field
     t.ok(verifyDescriptor(sodium, tampered) === null, "tampered descriptor rejected");
 
     // A holder re-signs with its own key → authority is bound to the author,
@@ -155,9 +155,8 @@ export async function run(t) {
       return signDescriptor(sodium, { level: 0, k: 2, m: 2, blockSize: 512, tailBytes: 1024, authTag: tag(), blockIds: ids },
         author.publicKey, author.privateKey);
     });
-    // An index level is JUST the ordered signed descriptors — no header, no file_size, no
-    // enc alg, no version. Every one of those either moved into the descriptor (tailBytes,
-    // the format tag) or was redundant.
+    // An index level is JUST the ordered signed descriptors — no header, file size,
+    // algorithm or version: each descriptor carries its own tailBytes and format tag.
     const plain = encodeDescriptorList(envs);
     const back = decodeDescriptorList(plain);
     t.eq(back.length, 2, "two chunk descriptors");
@@ -165,7 +164,7 @@ export async function run(t) {
     t.eq(plain.length, envs.reduce((n, e) => n + 4 + e.length, 0), "the list is exactly its length-prefixed entries");
 
     // The level goes through the SAME encrypt + content-address path a file chunk takes:
-    // its nonce domain is the level (1 here), never a manifest domain.
+    // its nonce domain is the level (1 here).
     const K = crypto.randomKey();
     const sealed = crypto.encrypt(K, 1 /* level 1 = the first index level */, 0, plain);
     t.eq(sealed.ciphertext.length, plain.length, "index ciphertext is length-preserving");

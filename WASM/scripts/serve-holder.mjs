@@ -27,7 +27,7 @@ const relaySecret = process.env.RELAY_SECRET || undefined;
 
 // CONTACT — the room's shared contact secret, 32 bytes of hex. The cohort is
 // symmetric, so the value we demand of callers and present when dialing is the
-// same. Unset => open room. A mismatched secret has no error path (§12.6.2) — a
+// same. Unset => open room. A mismatched secret has no error path (seedkernel §12.6.2) — a
 // gated peer refuses in silence, so "peers never link" is the symptom.
 //
 //   CONTACT=$(openssl rand -hex 32) ROOM=my-room node scripts/serve-holder.mjs
@@ -54,7 +54,7 @@ const identity = generateKeyPair(sodium);
 // this machine's datagram sockets, which seedkernel's UDP bundle makes direct paths over;
 // the transport bundle registers and links through the first, and signals those paths over
 // the links. A room shares one contact secret, so this node's own is the one its peers
-// present. Default store.local is an in-RAM fs, read back through the node's FsBlobView.
+// present. Its store is an in-RAM fs, read back through the node's FsBlobView.
 const node = await bootStorageNode(inProcessStandUp, {
   identity, timeoutMs: 6000, contactSecret, channels: nodeChannels(), datagrams: nodeDatagrams(),
   sodium, ...wasm, config, quota: 64 * 1024 * 1024,

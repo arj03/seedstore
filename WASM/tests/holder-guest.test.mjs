@@ -1,4 +1,4 @@
-// The holder side, confined (the runtime split — full Target B). Where
+// The holder side, confined (the runtime split). Where
 // shell-run.test.mjs proved a generic seedkernel-shell runs the *initiator* side
 // as signed content, this proves the *request* side too: a shell serving
 // HAVE/OFFER/STORE/FETCH — admission, the §6 sibling rule, content-addressing,
@@ -44,7 +44,7 @@ export async function run(t) {
   const bundleDir = mkdtempSync(join(tmpdir(), "seedstore-bundle-"));
   const bundlePath = join(bundleDir, "seedstore.skb");
   // The hybrid author id (key-set hash) is what the policy pins — the bundle is
-  // signed under suite 0x02 (§12.4), not the bare Ed25519 key.
+  // signed under suite 0x02 (seedkernel §12.4), not the bare Ed25519 key.
   const authorId = await buildBundle(bundlePath, author, build);
   // The StorageNode cohort loads the SAME signed bundle the shells load, so every node
   // derives the one author signing scope and a descriptor one signs verifies on another.
@@ -66,7 +66,7 @@ export async function run(t) {
     });
     await transport.start(); // bind the loopback port the cohort dials
     // A generic shell + the signed storage bundle is a storage node: the
-    // manifest claims STORAGE_PROTO and the load routes it (§12.10). Operator
+    // manifest claims STORAGE_PROTO and the load routes it (seedkernel §12.10). Operator
     // settings go on THIS LOAD as `LOCAL` (seedkernel §12.4) — note this is the
     // SHELL's spelling of quota; StorageNode takes it as a sibling option instead.
     // blockSize goes back to test scale (the bundle ships PRODUCTION 256 KiB).
@@ -123,7 +123,8 @@ export async function run(t) {
       // holder in the same cohort, so two PUTs overlap. The realm serializes —
       // costing latency on a busy realm, never correctness.
       const [sn] = await createConnectedCohort({
-        suppressLinkLog: true, // Same signed bundle as the shells (cross-path parity); blockSize back to
+        suppressLinkLog: true,
+        // Same signed bundle as the shells (cross-path parity); blockSize back to
         // test scale so this tiny file takes the RS path.
         count: 1, network: net, sodium, wasm: { bundleBlob }, config: { blockSize: 1024 }, timeoutMs: TIMEOUT,
       });
@@ -161,12 +162,13 @@ export async function run(t) {
       const net = new LoopbackNetwork();
       // Pure holders — they never initiate. They still need the WRITER among the peers
       // they are LINKED to, because a holder anchors a descriptor's author to a peer it
-      // knows (§4.3) and "knows" is now the transport's authenticated set: a signature that
+      // knows (§4.3) and "knows" is the transport's authenticated set: a signature that
       // verifies against a key nobody has a link to binds authority to nothing.
       const shells = [];
       for (let i = 0; i < 5; i++) shells.push(await bootShell(net));
       const [sn] = await createConnectedCohort({
-        suppressLinkLog: true, // Same signed bundle as the shells ⇒ same author scope (cross-path parity).
+        suppressLinkLog: true,
+        // Same signed bundle as the shells ⇒ same author scope (cross-path parity).
         // blockSize back to test scale so this tiny file takes the RS path across the cohort.
         count: 1, network: net, sodium, wasm: { bundleBlob }, config: { blockSize: 1024 }, timeoutMs: TIMEOUT,
       });

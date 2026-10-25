@@ -4,7 +4,7 @@
 // Measures pure RS work (the WASM codec + the JS<->WASM boundary copies), and
 // for context the full PUT-style pipeline cost of also naming (block_id, §4.2)
 // and stream-encrypting every block. The block-id section prices the author
-// binding against the bare content hash it replaced.
+// binding against a bare content hash.
 
 import { readFileSync } from "node:fs";
 import { performance } from "node:perf_hooks";
@@ -80,7 +80,7 @@ let encr = performance.now() - t0;
 // Name the n blocks of every chunk (data + parity = 1.6× the file). A block id is
 // BLAKE2b over ASCII domain ‖ authorPk ‖ ciphertext (§4.2), so it costs one
 // block-sized copy on top of the bare hash. Priced three ways: the copy alone, the
-// bare hash the id replaced, and the id itself.
+// bare hash, and the id itself.
 const authorPk = crypto.randomKey();
 const eachBlock = (fn) => {
   let sum = 0;
@@ -99,8 +99,8 @@ const bound = eachBlock((b) => crypto.blockId(authorPk, b));
 let hsh = bound.ms, hsum = bound.sum;
 
 // ── full PUT-style pipeline: encrypt + name every block + encode ───────────
-// Run it both ways: `full` is what PUT does now, `fullBare` what it cost when a
-// block id was the bare content hash — the difference is the binding's price.
+// Run it both ways: `full` is what PUT does, `fullBare` the same with a bare content
+// hash as the block id — the difference is the binding's price.
 const pipeline = (nameBlock) => {
   const t = performance.now();
   for (let c = 0; c < numChunks; c++) {

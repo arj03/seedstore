@@ -104,7 +104,7 @@ const heapMB = num("heap", 256);
 const timeoutMs = num("timeout", 5000);
 const guestDeadlineMs = args.has("guest-deadline") ? num("guest-deadline", 0) : undefined;
 
-const hex = toHex; // toHex/fromHex come from the host build (node.js) — one hex pair, not a re-decl
+const hex = toHex; // the host build's toHex (node.js), not a local copy
 const now = () => performance.now();
 const MB = 1024 * 1024;
 const mbs = (bytes, ms) => (bytes / MB / (ms / 1000)).toFixed(1);

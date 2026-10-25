@@ -38,7 +38,7 @@ export async function run(t) {
     t.ok(await store(forged) !== VERDICT_ACCEPTED, "re-signing cannot replace an existing record either");
     t.ok(bytesEqual(holder.store.get(id).descriptor, legitimate), "the author's repair metadata stays intact");
     t.ok(!bytesEqual(id, crypto.blockId(attacker.identity.publicKey, bytes)), "identical ciphertext under another author has a different id");
-    // The construction the binding replaces: a bare content hash names no author,
+    // Without the binding: a bare content hash names no author,
     // so it is not a block id whoever signs the descriptor around it.
     const unboundId = crypto.hash(bytes);
     t.ok(await store(sign(owner, { ...d, blockIds: [unboundId, unboundId] }), unboundId) !== VERDICT_ACCEPTED,

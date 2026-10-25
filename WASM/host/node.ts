@@ -1,6 +1,6 @@
 // Node entry point — reads the signed seedstore bundle (.skb) from disk and loads it
-// onto a seedkernel node, with seedkernel's core libsodium. Use this on Node; for the
-// browser see ./browser.ts.
+// onto a seedkernel node, with libsodium for what storage computes host-side. Use this
+// on Node; for the browser see ./browser.ts.
 
 import { readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
