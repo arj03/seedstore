@@ -14,9 +14,11 @@ Seedstore runs on [seedkernel](https://github.com/arj03/seedkernel). It ships as
 signed bundle that the generic seedkernel host loads. It is not a separate binary,
 and it runs the same way in Node, the browser and seedkernel's native binary.
 
-> **Status:** experimental. [`WASM/`](WASM/) implements Part I of the spec, the complete
-> minimal system. The optional Part II extensions are not implemented. The wire format
-> still changes without a compatibility promise.
+> **Status:** experimental. [`WASM/`](WASM/) implements Part I of the spec, the minimal
+> system, except for the pieces listed under
+> [not yet built](WASM/README.md#not-yet-built), such as eviction and sampled repair
+> audits. The optional Part II extensions are not implemented. The wire format still
+> changes without a compatibility promise.
 
 ## How it works
 

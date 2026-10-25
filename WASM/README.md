@@ -299,14 +299,14 @@ tests/     *.test.mjs (run.mjs), bench*.mjs, harness + helpers + fixtures
 
 ## Where the implementation departs from the spec
 
-Part II (§20–§27) is out of scope. Within Part I, a few behaviours use a simpler
-reference form:
+Part II (§20–§27) is out of scope. Within Part I, the implementation takes a simpler
+form in some places and leaves other parts of the spec unbuilt.
+
+### Simpler reference forms
 
 - **Liveness (§8).** There is no Suspected state and no grace window. A holder is
   either verified-live or not, and repair heals on the first miss. This is safe
   because repair is idempotent. It just does more repair work under churn.
-- **Admission and eviction (§14).** Admission is quota plus the sibling rule. The
-  full eviction score is not implemented.
 - **The bulk plane (§3).** Blocks ride ordinary request/response bodies inside the
   encrypted record layer, which is what the seedkernel transport provides. There is
   no separate bulk frame stream.
@@ -317,3 +317,39 @@ reference form:
   guarantee full durability at write time would fail the PUT instead.
 - **The browser demos use *k* = 1**, meaning replication, because surviving the loss
   of one holder in a two- or three-node cohort can't be done with coding.
+
+### Not yet built
+
+- **Sampled, latency-bounded verification (§8, §9).** The spec samples a
+  verification-fetch or two per audit. Here a repair pass fetches every advertised
+  block of the chunk, in full, from every peer that advertises it, and any reply
+  that hashes correctly counts as live, however long it took. Every holder of a
+  chunk runs that audit, so with RS(10, 6) one pass moves roughly 15× the chunk's
+  stored size across the cohort (each of its 16 holders downloads the other 15
+  blocks). That is fine for tests and demos, but it sets the
+  cost of running repair at real data sizes.
+- **Eviction (§14).** Nothing is ever evicted: the holder has no delete path, and
+  blocks stay until the operator removes them. There are no committed and cache
+  tiers either, so every stored block is held the same way.
+- **Reclaiming removed files (§11).** Removal is crypto-shredding only, and the
+  shredded blocks are never reclaimed. Without eviction they never age out, and
+  because every holder repairs every chunk it holds, repair keeps them at full
+  redundancy indefinitely.
+- **Reciprocity-weighted admission (§13.2, §14).** Admission is quota plus the
+  sibling rule. It does not weigh the offerer's standing, social closeness or how
+  under-replicated the chunk is, and there is no tit-for-tat allowance, so any
+  known cohort peer can fill a holder's whole quota.
+- **The full reciprocity score (§13.1).** The score counts passes and misses on the
+  fetches that GET and repair audits already make, with a 7-day half-life. It is not
+  netted against how much a node stores for that peer. There is no separate
+  spot-check schedule, so an owner that holds no block of its own file never
+  audits that file.
+- **Placement beyond standing (§6, §8).** Placement ranks peers by reciprocity score
+  alone. It does not spread a chunk across social clusters or prefer long-lived
+  peers over browser tabs, since nodes carry no cluster or longevity tag.
+- **Proactive re-spreading (§9).** Repair runs only when a chunk drops below its
+  low-water mark. Nothing moves blocks toward healthier peers ahead of time when the
+  cohort thins.
+- **Browser storage (§12).** A tab's block store is in RAM, because the
+  OPFS/IndexedDB backend isn't built yet, so a tab that acts as a holder forgets
+  everything on reload (see [Browser demos](#browser-demos)).
