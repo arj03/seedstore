@@ -239,6 +239,80 @@ export async function run(t) {
     t.ok(r.missAbsent > 0, "every request decides at least one id, so a re-ask always makes progress");
     t.eq(r.repeatReads, 1, "a repeated id is one store read");
   }
+
+  t.group("security: a member cannot hold off a chunk's repair by claiming it (§9, §10)");
+  {
+    // The production guest with its store and network stubbed. This node holds one copy of a
+    // k = 1 chunk that wants two. "member" and "helper" share the chunk's group; "outsider"
+    // shares only another group with this node. Any of them can send a REPAIR_FETCH.
+    const author = newKey();
+    const signed = (blockIds) => signDescriptor(sodium, { group: "g", level: 0, k: 1, m: 1, blockSize: 1024,
+      tailBytes: 1024, authTag: new Uint8Array(16), blockIds }, author.publicKey, author.privateKey);
+    const id = crypto.blockId(author.publicKey, sodium.randombytes_buf(1024));
+    const otherId = crypto.blockId(author.publicKey, sodium.randombytes_buf(1024));
+    const env = signed([id, id]), other = signed([otherId, otherId]);
+    const source = readFileSync(new URL("../build/host/tier2-guest.js", import.meta.url), "utf8");
+    const ctx = vm.createContext({ APP: { k: 1, m: 1, blockSize: 1024, maxMessageBytes: 8192, fanoutWindow: 4,
+      verifyFreshMs: 60000, verifyDeadlineMs: 2000, newcomerShare: 0.5 }, LOCAL: {}, Uint8Array,
+      env, other, id, d: parseSignedDescriptor(env).descriptor });
+    vm.runInContext(source, ctx);
+    const r = await vm.runInContext(`(async () => {
+      for (const name of ["hintFromRepairFetch", "isRepairing", "requestRepairs", "auditChunk", "chunkKey", "setRoster",
+                          "storeGetDescriptor", "groupPeers", "rank", "netSend", "liveHolders", "verifyEnv", "myPeer"]) {
+        if (typeof globalThis[name] !== "function") throw new Error("fault injection: the guest no longer defines " + name);
+      }
+      let now = 1000000;
+      Date.now = () => now;
+      const self = "0f".repeat(32), member = "01".repeat(32), outsider = "02".repeat(32), helper = "03".repeat(32);
+      globalThis.myPeer = () => self;
+      globalThis.verifyEnv = async () => true;
+      setRoster(new Map([["g", new Set([member, helper])], ["other", new Set([outsider])]]));
+      heldBlocks = new Map([[toHex(id), { size: 1200, author: "aa".repeat(32), group: "g", cache: false }]]);
+      bytesUsed = 1200;
+      storeIndexDirty = false;
+      globalThis.storeGetDescriptor = async () => env;
+      globalThis.groupPeers = async () => [helper];
+      globalThis.rank = async (peers) => peers;
+      const asked = [];
+      globalThis.netSend = async (peer, type) => {
+        if (type === MsgType.REPAIR) asked.push(peer);
+        return new Uint8Array([VERDICT_ACCEPTED]);
+      };
+      const key = chunkKey(env), h = toHex(id);
+      const ask = () => requestRepairs(d, env, new Map([[h, new Set([self])]]), 0); // one copy of two: short
+      const out = {};
+      await hintFromRepairFetch(fromHex(outsider), key, [id]);
+      out.outsider = isRepairing(key, now);
+      await hintFromRepairFetch(fromHex(member), chunkKey(other), [id]);
+      out.wrongKey = isRepairing(chunkKey(other), now) || isRepairing(key, now);
+      await hintFromRepairFetch(fromHex(member), key, [id]);
+      out.member = isRepairing(key, now);
+      out.deferred = await ask();
+      now += REPAIR_NOTE_MS - 1000;
+      await hintFromRepairFetch(fromHex(member), key, [id]); // a fresh claim, just before the window ends
+      now += 2000;
+      out.capped = !isRepairing(key, now);
+      out.askedAfter = await ask();
+      out.asked = asked.slice();
+      // Asking noted this node's own request. Once that lapses and an audit finds the chunk
+      // healthy, the next shortfall may be deferred again.
+      now += REPAIR_NOTE_MS + 1;
+      globalThis.liveHolders = async () => new Map([[h, new Set([self, helper])]]);
+      out.healthy = (await auditChunk(env)) === null;
+      await hintFromRepairFetch(fromHex(member), key, [id]);
+      out.again = isRepairing(key, now);
+      return out;
+    })()`, ctx);
+    t.ok(!r.outsider, "a REPAIR_FETCH from outside the chunk's group defers nothing");
+    t.ok(!r.wrongKey, "nor one whose key is not the chunk of the block it names");
+    t.ok(r.member, "a member fetching one of the chunk's blocks defers this holder's own request");
+    t.eq(r.deferred, 0, "while that lasts, the holder asks nobody to repair the chunk");
+    t.ok(r.capped, "a fresh claim does not extend the deferral past one window from the first");
+    t.eq(r.askedAfter, 1, "after that window the holder asks for the repair itself");
+    t.eq(r.asked.join(","), "03".repeat(32), "and asks a member that holds none of the chunk");
+    t.ok(r.healthy, "an audit that finds the chunk healthy clears the spent deferral");
+    t.ok(r.again, "so the next shortfall may be deferred again");
+  }
 }
 
 if (process.argv[1]?.endsWith("security.test.mjs")) {

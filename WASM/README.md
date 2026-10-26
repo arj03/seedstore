@@ -268,7 +268,10 @@ block, checks it against the signed id and stores it, on a timer wake after it h
 answered, retrying a failed fetch with backoff for up to two minutes. Its fetches are
 REPAIR_FETCH, which lead with the chunk's key, so every holder serving one notes the
 chunk as being repaired and sends no request for it meanwhile, as does the holder that
-asked. The asker sends its requests together, at the end of its pass, so the members
+asked. A holder takes that note only from a member of the chunk's group naming a block of
+the chunk it holds, and only once per shortfall: two minutes after the first, it asks for
+the repair itself whatever further REPAIR_FETCHes say, until an audit finds the chunk
+healthy, so a member cannot hold a chunk's repair off by claiming it. The asker sends its requests together, at the end of its pass, so the members
 answer before they start fetching from it. STORE and OFFER are accepted only from the
 chunk's author, so nobody pushes bytes onto a holder for someone else.
 
@@ -309,7 +312,8 @@ Everything that weighs a peer reads that ledger:
 **Sampled verification (§8).** A repair audit fetches one block from each advertising
 holder that has no verification pass in the last `verifyFreshMs` (default 15 min),
 plus 2 of the rest, least recently verified first. Each is a one-block FETCH, and a
-correct answer slower than `verifyDeadlineMs` (default 2 s) fails. A holder counts as
+correct answer slower than `verifyDeadlineMs` (default 30 s, a bound for a stuck holder
+rather than a slow one) fails. A holder counts as
 live for every block it advertises while its last pass is fresh, so a pass costs
 about 2 fetches per chunk once the cohort is verified. Heal then fetches only the
 blocks it copies or decodes from.

@@ -873,7 +873,7 @@ async function placeChunksBatched(jobs, what, ranker) {
 // lane refilled at once, as the STORE lanes are (runStoreBatches): one slow holder then holds
 // up only its own lane, not the verification of every answer that came back beside it.
 // With `repairKey` each request is a REPAIR_FETCH, [chunk key 64][FETCH request]: serving it
-// tells the holder that chunk is being repaired (§9).
+// tells the holder that chunk is being repaired, deferring its own request (§9).
 async function runFetchTasks(byPeer, maxIds, descriptorOf, onResult, repairKey = null) {
   const me = myPeer();
   const tally = repTally();
@@ -1411,15 +1411,44 @@ async function liveHolders(d) {
 // against its signed id and stores it. Agreeing is a promise, not a guarantee: if nothing
 // lands, the chunk's repair note expires and a later audit asks someone else.
 const REPAIR_NOTE_MS = 2 * 60 * 1000;
-// Chunk key → until when this node treats it as being repaired: one it asked a member to
-// repair, or one whose repair fetches it served. Either way it sends no request for it.
+// Chunk key → until when this node treats it as being repaired because it asked a member to
+// repair it. That is this node's own request, so it holds for the whole window.
 const repairing = new Map();
+// Chunk key → until when another member's REPAIR_FETCH defers this node's own request. A
+// hint, not a promise, and any member can send one, so it holds one window from the FIRST
+// hint and later hints do not extend it. The spent entry stays until an audit finds the chunk
+// healthy, so a member that keeps claiming a repair it never finishes delays healing by one
+// window, never suppresses it (§10). Entries spent for over REPAIR_HINT_MEMORY_MS are pruned.
+const repairHints = new Map();
+const REPAIR_HINT_MEMORY_MS = 60 * 60 * 1000;
 function chunkKey(env) { return toHex(env.subarray(32, 96)); }
 function noteRepairing(key, t) {
   for (const [k, until] of repairing) if (until <= t) repairing.delete(k);
   repairing.set(key, t + REPAIR_NOTE_MS);
 }
-function isRepairing(key, t) { const until = repairing.get(key); return until !== undefined && until > t; }
+function noteRepairHint(key, t) {
+  if (repairHints.has(key)) return;
+  for (const [k, until] of repairHints) if (until + REPAIR_HINT_MEMORY_MS <= t) repairHints.delete(k);
+  repairHints.set(key, t + REPAIR_NOTE_MS);
+}
+function isRepairing(key, t) {
+  const until = repairing.get(key), hint = repairHints.get(key);
+  return (until !== undefined && until > t) || (hint !== undefined && hint > t);
+}
+// Take a REPAIR_FETCH as a hint only from a member of the chunk's group, about a chunk this
+// node holds a block of, whose block the request names. Anything else is served and ignored.
+// A repairer fetches only the chunk's own blocks, so the first one held decides.
+async function hintFromRepairFetch(caller, key, ids) {
+  await ensureStoreIndex();
+  for (const id of ids) {
+    const e = heldBlocks.get(toHex(id));
+    if (!e) continue;
+    if (!inGroup(e.group, toHex(caller))) return;
+    const env = await storeGetDescriptor(id, holderCall);
+    if (env && chunkKey(env) === key) noteRepairHint(key, Date.now());
+    return;
+  }
+}
 // ── this node's own files (§13.1) ──
 // Every chunk this node authored, as its signed descriptors, so its own audit sees who holds
 // its data: the ledger's holdings, and a repair request when one of them is short. A PUT
@@ -1520,7 +1549,9 @@ async function auditChunk(env) {
   if (toHex(sd.authorPk) === myPeer()) recordHoldings(chunkKey(env), d, live);
   await retier(d, live);
   const margin = lossMargin(d, dependableCopies(d, live));
-  return margin >= lowWaterMargin(d) ? null : { d, env, live, margin };
+  if (margin < lowWaterMargin(d)) return { d, env, live, margin };
+  repairHints.delete(chunkKey(env)); // healthy: the next shortfall may be deferred again
+  return null;
 }
 // Audit one chunk and, if it is short, ask for its repair.
 async function repairChunk(env) {
@@ -2130,8 +2161,9 @@ async function handle(arg) {
   else if (type === MsgType.FETCH) out = encodeFetchBatchRes(await serveFetch(decodeFetchBatchReq(payload)));
   else if (type === MsgType.REPAIR) out = encodeMask([await acceptRepair(payload, caller)]);
   else if (type === MsgType.REPAIR_FETCH && payload.length >= 64) {
-    noteRepairing(toHex(payload.subarray(0, 64)), Date.now());
-    out = encodeFetchBatchRes(await serveFetch(decodeFetchBatchReq(payload.subarray(64))));
+    const ids = decodeFetchBatchReq(payload.subarray(64));
+    await hintFromRepairFetch(caller, toHex(payload.subarray(0, 64)), ids);
+    out = encodeFetchBatchRes(await serveFetch(ids));
   }
   else out = EMPTY;
   statsRecv[type]++;

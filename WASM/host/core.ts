@@ -50,8 +50,10 @@ export interface StorageConfig {
    *  samples a couple of the rest. */
   verifyFreshMs?: number;
   /** The latency bound on a verification-fetch (§8): a correct block answered later
-   *  than this fails the check, since a holder regenerating it on demand needs k
-   *  round trips and a decode where a stored block needs one disk read. */
+   *  than this fails the check. It catches a holder that is stuck, not one that is slow:
+   *  regenerating a block on demand costs about one round trip more than reading it, less
+   *  than an honest holder's own variance on a slow uplink or a busy realm, so no bound
+   *  could tell the two apart (§10). */
   verifyDeadlineMs?: number;
   /** The share of quota an author this holder has no standing with may fill with its
    *  own placements (§13.2). Positive standing lifts it to the whole quota, negative
@@ -75,7 +77,7 @@ export const DEFAULT_QUOTA_BYTES = 64 * 1024 * 1024;
 
 /** Defaults for the §8 verification knobs and the §13.2 newcomer allowance. */
 export const DEFAULT_VERIFY_FRESH_MS = 15 * 60 * 1000;
-export const DEFAULT_VERIFY_DEADLINE_MS = 2000;
+export const DEFAULT_VERIFY_DEADLINE_MS = 30 * 1000;
 export const DEFAULT_NEWCOMER_SHARE = 0.5;
 
 /** The block size a real DEPLOYMENT uses — one named constant so "production
