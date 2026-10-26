@@ -4,6 +4,7 @@
 // host-side by store-view.ts, so the layout has one definition.
 
 import { readU32BE, writeU32BE } from "./util.js";
+import { GROUP_MAX, groupBytes, groupName } from "./descriptor-core.js";
 
 export const STORE_REC = ".rec";
 export const STORE_REC_HEAD = 4;
@@ -25,24 +26,28 @@ export function storeRecordHead(descriptorLength: number): Uint8Array {
   return head;
 }
 
-// Beside each record, `<block id hex>.tag`: [tier u8][author public key 32], the §14
-// tier and the chunk author whose allowance the block counts against (§13.2). It is
-// written first, so a record without one never committed and is not held.
+// Beside each record, `<block id hex>.tag`: [tier u8][author public key 32][group], the
+// §14 tier, and the author and group whose allowance the block counts against (§13.2).
+// It is written first, so a record without one never committed and is not held.
 export const STORE_TAG = ".tag";
 export const TIER_COMMITTED = 0, TIER_CACHE = 1;
-export const STORE_TAG_LEN = 1 + 32;
+export const STORE_TAG_MAX = 1 + 32 + GROUP_MAX;
 
-export function encodeStoreTag(tier: number, author: Uint8Array): Uint8Array {
-  const tag = new Uint8Array(STORE_TAG_LEN);
+export function encodeStoreTag(tier: number, author: Uint8Array, group: string): Uint8Array {
+  const name = groupBytes(group);
+  const tag = new Uint8Array(1 + 32 + name.length);
   tag[0] = tier;
   tag.set(author.subarray(0, 32), 1);
+  tag.set(name, 33);
   return tag;
 }
 
-/** The tag's tier and author, or null for a missing or malformed tag. */
-export function decodeStoreTag(tag: Uint8Array | null): { tier: number; author: Uint8Array } | null {
-  if (!tag || tag.length !== STORE_TAG_LEN || (tag[0] !== TIER_COMMITTED && tag[0] !== TIER_CACHE)) return null;
-  return { tier: tag[0], author: tag.subarray(1) };
+/** The tag's tier, author and group, or null for a missing or malformed tag. */
+export function decodeStoreTag(tag: Uint8Array | null): { tier: number; author: Uint8Array; group: string } | null {
+  if (!tag || tag.length < 34 || tag.length > STORE_TAG_MAX || (tag[0] !== TIER_COMMITTED && tag[0] !== TIER_CACHE)) return null;
+  let group: string;
+  try { group = groupName(tag.subarray(33)); } catch { return null; }
+  return { tier: tag[0], author: tag.subarray(1, 33), group };
 }
 
 /** Views into `rec`, or null for a record too short to hold its own descriptor. */

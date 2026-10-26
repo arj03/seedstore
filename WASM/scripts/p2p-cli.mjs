@@ -18,7 +18,12 @@
 //     --peers "pk[.secret]@host:port,…" [--size 10] [--file path] \
 //     [--puts 1] [--gets 1] [--k 1] [--m 1] [--block 256] [--batch 512] [--window 64] \
 //     [--conns 8] [--wtarget 24] [--heap 256] [--timeout 5000] [--guest-deadline 60000] \
-//     [--relay ws://host:port]
+//     [--relay ws://host:port] [--key p2p-cli.key] [--group cohort]
+//
+// The peers form this node's group (`--group`, default "cohort"), and a holder stores for
+// it only if that holder's own `groups` lists this node's key (§5.1). So the key is kept in
+// `--key` (created on first run, beside the build by default) and printed: add it to each
+// holder's local config, e.g. `"groups": { "cohort": ["<this key>", …] }`.
 //
 // `--relay` meets the peers through that seedrelay instead: a bare `pk[.secret]` is
 // reached through it, the node also holds UDP sockets, and timing starts once every
@@ -40,6 +45,8 @@
 // runs disappear looks FASTER than one that completes them.
 
 import { readFile } from "node:fs/promises";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { randomBytes, timingSafeEqual } from "node:crypto";
 
 import { WsNetwork } from "seedkernel-wasm/net-ws";
@@ -48,7 +55,7 @@ import { bootShell } from "seedkernel-wasm/shell-core";
 import { MemoryFs } from "seedkernel-wasm/fs-memory";
 import { loadCrypto } from "seedkernel-wasm";
 import {
-  createStorageNode, storageRuntime, generateKeyPair, defaultConfig, PRODUCTION_BLOCK_SIZE, toHex,
+  createStorageNode, storageRuntime, generateKeyPair, defaultConfig, PRODUCTION_BLOCK_SIZE, toHex, fromHex,
   netPeer, netReady, netRelay, netRoutes,
 } from "../build/host/node.js";
 import { DEFAULT_QUOTA_BYTES, DEFAULT_REALM_MEMORY_BYTES } from "../build/host/core.js";
@@ -194,8 +201,20 @@ function report(e, totalMs, bulk /* "send" | "recv" */) {
 // ── boot ─────────────────────────────────────────────────────────────────────
 // The host crypto, not bare libsodium: bundles are hybrid-signed, so the shell needs ML-DSA-65.
 const sodium = await loadCrypto();
-const identity = generateKeyPair(sodium);
-console.log(`me: ${hex(identity.publicKey).slice(0, 16)}…`);
+// A stable identity, so the holders can list it: the 64-byte secret key as hex, whose
+// second half is the public key.
+const keyPath = args.get("key") ?? fileURLToPath(new URL("../p2p-cli.key", import.meta.url));
+const identity = (() => {
+  if (existsSync(keyPath)) {
+    const sk = fromHex(readFileSync(keyPath, "utf8").trim());
+    return { publicKey: sk.slice(32), privateKey: sk };
+  }
+  const kp = generateKeyPair(sodium);
+  writeFileSync(keyPath, hex(kp.privateKey), { mode: 0o600 });
+  return kp;
+})();
+const groupName = args.get("group") ?? "cohort";
+console.log(`me: ${hex(identity.publicKey)}  (key ${keyPath}; holders must list it in groups.${groupName})`);
 
 
 // Base on defaultConfig so every guest knob is set (a partial config would feed
@@ -241,6 +260,7 @@ if (![...expected].every((pid) => peerUp.has(pid))) {
   throw new Error(`only ${[...expected].filter((pid) => peerUp.has(pid)).length}/${expected.size} peers linked after 10 s`);
 }
 console.log(`${peerUp.size} peer(s) linked\n`);
+await node.setGroups({ [groupName]: [node.peerId, ...expected] });
 if (relayUrl) {
   const direct = async () => {
     let n = 0;

@@ -70,12 +70,20 @@ author public key printed by `npm run build:bundle` in one:
 echo '{ "authors": ["<author-pubkey-hex>"] }' > allowed-keys.json
 ```
 
-Start a few holders. Each one prints its `<peer-pubkey>`:
+A node stores only for the peers in its groups (§5.1), and answers nobody else. Every
+node prints its `<peer-pubkey>` at startup and keeps it in its `--key` file, so start
+each once to learn its key, then give them all one roster in a local config:
+
+```sh
+echo '{ "groups": { "cohort": ["<pkA>", "<pkB>", "<pkC>", "<pkD>", "<pkClient>"] } }' > roster.json
+```
+
+Start a few holders:
 
 ```sh
 SHELL=../../seedkernel/WASM/build/host/loader-node.js
 
-node "$SHELL" --policy allowed-keys.json --bundle ./bundle/seedstore.skb \
+node "$SHELL" --policy allowed-keys.json --bundle ./bundle/seedstore.skb --local-config roster.json \
      --dir ./data-A --key ./A.key --listen 127.0.0.1:7401
 #   bundle seedstore v1  author <author-pubkey-hex>  serves seedstore
 #   serving the app's request side from the confined guest
@@ -88,23 +96,28 @@ Then PUT and GET from a client that lists the holders as `--peers`
 ```sh
 PEERS="<pkA>@127.0.0.1:7401,<pkB>@127.0.0.1:7402,<pkC>@127.0.0.1:7403,<pkD>@127.0.0.1:7404"
 
-node "$SHELL" --policy allowed-keys.json --bundle ./bundle/seedstore.skb --dir ./client \
-     --peers "$PEERS" --op put < ./notes.txt > ./receipt.bin
+node "$SHELL" --policy allowed-keys.json --bundle ./bundle/seedstore.skb --local-config roster.json \
+     --dir ./client --key ./client.key --peers "$PEERS" --op put < ./notes.txt > ./receipt.bin
 
 # A GET takes K ‖ root, cut out of the PUT receipt:
 #   [K 32][chunkCount u32][placed u32][intended u32][rootLen u32][root …][idCount u32][ids …]
 node -e 'const b=require("fs").readFileSync("receipt.bin"), n=b.readUInt32BE(44);
 process.stdout.write(Buffer.concat([b.subarray(0,32), b.subarray(48,48+n)]))' > getarg.bin
 
-node "$SHELL" --policy allowed-keys.json --bundle ./bundle/seedstore.skb --dir ./client \
-     --peers "$PEERS" --op get < ./getarg.bin > ./restored.txt
+node "$SHELL" --policy allowed-keys.json --bundle ./bundle/seedstore.skb --local-config roster.json \
+     --dir ./client --key ./client.key --peers "$PEERS" --op get < ./getarg.bin > ./restored.txt
 ```
 
 `--op` is the host's only app-facing flag (seedkernel §12.8). It passes stdin to the
 named op on the app's `handle` and writes the answer to stdout. Operator logging goes
 to stderr, so the redirects carry only app bytes. The root is a signed descriptor of
 variable length (§4.3), which is why the GET argument reads its length from the
-receipt. Keep `K`: without it, the holders hold permanent noise (§11).
+receipt. Keep `K`: without it, the holders hold permanent noise (§11). `--op put` stores
+into the node's only group; a node with several streams through the library and names one.
+
+The roster is storage's, so a stranger can still complete a handshake with these
+nodes, and is then answered nothing. Who may link at all is the transport's own
+setting: its peer list or a contact secret (seedkernel §12.6.3).
 
 Every other flag belongs to the host: `--listen`/`--peers`/`--dir`/
 `--key`/`--guest-timeout`/`--guest-memory`, and more. A node with no listener is a
@@ -112,7 +125,8 @@ pure client, and a node with a listener serves until Ctrl-C. seedkernel's native
 single-file `seedkernel` binary loads the same bundle (seedkernel §12.9).
 
 To benchmark PUT/GET against live nodes listening with `--listen ws=…`, see `scripts/p2p-cli.mjs`
-and [PERFORMANCE.md](../docs/PERFORMANCE.md).
+and [PERFORMANCE.md](../docs/PERFORMANCE.md). It keeps its key in `p2p-cli.key` and prints it,
+for the holders' `groups.cohort`.
 
 ## Use it as a library
 
@@ -127,7 +141,8 @@ const net = new LoopbackNetwork();
 const nodes = await createConnectedCohort({ count: 6, network: net, sodium, wasm, config: { k: 2, m: 2, blockSize: 512 } });
 
 const data = new TextEncoder().encode("hello, cohort");
-const put = await nodes[0].put(data);              // chunk → encrypt → RS → place → root
+const put = await nodes[0].put(data);              // chunk → encrypt → RS → place → root,
+                                                   // in the cohort's one group, "cohort"
 const got = await nodes[0].get(put.root, put.key); // locate → fetch any k → decode → decrypt
 ```
 
@@ -137,7 +152,9 @@ is one protocol implementation. Each node is one the seedkernel host stands up, 
 the signed transport installed (`storageRuntime` over a host's `standUp`: an in-memory
 host of its own per node here, `bootNodeShell` on a server, the page's `browserHost` in a
 browser). `StorageNode` installs the signed storage bundle on it and drives the confined
-guest, and nothing else. The block store is the host's: in memory here, a directory on a
+guest, and nothing else. A node's roster is `groups` at boot (`{ mine: [pk…], friends: [pk…] }`,
+hex keys) or `setGroups` later, and a PUT into one of several names it: `put(data, { group })`.
+The block store is the host's: in memory here, a directory on a
 server, OPFS/IndexedDB in a browser (§12).
 
 ## Browser demos
@@ -157,7 +174,9 @@ retrieval token. You pick one of two transports on the page:
 
 - **Direct WebSocket** (the default) dials holders at a `ws`-labelled listener, with
   no relay or STUN. Start holders with `--listen ws=0.0.0.0:47210 …` and paste each
-  one's `pubkey[.secret]@host:port` into the peers box.
+  one's `pubkey[.secret]@host:port` into the peers box. Those peers form the tab's
+  `room` group, and each holder must list the tab's key in its own `groups.room`. The
+  page logs that key and keeps it across reloads.
 - **WebRTC** finds peers in a room on a relay
   ([seedrelay](https://github.com/arj03/seedrelay)), links to them through it, and
   then moves to a direct connection, using STUN for NAT traversal; where that fails,
@@ -165,7 +184,9 @@ retrieval token. You pick one of two transports on the page:
   page meets the room with seedrelay's room client and registers on the relay
   (`netRelay`); the transport bundle links to each member and negotiates every peer
   connection over sockets the page supplies (seedkernel §12.7). For the cohort,
-  open 3+ tabs in one room, or one tab plus console holders:
+  open 3+ tabs in one room, or one tab plus console holders. Everyone met in the room
+  joins each node's `room` group, so the room's contact secret is what keeps strangers
+  out:
 
   ```sh
   (cd ../../seedshell && npm run relay)  # seedrelay on ws://localhost:8080
@@ -196,7 +217,7 @@ bytes.
 | --- | --- | --- |
 | GF(2⁸) + systematic Reed–Solomon encode/decode | `assembly/codec/`, which is WASM with no grants, called as `host.call("codec", …)` | §4.1, §9 |
 | Decayed per-peer reciprocity counters | `assembly/reputation/`, which is WASM with no grants | §13 |
-| The whole protocol: PUT/GET, the index tree, placement, have/want, repair, and the holder side (admission, sibling rule, quota, allowance, tiers, eviction, store writes) | `host/tier2-guest.orchestration.js`, assembled with the shared cores into `build/host/tier2-guest.js` by `scripts/build-guest.mjs` | §5–§10, §14 |
+| The whole protocol: PUT/GET, the index tree, placement, have/want, repair, and the holder side (the roster, admission, sibling rule, quota, allowance, tiers, eviction, store writes) | `host/tier2-guest.orchestration.js`, assembled with the shared cores into `build/host/tier2-guest.js` by `scripts/build-guest.mjs` | §5–§10, §14 |
 | Wire format for HAVE/OFFER/STORE/FETCH | `host/protocol.ts` (shared with the guest) | §18 |
 | Descriptor layout, tags, copy targets, loss margin | `host/descriptor-core.ts` (shared with the guest) | §4.1, §4.3, §8 |
 | Scoped descriptor sign/verify, host side | `host/descriptor.ts` | §16 |
@@ -239,9 +260,19 @@ first. It then releases commitments, lowest-standing author first. Each one is
 re-placed on another peer first, or kept if the chunk would drop below low water
 without it.
 
-**Admission weighs standing (§13.2).** An author placing its own chunks may fill
-`newcomerShare` (default 0.5) of a holder's quota while the holder has no record of
-it, all of it with positive standing, and none with negative standing. The holder
+**Groups (§5.1).** Each node keeps a roster of named groups, operator policy like the
+quota: `groups` at boot, `setGroups` later. A node answers nothing to a peer outside
+it. A PUT names one group and signs the name into every descriptor, its blocks go
+only to that group's linked members, and a holder admits a block only if it lists
+both the author and the placer under that name (`not-in-group` otherwise). Standing is
+kept per (group, peer): a peer's service counts in the group of the chunk it served.
+The roster is dynamic: `setGroups` (the guest's `groups` op) replaces it whole, and
+the next request reads the new one, so a separate groups app can keep it.
+
+**Admission weighs standing (§13.2).** An author placing its own chunks in a group may
+fill `newcomerShare` (default 0.5) of a holder's quota while the holder has no record
+of it in that group, all of it with positive standing there, and none with negative
+standing. The holder
 answers `allowance` past that. A repairer re-placing another author's chunk is not
 charged to anyone's allowance, so repair outranks routine placement. Set
 `newcomerShare: 1` to turn this off, for example among one person's own devices.
@@ -270,7 +301,7 @@ affects correctness.
 | `descriptor` | descriptor round trips, tamper evidence under the scoped signature, index-list encryption, multiplicity as the replica count, loss margin |
 | `protocol` | batched OFFER/STORE/FETCH encoding; batch-wide sibling, quota and newcomer-allowance rules; a STORE evicts cache, never a commitment; a missing, forged, foreign or mismatched descriptor is declined; concurrent STOREs can't race a sibling reservation |
 | `reputation` | passes raise the score, misses penalize it, scores decay |
-| `storage` | multi-node PUT→GET, small-file replication, offline tolerance, repair (including mixed geometry), sampled audits, a holder advertising what it cannot serve, cache demotion and re-promotion, graceful release over quota, key sharing, crypto-shredding, reciprocity |
+| `storage` | multi-node PUT→GET, small-file replication, offline tolerance, repair (including mixed geometry), groups (strangers refused, placement inside a group, per-group standing), sampled audits, a holder advertising what it cannot serve, cache demotion and re-promotion, graceful release over quota, key sharing, crypto-shredding, reciprocity |
 | `security` | a peer can't claim another author's block ids, roots are authenticated before use, malformed holder responses can't abort GET or repair, a late verification answer is not live, FETCH reply bounds |
 | `concurrency` | round-trip economy over a latency-bearing link, asserted as request counts |
 | `net` | the store persisting across a cold reopen, a cohort over real TCP, a browser-like node over real WebSocket |
@@ -296,7 +327,7 @@ windows, the host-call ledger, and the guest deadline.
 | --- | ---: |
 | `codec.wasm`, including SIMD RS and GF tables | 8.7 KB |
 | `reputation.wasm` | 5.3 KB |
-| the guest, minified | 75 KB (20 KB gzipped) |
+| the guest, minified | 79 KB (21 KB gzipped) |
 
 Those three files are all of seedstore's runtime code. Everything else is the
 seedkernel host and its core libsodium, which any app on that host shares.
@@ -355,19 +386,19 @@ form in some places and leaves other parts of the spec unbuilt.
   lowest-standing commitments, but nothing ages out a long-unread committed block.
   Because every holder repairs every chunk it holds, repair keeps shredded chunks
   at full redundancy indefinitely.
-- **The rest of admission (§14).** Admission weighs the author's standing, but not
-  social closeness, since nodes carry no cluster tag. A holder does not measure how
-  under-replicated an offered chunk is either. It treats any placement by someone
-  other than the author as repair, so an author with a friend to place for it gets
-  past its allowance.
+- **The rest of admission (§14).** A holder does not measure how under-replicated an
+  offered chunk is. It treats any placement by a group member other than the author
+  as repair, so an author with a fellow member to place for it gets past its
+  allowance.
 - **The full reciprocity score (§13.1).** The score counts passes and misses on the
   fetches that GET and repair audits already make, with a 7-day half-life. It is not
   netted against how much a node stores for that peer. There is no separate
   spot-check schedule, so an owner that holds no block of its own file never
   audits that file.
-- **Placement beyond standing (§6, §8).** Placement ranks peers by reciprocity score
-  alone. It does not spread a chunk across social clusters or prefer long-lived
-  peers over browser tabs, since nodes carry no cluster or longevity tag.
+- **Placement beyond standing (§6, §8).** Placement ranks a group's members by
+  their standing in it. Within a group it does not spread a chunk across members who
+  fail together, or prefer long-lived peers over browser tabs, since nodes carry no
+  longevity tag.
 - **Proactive re-spreading (§9).** Repair runs only when a chunk drops below its
   low-water mark. Nothing moves blocks toward healthier peers ahead of time when the
   cohort thins.

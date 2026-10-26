@@ -25,7 +25,7 @@ export async function run(t) {
     t.group("security: a known peer cannot claim another author's block ids");
     const bytes = sodium.randombytes_buf(1024);
     const id = crypto.blockId(owner.identity.publicKey, bytes);
-    const d = { level: 0, k: 1, m: 1, blockSize: 1024, tailBytes: 1024,
+    const d = { group: "cohort", level: 0, k: 1, m: 1, blockSize: 1024, tailBytes: 1024,
       authTag: new Uint8Array(16), blockIds: [id, id] };
     const legitimate = sign(owner, d);
     const forged = sign(attacker, { ...d, m: 0, blockIds: [id] });
@@ -67,7 +67,7 @@ export async function run(t) {
   const plaintext = sodium.randombytes_buf(1024);
   const sealed = crypto.encrypt(K, 0, 0, plaintext);
   const id = crypto.blockId(author.publicKey, sealed.ciphertext);
-  const env = signDescriptor(sodium, { level: 0, k: 1, m: 2, blockSize: 1024, tailBytes: 1024,
+  const env = signDescriptor(sodium, { group: "cohort", level: 0, k: 1, m: 2, blockSize: 1024, tailBytes: 1024,
     authTag: sealed.authTag, blockIds: [id, id, id] }, author.publicKey, author.privateKey);
   const d = parseSignedDescriptor(env).descriptor;
   const good = encodeFetchBatchRes([sealed.ciphertext]);
@@ -105,7 +105,7 @@ export async function run(t) {
       stub("verifyEnv", async bytes => verifySigned(bytes));
       stub("myPeer", () => "self");
       const observations = [];
-      stub("repObserve", async (peer, time, passes, misses) => observations.push({ passes, misses }));
+      stub("repObserve", async (group, peer, time, passes, misses) => observations.push({ passes, misses }));
       stub("makeRanker", async () => async peers => peers);
       const bad = "01".repeat(32), healthy = "02".repeat(32);
       stub("haveWant", async ids => new Map(ids.map(id => [toHex(id), new Set([bad, healthy])])));
@@ -176,7 +176,7 @@ export async function run(t) {
       }
       globalThis.myPeer = () => "self";
       const misses = [];
-      globalThis.repObserve = async (peer, time, passes, missed) => { if (missed) misses.push(toHex(peer)); };
+      globalThis.repObserve = async (group, peer, time, passes, missed) => { if (missed) misses.push(toHex(peer)); };
       globalThis.blake2b = async (req) => crypto.hash(req.subarray(2));
       const slow = "01".repeat(32), fast = "02".repeat(32);
       globalThis.haveWant = async (ids) => new Map(ids.map((id) => [toHex(id), new Set([slow, fast])]));

@@ -35,6 +35,7 @@ export { LoopbackNetwork } from "./loopback.js";
 export { createConnectedCohort } from "./cluster.js";
 export { storageRuntime, bootStorageNode } from "./runtime.js";
 export type { StorageNodeOptions, WasmBytes } from "./storage-node.js";
+export type { Groups } from "./protocol.js";
 export { netAddr, netPeer, netRelay, netRelayState, netContact, netReady, netPeers, netRoutes } from "./storage-node.js";
 export type { StorageConfig, Identity } from "./core.js";
 export { defaultConfig, STORAGE_APP, STORAGE_PROTO } from "./core.js";

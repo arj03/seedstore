@@ -39,21 +39,44 @@ export interface Descriptor {
   m: number;            // losses this chunk survives: m parity blocks, or m extra replicas
   blockSize: number;
   tailBytes: number;    // real plaintext bytes in this chunk; the rest is zero padding
+  group: string;        // the group the author placed it in; each holder reads it against its own roster
   authTag: Uint8Array;  // ChaCha20-Poly1305 tag over this chunk's padded ciphertext
   blockIds: Uint8Array[]; // k + m ids by generator-row index; a k=1 chunk repeats its one id
 }
 
 const FIXED_HEAD = 13; // tag,level,k,m (4) + blockSize (4) + tailBytes (4) + n (1)
-const CORE_HEAD = FIXED_HEAD + AUTH_TAG_LEN;
+// The shortest core: a one-character group and no ids.
+export const MIN_CORE = FIXED_HEAD + 2 + AUTH_TAG_LEN;
+
+// A group name is local to each node's roster but travels in the signed descriptor, so it
+// is kept to a short ASCII set that encodes the same everywhere (QuickJS has no TextEncoder).
+export const GROUP_MAX = 32;
+export function validGroupName(name: unknown): name is string {
+  return typeof name === "string" && name.length >= 1 && name.length <= GROUP_MAX && /^[A-Za-z0-9._-]+$/.test(name);
+}
+export function groupBytes(name: string): Uint8Array {
+  if (!validGroupName(name)) throw new Error("group: a name is 1-" + GROUP_MAX + " characters of A-Z a-z 0-9 . _ -");
+  const out = new Uint8Array(name.length);
+  for (let i = 0; i < name.length; i++) out[i] = name.charCodeAt(i);
+  return out;
+}
+export function groupName(bytes: Uint8Array): string {
+  let s = "";
+  for (let i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]);
+  if (!validGroupName(s)) throw new Error("group: malformed name");
+  return s;
+}
 
 /** The descriptor's signed core — the bytes the author signs over (§4.3). Leads with
- *  the descriptor format tag (§16). */
+ *  the descriptor format tag (§16):
+ *  [tag][level][k][m][blockSize u32][tailBytes u32][n][groupLen][group][authTag 16][ids]. */
 export function encodeDescriptorCore(d: Descriptor): Uint8Array {
   const n = d.blockIds.length;
   if (n !== d.k + d.m) throw new Error("descriptor: blockIds.length must be k+m");
   if (d.tailBytes > d.k * d.blockSize) throw new Error("descriptor: tailBytes exceeds the chunk");
   if (d.authTag.length !== AUTH_TAG_LEN) throw new Error(`descriptor: authTag must be ${AUTH_TAG_LEN} bytes`);
-  const head = new Uint8Array(CORE_HEAD);
+  const group = groupBytes(d.group);
+  const head = new Uint8Array(FIXED_HEAD + 1 + group.length + AUTH_TAG_LEN);
   head[0] = TAG_DESCRIPTOR; // leading format tag (§16)
   head[1] = d.level;
   head[2] = d.k;
@@ -61,12 +84,14 @@ export function encodeDescriptorCore(d: Descriptor): Uint8Array {
   writeU32BE(head, 4, d.blockSize);
   writeU32BE(head, 8, d.tailBytes);
   head[12] = n;
-  head.set(d.authTag, FIXED_HEAD);
+  head[FIXED_HEAD] = group.length;
+  head.set(group, FIXED_HEAD + 1);
+  head.set(d.authTag, FIXED_HEAD + 1 + group.length);
   return concatBytes([head, ...d.blockIds]);
 }
 
 export function decodeDescriptorCore(core: Uint8Array): Descriptor {
-  if (core.length < CORE_HEAD || core[0] !== TAG_DESCRIPTOR) throw new Error("descriptor: bad core");
+  if (core.length < MIN_CORE || core[0] !== TAG_DESCRIPTOR) throw new Error("descriptor: bad core");
   const level = core[1], k = core[2], m = core[3];
   const blockSize = readU32BE(core, 4);
   const tailBytes = readU32BE(core, 8);
@@ -75,11 +100,14 @@ export function decodeDescriptorCore(core: Uint8Array): Descriptor {
   if (tailBytes > k * blockSize) throw new Error("descriptor: tailBytes exceeds the chunk");
   const n = core[12];
   if (n !== k + m) throw new Error("descriptor: n must be k+m");
-  if (core.length !== CORE_HEAD + n * BLOCK_ID_LEN) throw new Error("descriptor: truncated");
-  const authTag = core.slice(FIXED_HEAD, CORE_HEAD);
+  const groupLen = core[FIXED_HEAD];
+  const head = FIXED_HEAD + 1 + groupLen + AUTH_TAG_LEN;
+  if (groupLen < 1 || groupLen > GROUP_MAX || core.length !== head + n * BLOCK_ID_LEN) throw new Error("descriptor: truncated");
+  const group = groupName(core.subarray(FIXED_HEAD + 1, FIXED_HEAD + 1 + groupLen));
+  const authTag = core.slice(head - AUTH_TAG_LEN, head);
   const blockIds: Uint8Array[] = [];
-  for (let i = 0; i < n; i++) blockIds.push(core.slice(CORE_HEAD + i * BLOCK_ID_LEN, CORE_HEAD + (i + 1) * BLOCK_ID_LEN));
-  return { level, k, m, blockSize, tailBytes, authTag, blockIds };
+  for (let i = 0; i < n; i++) blockIds.push(core.slice(head + i * BLOCK_ID_LEN, head + (i + 1) * BLOCK_ID_LEN));
+  return { level, k, m, blockSize, tailBytes, group, authTag, blockIds };
 }
 
 export interface SignedDescriptor {
@@ -90,7 +118,7 @@ export interface SignedDescriptor {
 }
 
 export function parseSignedDescriptor(env: Uint8Array): SignedDescriptor {
-  if (env.length < 32 + 64 + CORE_HEAD) throw new Error("signed descriptor: too short");
+  if (env.length < 32 + 64 + MIN_CORE) throw new Error("signed descriptor: too short");
   const authorPk = env.slice(0, 32);
   const sig = env.slice(32, 96);
   const core = env.slice(96);

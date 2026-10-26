@@ -14,7 +14,8 @@ import {
   type Identity, type PeerId, type StorageConfig, defaultConfig, assertStorageConfig, normaliseConfig, DEFAULT_QUOTA_BYTES,
   TEST_BLOCK_SIZE, NET_SERVICE,
 } from "./core.js";
-import { Op, decodeStats, decodePutResult, type PutResult, type RequestStats } from "./protocol.js";
+import { Op, decodeStats, decodePutResult, encodeGroups, type Groups, type PutResult, type RequestStats } from "./protocol.js";
+import { groupBytes, validGroupName } from "./descriptor-core.js";
 import { toHex, fromHex, readU32BE, readU64BE, concatBytes } from "./util.js";
 import { parseDest } from "seedkernel-wasm/peer-addr";
 import type { Sodium } from "./sodium.js";
@@ -164,6 +165,11 @@ export interface StorageNodeOptions {
   config?: Partial<StorageConfig>;
   store?: BlobView;
   quota?: number;
+  /** This node's groups (§5.1): name → member keys as hex. Every member of every group is
+   *  its cohort, and a chunk is stored only among its own group. Operator policy, like
+   *  `quota`, so it is never signed. Omitted ⇒ no groups: the node stores for nobody and
+   *  answers nobody until `setGroups`. */
+  groups?: Groups;
   /** The realm's invocation budget (seedkernel §12.3): queue wait + guest execution +
    *  a deferred answer. A DIFFERENT clock from the transport's `timeoutMs`, the
    *  per-request stall window a silent peer is given — that one is deliberately short (a
@@ -185,6 +191,8 @@ export class StorageNode {
   readonly fs: Fs;
   readonly store: BlobView;
   readonly quota: number;
+  /** The roster the guest holds, as last set. */
+  groups: Groups;
   readonly crypto: Crypto;
   readonly sodium: Sodium;
   readonly config: StorageConfig;
@@ -219,6 +227,7 @@ export class StorageNode {
     // guest writes to.
     this.fs = loaded.fs!;
     this.quota = local.guest.quota;
+    this.groups = local.guest.groups;
     this.store = opts.store ?? new FsBlobView(this.fs);
     this.crypto = new Crypto(opts.sodium);
     this.net = net;
@@ -227,7 +236,7 @@ export class StorageNode {
 
     // The guest's CFG (signed APP, then LOCAL over it), merged from the very LOCAL the
     // guest was handed, so the two cannot disagree. guest.config is untyped JSON.
-    const { quota: _quota, ...override } = local.guest;
+    const { quota: _quota, groups: _groups, ...override } = local.guest;
     const signed = (loaded.manifest.guest?.config ?? {}) as unknown as Partial<StorageConfig>;
     const merged: Partial<StorageConfig> = { ...signed, ...override, realmMemoryBytes: local.realmMemoryBytes };
     // A deployed bundle always signs its geometry into guest.config, so the fallback
@@ -300,10 +309,21 @@ export class StorageNode {
     return this.handle.invoke(writeOp(op, args));
   }
 
-  /** PUT a file (§6), orchestrated in the guest, STREAMED. */
-  async put(plaintext: Uint8Array): Promise<PutResult> {
+  /** Replace this node's groups (§5.1), whole, at any time: the next request, admission
+   *  and placement read the new roster. Whatever keeps the roster (an operator, or a
+   *  groups app) drives it through here. */
+  async setGroups(groups: Groups): Promise<void> {
+    const checked = checkGroups(groups);
+    await this.runExclusive(() => this.invoke(Op.GROUPS, encodeGroups(checked)));
+    this.groups = checked;
+  }
+
+  /** PUT a file (§6) into one of this node's groups, orchestrated in the guest, STREAMED.
+   *  The group may be left out when the node has exactly one. */
+  async put(plaintext: Uint8Array, opts: { group?: string } = {}): Promise<PutResult> {
+    const group = opts.group ?? soleGroup(this.groups);
     return this.runExclusive(async () => {
-      const meta = await this.invoke(Op.PUT_START, NO_ARG);
+      const meta = await this.invoke(Op.PUT_START, groupBytes(group));
       const windowBytes = readU32BE(meta, 0);
       for (let off = 0; ; off += windowBytes) {
         await this.invoke(Op.PUT_WINDOW, plaintext.subarray(off, Math.min(off + windowBytes, plaintext.length)));
@@ -351,10 +371,11 @@ export class StorageNode {
     return readU32BE(await this.runExclusive(() => this.invoke(Op.REPAIR, NO_ARG)), 0);
   }
 
-  /** Decayed reciprocity score this node holds for a peer (§13), read from the
-   *  guest — the same module instance the placement ranker scores against. */
-  async score(peerPk: Uint8Array): Promise<number> {
-    const res = await this.invoke(Op.SCORE, peerPk);
+  /** Decayed reciprocity score this node holds for a peer in one group (§13), read from
+   *  the guest — the same module instance the placement ranker scores against. Goodwill is
+   *  per group: serving one group's chunks earns nothing in another. */
+  async score(peerPk: Uint8Array, group: string = soleGroup(this.groups)): Promise<number> {
+    const res = await this.invoke(Op.SCORE, concatBytes([peerPk, groupBytes(group)]));
     if (!res || res.length < 8) return 0;
     return new DataView(res.buffer, res.byteOffset, 8).getFloat64(0, true);
   }
@@ -421,7 +442,7 @@ export class StorageNode {
  *  reads (seedkernel §12.4), and `realmMemoryBytes` is split back out of it (the realm's
  *  bound, not the guest's). `quota` can never be signed, so LOCAL is its only door. */
 interface LocalConfig {
-  guest: Omit<Partial<StorageConfig>, "realmMemoryBytes"> & { quota: number };
+  guest: Omit<Partial<StorageConfig>, "realmMemoryBytes"> & { quota: number; groups: Groups };
   realmMemoryBytes?: number;
 }
 /** Normalised and checked once, before the bundle loads. */
@@ -429,5 +450,27 @@ function localConfigFor(opts: StorageNodeOptions): LocalConfig {
   const config = normaliseConfig(opts.config ?? {});
   assertStorageConfig(config);
   const { realmMemoryBytes, ...guest } = config;
-  return { guest: { ...guest, quota: opts.quota ?? DEFAULT_QUOTA_BYTES }, realmMemoryBytes };
+  return { guest: { ...guest, quota: opts.quota ?? DEFAULT_QUOTA_BYTES, groups: checkGroups(opts.groups ?? {}) }, realmMemoryBytes };
+}
+
+/** A roster with valid names and lowercase 64-hex keys, each listed once. */
+export function checkGroups(groups: Groups): Groups {
+  const out: Groups = {};
+  for (const [name, members] of Object.entries(groups)) {
+    if (!validGroupName(name)) throw new Error(`groups: "${name}" is not a group name (1-32 of A-Z a-z 0-9 . _ -)`);
+    const keys = new Set<string>();
+    for (const m of members) {
+      const key = String(m).toLowerCase();
+      if (!/^[0-9a-f]{64}$/.test(key)) throw new Error(`groups: "${m}" in ${name} is not a 64-hex-character key`);
+      keys.add(key);
+    }
+    out[name] = [...keys];
+  }
+  return out;
+}
+
+function soleGroup(groups: Groups): string {
+  const names = Object.keys(groups);
+  if (names.length !== 1) throw new Error(`storage: name a group — this node has ${names.length === 0 ? "none (pass groups, or call setGroups)" : names.join(", ")}`);
+  return names[0];
 }

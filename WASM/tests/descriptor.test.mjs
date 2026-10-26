@@ -42,7 +42,7 @@ export async function run(t) {
   {
     const ids = [];
     for (let i = 0; i < 6; i++) ids.push(crypto.hash(new Uint8Array([i])));
-    const d = { level: 0, k: 4, m: 2, blockSize: 1024, tailBytes: 4000, authTag: tag(), blockIds: ids };
+    const d = { group: "cohort", level: 0, k: 4, m: 2, blockSize: 1024, tailBytes: 4000, authTag: tag(), blockIds: ids };
     const core = encodeDescriptorCore(d);
     const back = decodeDescriptorCore(core);
     t.eq(back.k, 4, "k preserved");
@@ -63,9 +63,9 @@ export async function run(t) {
 
     // n = k + m for BOTH. A coded chunk lists k+m distinct blocks; a k=1 chunk lists its
     // lone block m+1 times, and that repetition IS its replica count — no second shape.
-    const coded = { level: 0, k: 10, m: 6, blockSize: 4096, tailBytes: 40960, authTag: tag(), blockIds: ids(16) };
+    const coded = { group: "cohort", level: 0, k: 10, m: 6, blockSize: 4096, tailBytes: 40960, authTag: tag(), blockIds: ids(16) };
     const one = id(100);
-    const repl = { level: 0, k: 1, m: 6, blockSize: 4096, tailBytes: 4096, authTag: tag(), blockIds: new Array(7).fill(one) };
+    const repl = { group: "cohort", level: 0, k: 1, m: 6, blockSize: 4096, tailBytes: 4096, authTag: tag(), blockIds: new Array(7).fill(one) };
     t.eq(coded.blockIds.length, coded.k + coded.m, "coded: n = k+m");
     t.eq(repl.blockIds.length, repl.k + repl.m, "k=1: n = k+m too, by repeating the id");
     t.eq(copyTargets(coded).size, 16, "a coded chunk has 16 distinct blocks");
@@ -100,13 +100,13 @@ export async function run(t) {
 
     // n must be exactly k+m — there is no second accepted id count.
     let threw = false;
-    try { encodeDescriptorCore({ level: 0, k: 1, m: 6, blockSize: 4096, tailBytes: 1, authTag: tag(), blockIds: ids(1, 200) }); } catch { threw = true; }
+    try { encodeDescriptorCore({ group: "cohort", level: 0, k: 1, m: 6, blockSize: 4096, tailBytes: 1, authTag: tag(), blockIds: ids(1, 200) }); } catch { threw = true; }
     t.ok(threw, "a k=1 descriptor listing its id ONCE is rejected — n must be k+m");
     threw = false;
-    try { encodeDescriptorCore({ level: 0, k: 10, m: 6, blockSize: 4096, tailBytes: 1, authTag: tag(), blockIds: ids(12) }); } catch { threw = true; }
+    try { encodeDescriptorCore({ group: "cohort", level: 0, k: 10, m: 6, blockSize: 4096, tailBytes: 1, authTag: tag(), blockIds: ids(12) }); } catch { threw = true; }
     t.ok(threw, "an id count that is not k+m is rejected");
     threw = false;
-    try { encodeDescriptorCore({ level: 0, k: 2, m: 2, blockSize: 256, tailBytes: 999, authTag: tag(), blockIds: ids(4, 300) }); } catch { threw = true; }
+    try { encodeDescriptorCore({ group: "cohort", level: 0, k: 2, m: 2, blockSize: 256, tailBytes: 999, authTag: tag(), blockIds: ids(4, 300) }); } catch { threw = true; }
     t.ok(threw, "tailBytes past k*blockSize is rejected");
   }
 
@@ -116,7 +116,7 @@ export async function run(t) {
     const holder = newKey(); // a malicious holder
     const ids = [];
     for (let i = 0; i < 4; i++) ids.push(crypto.hash(new Uint8Array([i + 10])));
-    const d = { level: 0, k: 2, m: 2, blockSize: 256, tailBytes: 512, authTag: tag(), blockIds: ids };
+    const d = { group: "cohort", level: 0, k: 2, m: 2, blockSize: 256, tailBytes: 512, authTag: tag(), blockIds: ids };
     // signDescriptor/verifyDescriptor route through the host's scoped signer, which
     // applies `DOMAIN_guest ‖ scope` host-side for the `seedstore` label; the scope
     // bytes themselves are never reconstructed here (§16).
@@ -152,7 +152,7 @@ export async function run(t) {
     const envs = [0, 1].map((c) => {
       const ids = [];
       for (let i = 0; i < 4; i++) ids.push(crypto.hash(new Uint8Array([c, i])));
-      return signDescriptor(sodium, { level: 0, k: 2, m: 2, blockSize: 512, tailBytes: 1024, authTag: tag(), blockIds: ids },
+      return signDescriptor(sodium, { group: "cohort", level: 0, k: 2, m: 2, blockSize: 512, tailBytes: 1024, authTag: tag(), blockIds: ids },
         author.publicKey, author.privateKey);
     });
     // An index level is JUST the ordered signed descriptors — no header, file size,

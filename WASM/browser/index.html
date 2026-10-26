@@ -85,7 +85,7 @@ let nodes, net, lastPut;
   log("booting a cohort of 6 nodes on the seedkernel…");
   nodes = await createConnectedCohort({
     count: 6, network: net, sodium, wasm, standUp: host.standUp,
-    // k·blockSize must hold two chunk descriptors (257 B each), so a file's descriptor
+    // k·blockSize must hold two chunk descriptors (264 B each in "cohort"), so a file's descriptor
     // list can reach a single root.
     config: { k: 2, m: 2, blockSize: 512 }, timeoutMs: 200,
   });

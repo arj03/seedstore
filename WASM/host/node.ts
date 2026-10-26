@@ -81,6 +81,7 @@ export {
 export { storageRuntime, bootStorageNode } from "./runtime.js";
 export type { StandUp, StorageRuntimeOptions } from "./runtime.js";
 export type { StorageNodeOptions, StorageRuntime, PutResult, WasmBytes } from "./storage-node.js";
+export type { Groups } from "./protocol.js";
 // The host's door into the signed transport: peers and cohort readiness live in that
 // guest, so they are calls to the id it claims rather than methods on the socket driver.
 export { netAddr, netPeer, netRelay, netRelayState, netContact, netReady, netPeers, netRoutes } from "./storage-node.js";

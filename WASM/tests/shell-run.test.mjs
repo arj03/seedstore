@@ -74,8 +74,11 @@ export async function run(t) {
         // the bundle is signed under suite 0x02 (seedkernel §12.4), not the bare Ed25519 key.
         const authorId = await buildBundle(bundlePath, author, build);
         const bundleBlob = new Uint8Array(readFileSync(bundlePath));
+      // The shell's key is minted first, so the holders can list it in their group.
+      const shellIdentity = generateKeyPair(sodium);
+      const shellHex = toHex(shellIdentity.publicKey);
       holders = await createConnectedCohort({
-        suppressLinkLog: true,
+        suppressLinkLog: true, groups: (ids) => ({ cohort: [...ids, shellHex] }),
         // Match the shell's test-scale geometry so this tiny file spreads across the
         // cohort (the signed bundle ships PRODUCTION 256 KiB blocks).
         count: 6, network: net, sodium, wasm: { bundleBlob }, config: { blockSize: 1024 }, timeoutMs: TIMEOUT,
@@ -83,7 +86,6 @@ export async function run(t) {
 
       // The host knows only its policy; storage arrives as content.
       // A cohort is mutual, so both sides receive an address and authenticate.
-      const shellIdentity = generateKeyPair(sodium);
       const rt = await bootNodeShell({
         policyJson: JSON.stringify({ authors: [toHex(authorId)] }),
         dir: shellDir, identity: shellIdentity,
@@ -97,7 +99,9 @@ export async function run(t) {
       // guest as `LOCAL`, which its `CFG` lets win: blockSize back to test scale (the
       // bundle ships the PRODUCTION 256 KiB, which would make this tiny file
       // single-block/replicated instead of RS across the cohort).
-      const loaded = await shell.installFile(bundlePath, { localConfig: { blockSize: 1024 } });
+      const loaded = await shell.installFile(bundlePath, {
+        localConfig: { blockSize: 1024, groups: { cohort: [...holders.map((h) => h.peerId), shellHex] } },
+      });
       // A node with a network has at least two apps loaded — the storage bundle and the
       // transport, an ordinary app claiming `_net` under its `services` list (seedkernel §12.10), a
       // co-resident guest's to reach and never a peer's — so each claim names its label.

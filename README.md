@@ -25,8 +25,9 @@ and it runs the same way in Node, the browser and seedkernel's native binary.
 The whole design rests on five ideas:
 
 - **A social cohort.** You store only with a bounded set of peers you have a
-  relationship with. There is no global index or DHT, so strangers can't find or
-  probe your data.
+  relationship with, kept as named groups such as your own devices and your friends.
+  A file lives in one group, and a peer outside your groups is answered nothing.
+  There is no global index or DHT, so strangers can't find or probe your data.
 - **Client-side encryption.** Every file gets a random key, and holders only ever
   see ciphertext. You share a file by sealing its key to a friend's public key.
   Destroying the key makes every copy permanent noise.

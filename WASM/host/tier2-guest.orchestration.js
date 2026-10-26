@@ -283,23 +283,25 @@ async function assertCodecFits(k, m, blockSize) {
   }
 }
 
-// Per-peer reputation accumulators (module is a pure transform; callers hold state).
-// hex pubkey → {serve, miss, last}. Entries are created only by repObserve — a real
+// Reputation accumulators (module is a pure transform; callers hold state), one per
+// (group, peer): goodwill a peer earns serving one group's chunks counts in that group
+// only (§13). repKey → {serve, miss, last}. Entries are created only by repObserve — a real
 // witnessed event (§8) — never by a bare score query, which must stay side-effect-free.
 const peerReps = new Map();
+function repKey(group, peerHex) { return group + "/" + peerHex; }
 
 const ZERO_REP = { serve: 0, miss: 0, last: 0 };
 
-async function repScore(peerPk, t, via = call) {
-  return decodeScoreResp(await repScoreBytes(peerPk, t, via));
+async function repScore(group, peerPk, t, via = call) {
+  return decodeScoreResp(await repScoreBytes(group, peerPk, t, via));
 }
 // Call the reputation module's SCORE op with the peer's accumulator at time t, or the
 // zero accumulator for a peer never observed. Read-only: never touches peerReps.
 // A score is advisory — it orders peers, it does not decide correctness — so a module
 // failure (seedkernel §12.2) answers as an unscored peer rather than failing the PUT or
 // GET that was only ranking. That translation is this layer's policy, not the seam's.
-async function repScoreBytes(peerPk, t, via = call) {
-  const rep = peerReps.get(toHex(peerPk)) ?? ZERO_REP;
+async function repScoreBytes(group, peerPk, t, via = call) {
+  const rep = peerReps.get(repKey(group, toHex(peerPk))) ?? ZERO_REP;
   const req = encodeScoreReq(rep.serve, rep.miss, rep.last, t);
   return via(REP_NAME, req).catch(() => EMPTY);
 }
@@ -308,14 +310,14 @@ async function repScoreBytes(peerPk, t, via = call) {
 // the Map update actually lands (this is not fire-and-forget). Counts, not one call
 // per block: a fan-out's blocks are verified independently but share an observation
 // time, and a call apiece would spend the realm's outstanding-call budget on scoring.
-async function repObserve(peerPk, t, passes, misses) {
+async function repObserve(group, peerPk, t, passes, misses) {
   if (passes + misses === 0) return;
-  const peerHex = toHex(peerPk);
-  let rep = peerReps.get(peerHex);
+  const key = repKey(group, toHex(peerPk));
+  let rep = peerReps.get(key);
   if (rep === undefined) {
     pruneStalePeers(peerReps, t);
     rep = { ...ZERO_REP };
-    peerReps.set(peerHex, rep);
+    peerReps.set(key, rep);
   }
   const req = encodeObserveReq(rep.serve, rep.miss, rep.last, t, passes, misses);
   try {
@@ -338,12 +340,13 @@ async function repObserve(peerPk, t, passes, misses) {
 // transfer — so it stays off the per-result path: awaiting a module round trip between FETCH
 // results puts the reputation worker in series with the wire.
 function repTally() {
-  const per = new Map(); // peerHex → {passes, misses}
+  const per = new Map(); // repKey → {group, peerHex, passes, misses}
   return {
-    note(peerHex, passes, misses) {
+    note(group, peerHex, passes, misses) {
       if (passes + misses === 0) return;
-      let e = per.get(peerHex);
-      if (!e) per.set(peerHex, (e = { passes: 0, misses: 0 }));
+      const key = repKey(group, peerHex);
+      let e = per.get(key);
+      if (!e) per.set(key, (e = { group, peerHex, passes: 0, misses: 0 }));
       e.passes += passes; e.misses += misses;
     },
     // One clock read for the round: every outcome in it shares an observation time anyway.
@@ -354,11 +357,11 @@ function repTally() {
       const t = Date.now();
       const round = [...per];
       per.clear();
-      if (round.some(([peerHex]) => !peerReps.has(peerHex))) {
+      if (round.some(([key]) => !peerReps.has(key))) {
         pruneStalePeers(peerReps, t);
-        for (const [peerHex] of round) if (!peerReps.has(peerHex)) peerReps.set(peerHex, { ...ZERO_REP });
+        for (const [key] of round) if (!peerReps.has(key)) peerReps.set(key, { ...ZERO_REP });
       }
-      await Promise.all(round.map(([peerHex, { passes, misses }]) => repObserve(fromHex(peerHex), t, passes, misses)));
+      await Promise.all(round.map(([, e]) => repObserve(e.group, fromHex(e.peerHex), t, e.passes, e.misses)));
     },
   };
 }
@@ -407,17 +410,33 @@ function decodePeers(r) {
   for (let o = 0; o + 32 <= r.length; o += 32) out.push(toHex(r.slice(o, o + 32)));
   return out;
 }
-async function cohortPeers(via) { return decodePeers(await netOp("peers", EMPTY, via)); }
-// A reciprocity ranker (§13): orders peers best-score-first. `makeRanker` memoizes
+// ── the roster (§5.1) ──
+// This node's groups: name → Set of member hex, from LOCAL at boot and replaced by
+// Op.GROUPS. The cohort is every member of every group. A link alone admits nothing: a peer
+// outside the roster is answered nothing, and a chunk is stored only among its own group.
+let groups = new Map();
+let rosterMembers = new Set();
+function setRoster(map) {
+  groups = map;
+  rosterMembers = new Set();
+  for (const members of map.values()) for (const m of members) rosterMembers.add(m);
+}
+setRoster(new Map(Object.entries(LOCAL.groups ?? {}).map(([name, members]) => [name, new Set(members)])));
+function inGroup(group, peerHex) { const g = groups.get(group); return g !== undefined && g.has(peerHex); }
+// The linked peers in the roster: everyone a broadcast (have/want) may ask.
+async function cohortPeers(via) { return decodePeers(await netOp("peers", EMPTY, via)).filter((p) => rosterMembers.has(p)); }
+// The linked members of one group: everyone a chunk of that group may be placed on.
+async function groupPeers(group, via) { return (await cohortPeers(via)).filter((p) => inGroup(group, p)); }
+// A reciprocity ranker (§13): orders peers best-score-first, by their standing in `group`. `makeRanker` memoizes
 // each distinct peer's score (by PROMISE, not settled value, so concurrent lookups
 // share one in-flight call) for its lifetime, so ranking overlapping holder subsets
 // across a round costs one bridge crossing per peer, not one per (peer, id).
 // `inStanding` drops the peers scored below zero while any peer is at or above it, for a
 // caller that spreads work over the list instead of taking its head (gatherBlocks).
-async function makeRanker() {
+async function makeRanker(group) {
   const t = Date.now();
   const cache = new Map(); // peerHex → Promise<decayed score>
-  const scoreOf = (p) => { let s = cache.get(p); if (s === undefined) cache.set(p, s = repScore(fromHex(p), t)); return s; };
+  const scoreOf = (p) => { let s = cache.get(p); if (s === undefined) cache.set(p, s = repScore(group, fromHex(p), t)); return s; };
   return async (peers, inStanding = false) => {
     if (peers.length === 0) return [];
     const scored = (await Promise.all(peers.map(async (p) => ({ p, s: await scoreOf(p) })))).sort((a, b) => b.s - a.s);
@@ -426,7 +445,7 @@ async function makeRanker() {
   };
 }
 // One-shot ranker for callers that rank a single list (its own fresh cache).
-async function rank(peers) { return (await makeRanker())(peers); }
+async function rank(peers, group) { return (await makeRanker(group))(peers); }
 
 // ── net (request/response over the transport; wire format here) ──
 // One round trip via the transport's `send` op:
@@ -529,29 +548,16 @@ async function haveWant(ids) {
 // verifyDescriptor checks the author signature AND structurally validates the core:
 // a signed-but-malformed descriptor (bad id count) is rejected rather than parsed
 // into block-ids that sidestep the §10 sibling rule. Returns the whole envelope —
-// a valid signature is only half the check; knownAuthors below is the other half.
+// a valid signature is only half the check; the holder's roster (admitBatch) is the other half.
 // `parsed` is the envelope's parse when the caller already has it (a STORE hashes with it).
 async function verifyDescriptor(env, via, parsed) {
-  // Length-gate before the verify seam: the envelope is [pk 32][sig 64][core ≥13]
+  // Length-gate before the verify seam: the envelope is [pk 32][sig 64][core ≥ MIN_CORE]
   // (parseSignedDescriptor's own bound), so anything shorter — an absent descriptor
   // included — is rejected here rather than handed to verify as a short buffer.
-  if (!env || env.length < 32 + 64 + 13) return null;
+  if (!env || env.length < 32 + 64 + MIN_CORE) return null;
   if (!(await verifyEnv(env, via))) return null;
   if (parsed) return parsed;
   try { return parseSignedDescriptor(env); } catch (_e) { return null; }
-}
-// The §4.3 ANCHOR: a signature checked against a pubkey carried inside the signed
-// object only proves someone held a private key — any peer could self-sign a fresh
-// keypair. The author must also be an identity the cohort knows (§5.1), so forgery
-// costs a known peer its standing (§13) instead of nothing. Holder-only.
-// The caller reached us over an authenticated link, so it is a cohort peer already, as is
-// this node: only a third author (a repairer re-placing another's chunk) needs the roster.
-async function knownAuthors(caller, signed) {
-  const known = new Set([toHex(caller), myPeer()]);
-  if (signed.some((sd) => sd && !known.has(toHex(sd.authorPk)))) {
-    for (const p of await cohortPeers(holderCall)) known.add(p);
-  }
-  return known;
 }
 function signChunk(d) { return signCore(encodeDescriptorCore(d)); }
 
@@ -635,12 +641,13 @@ function batchBytes(items, sizeOf, maxBytes) {
 }
 // A placement JOB: the unit the one engine below consumes. A flat list of SLOTS —
 // (block bytes, id) targets to land on distinct peers — plus the signed descriptor
-// that admits them, a `floor` of distinct ids that must land, and peers to exclude.
+// that admits them, a `floor` of distinct ids that must land, peers to exclude, and the
+// chunk's group, whose linked members are the only candidates.
 // A chunk (makeChunk) is one slot per listed id, floor = its own k; a repair pass
 // (heal) is only the copies still owed, floor 0 (best-effort).
-function makeJob(slotIds, slotBlocks, descriptor, floor, exclude) {
+function makeJob(slotIds, slotBlocks, descriptor, floor, exclude, group) {
   return {
-    floor, slotIds, slotBlocks, descriptor, exclude,
+    floor, slotIds, slotBlocks, descriptor, exclude, group,
     placedPeer: new Array(slotIds.length).fill(null),
     placedIds: [],
   };
@@ -649,14 +656,14 @@ function makeJob(slotIds, slotBlocks, descriptor, floor, exclude) {
 // slot per listed id — a k=1 chunk's m+1-times-listed block IS its m+1 replica
 // slots, no special case needed. Floor is the chunk's OWN k, not config's.
 function makeChunk(d, blocks, descriptor) {
-  return makeJob(d.blockIds.slice(), blocks.slice(), descriptor, d.k, new Set());
+  return makeJob(d.blockIds.slice(), blocks.slice(), descriptor, d.k, new Set(), d.group);
 }
 // Encode + sign one chunk at its OWN k = ceil(plain / blockSize), not padded to the
 // deployment's k. At k=1, RS(1,m) parity ≡ data, so the codec is skipped and the
 // chunk simply lists its lone block m+1 times (§4.1). Nonce = (level, GLOBAL index
 // within that level) (§4.4), so a windowed encode matches a whole-level one.
-// `tailBytes` is how much of the chunk a reader keeps (§4.3).
-async function encodeChunk(source, localCi, globalCi, K, level) {
+// `tailBytes` is how much of the chunk a reader keeps (§4.3); `group` is where it is placed (§5.1).
+async function encodeChunk(source, localCi, globalCi, K, level, group) {
   const c = CFG;
   const plain = source.subarray(localCi * c.k * c.blockSize, (localCi + 1) * c.k * c.blockSize);
   const kc = Math.max(1, Math.ceil(plain.length / c.blockSize));
@@ -667,14 +674,14 @@ async function encodeChunk(source, localCi, globalCi, K, level) {
   const author = { authorPk: identity() };
   const ids = kc === 1 ? new Array(c.m + 1).fill(await blockHash(author, dataBlocks[0], call))
                        : await Promise.all(blocks.map((b) => blockHash(author, b, call)));
-  const d = { level, k: kc, m: c.m, blockSize: c.blockSize, tailBytes: plain.length, authTag: sealed.authTag, blockIds: ids };
+  const d = { level, k: kc, m: c.m, blockSize: c.blockSize, tailBytes: plain.length, group, authTag: sealed.authTag, blockIds: ids };
   return makeChunk(d, blocks, await signChunk(d));
 }
 // The decline reasons a holder's verdict can name, for the error a failed PUT throws.
 const VERDICT_REASONS = {
   [VERDICT_QUOTA]: "quota", [VERDICT_SIBLING]: "sibling",
   [VERDICT_DESCRIPTOR]: "descriptor-rejected", [VERDICT_ERROR]: "holder-error",
-  [VERDICT_ALLOWANCE]: "allowance",
+  [VERDICT_ALLOWANCE]: "allowance", [VERDICT_GROUP]: "not-in-group",
 };
 // THE placement engine (§6/§10). Places every job's slots with one batched OFFER
 // per peer per round, then accepted blocks STORE'd in fanoutWindow()-deep fan-outs.
@@ -684,11 +691,12 @@ const VERDICT_REASONS = {
 //
 // Throws if a job lands fewer than its `floor` distinct ids. `what` names the job in
 // that error; floor 0 (repair) never throws and so passes no name. `ranker` lets a PUT
-// stream score each peer once for all its windows (makeRanker). Answers the cohort size
-// it placed across.
-async function placeChunksBatched(jobs, what, ranker = rank) {
-  const roster = await cohortPeers(call);
-  const ranked = await ranker(roster);
+// stream score each peer once for all its windows (makeRanker). Every job shares one group,
+// and only that group's linked members are candidates. Answers the cohort size it placed across.
+async function placeChunksBatched(jobs, what, ranker) {
+  const group = jobs[0].group;
+  const roster = await groupPeers(group, call);
+  const ranked = await (ranker ?? ((peers) => rank(peers, group)))(roster);
   // Each job draws from the ranked cohort minus peers to avoid. PUT excludes nothing;
   // repair excludes peers already holding part of the chunk, so a restored copy lands
   // somewhere new instead of a sibling-declining or silently-overwritten holder.
@@ -815,14 +823,13 @@ async function runFetchTasks(byPeer, maxIds, descriptorOf, onResult) {
   // `blocks` aligns to `ids` (bytes|null each), or is null for an unreachable peer — not a §8 miss.
   const apply = async (peer, slice, ids, blocks) => {
     const hashes = blocks === null ? [] : await Promise.all(blocks.map((b, i) => b ? blockHash(descriptorOf(slice[i]), b, call) : null));
-    let passes = 0, misses = 0;
     for (let i = 0; i < slice.length; i++) {
       const b = blocks === null ? null : blocks[i];
       const good = b !== null && bytesEqual(hashes[i], ids[i]);
-      if (good) passes++; else if (blocks !== null) misses++;
+      // Standing is per group: each outcome counts in the group of the chunk it read.
+      if (peer !== me && blocks !== null) tally.note(descriptorOf(slice[i]).group, peer, good ? 1 : 0, good ? 0 : 1);
       onResult(peer, slice[i], good ? b : null);
     }
-    if (peer !== me) tally.note(peer, passes, misses);
   };
   if (byPeer.has(me)) {
     for (const slice of sliceN(byPeer.get(me), maxIds)) {
@@ -924,7 +931,7 @@ async function gatherBlocks(descriptors, holders, got = new Map()) {
   for (;;) {
     // One ranker for the whole round: scoring a holder crosses the bridge once, then
     // every id that shares that holder reuses the cached score (§13).
-    const rankRound = await makeRanker();
+    const rankRound = await makeRanker(descriptors[0].group);
     const byPeer = new Map(); // peer → [idHex]
     const queuedOn = (p) => { const l = byPeer.get(p); return l ? l.length : 0; };
     const queued = new Set();
@@ -1005,7 +1012,7 @@ const CHUNK_DEPTH = 4;
 // Encode the chunks wholly contained in `slice` — a chunk-aligned slice of a LEVEL's
 // byte stream at offset `baseByteOffset`. Each chunk codes at its own k (§4.1).
 // Level 0 (the file) and level ℓ > 0 (an index) are the same call.
-async function encodeWindow(slice, baseByteOffset, K, level) {
+async function encodeWindow(slice, baseByteOffset, K, level, group) {
   const c = CFG;
   const chunkData = c.k * c.blockSize;
   const baseCi = Math.floor(baseByteOffset / chunkData);
@@ -1013,7 +1020,7 @@ async function encodeWindow(slice, baseByteOffset, K, level) {
   const chunks = [];
   for (let base = 0; base < numChunks; base += CHUNK_DEPTH) {
     const work = [];
-    for (let lc = base; lc < Math.min(base + CHUNK_DEPTH, numChunks); lc++) work.push(encodeChunk(slice, lc, baseCi + lc, K, level));
+    for (let lc = base; lc < Math.min(base + CHUNK_DEPTH, numChunks); lc++) work.push(encodeChunk(slice, lc, baseCi + lc, K, level, group));
     chunks.push(...await Promise.all(work));
   }
   return chunks;
@@ -1033,7 +1040,7 @@ async function placeStream(s, bytes, level, base) {
   const out = [];
   const wb = putWindowBytes();
   for (let off = 0; off === 0 || off < bytes.length; off += wb) {   // an empty file is still one chunk
-    const chunks = await encodeWindow(bytes.subarray(off, Math.min(off + wb, bytes.length)), base + off, s.K, level);
+    const chunks = await encodeWindow(bytes.subarray(off, Math.min(off + wb, bytes.length)), base + off, s.K, level, s.group);
     for (const ch of chunks) out.push(ch.descriptor);
     await pipePlacement(s, placeChunksBatched(chunks, "chunk", s.rank).then((peerCount) => recordPlacements(s, chunks, peerCount)));
   }
@@ -1075,9 +1082,9 @@ function requirePut() {
   if (!putStream) throw new Error("put: no stream open — call putStart first");
   return putStream;
 }
-// The largest a signed descriptor gets, framed for the descriptor list: the deployment's
-// own (k, m), since a partial chunk lists fewer ids (§4.3).
-function descriptorBytes() { return 4 + 32 + 64 + 13 + AUTH_TAG_LEN + (CFG.k + CFG.m) * BLOCK_ID_LEN; }
+// The largest a signed descriptor in `group` gets, framed for the descriptor list: the
+// deployment's own (k, m), since a partial chunk lists fewer ids (§4.3).
+function descriptorBytes(group) { return 4 + 32 + 64 + MIN_CORE - 1 + group.length + (CFG.k + CFG.m) * BLOCK_ID_LEN; }
 // Open a stream: mint K and answer with the plaintext window the driver should feed.
 // It takes no file size: each chunk signs its own `tailBytes` (§4.3).
 //
@@ -1086,14 +1093,16 @@ function descriptorBytes() { return 4 + 32 + 64 + 13 + AUTH_TAG_LEN + (CFG.k + C
 // chunk against the codec's limits. Realistic geometries clear the first by orders of magnitude.
 //
 // The stream keeps one ranker: each peer is scored once for every window, not per window.
-async function putStart() {
+// Every chunk, index levels included, is placed in `group` and signs its name (§5.1).
+async function putStart(group) {
+  if (!groups.has(group)) throw new Error("put: no group \"" + group + "\" in this node's roster");
   const chunkData = CFG.k * CFG.blockSize;
-  if (chunkData < 2 * descriptorBytes()) {
+  if (chunkData < 2 * descriptorBytes(group)) {
     throw new Error("put: k·blockSize (" + chunkData + " B) must hold two chunk descriptors ("
-      + descriptorBytes() + " B each) so a file's descriptor list can reach a single root — raise blockSize or k");
+      + descriptorBytes(group) + " B each) so a file's descriptor list can reach a single root — raise blockSize or k");
   }
   if (CFG.k > 1) await assertCodecFits(CFG.k, CFG.m, CFG.blockSize);
-  putStream = { K: await randomKey(), rank: await makeRanker(), offset: 0, descriptors: [], placedIds: [], placed: 0, intended: 0, placing: null };
+  putStream = { K: await randomKey(), group, rank: await makeRanker(group), offset: 0, descriptors: [], placedIds: [], placed: 0, intended: 0, placing: null };
   return putWindowBytes();
 }
 // Fold placed chunks into the stream's durability accounting (§8). Counts REPLICA
@@ -1142,15 +1151,23 @@ async function putFinish() {
   });
 }
 
-// No argument → [windowBytes u32]: open the stream, report the feed size.
-async function doPutStart() { const out = new Uint8Array(4); wU32(out, 0, await putStart()); return out; }
+// The group a PUT names, or the node's only one when it names none.
+function putGroup(nameBytes) {
+  if (nameBytes.length > 0) return groupName(nameBytes);
+  if (groups.size !== 1) throw new Error("put: name a group — this node has " + (groups.size === 0 ? "none" : [...groups.keys()].join(", ")));
+  return [...groups.keys()][0];
+}
+// [group ..] → [windowBytes u32]: open the stream, report the feed size. An empty argument
+// is the node's only group.
+async function doPutStart(arg) { const out = new Uint8Array(4); wU32(out, 0, await putStart(putGroup(arg))); return out; }
 // The window's plaintext, raw — no framing, since the stream holds everything else.
 async function doPutWindow(arg) { await putFeed(arg); return EMPTY; }
 // Whole-file PUT: one call, bytes in, result out — for drivers with no protocol
-// structure of their own. Runs the same session as the streamed path; only the 1×
-// plaintext is resident.
+// structure of their own, such as the CLI's `--op put < file`. It stores into the node's
+// only group; a node with several streams instead (PUT_START names the group). Runs the
+// same session as the streamed path; only the 1× plaintext is resident.
 async function doPut(plaintext) {
-  const wb = await putStart();
+  const wb = await putStart(putGroup(EMPTY));
   for (let off = 0; ; off += wb) {
     await putFeed(plaintext.subarray(off, Math.min(off + wb, plaintext.length)));
     if (off + wb >= plaintext.length) break;
@@ -1303,7 +1320,7 @@ async function verifySample(d, picks, bytes) {
     if (good && !bytes.has(h)) bytes.set(h, b);
     const ok = good && !(timing.ms > cfgMs("verifyDeadlineMs"));
     noteVerified(peer, Date.now(), ok);
-    tally.note(peer, ok ? 1 : 0, ok ? 0 : 1);
+    tally.note(d.group, peer, ok ? 1 : 0, ok ? 0 : 1);
   }));
   await tally.settle();
 }
@@ -1379,7 +1396,7 @@ async function heal(d, descEnv, holders, verified) {
 
   // Floor 0 — repair is best-effort: a pass places what the cohort will take and the next
   // pass retries the rest, where a PUT would rather fail than under-place a new file.
-  const job = makeJob(slotIds, slotBlocks, descEnv, 0, occupied);
+  const job = makeJob(slotIds, slotBlocks, descEnv, 0, occupied, d.group);
   await placeChunksBatched([job]);
   let replaced = 0;
   for (const p of job.placedPeer) if (p) replaced++;
@@ -1441,10 +1458,14 @@ async function relieveQuota() {
   if (bytesUsed <= quota()) return;
   await deleteBlocks(pickCacheVictims(bytesUsed - quota()), call);
   if (bytesUsed <= quota()) return;
-  const t = Date.now(), standing = new Map();
+  const t = Date.now(), standing = new Map(); // allowanceKey → the author's standing in that group
   const committed = [...heldBlocks].filter(([h, e]) => !e.cache && !pendingDeletes.has(h));
-  for (const [, e] of committed) if (!standing.has(e.author)) standing.set(e.author, await repScore(fromHex(e.author), t));
-  committed.sort(([ha, a], [hb, b]) => (standing.get(a.author) - standing.get(b.author)) || (touchedAt(ha) - touchedAt(hb)));
+  for (const [, e] of committed) {
+    const key = allowanceKey(e.group, e.author);
+    if (!standing.has(key)) standing.set(key, await repScore(e.group, fromHex(e.author), t));
+  }
+  const standingOf = (e) => standing.get(allowanceKey(e.group, e.author));
+  committed.sort(([ha, a], [hb, b]) => (standingOf(a) - standingOf(b)) || (touchedAt(ha) - touchedAt(hb)));
   for (const [h] of committed) {
     if (bytesUsed <= quota()) break;
     await releaseCommitment(h);
@@ -1462,7 +1483,7 @@ async function releaseCommitment(h) {
     const occupied = new Set();
     for (const set of live.values()) for (const p of set) occupied.add(p);
     occupied.add(me);
-    const job = makeJob([fromHex(h)], [rec.bytes], rec.descriptor, 0, occupied);
+    const job = makeJob([fromHex(h)], [rec.bytes], rec.descriptor, 0, occupied, d.group);
     await placeChunksBatched([job]);
     if (!job.placedPeer[0]) {
       const copies = d.blockIds.map((id) => { const s = live.get(toHex(id)) || new Set(); return s.size - (toHex(id) === h && s.has(me) ? 1 : 0); });
@@ -1481,31 +1502,38 @@ async function releaseCommitment(h) {
 // here; the host keeps only a read view (host/store-view.ts), no write path. Async,
 // since every seam name answers a Promise (seedkernel §12.2), fs included.
 // The index of what is held, rebuilt from fs on first use: heldBlocks maps block hex →
-// { size, author (hex), cache }. bytesUsed counts both §14 tiers and cacheBytes the cache
-// alone; committedFor charges each author's committed bytes to its allowance (§13.2).
+// { size, author (hex), group, cache }. bytesUsed counts both §14 tiers and cacheBytes the
+// cache alone; committedFor charges each author's committed bytes in a group to its
+// allowance there (§13.2), keyed by allowanceKey.
 let bytesUsed = -1, cacheBytes = 0, heldBlocks = null, storeIndexPromise = null, storeIndexDirty = false;
 let committedFor = new Map();
 const touched = new Map();        // block hex → when a peer last fetched or stored it (coldness, §14)
 const pendingDeletes = new Set(); // claimed for deletion: out of the index, still on disk and a sibling
 let activeStoreWrites = 0, resolveStoreWritesIdle = null, storeWritesIdle = Promise.resolve();
-const liveStoreReservations = new Map(); // block hex → { size, author }
+const liveStoreReservations = new Map(); // block hex → { size, author, group }
 let storeReservationVersion = 0;
 // The §14 byte budget is OPERATOR policy: read from LOCAL alone, never CFG (an
 // author-signed `quota` in CFG would let a bundle grant itself disk). No generous
 // default either — an under-injecting driver falls to 0 and FAILS CLOSED.
 function quota() { return LOCAL.quota != null ? LOCAL.quota : 0; }
-// How much of the quota an author may fill with its own placements (§13.2): all of it with
-// standing, none below zero, and newcomerShare of it for a peer this node has no record of.
+// How much of the quota an author may fill with its own placements in one group (§13.2): all
+// of it with standing there, none below zero, and newcomerShare of it with no record yet.
 function allowanceFor(score) {
   const share = CFG.newcomerShare;
   if (!(share >= 0 && share <= 1)) throw new Error("config: no newcomerShare — the host derives it (core.ts normaliseConfig)");
   return score > 0 ? quota() : score < 0 ? 0 : quota() * share;
 }
+function allowanceKey(group, authorHex) { return group + "/" + authorHex; }
 function touchedAt(h) { return touched.get(h) ?? 0; }
-function indexSet(h, size, author, cache) {
-  heldBlocks.set(h, { size, author, cache });
+function charge(e, sign) {
+  const key = allowanceKey(e.group, e.author);
+  committedFor.set(key, (committedFor.get(key) ?? 0) + sign * e.size);
+}
+function indexSet(h, size, author, group, cache) {
+  const e = { size, author, group, cache };
+  heldBlocks.set(h, e);
   bytesUsed += size;
-  if (cache) cacheBytes += size; else committedFor.set(author, (committedFor.get(author) ?? 0) + size);
+  if (cache) cacheBytes += size; else charge(e, 1);
 }
 function indexDrop(h) {
   const e = heldBlocks.get(h);
@@ -1513,7 +1541,7 @@ function indexDrop(h) {
   heldBlocks.delete(h);
   touched.delete(h);
   bytesUsed -= e.size;
-  if (e.cache) cacheBytes -= e.size; else committedFor.set(e.author, committedFor.get(e.author) - e.size);
+  if (e.cache) cacheBytes -= e.size; else charge(e, -1);
 }
 // Every write or delete runs between these, so a rebuild waits for the store to settle.
 function beginStoreWrite() {
@@ -1546,14 +1574,14 @@ async function ensureStoreIndex() {
         else if (key.endsWith(STORE_TAG)) tagged.push(key.slice(0, 64));
       }
       const entries = (await Promise.all(tagged.filter((hex) => recs.has(hex)).map(async (hex) => {
-        const tag = decodeStoreTag(await fsGet(hex + STORE_TAG, holderCall, STORE_TAG_LEN + 1));
-        return tag && { hex, size: await fsSize(hex + STORE_REC), author: toHex(tag.author), cache: tag.tier === TIER_CACHE };
+        const tag = decodeStoreTag(await fsGet(hex + STORE_TAG, holderCall, STORE_TAG_MAX + 1));
+        return tag && { hex, size: await fsSize(hex + STORE_REC), author: toHex(tag.author), group: tag.group, cache: tag.tier === TIER_CACHE };
       }))).filter((e) => e);
       if (reservationVersion !== storeReservationVersion || activeStoreWrites > 0) continue;
       heldBlocks = new Map();
       bytesUsed = 0; cacheBytes = 0; committedFor = new Map();
-      for (const e of entries) indexSet(e.hex, e.size, e.author, e.cache);
-      for (const [hex, r] of liveStoreReservations) if (!heldBlocks.has(hex)) indexSet(hex, r.size, r.author, false);
+      for (const e of entries) indexSet(e.hex, e.size, e.author, e.group, e.cache);
+      for (const [hex, r] of liveStoreReservations) if (!heldBlocks.has(hex)) indexSet(hex, r.size, r.author, r.group, false);
       storeIndexDirty = false;
       return;
     }
@@ -1571,7 +1599,7 @@ async function writeTag(h, cache, via) {
   const e = heldBlocks.get(h);
   if (!e) return;
   beginStoreWrite();
-  try { await fsPut(h + STORE_TAG, [encodeStoreTag(cache ? TIER_CACHE : TIER_COMMITTED, fromHex(e.author))], via); }
+  try { await fsPut(h + STORE_TAG, [encodeStoreTag(cache ? TIER_CACHE : TIER_COMMITTED, fromHex(e.author), e.group)], via); }
   finally { endStoreWrite(); }
 }
 // Move a held block between the tiers: the index at once, its tag after.
@@ -1579,18 +1607,18 @@ async function setTier(h, cache, via) {
   const e = heldBlocks.get(h);
   if (!e || e.cache === cache) return;
   indexDrop(h);
-  indexSet(h, e.size, e.author, cache);
+  indexSet(h, e.size, e.author, e.group, cache);
   try { await writeTag(h, cache, via); } catch { storeIndexDirty = true; }
 }
 // The one write path into the store: the tag, then one framed record, under the quota budget.
 //
 // Backend failures (full disk, backend error, realm OOM) surface as holder errors:
 // a holder has no console, so the verdict byte is its only way to report them.
-async function storeWrite(id, bytes, descriptor) {
+async function storeWrite(id, bytes, descriptor, group) {
   const hex = toHex(id);
   beginStoreWrite();
   try {
-    await fsPut(hex + STORE_TAG, [encodeStoreTag(TIER_COMMITTED, descriptor.subarray(0, 32))], holderCall);
+    await fsPut(hex + STORE_TAG, [encodeStoreTag(TIER_COMMITTED, descriptor.subarray(0, 32), group)], holderCall);
     await fsPut(hex + STORE_REC, [storeRecordHead(descriptor.length), descriptor, bytes], holderCall);
     touched.set(hex, Date.now());
   } catch (e) {
@@ -1631,42 +1659,49 @@ async function deleteBlocks(hexes, via) {
     }
   }));
 }
-// Admission (§4.3 descriptor, §6 sibling rule, §14 quota, §13.2 allowance), enforced by the
-// holder itself so the §10 invariant survives a malicious placer. A batch is checked
-// cumulatively: room, allowance and siblings count as blocks are provisionally accepted.
-// OFFER is the advisory pre-check; STORE re-checks with `reserve=true` and passes `size`, the
-// block in hand, and `parsed`, the descriptor it already parsed to hash it, and collects the
-// cache blocks evicted to make room in `evicted`. The signed descriptor is required on every
-// path — no descriptor-less branch past the sibling rule. `caller` sent the batch.
+// Admission (§4.3 descriptor, §5.1 group, §6 sibling rule, §14 quota, §13.2 allowance),
+// enforced by the holder itself so the §10 invariant survives a malicious placer. A batch is
+// checked cumulatively: room, allowance and siblings count as blocks are provisionally
+// accepted. OFFER is the advisory pre-check; STORE re-checks with `reserve=true` and passes
+// `size`, the block in hand, and `parsed`, the descriptor it already parsed to hash it, and
+// collects the cache blocks evicted to make room in `evicted`. The signed descriptor is
+// required on every path — no descriptor-less branch past the sibling rule. `caller` sent
+// the batch.
 async function admitBatch(offers, caller, reserve = false, evicted = null) {
   // A batch is one immutable admission snapshot. Issue its independent seam work
   // together (the holder's budget share paces it), then apply quota +
   // provisional-sibling decisions in wire order.
   const signed = await Promise.all(offers.map((o) => verifyDescriptor(o.descriptor, holderCall, o.parsed)));
-  const known = await knownAuthors(caller, signed);
-  // A caller placing chunks it authored is a routine placement, charged to its allowance.
-  // A repairer re-placing another author's chunk is not (§14: repair outranks routine).
-  const callerHex = toHex(caller);
+  // A caller placing chunks it authored is a routine placement, charged to its allowance in
+  // the chunk's group. A repairer re-placing another author's chunk is not (§14: repair
+  // outranks routine).
+  const callerHex = toHex(caller), me = myPeer();
   const routine = (sd) => toHex(sd.authorPk) === callerHex;
-  const allowance = signed.some((sd) => sd && routine(sd)) ? allowanceFor(await repScore(caller, Date.now(), holderCall)) : 0;
-  // Do this after crypto/roster awaits: once it returns, the quota/sibling decision
+  const allowance = new Map(); // group → the caller's allowance there
+  const t = Date.now();
+  for (const sd of signed) {
+    if (!sd || !routine(sd) || allowance.has(sd.descriptor.group)) continue;
+    allowance.set(sd.descriptor.group, allowanceFor(await repScore(sd.descriptor.group, caller, t, holderCall)));
+  }
+  // Do this after crypto/score awaits: once it returns, the quota/sibling decision
   // and optional STORE reservations below run without yielding, making the snapshot
   // atomic with respect to other inbound calls while disk writes remain concurrent.
   await ensureStoreIndex();
   // Cache gives way to commitments, so a commitment needs room only beside the committed tier.
   let room = Math.max(0, quota() - (bytesUsed - cacheBytes));
-  let callerUsed = committedFor.get(callerHex) ?? 0;
+  const callerUsed = new Map(); // group → the caller's committed bytes there, this batch included
+  const usedIn = (group) => callerUsed.get(group) ?? committedFor.get(allowanceKey(group, callerHex)) ?? 0;
   const held = (h) => heldBlocks.has(h) || pendingDeletes.has(h);
   const provisional = new Set();
   const verdicts = [];
   for (let oi = 0; oi < offers.length; oi++) {
     const o = offers[oi], sd = signed[oi];
     if (!sd) { verdicts.push(VERDICT_DESCRIPTOR); continue; }          // absent, forged, unsigned, or malformed
-    // ANCHOR the signature (§4.3): the key that signed it must be one this cohort knows,
-    // or the check proves nothing — the envelope carries its own pubkey, so any peer could
-    // self-sign with a fresh keypair.
-    if (!known.has(toHex(sd.authorPk))) { verdicts.push(VERDICT_DESCRIPTOR); continue; }
-    const d = sd.descriptor;
+    const d = sd.descriptor, authorHex = toHex(sd.authorPk);
+    // ANCHOR the signature (§4.3) in the roster (§5.1): the author must be a member of the
+    // group the chunk names, or this node itself, and so must the caller. A key that merely
+    // signed proves nothing, since the envelope carries its own pubkey.
+    if (!inGroup(d.group, callerHex) || (authorHex !== me && !inGroup(d.group, authorHex))) { verdicts.push(VERDICT_GROUP); continue; }
     if (!descriptorContains(d, o.blockId)) { verdicts.push(VERDICT_DESCRIPTOR); continue; } // not a block of this chunk
     // Geometry is the SIGNED descriptor's, never a field the sender picks: every block
     // is exactly blockSize bytes, so bytes in hand that disagree are not the block that
@@ -1676,7 +1711,7 @@ async function admitBatch(offers, caller, reserve = false, evicted = null) {
     const cost = STORE_REC_HEAD + d.blockSize + o.descriptor.length;
     if (cost > room) { verdicts.push(VERDICT_QUOTA); continue; }
     const own = routine(sd);
-    if (own && callerUsed + cost > allowance) { verdicts.push(VERDICT_ALLOWANCE); continue; }
+    if (own && usedIn(d.group) + cost > allowance.get(d.group)) { verdicts.push(VERDICT_ALLOWANCE); continue; }
     // The sibling rule, over the whole id list. A block this holder ALREADY has counts:
     // a k=1 chunk lists its one block m+1 times, so those m+1 slots are m+1 distinct
     // peers — accepting a second copy here would silently burn one of them and leave the
@@ -1689,16 +1724,15 @@ async function admitBatch(offers, caller, reserve = false, evicted = null) {
     }
     if (sibling) { verdicts.push(VERDICT_SIBLING); continue; }
     room -= cost;
-    if (own) callerUsed += cost;
+    if (own) callerUsed.set(d.group, usedIn(d.group) + cost);
     const blockHex = toHex(o.blockId);
     provisional.add(blockHex);
     if (reserve) {
       // Evict cache (§14 step 1) for whatever the free space falls short of.
       const short = cost - (quota() - bytesUsed);
       if (short > 0) for (const h of pickCacheVictims(short)) evicted.push(h);
-      const author = toHex(sd.authorPk);
-      indexSet(blockHex, cost, author, false);
-      liveStoreReservations.set(blockHex, { size: cost, author });
+      indexSet(blockHex, cost, authorHex, d.group, false);
+      liveStoreReservations.set(blockHex, { size: cost, author: authorHex, group: d.group });
       storeReservationVersion++;
     }
     verdicts.push(VERDICT_ACCEPTED);
@@ -1724,7 +1758,7 @@ async function acceptStoreBatch(stores, caller) {
   })), caller, true, evicted);
   await Promise.all([deleteBlocks(evicted, holderCall), ...valid.map(async ({ index, store: s }, i) => {
     if (admitted[i] !== VERDICT_ACCEPTED) { verdicts[index] = admitted[i]; return; }
-    try { await storeWrite(s.blockId, s.bytes, s.descriptor); verdicts[index] = VERDICT_ACCEPTED; }
+    try { await storeWrite(s.blockId, s.bytes, s.descriptor, parsed[index].descriptor.group); verdicts[index] = VERDICT_ACCEPTED; }
     catch { verdicts[index] = VERDICT_ERROR; }
   })]);
   return verdicts;
@@ -1791,7 +1825,7 @@ async function handle(arg) {
     const { op, args: payload } = readOp(body);
     switch (op) {
       case Op.PUT: return doPut(payload);
-      case Op.PUT_START: return doPutStart();
+      case Op.PUT_START: return doPutStart(payload);
       case Op.PUT_WINDOW: return doPutWindow(payload);
       case Op.PUT_FINISH: return putFinish();
       case Op.GET: return doGet(payload);
@@ -1800,7 +1834,8 @@ async function handle(arg) {
       case Op.REPAIR: return doRepair();
       case Op.REQUEST: return doRequest(payload);
       case Op.WARM: return doWarm();
-      case Op.SCORE: return repScoreBytes(payload, Date.now());
+      case Op.SCORE: return repScoreBytes(groupName(payload.subarray(32)), payload.subarray(0, 32), Date.now());
+      case Op.GROUPS: setRoster(decodeGroups(payload)); return EMPTY;
       case Op.STATS: return encodeStats();
       default: return EMPTY;
     }
@@ -1808,6 +1843,9 @@ async function handle(arg) {
   // A peer's wire frame: answer it, timing + counting it as holder work (the
   // `recv*` half of the STATS op, since the host has no inbound seam of its own).
   const type = body[0], payload = body.subarray(1); // a view — the decoders below own no bytes
+  // A link is not membership (§5.1): a peer in none of this node's groups learns nothing,
+  // not even what it holds, and an empty answer is what a turned-away request gets.
+  if (!rosterMembers.has(toHex(caller))) return EMPTY;
   const t0 = Date.now();
   let out;
   if (type === MsgType.HAVE) out = encodeMask(await Promise.all(decodeHaveReq(payload).map((id) => storeHas(id))));
@@ -1848,7 +1886,7 @@ async function doWarm() {
     // `r` is both the chunk index and the nonce counter — must advance each round
     // or this becomes a two-time pad (nothing here leaves the realm, but don't copy
     // this loop as an example with a fixed counter).
-    const chunk = await encodeChunk(buf, 0, r, K, LEVEL_BODY);                       // encrypt + RS-encode + hash + sign
+    const chunk = await encodeChunk(buf, 0, r, K, LEVEL_BODY, "warm");                       // encrypt + RS-encode + hash + sign
     const sd = await verifyDescriptor(chunk.descriptor, call);                   // Ed25519 verify (+ §16 scope preimage)
     // Warm the decode seam too, at k ≥ 2 only — a k=1 deployment never reaches the
     // codec on PUT/GET/repair, so there's no cold-JIT tax there to pay down.

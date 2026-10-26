@@ -24,7 +24,7 @@ import {
 import { toHex, bytesEqual, concatBytes } from "../build/host/util.js";
 import { writeOp } from "seedkernel-wasm/op-frame";
 import { netAddr, netReady } from "../build/host/storage-node.js";
-import { Op, decodePutResult } from "../build/host/protocol.js";
+import { Op, decodePutResult, encodeGroups } from "../build/host/protocol.js";
 import { buildBundle } from "./bundle-fixture.mjs";
 import { makeT } from "./harness.mjs";
 
@@ -86,7 +86,14 @@ export async function run(t) {
       }
     }
     await Promise.all(entries.map((e) => netReady(e.shell)));
+    await joinCohort(entries);
     void net;
+  };
+  // One group, "cohort", of every entry: a shell takes it through the guest's op, a
+  // StorageNode through setGroups.
+  const joinCohort = (entries) => {
+    const groups = { cohort: entries.map((e) => e.peerId) };
+    return Promise.all(entries.map((e) => e.app ? e.app.invoke(writeOp(Op.GROUPS, encodeGroups(groups))) : e.node.setGroups(groups)));
   };
 
   try {
@@ -128,7 +135,7 @@ export async function run(t) {
         // test scale so this tiny file takes the RS path.
         count: 1, network: net, sodium, wasm: { bundleBlob }, config: { blockSize: 1024 }, timeoutMs: TIMEOUT,
       });
-      const all = [...shells, { shell: sn.shell, peerId: sn.peerId, net: sn.net }];
+      const all = [...shells, { shell: sn.shell, peerId: sn.peerId, net: sn.net, node: sn }];
       await connectAll(net, all);
       try {
         const dataA = file(12800, 11), dataB = file(12800, 12);
@@ -177,6 +184,7 @@ export async function run(t) {
         await netAddr(e.shell, sn.peerId, `tcp://127.0.0.1:${sn.net.portOf("tcp")}`);
       }
       await Promise.all([netReady(sn.shell), ...shells.map((e) => netReady(e.shell))]);
+      await joinCohort([...shells, { peerId: sn.peerId, node: sn }]);
       try {
         // Written by the trusted host-side path, served entirely by confined shells.
         const data = file(12800, 21);

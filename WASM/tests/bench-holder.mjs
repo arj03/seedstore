@@ -76,10 +76,12 @@ const bootNode = (dir) => bootStorageNode(dir ? (cfg) => inProcessHost(nodeRawFi
   timeoutMs: 20000,
 });
 
-// A holder process: say where it listens, then answer each `stats` with Op.STATS.
+// A holder process: say where it listens, then answer each `stats` with Op.STATS. Its
+// group is itself and the initiator whose key it was handed.
 const holderArg = process.argv.indexOf("--holder");
 if (holderArg >= 0) {
   const node = await bootNode(process.argv[holderArg + 1] || undefined);
+  await node.setGroups({ bench: [process.argv[holderArg + 2], node.peerId] });
   process.on("message", async () => { process.send([...await node.stats()]); });
   process.send({ peerId: node.peerId, port: node.net.portOf("tcp") });
   await new Promise(() => {}); // until the bench kills it
@@ -96,13 +98,14 @@ const initiator = await bootNode();
 for (let i = 0; i < holders; i++) {
   const dir = ON_DISK ? mkdtempSync(join(tmpdir(), "seedstore-bench-holder-")) : "";
   if (dir) tmpDirs.push(dir);
-  const child = fork(fileURLToPath(import.meta.url), [...process.argv.slice(2), "--holder", dir]);
+  const child = fork(fileURLToPath(import.meta.url), [...process.argv.slice(2), "--holder", dir, initiator.peerId]);
   const [{ peerId, port }] = await once(child, "message");
   children.push({ child, peerId });
   await netAddr(initiator.shell, peerId, `tcp://127.0.0.1:${port}`);
 }
 await netReady(initiator.shell);
 const holderIds = children.map((c) => c.peerId);
+await initiator.setGroups({ bench: [initiator.peerId, ...holderIds] });
 
 /** One holder's received-request stats (the guest's read-and-clear Op.STATS), shaped
  *  as `{ [MsgType]: { n, ms, payloadBytes } }` for the per-type reporting below. */

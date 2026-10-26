@@ -6,6 +6,7 @@
 
 import { generateKeyPair, type Sodium } from "./sodium.js";
 import type { StorageConfig } from "./core.js";
+import type { Groups } from "./protocol.js";
 import { StorageNode, type WasmBytes } from "./storage-node.js";
 import { bootStorageNode, type StandUp } from "./runtime.js";
 import { LoopbackNetwork } from "./loopback.js";
@@ -25,6 +26,8 @@ export interface CohortOptions {
   wasm: WasmBytes;
   config?: Partial<StorageConfig>;
   quota?: number;
+  /** Each node's roster, given every node's key. Default: one group, "cohort", of them all. */
+  groups?: (peerIds: string[]) => Groups;
   timeoutMs?: number;
   guestDeadlineMs?: number;
   /** Silence the host transport driver's link-down diagnostic for every node in the cohort
@@ -37,9 +40,11 @@ export interface CohortOptions {
 
 /** Create `count` storage nodes on `network` and connect them into one cohort. */
 export async function createConnectedCohort(opts: CohortOptions): Promise<StorageNode[]> {
-  const nodes = await Promise.all(Array.from({ length: opts.count }, () => {
-    const identity = generateKeyPair(opts.sodium);
-    const peerId = toHex(identity.publicKey);
+  const identities = Array.from({ length: opts.count }, () => generateKeyPair(opts.sodium));
+  const peerIds = identities.map((id) => toHex(id.publicKey));
+  const groups = (opts.groups ?? ((ids) => ({ cohort: ids })))(peerIds);
+  const nodes = await Promise.all(identities.map((identity, i) => {
+    const peerId = peerIds[i];
     return bootStorageNode(opts.standUp, {
       sodium: opts.sodium,
       bundleBlob: opts.wasm.bundleBlob,
@@ -48,6 +53,7 @@ export async function createConnectedCohort(opts: CohortOptions): Promise<Storag
       dir: peerId,
       config: opts.config,
       quota: opts.quota,
+      groups,
       timeoutMs: opts.timeoutMs,
       guestDeadlineMs: opts.guestDeadlineMs,
       // Each node dials/listens through its own view of the shared fabric.

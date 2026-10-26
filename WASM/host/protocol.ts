@@ -7,7 +7,8 @@
 // batched the same way and is the BINDING admission point (re-checked there,
 // §4.2/§6/§14); OFFER is only an advisory pre-check.
 
-import { writeU32BE, readU32BE, concatBytes } from "./util.js";
+import { writeU32BE, readU32BE, concatBytes, fromHex, toHex } from "./util.js";
+import { groupBytes, groupName } from "./descriptor-core.js";
 
 /** The wire protocol id storage speaks (seedkernel §12.10), claimed by the
  *  bundle's signed manifest (`protocols`, scripts/storage-bundle.mjs) and named by
@@ -32,8 +33,8 @@ export const MsgType = {
 // caller (the seedkernel CLI's `--op`) and StorageNode both address it without
 // agreeing on a tag byte.
 export const Op = {
-  PUT: "put",               // whole-file: [plaintext ..] → the PutResult envelope
-  PUT_START: "putStart",    // open the stream → [windowBytes u32]
+  PUT: "put",               // whole-file, into the node's only group: [plaintext ..] → the PutResult envelope
+  PUT_START: "putStart",    // open the stream into a group: [group ..], or empty for the only one → [windowBytes u32]
   PUT_WINDOW: "putWindow",  // feed one window of plaintext
   PUT_FINISH: "putFinish",  // seal the stream → the PutResult envelope
   GET: "get",               // whole-file: [K 32][root ..] → plaintext
@@ -41,7 +42,8 @@ export const Op = {
   GET_NEXT: "getNext",      // the next window of plaintext
   REPAIR: "repair",         // one repair pass → [replaced u32]
   REQUEST: "request",       // one control-plane message: [peer 32][type u8][payload] → [ok u8][resp]
-  SCORE: "score",           // this node's decayed standing for a peer: [peer 32] → [score f64 LE]
+  SCORE: "score",           // this node's decayed standing for a peer in a group: [peer 32][group ..] → [score f64 LE]
+  GROUPS: "groups",         // replace the roster: encodeGroups → (empty)
   WARM: "warm",             // JIT warm-up, no result
   STATS: "stats",           // request counters, read-and-cleared: → `RequestStats` (below)
 } as const;
@@ -177,6 +179,54 @@ export const VERDICT_ERROR      = 5;
 // The author's own placements already fill what this holder grants it at its
 // standing (§13.2) — quota remains for others, and repair placements still land.
 export const VERDICT_ALLOWANCE  = 6;
+// The chunk's group is not one this holder lists the author or the caller in (§5.1).
+export const VERDICT_GROUP      = 7;
+
+// ── the roster (Op.GROUPS) ───────────────────────────────────────────────────
+// A node's groups (§5.1): name → member keys. Every member of every group is in its
+// cohort; anyone else is not. [count u16]([nameLen u8][name][n u16][key 32]*n)*
+export type Groups = Record<string, string[]>;
+
+export function encodeGroups(groups: Groups): Uint8Array {
+  const parts: Uint8Array[] = [];
+  const names = Object.keys(groups);
+  const head = new Uint8Array(2);
+  head[0] = names.length >> 8; head[1] = names.length & 255;
+  parts.push(head);
+  for (const name of names) {
+    const nb = groupBytes(name), members = groups[name];
+    const h = new Uint8Array(1 + nb.length + 2);
+    h[0] = nb.length; h.set(nb, 1);
+    h[1 + nb.length] = members.length >> 8; h[2 + nb.length] = members.length & 255;
+    parts.push(h);
+    for (const m of members) {
+      if (!/^[0-9a-f]{64}$/.test(m)) throw new Error("groups: a member is a 64-hex-character key: " + m);
+      parts.push(fromHex(m));
+    }
+  }
+  return concatBytes(parts);
+}
+
+/** name → Set of member hex. Throws on a malformed roster. */
+export function decodeGroups(buf: Uint8Array): Map<string, Set<string>> {
+  const out = new Map<string, Set<string>>();
+  if (buf.length < 2) throw new Error("groups: truncated");
+  const count = (buf[0] << 8) | buf[1];
+  let o = 2;
+  for (let g = 0; g < count; g++) {
+    if (o + 1 > buf.length) throw new Error("groups: truncated");
+    const nl = buf[o++];
+    if (o + nl + 2 > buf.length) throw new Error("groups: truncated");
+    const name = groupName(buf.subarray(o, o + nl)); o += nl;
+    const n = (buf[o] << 8) | buf[o + 1]; o += 2;
+    if (o + n * 32 > buf.length) throw new Error("groups: truncated");
+    const members = new Set<string>();
+    for (let i = 0; i < n; i++, o += 32) members.add(toHex(buf.subarray(o, o + 32)));
+    out.set(name, members);
+  }
+  if (o !== buf.length) throw new Error("groups: trailing bytes");
+  return out;
+}
 
 // ── STORE (the push, §6 step 4) ─────────────────────────────────────────────
 // Batched per holder: every block headed to a peer streams in one message,

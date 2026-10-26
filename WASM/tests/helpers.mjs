@@ -6,6 +6,7 @@
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { concatBytes } from "../build/host/util.js";
+import { parseSignedDescriptor } from "../build/host/descriptor-core.js";
 import { STORE_REC, STORE_TAG, TIER_COMMITTED, encodeStoreTag, storeRecordHead } from "../build/host/store-record.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -52,6 +53,15 @@ export function liveBlockCount(nodes, net, ids) {
  *  byte total from the fs lazily, so a later plant is invisible to it until
  *  the realm is rebuilt. */
 export function plantBlock(fs, idHex, bytes, descriptor, tier = TIER_COMMITTED) {
-  fs.put(idHex + STORE_TAG, encodeStoreTag(tier, descriptor.subarray(0, 32)));
+  // A test that only reads the bytes back may plant a stand-in descriptor: charge it to "cohort".
+  let group = "cohort";
+  try { group = parseSignedDescriptor(descriptor).descriptor.group; } catch { /* a stand-in */ }
+  fs.put(idHex + STORE_TAG, encodeStoreTag(tier, descriptor.subarray(0, 32), group));
   fs.put(idHex + STORE_REC, concatBytes([storeRecordHead(descriptor.length), descriptor, bytes]));
+}
+
+/** Put `nodes` in one group, `name`, after they booted without a roster. */
+export async function joinGroup(nodes, name = "cohort") {
+  const groups = { [name]: nodes.map((n) => n.peerId) };
+  await Promise.all(nodes.map((n) => n.setGroups(groups)));
 }

@@ -168,6 +168,8 @@ descriptor D:
                        //   config and readers never disagree with writers
   tail_bytes           // how many of the chunk's k×B plaintext bytes are real; the rest is
                        //   zero padding. A reader trims each chunk by its own signed number.
+  group                // the group the author placed the file in (§5.1), 1–32 ASCII characters;
+                       //   every holder reads it against its own roster
   auth_tag             // the chunk's detached ChaCha20-Poly1305 tag (§4.4)
   block_ids[0..n)      // ALWAYS n = k + m. Coded: 0..k data, k..n parity, one per peer.
                        //   k = 1: the same id listed m+1 times, one per peer (§4.1).
@@ -177,10 +179,10 @@ signed by the file's author
 **Admission checks.** Before accepting a block, a peer verifies three things about its descriptor:
 
 1. The author's signature is valid, over the scoped, tag-led preimage of §16.
-2. **The signing key is an identity the holder's cohort knows** (§5.1).
+2. **The signing key, and the peer placing the block, are members of the group the descriptor names, in the holder's own roster** (§5.1).
 3. The block's own `block_id` is in `block_ids`.
 
-The second check is what makes the first mean anything. The envelope carries the author's public key inside itself, so a signature checked against that key alone proves only that somebody held *some* private key: any cohort peer could mint a fresh keypair, self-sign a descriptor with a truncated sibling list, and concentrate a chunk on itself. Anchoring the author to a known peer costs nothing and makes a forgery **attributable**, which is reciprocity's job (§13). The price is that a cohort is mutual: a writer must be in its holders' rosters, and a peer evicted from the roster can no longer have its files repaired.
+The second check is what makes the first mean anything. The envelope carries the author's public key inside itself, so a signature checked against that key alone proves only that somebody held *some* private key: any cohort peer could mint a fresh keypair, self-sign a descriptor with a truncated sibling list, and concentrate a chunk on itself. Anchoring the author to a group member costs nothing and makes a forgery **attributable**, which is reciprocity's job (§13). The price is that a group is mutual: a writer must be in its holders' rosters under the group it names, and a peer dropped from the roster can no longer have its files repaired.
 
 A block that fails any check is rejected. The descriptor is therefore **mandatory on every placement message** (§18). Otherwise any cohort peer could put arbitrary bytes on a holder while sidestepping these checks and the sibling rule (§6). The descriptor's signed `B` is also what a holder charges against its quota (§14).
 
@@ -233,6 +235,12 @@ Two questions need answers (*which peers should hold a block?* and *who holds it
 ### 5.1 The cohort
 
 A node keeps connections to a **bounded set of peers it has a relationship with**: direct contacts plus, optionally, a hop or two out. There is no global index or routing table, and nothing about who holds what exists outside your cohort. New peers join the way Scuttlebutt peers do, by introduction or through a rendezvous point. Cohorts are tens to low hundreds of peers, which keeps every operation here cheap.
+
+**The cohort is a roster of named groups**, kept by each node: say `mine` for one person's devices and `friends` for a circle of friends, each a list of member keys. The cohort is every member of every group, and nobody else: an authenticated link alone admits nothing, and a node answers no request from a peer outside its roster. The roster is dynamic. Whatever keeps it, the operator or a separate groups app, replaces it whole at any time, and the next request is judged by the new one. Who may link at all stays the transport's own setting.
+
+- **A file lives in one group.** A PUT names the group, the descriptor signs its name (§4.3), and its blocks are placed on that group's members only. A holder stores a chunk only if it lists both the author and the placer under that name.
+- **Goodwill is per group** (§13). Standing a peer earns by serving one group's chunks counts in that group and no other, and so does the allowance it buys (§13.2). Being a reliable friend earns nothing among someone's own devices, and the reverse.
+- **Names are local.** Each node keeps its own member list per name, so `friends` means whoever this node lists as friends. Two nodes cooperate on a group when each lists the other under the same name.
 
 ### 5.2 Have/want is the whole discovery layer
 
@@ -394,13 +402,13 @@ The reward for being a good citizen is **durability for your own data and good s
 
 ### 13.1 The local score
 
-Each node keeps, per peer, a small **decayed reciprocity balance**, built only from what it has *witnessed directly*:
+Each node keeps, per peer **and per group** (§5.1), a small **decayed reciprocity balance**, built only from what it has *witnessed directly*. An observation counts in the group of the chunk it was made on:
 
 - **Service received**: blocks the peer has held and served for you, confirmed by the verification-fetches that already back repair (§8). A pass raises the score; a miss lowers it. This reuses the ordinary fetch path, with no separate challenge protocol and no proof object to store.
 - **Reciprocity**: netted against how much you currently store *for* that peer, so the score reflects a running give-and-take.
 - **Recency**: old observations decay, so a peer that stops serving fades, and the state never grows without bound.
 
-`reputation.score(pubkey) → score` is a read-only query over these counters. Placement (§6), holders deciding whether to accept an `offer` (§18), and readers choosing whom to fetch from first all use it. The computation is arithmetic over locally witnessed events, so it lives in the pure, no-grant `reputation` module (§17). A deployment that stores only among one person's devices can replace it with a constant.
+`reputation.score(group, pubkey) → score` is a read-only query over these counters. Placement (§6), holders deciding whether to accept an `offer` (§18), and readers choosing whom to fetch from first all use it. The computation is arithmetic over locally witnessed events, so it lives in the pure, no-grant `reputation` module (§17). A deployment that stores only among one person's devices can replace it with a constant.
 
 ### 13.2 What it buys (the incentive loop)
 

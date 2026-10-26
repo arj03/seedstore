@@ -29,7 +29,7 @@ import {
 } from "../build/host/protocol.js";
 import { signDescriptor } from "../build/host/descriptor.js";
 import { toHex, fromHex, bytesEqual } from "../build/host/util.js";
-import { plantBlock } from "./helpers.mjs";
+import { joinGroup, plantBlock } from "./helpers.mjs";
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -65,6 +65,7 @@ async function tcpCohort({ count, sodium, wasm, config, baseDir }) {
     }));
   }
   for (let i = 0; i < count; i++) for (let j = i + 1; j < count; j++) await StorageNode.connect(nodes[i], nodes[j]);
+  await joinGroup(nodes);
   await sleep(100); // let inbound links finish promoting
   return { nodes, dirs };
 }
@@ -109,6 +110,7 @@ export async function run(t) {
       sodium, ...wasm, identity: idB, timeoutMs: 3000,
       suppressLinkLog: true, channels: net.view(toHex(idB.publicKey)),
     });
+    await joinGroup([S, B]);
     try {
       t.eq(net.view("nobody").connect("wss://127.0.0.1:1"), null,
         "wss is not a route this fabric has — no TLS under an in-process pair");
@@ -120,7 +122,7 @@ export async function run(t) {
 
       const bytes = file(8192, 33);
       const bid = S.crypto.blockId(idB.publicKey, bytes);
-      const desc = signDescriptor(sodium, { level: 0, k: 1, m: 0, blockSize: bytes.length, tailBytes: bytes.length, authTag: new Uint8Array(16), blockIds: [bid] }, idB.publicKey, idB.privateKey);
+      const desc = signDescriptor(sodium, { group: "cohort", level: 0, k: 1, m: 0, blockSize: bytes.length, tailBytes: bytes.length, authTag: new Uint8Array(16), blockIds: [bid] }, idB.publicKey, idB.privateKey);
       const stored = decodeMask(await B.request(S.peerId, typed(MsgType.STORE, encodeStoreBatch([{ blockId: bid, descriptor: desc, bytes }]))));
       t.eq(stored[0], VERDICT_ACCEPTED, "STORE lands through the ws codec");
       const back = decodeFetchBatchRes(await B.request(S.peerId, typed(MsgType.FETCH, encodeFetchBatchReq([bid]))))[0];
@@ -256,6 +258,7 @@ export async function run(t) {
       sodium, ...wasm, identity: idB, timeoutMs: 3000,
       suppressLinkLog: true, channels: nodeChannels(),
     });
+    await joinGroup([S, B]);
     await netAddr(B.shell, S.peerId, `ws://127.0.0.1:${S.net.portOf("ws")}`, secretS);
     await netReady(B.shell, 8000);
     await sleep(50);
@@ -270,7 +273,7 @@ export async function run(t) {
       // The block travels with its author-signed chunk descriptor (§4.3) — the holder
       // verifies it before admitting, here as on any other transport. Both nodes load the
       // same bundle, so they share one signing scope (author).
-      const desc = signDescriptor(sodium, { level: 0, k: 1, m: 0, blockSize: bytes.length, tailBytes: bytes.length, authTag: new Uint8Array(16), blockIds: [bid] }, idB.publicKey, idB.privateKey);
+      const desc = signDescriptor(sodium, { group: "cohort", level: 0, k: 1, m: 0, blockSize: bytes.length, tailBytes: bytes.length, authTag: new Uint8Array(16), blockIds: [bid] }, idB.publicKey, idB.privateKey);
 
       const stored = decodeMask(await B.request(S.peerId, typed(MsgType.STORE, encodeStoreBatch([{ blockId: bid, descriptor: desc, bytes }]))));
       t.eq(stored[0], VERDICT_ACCEPTED, "STORE acknowledged over ws");

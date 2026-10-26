@@ -168,7 +168,7 @@ export async function run(t) {
     // The WebRTC case: a small frame cap forces ~one block per STORE message, so
     // a big file becomes many single-block STOREs. OFFER still batches (tiny
     // descriptors); the only lever left is pipelining those per-holder STOREs.
-    const bs = 4200;                                 // block big enough to dominate a STORE message
+    const bs = 4400;                                 // block big enough to dominate a STORE message, and to hold the 16-entry index
     const Nw = 16;                                   // chunks ≫ holders, so a per-holder window can bind
     const cap = bs + 2000;                           // one ~4 KiB block + headers fits a STORE; two don't.
     const webrtcData = file(Nw * config.k * bs, 9);  // exactly Nw RS chunks
@@ -397,7 +397,7 @@ export async function run(t) {
       };
       const ids = Array.from({ length: 32 }, (_, i) => { const b = new Uint8Array(32); b[0] = i; return toHex(b); });
       let applied = 0;
-      await runFetchTasks(new Map([["peerA", ids]]), fetchMaxIds(), () => null, (peer, h, b) => { if (b) applied++; });
+      await runFetchTasks(new Map([["peerA", ids]]), fetchMaxIds(), () => ({ group: "cohort" }), (peer, h, b) => { if (b) applied++; });
       return { messages, peak, applied, window: fanoutWindow() };
     })()`, ctx);
     t.eq(r.applied, 32, `one pass fetches every block the plan asked for (${r.applied}/32 in ${r.messages} messages)`);

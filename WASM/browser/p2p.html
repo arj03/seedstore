@@ -251,6 +251,17 @@ hostReady.catch(() => {});
 bundleReady.catch(() => {});
 
 let node = null, net = null, runtime = null, dialTimer = null, peersEnough = false;
+// This tab's one group, "room" (§5.1), the one serve-holder stores into too: the peers in the
+// box (WebSocket mode) or the room's members (WebRTC mode). A link alone admits nothing, so a
+// peer is stored for only once it is a member here, and a holder stores for this tab only
+// once it lists this tab's key.
+const members = new Set();
+let rosterChain = Promise.resolve();
+function addMember(key) {
+  if (!node || members.has(key)) return;
+  members.add(key);
+  rosterChain = rosterChain.then(() => node.setGroups({ room: [node.peerId, ...members] })).catch((e) => log(`roster: ${e?.message ?? e}`));
+}
 
 const transport = () => document.querySelector('input[name="transport"]:checked').value;
 
@@ -313,7 +324,20 @@ async function boot() {
     const host = await hostReady;
     // One identity, shared by the transport and the storage node so their peer ids
     // match (the transport registers under this id).
-    const identity = sodium.crypto_sign_keypair();
+    // Kept across reloads where the browser allows, so a holder that lists this tab in its
+    // "room" group (§5.1) still knows it next time.
+    const identity = (() => {
+      try {
+        const saved = localStorage.getItem("seedstore-p2p-key");
+        if (saved && /^[0-9a-f]{128}$/.test(saved)) {
+          const sk = Uint8Array.from(saved.match(/../g), (b) => parseInt(b, 16));
+          return { publicKey: sk.slice(32), privateKey: sk };
+        }
+      } catch { /* no storage: a fresh key */ }
+      const kp = sodium.crypto_sign_keypair();
+      try { localStorage.setItem("seedstore-p2p-key", hex(kp.privateKey)); } catch { /* not kept */ }
+      return kp;
+    })();
     $("me").textContent = hex(identity.publicKey).slice(0, 16) + "…";
 
     const mode = transport();
@@ -381,6 +405,8 @@ async function boot() {
     // no store), so the first PUT isn't cold: a cold PUT encodes the WHOLE file before
     // the first byte reaches the wire, so that ~0.25 s lands entirely ahead of the
     // transfer. Awaited before enabling PUT so it can't overlap a real initiator call.
+    await node.setGroups({ room: [node.peerId] });
+    log(`this tab's key: ${node.peerId} — a holder stores for it only if its "room" group lists that key.`);
     log("warming codec + crypto (first-PUT JIT)…");
     await node.warm();
     startPeerPolling();
@@ -402,6 +428,7 @@ async function boot() {
         ...(relaySecret ? { secret: relaySecret, blake2b: (m) => sodium.crypto_generichash(64, m) } : {}),
         onMember: (_room, key, present) => {
           if (!present || key === me) return;
+          addMember(key);
           void netAddr(runtime.shell, key, "relay+" + relayUrl, contactSecret)
             .then(() => (me < key ? netReady(runtime.shell, 0) : undefined)).catch(() => {});
         },
@@ -435,6 +462,7 @@ function dialWs() {
   log(`dialing ${specs.length} node(s) — links come up as each authenticates…`);
   for (const spec of specs) {
     void netPeer(runtime.shell, spec, "ws")
+      .then(addMember)
       .catch((e) => log(`  bad peer "${spec}": ${e?.message ?? e}`));
   }
   // `addr` only TEACHES the destination; the signed guest dials on `ready`, which tops
@@ -519,6 +547,10 @@ $("store").onclick = async () => {
       if (/allowance/.test(reasons)) {
         log(`  ⚠ ${count} holder reply/replies refused on ALLOWANCE — this tab has no standing with them yet, so it may fill only their newcomerShare of quota (§13.2).`);
         log("    fix: hold and serve blocks for those holders to earn standing, or set newcomerShare: 1 in their local config.");
+      }
+      if (/not-in-group/.test(reasons)) {
+        log(`  ⚠ ${count} holder reply/replies refused as NOT-IN-GROUP — those holders do not list this tab in their "room" group (§5.1).`);
+        log(`    fix: add ${node.peerId} to each holder's groups.room, or join the same relay room.`);
       }
       if (/descriptor/.test(reasons)) {
         log("  ⚠ holders rejected the DESCRIPTOR — it does not verify under their app's signing scope (§16).");

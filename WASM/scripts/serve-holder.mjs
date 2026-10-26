@@ -16,7 +16,7 @@
 
 import { loadSodium, loadWasmBytes, bootStorageNode, inProcessStandUp, generateKeyPair, toHex, fromHex } from "../build/host/node.js";
 import { nodeChannels, nodeDatagrams } from "seedkernel-wasm/shell-node";
-import { joinRelayRoom } from "./relay-room.mjs";
+import { joinRelayRoom, roomGroup } from "./relay-room.mjs";
 
 const short = (id) => id.slice(0, 12) + "…";
 const base = (process.env.RELAY ?? "ws://localhost:8080").replace(/\/+$/, "");
@@ -59,8 +59,10 @@ const node = await bootStorageNode(inProcessStandUp, {
   identity, timeoutMs: 6000, contactSecret, channels: nodeChannels(), datagrams: nodeDatagrams(),
   sodium, ...wasm, config, quota: 64 * 1024 * 1024,
 });
-// Meet in the room: members are dialed through the relay, and console ones move to UDP.
-await joinRelayRoom({ shell: node.shell, identity, sodium, relay: base, room, secret: contactSecret, relaySecret });
+// Meet in the room: members are dialed through the relay, and console ones move to UDP. Everyone
+// met there joins this node's group "room", the one p2p.html stores into (§5.1); the room's
+// contact secret is what keeps strangers out of it.
+await joinRelayRoom({ shell: node.shell, identity, sodium, relay: base, room, secret: contactSecret, relaySecret, onMember: roomGroup(node, "room") });
 
 console.log(`\nseedstore holder ${short(node.peerId)} ready — handlers installed: ${node.handlersInstalled()}`);
 console.log(`joined room "${room}" on ${base}${relaySecret ? " (private relay)" : ""}  (RS k=${config.k} m=${config.m}, ${config.blockSize} B blocks)`);

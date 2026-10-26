@@ -12,11 +12,11 @@ import {
   LoopbackNetwork, loadWasmBytes, loadSodium, createConnectedCohort, StorageNode,
   bootStorageNode, inProcessStandUp, inProcessHost,
 } from "../build/host/node.js";
-import { encodeFetchBatchReq, decodeFetchBatchRes, encodeStoreBatch, decodeMask, FETCH_UNANSWERED, VERDICT_ACCEPTED, VERDICT_DECLINED, VERDICT_QUOTA, VERDICT_SIBLING, VERDICT_DESCRIPTOR, MsgType } from "../build/host/protocol.js";
+import { encodeFetchBatchReq, decodeFetchBatchRes, encodeStoreBatch, encodeHaveReq, decodeMask, FETCH_UNANSWERED, VERDICT_ACCEPTED, VERDICT_DECLINED, VERDICT_QUOTA, VERDICT_SIBLING, VERDICT_DESCRIPTOR, VERDICT_GROUP, MsgType } from "../build/host/protocol.js";
 import { parseSignedDescriptor, signDescriptor, encodeDescriptorList } from "../build/host/descriptor.js";
 import { memoryRawFiles } from "seedkernel-wasm/fs-memory";
 import { toHex, fromHex, bytesEqual } from "../build/host/util.js";
-import { liveBlockCount, newKey, plantBlock } from "./helpers.mjs";
+import { joinGroup, liveBlockCount, newKey, plantBlock } from "./helpers.mjs";
 import { TIER_CACHE, TIER_COMMITTED } from "../build/host/store-record.js";
 
 const TIMEOUT = 40; // ms — keep offline-peer timeouts snappy in tests
@@ -259,6 +259,7 @@ export async function run(t) {
     }
     const all = [owner, ...holders];
     for (let i = 0; i < all.length; i++) for (let j = i + 1; j < all.length; j++) await StorageNode.connect(all[i], all[j]);
+    await joinGroup(all);
 
     const data = file(1024, 47);                           // 1 block → k=1 chunk
     const put = await owner.put(data);
@@ -448,6 +449,7 @@ export async function run(t) {
     for (let i = 0; i < nodes.length; i++) {
       for (let j = i + 1; j < nodes.length; j++) await StorageNode.connect(nodes[i], nodes[j]);
     }
+    await joinGroup(nodes);
 
     const data = file(4096, 41); // 4 blocks → 2 RS(2,2) chunks, block i of each on holder i
     const put = await owner.put(data);
@@ -514,6 +516,7 @@ export async function run(t) {
     const holder = await mk(holderId, (cfg) => inProcessHost(failing).standUp(cfg));
     try {
       await StorageNode.connect(writer, holder);
+      await joinGroup([writer, holder]);
       let err = null;
       try { await writer.put(file(config.blockSize, 63)); } catch (e) { err = e; }
       t.ok(err !== null, "PUT fails when the only holder cannot commit");
@@ -535,7 +538,7 @@ export async function run(t) {
       const bytes = file(config.blockSize, 77);
       const bid = a.crypto.blockId(a.identity.publicKey, bytes);
       const desc = (id, sk) => signDescriptor(
-        sodium, { level: 0, k: 1, m: 0, blockSize: config.blockSize, tailBytes: config.blockSize, authTag: new Uint8Array(16), blockIds: [bid] },
+        sodium, { group: "cohort", level: 0, k: 1, m: 0, blockSize: config.blockSize, tailBytes: config.blockSize, authTag: new Uint8Array(16), blockIds: [bid] },
         id.publicKey, id.privateKey,
       );
 
@@ -549,11 +552,11 @@ export async function run(t) {
       const bytes2 = file(config.blockSize, 78);
       const bid2 = a.crypto.blockId(stranger.publicKey, bytes2);
       const forged = signDescriptor(
-        sodium, { level: 0, k: 1, m: 0, blockSize: config.blockSize, tailBytes: config.blockSize, authTag: new Uint8Array(16), blockIds: [bid2] },
+        sodium, { group: "cohort", level: 0, k: 1, m: 0, blockSize: config.blockSize, tailBytes: config.blockSize, authTag: new Uint8Array(16), blockIds: [bid2] },
         stranger.publicKey, stranger.privateKey,
       );
       const unknown = decodeMask(await a.request(b.peerId, typed(MsgType.STORE, encodeStoreBatch([{ blockId: bid2, descriptor: forged, bytes: bytes2 }]))));
-      t.eq(unknown[0], VERDICT_DESCRIPTOR, "a self-signed descriptor from a fresh keypair is declined — the signature is not anchored");
+      t.eq(unknown[0], VERDICT_GROUP, "a self-signed descriptor from a fresh keypair is declined — its author is in no group the holder lists");
       t.ok(!b.store.has(bid2), "nothing committed for the unanchored descriptor");
     } finally { [a, b].forEach((n) => n.close()); }
   }
@@ -570,7 +573,7 @@ export async function run(t) {
       const bytes = file(config.blockSize, 91);
       const bid = a.crypto.blockId(a.identity.publicKey, bytes);
       const env = signDescriptor(
-        sodium, { level: 0, k: 1, m: 2, blockSize: config.blockSize, tailBytes: config.blockSize, authTag: new Uint8Array(16), blockIds: [bid, bid, bid] },
+        sodium, { group: "cohort", level: 0, k: 1, m: 2, blockSize: config.blockSize, tailBytes: config.blockSize, authTag: new Uint8Array(16), blockIds: [bid, bid, bid] },
         a.identity.publicKey, a.identity.privateKey,
       );
       const first = decodeMask(await a.request(b.peerId, typed(MsgType.STORE, encodeStoreBatch([{ blockId: bid, descriptor: env, bytes }]))));
@@ -595,7 +598,7 @@ export async function run(t) {
       const sign = (d) => signDescriptor(sodium, d, owner.identity.publicKey, owner.identity.privateKey);
       const at = (level, sealed, tailBytes) => {
         const id = owner.crypto.blockId(owner.identity.publicKey, sealed.ciphertext);
-        return { id, ciphertext: sealed.ciphertext, env: sign({ level, k: 1, m: 1, blockSize: cfg.blockSize, tailBytes, authTag: sealed.authTag, blockIds: [id, id] }) };
+        return { id, ciphertext: sealed.ciphertext, env: sign({ group: "cohort", level, k: 1, m: 1, blockSize: cfg.blockSize, tailBytes, authTag: sealed.authTag, blockIds: [id, id] }) };
       };
       // Inner: a level-1 chunk. Outer: ANOTHER level-1 chunk whose plaintext is a list
       // naming the inner one. The walk therefore goes 1 → 1 and never descends. tailBytes
@@ -628,7 +631,7 @@ export async function run(t) {
       const data = file(cfg.k * cfg.blockSize * 9 - 77, 55); // 9 chunks → 9 → 5 → 3 → 2 → 1: four index levels
       const put = await nodes[0].put(data);
       t.eq(put.chunkCount, 9, "nine leaf chunks");
-      t.ok(put.root.length === 32 + 64 + 13 + 16 + 4 * 32, "the root is a signed descriptor envelope, not a 32-byte id");
+      t.ok(put.root.length === 32 + 64 + 13 + 1 + "cohort".length + 16 + 4 * 32, "the root is a signed descriptor envelope, not a 32-byte id");
       t.ok(parseSignedDescriptor(put.root).descriptor.level >= 2, "the roll-up needed more than one index level");
       t.ok(bytesEqual(await nodes[0].get(put.root, put.key), data), "a multi-level index round-trips");
       // Every block placed is exactly blockSize, index blocks included, so no block
@@ -641,6 +644,56 @@ export async function run(t) {
       }
       t.eq(oversize, 0, "no block on the wire exceeds blockSize — the index has no size ceiling");
     } finally { nodes.forEach((n) => n.close()); }
+  }
+
+  t.group("a linked peer outside the roster is answered nothing, and the roster changes at runtime (§5.1)");
+  {
+    const net = new LoopbackNetwork();
+    // Four linked nodes, three of them a group: a link alone admits nothing.
+    const [a, b, c, stranger] = await createConnectedCohort({ suppressLinkLog: true, count: 4, network: net, sodium, wasm, config, timeoutMs: TIMEOUT,
+      groups: (ids) => ({ cohort: ids.slice(0, 3) }) });
+    const have = async () => (await stranger.request(b.peerId, typed(MsgType.HAVE, encodeHaveReq([new Uint8Array(32)])))).length;
+    try {
+      t.ok((await b.linkedPeers()).includes(stranger.peerId), "the stranger is linked");
+      t.eq(await have(), 0, "a linked stranger's HAVE is answered with nothing");
+      const put = await a.put(file(2048, 91));
+      t.ok(bytesEqual(await a.get(put.root, put.key), file(2048, 91)), "members still store and read");
+      t.eq(stranger.store.list().length, 0, "nothing was placed on the stranger");
+
+      await b.setGroups({ cohort: [a.peerId, b.peerId, c.peerId, stranger.peerId] });
+      t.eq(await have(), 1, "once b adds it to the group, b answers it");
+      await b.setGroups({ cohort: [a.peerId, b.peerId, c.peerId] });
+      t.eq(await have(), 0, "and once b drops it again, b goes quiet");
+    } finally { [a, b, c, stranger].forEach((n) => n.close()); net.close(); }
+  }
+
+  t.group("a PUT stays inside its group, and goodwill earned in one group counts only there (§5.1, §13)");
+  {
+    const net = new LoopbackNetwork();
+    const cfg = { k: 1, m: 1, blockSize: 1024 };
+    // Owner a is in both groups; b, c only in x; d, e only in y.
+    const nodes = await createConnectedCohort({ suppressLinkLog: true, count: 5, network: net, sodium, wasm, config: cfg, timeoutMs: TIMEOUT,
+      groups: ([a, b, c, d, e]) => ({ x: [a, b, c], y: [a, d, e] }) });
+    try {
+      const [a, b, c, d, e] = nodes;
+      let err = null;
+      try { await a.put(file(1024, 92)); } catch (x) { err = x; }
+      t.ok(err && /name a group/.test(err.message), "with two groups, a PUT must name one");
+      const put = await a.put(file(4096, 93), { group: "x" });
+      t.ok(b.store.list().length > 0 && c.store.list().length > 0, "the group's members hold the file");
+      t.eq(d.store.list().length + e.store.list().length, 0, "no block landed outside the group");
+      t.ok(bytesEqual(await a.get(put.root, put.key), file(4096, 93)), "the file reads back");
+      t.ok(await a.score(b.identity.publicKey, "x") > 0, "serving the read earned b standing in x");
+      t.eq(await a.score(b.identity.publicKey, "y"), 0, "and none in y");
+
+      // A chunk naming a group the holder does not list it in is refused, whatever its signature.
+      const bytes = file(1024, 94);
+      const id = b.crypto.blockId(d.identity.publicKey, bytes);
+      const env = signDescriptor(sodium, { group: "x", level: 0, k: 1, m: 0, blockSize: 1024, tailBytes: 1024, authTag: new Uint8Array(16), blockIds: [id] },
+        d.identity.publicKey, d.identity.privateKey);
+      const verdict = decodeMask(await d.request(b.peerId, typed(MsgType.STORE, encodeStoreBatch([{ blockId: id, descriptor: env, bytes }]))));
+      t.eq(verdict[0], VERDICT_GROUP, "d may not store into x, a group b does not list it in");
+    } finally { nodes.forEach((n) => n.close()); net.close(); }
   }
 
   // The distinct chunks a node holds a block of, told apart by descriptor signature.
@@ -720,14 +773,14 @@ export async function run(t) {
   t.group("over quota, a holder releases commitments only after re-placing them elsewhere (§14)");
   {
     const net = new LoopbackNetwork();
-    // Each planted block costs 1161 (1000 + 157 + 4): two overrun a 1500-byte quota.
+    // Each planted block costs 1168 (1000 + 164 + 4): two overrun a 1500-byte quota.
     const [a, b, c] = await createConnectedCohort({ suppressLinkLog: true, count: 3, network: net, sodium, wasm, quota: 1500, config: { newcomerShare: 1 }, timeoutMs: TIMEOUT });
     try {
       const ids = [];
       for (const seed of [81, 82]) {
         const bytes = file(1000, seed);
         const id = b.crypto.blockId(a.identity.publicKey, bytes);
-        const env = signDescriptor(sodium, { level: 0, k: 1, m: 0, blockSize: 1000, tailBytes: 1000, authTag: new Uint8Array(16), blockIds: [id] },
+        const env = signDescriptor(sodium, { group: "cohort", level: 0, k: 1, m: 0, blockSize: 1000, tailBytes: 1000, authTag: new Uint8Array(16), blockIds: [id] },
           a.identity.publicKey, a.identity.privateKey);
         plantBlock(b.fs, toHex(id), bytes, env);
         ids.push(id);

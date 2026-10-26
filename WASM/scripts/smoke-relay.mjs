@@ -17,7 +17,7 @@ import {
 import { MsgType, encodeHaveReq, decodeMask } from "../build/host/protocol.js";
 import { bytesEqual } from "../build/host/util.js";
 import { nodeChannels, nodeDatagrams } from "seedkernel-wasm/shell-node";
-import { joinRelayRoom } from "./relay-room.mjs";
+import { joinRelayRoom, roomGroup } from "./relay-room.mjs";
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -90,7 +90,7 @@ try {
   const enter = async (e) => {
     e.room = await joinRelayRoom({
       shell: e.node.shell, identity: e.identity, sodium, relay: RELAY, room: ROOM, secret: e.contact,
-      relaySecret: RELAY_SECRET,
+      relaySecret: RELAY_SECRET, onMember: roomGroup(e.node, "room"),
     });
   };
   for (const e of nodes) await enter(e);

@@ -8,7 +8,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { ensureSodium } from "./helpers.mjs";
+import { ensureSodium, joinGroup } from "./helpers.mjs";
 import { bytesEqual, toHex } from "../build/host/util.js";
 
 const buildDir = join(dirname(fileURLToPath(import.meta.url)), "..", "build");
@@ -48,6 +48,7 @@ export async function run(t) {
     for (let i = 0; i < nodes.length; i++) {
       for (let j = i + 1; j < nodes.length; j++) await StorageNode.connect(nodes[i], nodes[j]);
     }
+    await joinGroup(nodes);
     t.ok(nodes[0].handlersInstalled(), "node booted through the browser fetch path");
 
     const data = new Uint8Array(200).map((_, i) => (i * 5 + 1) & 255);
