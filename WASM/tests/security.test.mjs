@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import vm from "node:vm";
 import { Crypto } from "../build/host/crypto.js";
 import { signDescriptor, verifyDescriptor, parseSignedDescriptor } from "../build/host/descriptor.js";
-import { encodeStoreBatch, encodeFetchBatchRes, MsgType, VERDICT_ACCEPTED } from "../build/host/protocol.js";
+import { encodeStoreBatch, encodeFetchBatchRes, MsgType, VERDICT_ACCEPTED, VERDICT_NOT_AUTHOR } from "../build/host/protocol.js";
 import { loadSodium, loadWasmBytes, LoopbackNetwork, createConnectedCohort } from "../build/host/node.js";
 import { bytesEqual, writeU32BE } from "../build/host/util.js";
 import { newKey } from "./helpers.mjs";
@@ -34,7 +34,9 @@ export async function run(t) {
     t.ok(verifyDescriptor(sodium, forged) !== null, "the attack carries a valid cohort signature");
     t.ok(await store(forged) !== VERDICT_ACCEPTED, "re-signed ciphertext is rejected even on a fresh holder");
     t.ok(!holder.store.has(id), "the attack cannot squat on the original block id");
-    t.eq(await store(legitimate), VERDICT_ACCEPTED, "a third-party repairer can relay the authentic descriptor");
+    t.eq(await store(legitimate), VERDICT_NOT_AUTHOR, "a third party cannot push even the author's authentic block: a repair is pulled (§9)");
+    t.eq((await owner.request(holder.peerId, typed(MsgType.STORE, encodeStoreBatch([{ blockId: id, descriptor: legitimate, bytes }]))))[0],
+      VERDICT_ACCEPTED, "the author places it");
     t.ok(await store(forged) !== VERDICT_ACCEPTED, "re-signing cannot replace an existing record either");
     t.ok(bytesEqual(holder.store.get(id).descriptor, legitimate), "the author's repair metadata stays intact");
     t.ok(!bytesEqual(id, crypto.blockId(attacker.identity.publicKey, bytes)), "identical ciphertext under another author has a different id");
@@ -92,7 +94,7 @@ export async function run(t) {
         if (typeof globalThis[name] !== "function") throw new Error("fault injection: the guest no longer defines " + name);
         globalThis[name] = fn;
       };
-      for (const name of ["reconstructChunks", "repairChunk", "blockHash", "toHex", "bytesEqual",
+      for (const name of ["reconstructChunks", "repairChunk", "groupPeers", "blockHash", "toHex", "bytesEqual",
                           "encodeFetchBatchRes", "decodeFetchBatchReq", "decodeFetchBatchRes"]) {
         if (typeof globalThis[name] !== "function") throw new Error("fault injection: the guest no longer defines " + name);
       }
@@ -114,21 +116,20 @@ export async function run(t) {
       // Audit each distinct id once, matching a one-block replica's evidence.
       // liveHolders may query a replica id multiple times; answer the requested
       // count on the healthy side while keeping the adversary's malformed frame.
-      stub("netSend", async (peer, type, payload) =>
-        peer === bad ? badReply : encodeFetchBatchRes(decodeFetchBatchReq(payload).map(() => decodeFetchBatchRes(good)[0])));
-      stub("placeChunksBatched", async jobs => {
-        for (const job of jobs) {
-          for (let j=0;j<job.slotIds.length;j++) {
-            if (!bytesEqual(await blockHash(d, job.slotBlocks[j]), job.slotIds[j])) throw new Error("repair changed identity");
-            job.placedPeer[j] = "fresh" + j;
-          }
-        }
+      // The audit's verification-fetches meet the malformed frame; two fresh members then
+      // agree to repair the copies the chunk lacks.
+      const asked = [];
+      stub("groupPeers", async () => ["03".repeat(32), "04".repeat(32)]);
+      stub("netSend", async (peer, type, payload) => {
+        if (type === MsgType.REPAIR) { asked.push(peer); return new Uint8Array([1]); }
+        return peer === bad ? badReply : encodeFetchBatchRes(decodeFetchBatchReq(payload).map(() => decodeFetchBatchRes(good)[0]));
       });
       const repaired = await repairChunk(env);
+      if (asked.includes(bad) || asked.includes(healthy)) throw new Error("asked a current holder to repair");
       return {read, repaired, misses:observations.reduce((n,o)=>n+o.misses,0)};
     })()`, ctx);
     t.ok(bytesEqual(result.read, plaintext), "malformed response " + i + ": GET retries a healthy holder");
-    t.eq(result.repaired, 2, "malformed response " + i + ": repair restores missing replicas");
+    t.eq(result.repaired, 2, "malformed response " + i + ": repair is asked for both missing replicas");
     t.ok(result.misses > 0, "malformed response " + i + ": the bad holder receives misses");
   }
 
@@ -166,7 +167,7 @@ export async function run(t) {
   t.group("security: a verification-fetch answered past its deadline does not count the holder live (§8)");
   {
     // A holder regenerating a block on demand answers correct bytes, only slowly. The
-    // audit keeps the bytes (they hash) but does not count that holder as storing them.
+    // audit does not count that holder as storing them.
     const ctx = vm.createContext({ APP: { k: 1, m: 2, blockSize: 1024, maxMessageBytes: 8192, fanoutWindow: 4,
       verifyFreshMs: 60000, verifyDeadlineMs: 50 }, LOCAL: {}, Uint8Array, d, good, crypto });
     vm.runInContext(source, ctx);
@@ -184,13 +185,12 @@ export async function run(t) {
         if (timing) timing.ms = peer === slow ? 5000 : 1;
         return good;
       };
-      const { live, bytes } = await liveHolders(d);
+      const live = await liveHolders(d);
       const h = toHex(d.blockIds[0]);
-      return { slowLive: live.get(h).has(slow), fastLive: live.get(h).has(fast), kept: bytes.has(h), misses };
+      return { slowLive: live.get(h).has(slow), fastLive: live.get(h).has(fast), misses };
     })()`, ctx);
     t.ok(r.fastLive, "the holder that answered in time is live");
     t.ok(!r.slowLive, "the holder that answered late is not counted as holding the block");
-    t.ok(r.kept, "the late but correct bytes are still kept for healing");
     t.eq(r.misses.length, 1, "the late answer is scored as a miss");
   }
 

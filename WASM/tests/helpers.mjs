@@ -65,3 +65,14 @@ export async function joinGroup(nodes, name = "cohort") {
   const groups = { [name]: nodes.map((n) => n.peerId) };
   await Promise.all(nodes.map((n) => n.setGroups(groups)));
 }
+
+/** Poll `check` until it holds or `ms` passes, and answer whether it held. A repair lands a
+ *  moment after the pass that asked for it, on the repairing node's own wake. */
+export async function eventually(check, ms = 5000) {
+  const t0 = Date.now();
+  while (!(await check())) {
+    if (Date.now() - t0 > ms) return false;
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  return true;
+}

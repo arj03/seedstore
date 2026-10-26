@@ -78,7 +78,7 @@ const repairMs = process.env.REPAIR_MS != null ? Number(process.env.REPAIR_MS) :
 if (repairMs > 0) {
   node.startRepairLoop({
     intervalMs: repairMs,
-    onPass: (n) => { if (n > 0) console.log(`  ↻ repair re-placed ${n} block(s) on fresh peers — redundancy restored (§9)`); },
+    onPass: (n) => { if (n > 0) console.log(`  ↻ repair: ${n} member(s) agreed to rebuild a missing copy (§9)`); },
   });
   console.log(`self-healing on: repair pass every ~${(repairMs / 1000).toFixed(0)}s (jittered) — set REPAIR_MS to tune, =0 to disable.`);
 } else {

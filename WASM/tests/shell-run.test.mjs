@@ -121,7 +121,7 @@ export async function run(t) {
       let holding = 0;
       for (const h of holders) if (h.store.list().length > 0) holding++;
       t.ok(holding >= 4, "the shell's guest placed blocks across several distinct holders");
-      t.eq(shell.fs.list().length, 0, "the shell itself holds nothing — durability is the cohort's");
+      t.eq(shell.fs.list().filter((k) => k.endsWith(".rec")).length, 0, "the shell itself holds no block — durability is the cohort's; it keeps only its file list");
 
       // GET, same confined guest, reconstructing from the holders.
       const got = await loaded.invoke(writeOp(Op.GET, concatBytes([key, root])));

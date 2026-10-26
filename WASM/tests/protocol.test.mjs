@@ -11,6 +11,7 @@ import {
   encodeFetchBatchReq, decodeFetchBatchReq, encodeFetchBatchRes, decodeFetchBatchRes,
   FETCH_UNANSWERED, MsgType,
   VERDICT_ACCEPTED, VERDICT_DECLINED, VERDICT_QUOTA, VERDICT_SIBLING, VERDICT_DESCRIPTOR, VERDICT_ALLOWANCE,
+  VERDICT_NOT_AUTHOR, encodeRepairReq,
 } from "../build/host/protocol.js";
 import { TIER_CACHE, TIER_COMMITTED, encodeStoreTag } from "../build/host/store-record.js";
 import { signDescriptor } from "../build/host/descriptor.js";
@@ -267,7 +268,7 @@ export async function run(t) {
     } finally { a.close(); b.close(); }
   }
 
-  t.group("an author with no standing fills only its newcomer share; a repairer's placement is not charged to it (§13.2)");
+  t.group("an author with no standing fills only its newcomer share, however its blocks arrive (§13.2)");
   {
     const net = new LoopbackNetwork();
     // Each block costs 1168 (1000 + 164 + 4). The default newcomerShare of 0.5 grants a
@@ -285,11 +286,15 @@ export async function run(t) {
       ]))));
       t.eq(stored[0], VERDICT_ACCEPTED, "the author's first block fits its allowance");
       t.eq(stored[1], VERDICT_ALLOWANCE, "its second is over the newcomer share, and says so");
-      const repaired = decodeMask(await c.request(b.peerId, typed(MsgType.STORE, encodeStoreBatch([
+      const pushed = decodeMask(await c.request(b.peerId, typed(MsgType.STORE, encodeStoreBatch([
         { blockId: i1, descriptor: solo(i1), bytes: b1 },
       ]))));
-      t.eq(repaired[0], VERDICT_ACCEPTED, "the same block re-placed by a third-party repairer is accepted");
-      t.ok(b.store.has(i0) && b.store.has(i1), "both blocks are held");
+      t.eq(pushed[0], VERDICT_NOT_AUTHOR, "a third party cannot push the author's block at all");
+      const repair = decodeMask(await c.request(b.peerId, typed(MsgType.REPAIR, encodeRepairReq({
+        descriptor: solo(i1), target: i1, hints: [{ peer: a.peerId, blockId: i1 }],
+      }))));
+      t.eq(repair[0], VERDICT_ALLOWANCE, "and a repair of it is charged to the author too");
+      t.ok(b.store.has(i0) && !b.store.has(i1), "only the first block is held");
     } finally { a.close(); b.close(); c.close(); }
   }
 

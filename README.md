@@ -103,6 +103,6 @@ seedstore as a library, and for the browser transports, see the
 - **§4**: the data model, meaning blocks, chunks, the signed descriptor and encryption.
 - **§6–§9**: PUT, GET, availability and self-healing.
 - **§15**: what the design protects and what it leaks.
-- **§18**: the entire control plane, which is four request/response messages.
+- **§18**: the entire control plane, which is six request/response messages.
 - **Part II (§20–§27)**: optional extensions such as verifiable reputation, LRC,
   tombstones, Shamir key recovery and edits.

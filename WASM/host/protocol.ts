@@ -19,10 +19,14 @@ export const MsgType = {
   HAVE: 1,   // have/want (§5)
   OFFER: 2,  // batched offer → verdict mask (§6)
   FETCH: 3,  // batched fetch → the blocks (§7, also the §8 verification-fetch)
-  STORE: 4,  // the push after accept (§6 step 4). In the base bulk plane this is
-             // an unsigned, hash-verified frame (§3); here it is an awaited
-             // request so placement is deterministic. A dedicated bulk channel
+  STORE: 4,  // the push after accept (§6 step 4), from the author only. In the base
+             // bulk plane this is an unsigned, hash-verified frame (§3); here it is an
+             // awaited request so placement is deterministic. A dedicated bulk channel
              // (§22) is the throughput upgrade.
+  REPAIR: 5, // "please repair this block" (§9) → one verdict: accepted means the receiver
+             // promises to fetch, rebuild and store it itself
+  REPAIR_FETCH: 6, // a FETCH made while repairing a chunk: [chunk key 64][FETCH request].
+             // Serving it tells the holder that chunk is being repaired (§9)
 } as const;
 
 // ── the initiator's LOCAL op names (the host's loopback vocabulary) ──────────
@@ -181,6 +185,9 @@ export const VERDICT_ERROR      = 5;
 export const VERDICT_ALLOWANCE  = 6;
 // The chunk's group is not one this holder lists the author or the caller in (§5.1).
 export const VERDICT_GROUP      = 7;
+// Bytes pushed by someone other than the chunk's author: only an author places data
+// (§6); a repair is pulled by the device that will keep it (§9).
+export const VERDICT_NOT_AUTHOR = 8;
 
 // ── the roster (Op.GROUPS) ───────────────────────────────────────────────────
 // A node's groups (§5.1): name → member keys. Every member of every group is in its
@@ -313,6 +320,44 @@ export function decodeFetchBatchReq(buf: Uint8Array): Uint8Array[] {
   for (let i = 0; i < count; i++) out.push(buf.subarray(4 + i * 32, 4 + (i + 1) * 32));
   return out;
 }
+// ── REPAIR (§9) ─────────────────────────────────────────────────────────────
+// A holder that finds a chunk short asks a group member holding none of it to repair one
+// block: the signed descriptor, the block wanted, how urgent it is, and who holds which
+// blocks now, so the receiver can decide, order it among its repairs, and knows where to
+// fetch from. The hints are advice: every block fetched is checked against its signed id.
+// `margin` is the chunk's dependable loss margin as the asker sees it (§8), lower first.
+//   [descLen u32][descriptor][target 32][margin i8][hintCount u16]([peer 32][blockId 32])*
+export interface RepairReq {
+  descriptor: Uint8Array;
+  target: Uint8Array;
+  margin: number;
+  hints: { peer: string; blockId: Uint8Array }[];
+}
+export function encodeRepairReq(r: RepairReq): Uint8Array {
+  const head = new Uint8Array(4);
+  writeU32BE(head, 0, r.descriptor.length);
+  const count = new Uint8Array(3);
+  count[0] = Math.max(-128, Math.min(127, r.margin)) & 255;
+  count[1] = r.hints.length >> 8; count[2] = r.hints.length & 255;
+  const parts: Uint8Array[] = [head, r.descriptor, r.target, count];
+  for (const h of r.hints) parts.push(fromHex(h.peer), h.blockId);
+  return concatBytes(parts);
+}
+export function decodeRepairReq(buf: Uint8Array): RepairReq {
+  if (buf.length < 4) throw new Error("protocol: decodeRepairReq truncated");
+  const dlen = readU32BE(buf, 0);
+  let o = 4 + dlen;
+  if (o + 32 + 3 > buf.length) throw new Error("protocol: decodeRepairReq truncated");
+  const descriptor = buf.subarray(4, o);
+  const target = buf.subarray(o, o + 32); o += 32;
+  const margin = buf[o] > 127 ? buf[o] - 256 : buf[o]; o += 1;
+  const n = (buf[o] << 8) | buf[o + 1]; o += 2;
+  if (o + n * 64 !== buf.length) throw new Error("protocol: decodeRepairReq bad hints");
+  const hints: RepairReq["hints"] = [];
+  for (let i = 0; i < n; i++, o += 64) hints.push({ peer: toHex(buf.subarray(o, o + 32)), blockId: buf.subarray(o + 32, o + 64) });
+  return { descriptor, target, margin, hints };
+}
+
 export function encodeFetchBatchRes(blocks: FetchEntry[]): Uint8Array {
   const head = new Uint8Array(4);
   writeU32BE(head, 0, blocks.length);

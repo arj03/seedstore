@@ -16,7 +16,7 @@ import { encodeFetchBatchReq, decodeFetchBatchRes, encodeStoreBatch, encodeHaveR
 import { parseSignedDescriptor, signDescriptor, encodeDescriptorList } from "../build/host/descriptor.js";
 import { memoryRawFiles } from "seedkernel-wasm/fs-memory";
 import { toHex, fromHex, bytesEqual } from "../build/host/util.js";
-import { joinGroup, liveBlockCount, newKey, plantBlock } from "./helpers.mjs";
+import { eventually, joinGroup, liveBlockCount, newKey, plantBlock } from "./helpers.mjs";
 import { TIER_CACHE, TIER_COMMITTED } from "../build/host/store-record.js";
 
 const TIMEOUT = 40; // ms — keep offline-peer timeouts snappy in tests
@@ -159,8 +159,13 @@ export async function run(t) {
     const online = nodes.filter((n) => n !== owner && net.isOnline(n.peerId));
     for (const n of online) await n.runRepair();
 
+    await eventually(() => liveBlockCount(nodes, net, ids) >= config.k + Math.ceil(config.m / 2));
     const healed = liveBlockCount(nodes, net, ids);
     t.ok(healed >= config.k + Math.ceil(config.m / 2), `repair lifted redundancy back above low-water (live=${healed})`);
+    // Each holder audited the chunk, but the repairer's fetches told the others it was being
+    // repaired, so no lost block was rebuilt on two members.
+    const copies = ids.map((id) => nodes.filter((n) => net.isOnline(n.peerId) && n.store.has(id)).length);
+    t.ok(copies.every((c) => c <= 1), `no block was rebuilt twice (copies per block: ${copies.join(", ")})`);
     const got = await owner.get(put.root, put.key);
     t.ok(bytesEqual(got, data), "file still reads after loss + repair");
     nodes.forEach((n) => n.close());
@@ -204,7 +209,7 @@ export async function run(t) {
     let replaced = 0;
     for (const n of online) replaced += await n.runRepair();
     t.ok(replaced >= 1, `repair re-replicated the lost copies (placed=${replaced})`);
-    t.ok(minHolders(nodes, net, put.blockIds) >= 2, "every block — incl. the index — is back on >= 2 holders");
+    t.ok(await eventually(() => minHolders(nodes, net, put.blockIds) >= 2), "every block — incl. the index — is back on >= 2 holders");
     t.ok(bytesEqual(await owner.get(put.root, put.key), data), "file still reads after loss + repair");
 
     // Idempotent: a second pass over now-healthy chunks re-places nothing (§9).
@@ -276,6 +281,7 @@ export async function run(t) {
     let replaced = 0;
     for (const n of holders) if (net.isOnline(n.peerId)) replaced += await n.runRepair();
     t.ok(replaced > 0, `a differently-configured holder still healed the chunk (placed=${replaced})`);
+    await eventually(() => minHolders(all, net, [chunkId]) > 2);
     t.ok(minHolders(all, net, [chunkId]) > 2, `copies restored toward the descriptor's r=5 (now ${minHolders(all, net, [chunkId])})`);
     t.ok(bytesEqual(await owner.get(put.root, put.key), data), "the file still reads after the mixed-geometry repair");
     all.forEach((n) => n.close());
@@ -301,7 +307,7 @@ export async function run(t) {
     for (const n of online) n.stopRepairLoop();
 
     t.ok(passes > 0, `the loop fired at least one pass on its own (passes=${passes})`);
-    t.ok(minHolders(nodes, net, put.blockIds) >= 2, "the loop restored redundancy with no manual call");
+    t.ok(await eventually(() => minHolders(nodes, net, put.blockIds) >= 2), "the loop restored redundancy with no manual call");
     // stopRepairLoop() must actually stop it — no further passes after a settle.
     const at = passes;
     await new Promise((r) => setTimeout(r, 150));
@@ -733,8 +739,9 @@ export async function run(t) {
       t.ok(!liar.store.has(id), "the liar no longer holds the block");
       const replaced = await repairer.runRepair();
       t.ok(replaced >= 1, `the freshly verified liar was re-sampled, failed, and the copy re-placed (placed=${replaced})`);
-      const fresh = nodes.filter((n) => n !== repairer && n !== liar && n.store.has(id));
-      t.eq(fresh.length, 1, "the restored copy is on a peer other than the liar");
+      const fresh = () => nodes.filter((n) => n !== repairer && n !== liar && n.store.has(id));
+      await eventually(() => fresh().length > 0);
+      t.eq(fresh().length, 1, "the restored copy is on a peer other than the liar, which rebuilt it itself");
     } finally { nodes.forEach((n) => n.close()); net.close(); }
   }
 
@@ -770,7 +777,7 @@ export async function run(t) {
     } finally { nodes.forEach((n) => n.close()); net.close(); }
   }
 
-  t.group("over quota, a holder releases commitments only after re-placing them elsewhere (§14)");
+  t.group("over quota, a holder releases a commitment only once another member has repaired a copy (§14)");
   {
     const net = new LoopbackNetwork();
     // Each planted block costs 1168 (1000 + 164 + 4): two overrun a 1500-byte quota.
@@ -786,8 +793,12 @@ export async function run(t) {
         ids.push(id);
       }
       t.ok(b.store.usedBytes() > 1500, `the holder starts over quota (${b.store.usedBytes()} B)`);
+      // The first pass asks a member to repair the copy it would shed; a later one drops it
+      // once that copy has landed.
       await b.runRepair();
-      t.ok(b.store.usedBytes() <= 1500, `the pass brings it back under quota (${b.store.usedBytes()} B)`);
+      await eventually(() => ids.some((id) => a.store.has(id) || c.store.has(id)));
+      await b.runRepair();
+      t.ok(b.store.usedBytes() <= 1500, `repair passes bring it back under quota (${b.store.usedBytes()} B)`);
       const released = ids.filter((id) => !b.store.has(id));
       t.eq(released.length, 1, "one commitment released, no more than needed");
       t.ok(released.length === 1 && (a.store.has(released[0]) || c.store.has(released[0])), "the released block lives on another peer");

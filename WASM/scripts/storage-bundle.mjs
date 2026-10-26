@@ -56,6 +56,8 @@ export function authorKeysFor(edSk) {
 const STORAGE_REQUIRES = [
   "node",
   "fs",
+  // A repair the node agreed to runs on a wake, after the request that asked for it (§9).
+  "timer",
   TRANSPORT_SERVICE,
 ];
 

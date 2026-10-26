@@ -16,7 +16,7 @@ and becomes a storage node:
 seedstore.skb: one signed bundle, verified at load
   codec.wasm, reputation.wasm   Reed–Solomon + reciprocity math; pure, no grants
   guest.js                      the whole protocol, in a zero-authority JS realm:
-                                PUT/GET/repair (initiator) + HAVE/OFFER/STORE/FETCH (holder)
+                                PUT/GET/repair (initiator) + HAVE/OFFER/STORE/FETCH/REPAIR (holder)
         │ reaches I/O only through host.call(name, bytes)
         ▼
 seedkernel host                 install + admission policy, and the services:
@@ -217,7 +217,7 @@ bytes.
 | --- | --- | --- |
 | GF(2⁸) + systematic Reed–Solomon encode/decode | `assembly/codec/`, which is WASM with no grants, called as `host.call("codec", …)` | §4.1, §9 |
 | Decayed per-peer reciprocity counters | `assembly/reputation/`, which is WASM with no grants | §13 |
-| The whole protocol: PUT/GET, the index tree, placement, have/want, repair, and the holder side (the roster, admission, sibling rule, quota, allowance, tiers, eviction, store writes) | `host/tier2-guest.orchestration.js`, assembled with the shared cores into `build/host/tier2-guest.js` by `scripts/build-guest.mjs` | §5–§10, §14 |
+| The whole protocol: PUT/GET, the index tree, placement, have/want, repair (auditing, asking, and rebuilding what this node agreed to), and the holder side (the roster, admission, sibling rule, quota, allowance, tiers, eviction, store writes) | `host/tier2-guest.orchestration.js`, assembled with the shared cores into `build/host/tier2-guest.js` by `scripts/build-guest.mjs` | §5–§10, §14 |
 | Wire format for HAVE/OFFER/STORE/FETCH | `host/protocol.ts` (shared with the guest) | §18 |
 | Descriptor layout, tags, copy targets, loss margin | `host/descriptor-core.ts` (shared with the guest) | §4.1, §4.3, §8 |
 | Scoped descriptor sign/verify, host side | `host/descriptor.ts` | §16 |
@@ -256,26 +256,55 @@ sorts the block's live holders the same way, and the ones past the target step d
 A later audit that finds the chunk short again moves them back. A STORE needs room
 only beside the committed tier, and evicts cache, coldest first, for any shortfall.
 When the store is over quota (the operator lowered it), the repair pass drops cache
-first. It then releases commitments, lowest-standing author first. Each one is
-re-placed on another peer first, or kept if the chunk would drop below low water
-without it.
+first. It then releases commitments, lowest-standing author first. A copy goes once
+the chunk stays at or above low water without it; until then the pass asks another
+member to repair the copy it would leave missing, and drops its own on a later pass.
+
+**Repair is pulled (§9).** Holders audit their chunks, and for each copy a short chunk
+lacks they send a group member that holds none of it a REPAIR request: the signed
+descriptor, the block wanted, the chunk's dependable margin, and who holds which blocks. The member decides under its
+own admission and answers. Yes is a promise: it fetches what it needs, rebuilds the
+block, checks it against the signed id and stores it, on a timer wake after it has
+answered, retrying a failed fetch with backoff for up to two minutes. Its fetches are
+REPAIR_FETCH, which lead with the chunk's key, so every holder serving one notes the
+chunk as being repaired and sends no request for it meanwhile, as does the holder that
+asked. The asker sends its requests together, at the end of its pass, so the members
+answer before they start fetching from it. STORE and OFFER are accepted only from the
+chunk's author, so nobody pushes bytes onto a holder for someone else.
 
 **Groups (§5.1).** Each node keeps a roster of named groups, operator policy like the
 quota: `groups` at boot, `setGroups` later. A node answers nothing to a peer outside
 it. A PUT names one group and signs the name into every descriptor, its blocks go
 only to that group's linked members, and a holder admits a block only if it lists
-both the author and the placer under that name (`not-in-group` otherwise). Standing is
+both the author and the sender under that name (`not-in-group` otherwise). Standing is
 kept per (group, peer): a peer's service counts in the group of the chunk it served.
 The roster is dynamic: `setGroups` (the guest's `groups` op) replaces it whole, and
 the next request reads the new one, so a separate groups app can keep it.
 
-**Admission weighs standing (§13.2).** An author placing its own chunks in a group may
-fill `newcomerShare` (default 0.5) of a holder's quota while the holder has no record
-of it in that group, all of it with positive standing there, and none with negative
-standing. The holder
-answers `allowance` past that. A repairer re-placing another author's chunk is not
-charged to anyone's allowance, so repair outranks routine placement. Set
-`newcomerShare: 1` to turn this off, for example among one person's own devices.
+**The ledger (§13).** Each node keeps, per (group, peer), three things it saw itself:
+
+- **Reliability:** verified fetches passed against missed, with a 7-day half-life.
+- **Availability:** repair passes the peer was linked at against passes it was not,
+  decayed the same way. It measures uptime, so no longevity tag is needed.
+- **Holdings:** bytes the peer verifiably holds for this node. A PUT saves its chunks'
+  signed descriptors as `own.*` records (no content key), and each repair pass audits
+  32 of them in turn, as it audits the chunks it holds.
+
+Everything that weighs a peer reads that ledger:
+
+- **Ranking.** Placement, repair targets and reads order peers by reliability ×
+  availability, so a steady peer gets a copy before a browser tab that comes and goes.
+- **Health.** A chunk counts only its copies on dependable holders, those linked at
+  least half the time. A chunk sitting on often-offline peers is short, and repaired
+  onto steadier ones, before it loses anything. When the flaky copies come back as
+  surplus, they are the ones that step down to cache.
+- **Urgency.** A REPAIR request carries the chunk's dependable margin, and a member runs
+  its agreed repairs lowest margin first.
+- **Allowance (§13.2).** An author's blocks in a group, pushed or repaired, may fill
+  `newcomerShare` (default 0.5) of a holder's quota plus what the author verifiably
+  holds for that holder there, up to the whole quota, and nothing while it fails more
+  checks than it passes. The holder answers `allowance` past that. Set
+  `newcomerShare: 1` to turn this off, for example among one person's own devices.
 
 **Sampled verification (§8).** A repair audit fetches one block from each advertising
 holder that has no verification pass in the last `verifyFreshMs` (default 15 min),
@@ -301,8 +330,9 @@ affects correctness.
 | `descriptor` | descriptor round trips, tamper evidence under the scoped signature, index-list encryption, multiplicity as the replica count, loss margin |
 | `protocol` | batched OFFER/STORE/FETCH encoding; batch-wide sibling, quota and newcomer-allowance rules; a STORE evicts cache, never a commitment; a missing, forged, foreign or mismatched descriptor is declined; concurrent STOREs can't race a sibling reservation |
 | `reputation` | passes raise the score, misses penalize it, scores decay |
+| `ledger` | a chunk counting only dependable copies, ranking by reliability × availability, repairs most urgent first, the allowance netted against what an author holds for the holder |
 | `storage` | multi-node PUT→GET, small-file replication, offline tolerance, repair (including mixed geometry), groups (strangers refused, placement inside a group, per-group standing), sampled audits, a holder advertising what it cannot serve, cache demotion and re-promotion, graceful release over quota, key sharing, crypto-shredding, reciprocity |
-| `security` | a peer can't claim another author's block ids, roots are authenticated before use, malformed holder responses can't abort GET or repair, a late verification answer is not live, FETCH reply bounds |
+| `security` | a peer can't claim another author's block ids, roots are authenticated before use, malformed holder responses can't abort GET or repair, a third party cannot push an author's block, a late verification answer is not live, FETCH reply bounds |
 | `concurrency` | round-trip economy over a latency-bearing link, asserted as request counts |
 | `net` | the store persisting across a cold reopen, a cohort over real TCP, a browser-like node over real WebSocket |
 | `browser` | a node booted through the `fetch`-based browser entry |
@@ -327,7 +357,7 @@ windows, the host-call ledger, and the guest deadline.
 | --- | ---: |
 | `codec.wasm`, including SIMD RS and GF tables | 8.7 KB |
 | `reputation.wasm` | 5.3 KB |
-| the guest, minified | 79 KB (21 KB gzipped) |
+| the guest, minified | 90 KB (23 KB gzipped) |
 
 Those three files are all of seedstore's runtime code. Everything else is the
 seedkernel host and its core libsodium, which any app on that host shares.
@@ -385,23 +415,14 @@ form in some places and leaves other parts of the spec unbuilt.
   shredded blocks are never reclaimed. Eviction drops cache and, over quota, the
   lowest-standing commitments, but nothing ages out a long-unread committed block.
   Because every holder repairs every chunk it holds, repair keeps shredded chunks
-  at full redundancy indefinitely.
-- **The rest of admission (§14).** A holder does not measure how under-replicated an
-  offered chunk is. It treats any placement by a group member other than the author
-  as repair, so an author with a fellow member to place for it gets past its
-  allowance.
-- **The full reciprocity score (§13.1).** The score counts passes and misses on the
-  fetches that GET and repair audits already make, with a 7-day half-life. It is not
-  netted against how much a node stores for that peer. There is no separate
-  spot-check schedule, so an owner that holds no block of its own file never
-  audits that file.
-- **Placement beyond standing (§6, §8).** Placement ranks a group's members by
-  their standing in it. Within a group it does not spread a chunk across members who
-  fail together, or prefer long-lived peers over browser tabs, since nodes carry no
-  longevity tag.
-- **Proactive re-spreading (§9).** Repair runs only when a chunk drops below its
-  low-water mark. Nothing moves blocks toward healthier peers ahead of time when the
-  cohort thins.
+  at full redundancy indefinitely, and an owner's file list keeps every file it put.
+- **Correlated failure (§6, §10).** Placement spreads a chunk over distinct, steady
+  members, but it cannot tell which members fail together, such as two devices on one
+  power strip, since nothing a node observes says so until it happens.
+- **The ledger stays local.** Each device keeps its own: what a friend holds for my
+  laptop raises its allowance at my laptop, not at my phone. Agreed repairs, the
+  availability and holdings counts live in memory, so a restart starts them over (the
+  file list itself is on disk).
 - **Browser storage (§12).** A tab's block store is in RAM, because the
   OPFS/IndexedDB backend isn't built yet, so a tab that acts as a holder forgets
   everything on reload (see [Browser demos](#browser-demos)).

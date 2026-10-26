@@ -18,7 +18,7 @@ Seedkernel routes a wire protocol id to one bundle's confined guest over an encr
 
 **Design principles:**
 
-- **No new host concepts.** Storage is one signed bundle (pure-transform WASM modules plus a confined guest) and four request/response messages (§18), gated by the channel that already pins every peer and the policy that already admits every bundle.
+- **No new host concepts.** Storage is one signed bundle (pure-transform WASM modules plus a confined guest) and six request/response messages (§18), gated by the channel that already pins every peer and the policy that already admits every bundle.
 - **Integrity comes from content addressing, not signatures.** A block either hashes to its name or is discarded, so bulk transfer needs no per-message verification (§3).
 - **Identity comes from the channel.** A peer *is* the node public key its authenticated channel pinned (§2). Nothing is signed to establish it.
 - **Redundancy is erasure coding, not replication.** Any *k* of *n* blocks reconstruct a chunk (§4.1).
@@ -61,7 +61,7 @@ Storage changes nothing in seedkernel. It is one signed bundle on a generic host
 
 **The channel is the identity.** Seedkernel's transport gives every pair of peers an authenticated, encrypted channel, whatever carries it ([RUNTIME §12.6](https://github.com/arj03/seedkernel/blob/main/docs/RUNTIME.md), [CHANNEL](https://github.com/arj03/seedkernel/blob/main/docs/CHANNEL.md)). A peer *is* the node public key its channel pinned. Every operation that needs "who" (who is offering, who is fetching, whose reciprocity standing moves) reads it off the channel rather than out of a signature, so there is no per-message signing and no account system. Storage reaches its peers through the transport's `_net` service under its own signed `protocols` id, so a frame for that id reaches the storage guest and no other (§16). The control plane is typed request/response on that channel (§18). Bulk blocks ride the same messages as hash-verified payloads (§3); a dedicated bulk channel is an optional upgrade (§22).
 
-**The bundle carries the code and its authority.** Storage arrives as one author-signed bundle ([RUNTIME §12.4](https://github.com/arj03/seedkernel/blob/main/docs/RUNTIME.md)), and that signature authenticates storage's code to a node that received it through any number of relays. The bundle holds two pure WASM modules with no grants, `codec` (Reed–Solomon) and `reputation`, plus the confined guest, whose whole reach is the signed `guest.requires` list: `node`, `fs` and `_net` (§16). Which authors may install it is the operator's admission policy ([RUNTIME §12.5](https://github.com/arj03/seedkernel/blob/main/docs/RUNTIME.md)).
+**The bundle carries the code and its authority.** Storage arrives as one author-signed bundle ([RUNTIME §12.4](https://github.com/arj03/seedkernel/blob/main/docs/RUNTIME.md)), and that signature authenticates storage's code to a node that received it through any number of relays. The bundle holds two pure WASM modules with no grants, `codec` (Reed–Solomon) and `reputation`, plus the confined guest, whose whole reach is the signed `guest.requires` list: `node`, `fs`, `timer` and `_net` (§16). The timer is how a repair a node agreed to runs after the request that asked for it (§9). Which authors may install it is the operator's admission policy ([RUNTIME §12.5](https://github.com/arj03/seedkernel/blob/main/docs/RUNTIME.md)).
 
 **Crypto is the host's.** Hashing and authenticated encryption use the host's `crypto/*` transforms, and signing uses its scoped `node/sign` (§16). The only algorithm storage ships in WASM is Reed–Solomon, which libsodium lacks. Confidentiality at rest, which a hop-by-hop channel does not give, is added client-side (§4.4).
 
@@ -314,30 +314,34 @@ margin = Σ over distinct listed blocks of  min(live_holders, times listed)  −
 
 For a coded chunk each id is listed once, so the margin is `live_blocks − k`, healthy at `n = k + m`. For a `k = 1` chunk the id is listed `m + 1` times, so the margin is `min(copies, m + 1) − 1`, healthy at `m + 1` copies. Either way the margin is `m` for a fully healthy chunk and `0` one loss from death. Repair triggers at a **low-water mark** strictly above zero (§9), never waiting until the chunk is one loss from death.
 
-**Browser nodes** are treated as low-uptime, often-Suspected holders: they serve reads and act as extra cache while present, but durability leans on longer-lived peers. A deployment can tag node longevity so placement prefers steady peers for durable copies and lets browsers absorb read load.
+**Browser nodes** are treated as low-uptime, often-Suspected holders: they serve reads and act as extra cache while present, but durability leans on longer-lived peers. No tag is needed for that: each node measures every peer's availability itself (§13.1), placement prefers steady peers, and a copy on a peer that is reachable less than half the time does not count towards its chunk's health.
 
 ---
 
 ## 9. Self-healing / repair
 
-Repair is per chunk, and it is done by the chunk's own **block-holders**. Anyone holding a block also holds the chunk's signed descriptor (§4.3), with the sibling block-ids and geometry, which is all it needs to audit and rebuild the chunk. Reconstruction runs on ciphertext, so a repairer needs only the author's public key, never the file's key. The sharing group *reads*; any block-holder *repairs*. No peer is special or appointed; whoever notices first does the work.
+Repair is per chunk. A chunk's own **block-holders** notice it decaying, and a missing copy is **rebuilt by the device that will keep it**. Anyone holding a block also holds the chunk's signed descriptor (§4.3), with the sibling block-ids and geometry, which is all it needs to audit the chunk and all another member needs to rebuild it. Reconstruction runs on ciphertext, so a repairer needs only the author's public key, never the file's key. The sharing group *reads*; any block-holder *notices*; a group member that agrees *repairs*. No peer is special or appointed.
 
-This makes repair as redundant as the data. The peers able to heal a chunk are exactly the ~`n` peers storing it, so repair works as long as any one of them is online. (Tying repair to whoever can read the file's index would make a private file's owner the only possible repairer: a single point of failure for healing even when the bytes themselves are amply redundant.)
+This makes repair as redundant as the data. The peers able to notice a decaying chunk are exactly the ~`n` peers storing it, so repair works as long as any one of them is online. (Tying repair to whoever can read the file's index would make a private file's owner the only possible repairer: a single point of failure for healing even when the bytes themselves are amply redundant.)
+
+**Nobody pushes bytes for someone else.** The only bytes a device is ever sent unasked are an author's own PUT (§6). Every other copy it holds, it fetched and rebuilt itself after agreeing to, under its own admission (§14). So a holder never has to trust a third party's claim that it is "repairing": it decides, and it charges the copy to the chunk's author like any other.
 
 **The repair loop, run by every block-holder on a jittered interval:**
 
 1. **Audit.** Send a have/want for the chunk's block-ids (§5) and sample a verification-fetch or two (§8) to confirm advertised blocks are retrievable. This gives the live holders of each block, and from them the chunk's **loss margin** (§8).
 2. **Decide.** Repair is needed when `margin < ⌈m/2⌉`, i.e. half the redundancy is spent. Both numbers come from the descriptor, so a repairer needs no deployment config.
-3. **Avoid duplicate work** with the jitter alone. The peer whose timer fires first repairs; the others, firing later, see its new blocks in have/want and stand down. Nothing is locked and nobody coordinates. Correctness never depends on avoiding overlap, because repair is **idempotent**: the deterministic encoder (§4.1) regenerates the *same* content-addressed block-ids, so two peers healing the same chunk at once produce identical blocks, and the surplus is reclaimed as ordinary over-replication (§14).
-4. **Rebuild.** Top every block short of its target back up. The target is how many times the descriptor **lists** that id (§4.1): `m + 1` for a `k = 1` chunk's lone block, 1 for each block of a coded chunk.
+3. **Ask.** For every copy the chunk lacks (the target is how many times the descriptor **lists** that id, §4.1: `m + 1` for a `k = 1` chunk's lone block, 1 for each block of a coded chunk), send a `repair` request to a member of the chunk's group (§5.1) that holds none of it: the signed descriptor, the block wanted, and who holds which blocks now. The member decides under its own admission (group, sibling rule, quota, the author's allowance) and answers. Agreeing is a **promise, not a guarantee**. The asker then notes the chunk as being repaired and sends no more requests for it for a while; if the copy never lands, the note expires and a later audit asks someone else.
+4. **Rebuild, on the member that agreed.** It fetches what it needs from the listed holders and rebuilds the block itself:
    - A block with a live, verified copy is copied from it.
-   - A **coded** block that no live holder serves is regenerated: fetch any *k* retrievable blocks (each verified by its `block_id`, §4.2), reconstruct the chunk's ciphertext, and re-encode only the **missing** blocks. **Each regenerated block must hash to its signed `block_id`** before it is used. This certifies the reconstruction without the key and catches any bad input or decode error, so a poisoned descriptor can never make repair mint or spread garbage.
+   - A **coded** block that no live holder serves is regenerated: fetch any *k* retrievable blocks (each verified by its `block_id`, §4.2), reconstruct the chunk's ciphertext, and re-encode the **missing** block. **The regenerated block must hash to its signed `block_id`** before it is stored. This certifies the reconstruction without the key and catches any bad input or decode error, so a poisoned descriptor can never make repair mint or spread garbage.
    - A `k = 1` chunk has no parity to rebuild from, so it can only be copied while one copy survives, which is exactly what the `min` in the margin tracks.
 
-   The repairer places the blocks on fresh cohort peers (§6 steps 3–4) with the signed descriptor, skipping current holders so redundancy spreads to new peers.
-5. **Done.** The new blocks are discoverable via have/want at once, and redundancy is back to full with no change to the file's index, since the index never named holders.
+   Its fetches are marked as this chunk's repair (`repair-fetch`, §18), so **every holder that serves one learns the chunk is being repaired** and stands down too: the duplicate-avoidance needs no message of its own. The member runs the repair after answering, never inside the request, and tries a failed fetch again with backoff while its promise lasts.
+5. **Done.** The new block is discoverable via have/want at once, and redundancy is back to full with no change to the file's index, since the index never named holders.
 
-**Moving data on availability change** is the same loop run proactively: a peer that sees the cohort thinning (many Suspected or Lost holders, e.g. a correlated outage) re-spreads blocks toward healthier peers before a chunk reaches low-water.
+**Duplicate work** is avoided by those repair notes and the jittered timers, not by locks. Correctness never depends on it, because repair is **idempotent**: the deterministic encoder (§4.1) regenerates the *same* content-addressed block-ids, so two members rebuilding the same block produce identical bytes, and the surplus is reclaimed as ordinary over-replication (§14).
+
+**Moving data on availability change** is the same loop, because a chunk's margin counts only dependable copies (§8). When its holders are often offline, it falls below low water while its raw count still looks fine, and repair asks steadier members for copies before anything is lost. When the flaky copies come back as surplus, they are the ones that step down to cache (§14). Repair requests carry the chunk's margin, and a member runs the repairs it agreed to most urgent first.
 
 **The one real cost.** A chunk can only be healed while at least one of its holders is online within a repair interval. With ~`n` holders that is a weak requirement, but it fails if all of a chunk's holders are low-uptime and go dark together (e.g. an all-browser cohort overnight). Placing at least one durable peer among each chunk's holders removes the risk (§8).
 
@@ -398,24 +402,25 @@ The opposite (making a key *survivable* by splitting it across the cohort so a q
 
 ## 13. Reciprocity: rewarding good citizens without a coin
 
-The reward for being a good citizen is **durability for your own data and good service from your cohort**, and what earns it is *reliably holding and serving data for others*. There is no token, no ledger and no global reputation object, just **direct, pairwise reciprocity**. In a closed cohort that is enough, and it is Sybil-proof: you score only peers you have actually dealt with, so identities a peer invents never enter your view.
+The reward for being a good citizen is **durability for your own data and good service from your cohort**, and what earns it is *reliably holding and serving data for others*. There is no token, no shared ledger and no global reputation object, just **direct, pairwise reciprocity**. In a closed cohort that is enough, and it is Sybil-proof: you score only peers you have actually dealt with, so identities a peer invents never enter your view.
 
 ### 13.1 The local score
 
 Each node keeps, per peer **and per group** (§5.1), a small **decayed reciprocity balance**, built only from what it has *witnessed directly*. An observation counts in the group of the chunk it was made on:
 
-- **Service received**: blocks the peer has held and served for you, confirmed by the verification-fetches that already back repair (§8). A pass raises the score; a miss lowers it. This reuses the ordinary fetch path, with no separate challenge protocol and no proof object to store.
-- **Reciprocity**: netted against how much you currently store *for* that peer, so the score reflects a running give-and-take.
+- **Reliability**: blocks the peer has held and served, confirmed by the verification-fetches that already back repair (§8). A pass raises it; a miss lowers it more. This reuses the ordinary fetch path, with no separate challenge protocol and no proof object to store.
+- **Availability**: at each repair pass, whether the peer is reachable. This measures uptime directly, so a browser tab or a laptop that is often off scores low without anyone tagging it.
+- **Holdings**: how much the peer verifiably holds *for you*, against how much you hold for it. The first needs you to audit your own files, so a node keeps the signed descriptors of every file it put (no content key), and its repair loop audits them in turn as it audits the chunks it holds. That also means an owner notices, and asks for repair of, its own files.
 - **Recency**: old observations decay, so a peer that stops serving fades, and the state never grows without bound.
 
-`reputation.score(group, pubkey) → score` is a read-only query over these counters. Placement (§6), holders deciding whether to accept an `offer` (§18), and readers choosing whom to fetch from first all use it. The computation is arithmetic over locally witnessed events, so it lives in the pure, no-grant `reputation` module (§17). A deployment that stores only among one person's devices can replace it with a constant.
+`reputation.score(group, pubkey) → score` is a read-only query over the reliability counters. Placement (§6), repair targets (§9) and readers choosing whom to fetch from first rank peers by **reliability × availability**. A chunk's health counts only its copies on **dependable** holders, those reachable at least half the time (§8, §9). Holders deciding whether to accept an `offer` or a `repair` (§18) use holdings, below. The computation is arithmetic over locally witnessed events, so it lives in the pure, no-grant `reputation` module (§17). A deployment that stores only among one person's devices can replace it with a constant.
 
 ### 13.2 What it buys (the incentive loop)
 
 Reciprocity is spent as **priority**, which closes the loop without money:
 
 - **Durability for your own data.** Peers you have served reliably accept your `offer`s readily. A peer you have never reciprocated with may throttle you or ask you to contribute first.
-- **A storage allowance proportional to contribution.** A soft tit-for-tat budget: the cohort durably holds for you about as much as you have reliably held for others. Leeching limits itself, and donating storage is directly valuable to the donor.
+- **A storage allowance proportional to contribution.** A soft tit-for-tat budget: the cohort durably holds for you about as much as you have reliably held for others. At a holder, an author may fill a base share of the quota plus what it verifiably holds for that holder in the group, up to the whole quota, and nothing while its reliability is negative. Leeching limits itself, and donating storage is directly valuable to the donor.
 - **Preferential reads and repair.** Good citizens are chosen first to serve reads and to repair, so they get more chances to raise their score, and the loop compounds.
 
 Honest, available nodes climb. Nodes that withhold, lie about capacity or churn destructively fail verification-fetches, decay, and get routed around (§10).
@@ -431,7 +436,7 @@ A node has finite donated space and may be offered far more than it can hold, so
 - **Committed**: blocks a node accepted through an `offer` (§18), whose reliable serving earns it standing (§8, §13). These are not dropped casually, since shedding one abruptly fails its next verification-fetch and loses standing. A node sheds a commitment only by **graceful release** (re-placing the block on another peer, or letting repair pick it up), accepting that durability dips until redundancy is restored.
 - **Opportunistic cache**: blocks picked up while serving reads, or extra copies beyond `n`. Free to evict at any time, at no reciprocity cost.
 
-**Admission (when an `offer` arrives).** Weigh reciprocity (prefer peers who store for you), social closeness, and how under-replicated the chunk is; a repair offer that lifts a chunk off its low-water mark outranks a routine first placement. Reserve a fraction of quota for commitments so cache cannot crowd out durability, and refuse offers outright when the committed tier is full.
+**Admission (when an `offer` or a `repair` request arrives).** Only a chunk's author pushes its bytes; a copy for anyone else is one this node agrees to rebuild itself (§9). Either way it is charged to the author's allowance in the chunk's group, weighed by reciprocity (prefer peers who store for you) and social closeness (§5.1), and how under-replicated the chunk is may set which repairs a node takes on first. Reserve a fraction of quota for commitments so cache cannot crowd out durability, and refuse offers outright when the committed tier is full.
 
 **Eviction (under quota pressure).**
 
@@ -500,7 +505,7 @@ All storage *logic* is Tier 2: confined, grant-bounded, and reaching I/O only th
 | --- | --- | --- | --- |
 | `codec` | WASM module | none (pure) | **Reed–Solomon encode and decode** over GF(2⁸) on ciphertext blocks: the only algorithm storage ships in WASM |
 | `reputation` | WASM module | none (pure) | decayed per-peer reciprocity counters from witnessed verification-fetches and served reads, and the `reputation.score` query (§13). Swapped for the §20 receipts-and-transitive-trust version when portable reputation is needed |
-| **the guest** (cohort, coordinator and repair in one realm) | zero-authority JS realm | `node`, `fs`, `_net` (`guest.requires`): its whole reach, in one signed list | **Initiator:** slicing ciphertext into `B`-byte blocks; block ids (`crypto/blake2b`); sealing and opening chunks with detached tags (§4.4); building and checking descriptors; content-key generation (`crypto/random`); PUT/GET with placement negotiation and windowed transfer; the peer set; have/want, liveness and verification-fetch sampling (§8); reciprocity accounting (§13); the repair loop (§9). **Holder:** admission, the sibling rule, content addressing, quota, eviction (§14) and store writes |
+| **the guest** (cohort, coordinator and repair in one realm) | zero-authority JS realm | `node`, `fs`, `timer`, `_net` (`guest.requires`): its whole reach, in one signed list | **Initiator:** slicing ciphertext into `B`-byte blocks; block ids (`crypto/blake2b`); sealing and opening chunks with detached tags (§4.4); building and checking descriptors; content-key generation (`crypto/random`); PUT/GET with placement negotiation and windowed transfer; the peer set; have/want, liveness and verification-fetch sampling (§8); reciprocity accounting (§13); the repair loop (§9), and the repairs it agreed to rebuild. **Holder:** admission, the sibling rule, content addressing, quota, eviction (§14) and store writes |
 
 The two pure modules hold **no** grants, so even if buggy they can never reach disk or network; Reed–Solomon and the trust math are exactly where you want that guarantee.
 
@@ -512,9 +517,9 @@ Part I needs no replay protection of its own: every mutating request is an await
 
 ---
 
-## 18. Message catalog (the whole control plane: four request/response pairs)
+## 18. Message catalog (the whole control plane: six request/response pairs)
 
-Every storage message is a request/response between two cohort peers on the authenticated channel (§3), and there are exactly four. None carries a signature of its own, since the channel pins the sender; the only signed object in the storage protocol is the chunk descriptor riding inside `offer` and `store` (§4.3). All four are **batched**: one message carries many blocks' worth, bounded by a per-transport byte cap (§3, §28), so round trips scale with peers, not blocks.
+Every storage message is a request/response between two cohort peers on the authenticated channel (§3), and there are exactly six. None carries a signature of its own, since the channel pins the sender; the only signed object in the storage protocol is the chunk descriptor riding inside `offer`, `store` and `repair` (§4.3). All but `repair` are **batched**: one message carries many blocks' worth, bounded by a per-transport byte cap (§3, §28), so round trips scale with peers, not blocks.
 
 | Message | Request | Response |
 | --- | --- | --- |
@@ -522,8 +527,12 @@ Every storage message is a request/response between two cohort peers on the auth
 | `offer` | per block headed to this peer: `block_id` + its **signed descriptor** (§6) | a per-block **verdict** byte: 1 = accepted, 0 = declined, 2 = quota, 3 = sibling, 4 = descriptor rejected. Quota (§14) and the sibling rule (§6) are judged over the whole batch. Verdicts above 1 are **advisory diagnostics**: a holder may lie, so the reason never drives policy, but it turns the initiator's failure message from a guess into an exact report. |
 | `store` | per accepted block: `block_id`, signed descriptor, and the bytes (§6 step 4; the bulk plane's push, §3) | a per-block **verdict** byte, with the same codes as `offer`. This is the **binding** admission point: the content address (§4.2), sibling rule and quota are checked again here, so `offer` stays advisory. |
 | `fetch` | wanted block-ids (§7; also the §8 verification-fetch) | the blocks, present or absent per id (the bulk plane's pull, §3), each hash-verified by the receiver (§4.2). A block the holder has but cannot fit under its response cap is marked `UNANSWERED` (2), distinct from a miss (0), so the reader asks again. |
+| `repair` | one block to rebuild: the chunk's **signed descriptor**, the `block_id` wanted, the chunk's dependable margin, and who holds which blocks now (§9) | one **verdict** byte, the codes of `offer`. Accepted is a promise to fetch, rebuild, verify and store the block. |
+| `repair-fetch` | a `fetch` made while repairing a chunk, led by that chunk's key (its descriptor signature) | as `fetch`. Serving it tells the holder the chunk is being repaired (§9). |
 
-PUT and GET are not messages; they are the coordinator's local API, and it speaks only these four to the cohort. Repair adds no message of its own: it runs on `have`, `fetch`, `offer` and `store` (§9). The optional verifiable-reputation layer (§20) adds `proof.challenge` / `proof.receipt` and `rep.gossip`, and the optional tombstone layer (§25) adds its signed tombstone; the base protocol uses none of them.
+`offer` and `store` are accepted only from the chunk's author: they are how an author places its own data. Their verdicts add 5 = holder error, 6 = over the author's allowance, 7 = not in the chunk's group (§5.1) and 8 = not the author.
+
+PUT and GET are not messages; they are the coordinator's local API, and it speaks only these six to the cohort. Repair runs on `have`, `fetch`, `repair` and `repair-fetch` (§9). The optional verifiable-reputation layer (§20) adds `proof.challenge` / `proof.receipt` and `rep.gossip`, and the optional tombstone layer (§25) adds its signed tombstone; the base protocol uses none of them.
 
 ---
 

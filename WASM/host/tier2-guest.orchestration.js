@@ -366,6 +366,59 @@ function repTally() {
   };
 }
 
+// ── the ledger (§13) ─────────────────────────────────────────────────────────
+// Kept per (group, peer), from what this node witnesses itself:
+//   reliability — verified fetches passed against missed (peerReps, above);
+//   availability — repair passes the peer was linked at against passes it was not;
+//   holdings — bytes the peer verifiably holds for this node's own files, from auditing them.
+// Reliability × availability ranks peers for placement, repair and reads; availability
+// decides which copies a chunk can count on; holdings set the allowance an author earns.
+const availReps = new Map(); // repKey → { serve: passes present, miss: passes absent, last }
+// The share of recent passes a peer was linked at. Both counts decay from the same moment,
+// so their ratio needs no decay of its own. A peer not yet observed counts as available.
+function availability(group, peerHex) {
+  const r = availReps.get(repKey(group, peerHex));
+  return r !== undefined && r.serve + r.miss > 0 ? r.serve / (r.serve + r.miss) : 1;
+}
+// Online often enough that a copy on it counts towards its chunk's health (§8, §9).
+const DEPENDABLE = 0.5;
+function dependable(group, peerHex) { return peerHex === myPeer() || availability(group, peerHex) >= DEPENDABLE; }
+// One observation per group member per repair pass: is it linked now.
+async function observeAvailability() {
+  const linked = new Set(decodePeers(await netOp("peers", EMPTY, call)));
+  const me = myPeer(), t = Date.now(), work = [];
+  for (const [group, members] of groups) for (const p of members) if (p !== me) work.push(availObserve(group, p, t, linked.has(p)));
+  await Promise.all(work);
+}
+async function availObserve(group, peerHex, t, present) {
+  const key = repKey(group, peerHex);
+  let rep = availReps.get(key);
+  if (rep === undefined) {
+    pruneStalePeers(availReps, t);
+    rep = { ...ZERO_REP };
+    availReps.set(key, rep);
+  }
+  try {
+    const resp = await call(REP_NAME, encodeObserveReq(rep.serve, rep.miss, rep.last, t, present ? 1 : 0, present ? 0 : 1));
+    if (resp.length < 32) return;
+    const u = decodeObserveResp(resp);
+    rep.serve = u.serve; rep.miss = u.miss; rep.last = u.last;
+  } catch { /* advisory, as reliability is */ }
+}
+// Holdings: own chunk key → { group, peers: Map(peerHex → bytes) } from that chunk's last
+// audit, and their sum per (group, peer) in heldForMe.
+const ownHoldings = new Map();
+const heldForMe = new Map(); // repKey → bytes
+function recordHoldings(key, d, live) {
+  const old = ownHoldings.get(key);
+  if (old) for (const [p, n] of old.peers) heldForMe.set(repKey(old.group, p), heldForMe.get(repKey(old.group, p)) - n);
+  const peers = new Map(), me = myPeer();
+  for (const set of live.values()) for (const p of set) if (p !== me) peers.set(p, (peers.get(p) ?? 0) + d.blockSize);
+  ownHoldings.set(key, { group: d.group, peers });
+  for (const [p, n] of peers) heldForMe.set(repKey(d.group, p), (heldForMe.get(repKey(d.group, p)) ?? 0) + n);
+}
+function heldFor(group, peerHex) { return heldForMe.get(repKey(group, peerHex)) ?? 0; }
+
 // ── local store over fs ─────────────────────────────────────────────────────
 // One <hex>.rec per block (host/store-record.ts). The index of what is held is the
 // holder's, so its fs reads and writes take the holder's share of the budget.
@@ -427,16 +480,18 @@ function inGroup(group, peerHex) { const g = groups.get(group); return g !== und
 async function cohortPeers(via) { return decodePeers(await netOp("peers", EMPTY, via)).filter((p) => rosterMembers.has(p)); }
 // The linked members of one group: everyone a chunk of that group may be placed on.
 async function groupPeers(group, via) { return (await cohortPeers(via)).filter((p) => inGroup(group, p)); }
-// A reciprocity ranker (§13): orders peers best-score-first, by their standing in `group`. `makeRanker` memoizes
+// A ranker (§13): orders peers best-first by their standing in `group`, reliability times
+// availability, so a steady peer comes before one often offline. `makeRanker` memoizes
 // each distinct peer's score (by PROMISE, not settled value, so concurrent lookups
 // share one in-flight call) for its lifetime, so ranking overlapping holder subsets
 // across a round costs one bridge crossing per peer, not one per (peer, id).
-// `inStanding` drops the peers scored below zero while any peer is at or above it, for a
-// caller that spreads work over the list instead of taking its head (gatherBlocks).
+// `inStanding` drops the peers that fail more checks than they pass while any peer does not,
+// for a caller that spreads work over the list instead of taking its head (gatherBlocks).
 async function makeRanker(group) {
   const t = Date.now();
-  const cache = new Map(); // peerHex → Promise<decayed score>
-  const scoreOf = (p) => { let s = cache.get(p); if (s === undefined) cache.set(p, s = repScore(group, fromHex(p), t)); return s; };
+  const cache = new Map(); // peerHex → Promise<standing>
+  const standing = async (p) => { const rel = await repScore(group, fromHex(p), t); return rel < 0 ? rel : (1 + rel) * availability(group, p); };
+  const scoreOf = (p) => { let s = cache.get(p); if (s === undefined) cache.set(p, s = standing(p)); return s; };
   return async (peers, inStanding = false) => {
     if (peers.length === 0) return [];
     const scored = (await Promise.all(peers.map(async (p) => ({ p, s: await scoreOf(p) })))).sort((a, b) => b.s - a.s);
@@ -498,7 +553,7 @@ async function netSend(peer, type, payload, answerBytes, timing) {
     const t0 = Date.now();
     try { return await host.call(NET_ID, netSendFrame(fromHex(peer), type, parts)); }
     finally { statsInFlight[type]--; if (timing) timing.ms = Date.now() - t0; }
-  }, type === MsgType.STORE || type === MsgType.FETCH ? BULK : FOREGROUND).then((r) => r, () => EMPTY);
+  }, type === MsgType.STORE || type === MsgType.FETCH || type === MsgType.REPAIR_FETCH ? BULK : FOREGROUND).then((r) => r, () => EMPTY);
   // A view, not a copy: the caller decodes it (and keeps only what it needs) before
   // the answer goes out of scope. null = peer unreachable within the window.
   return r[0] === 1 ? r.subarray(1) : null;
@@ -681,7 +736,7 @@ async function encodeChunk(source, localCi, globalCi, K, level, group) {
 const VERDICT_REASONS = {
   [VERDICT_QUOTA]: "quota", [VERDICT_SIBLING]: "sibling",
   [VERDICT_DESCRIPTOR]: "descriptor-rejected", [VERDICT_ERROR]: "holder-error",
-  [VERDICT_ALLOWANCE]: "allowance", [VERDICT_GROUP]: "not-in-group",
+  [VERDICT_ALLOWANCE]: "allowance", [VERDICT_GROUP]: "not-in-group", [VERDICT_NOT_AUTHOR]: "not-author",
 };
 // THE placement engine (§6/§10). Places every job's slots with one batched OFFER
 // per peer per round, then accepted blocks STORE'd in fanoutWindow()-deep fan-outs.
@@ -817,7 +872,9 @@ async function placeChunksBatched(jobs, what, ranker) {
 // Up to fanoutWindow() requests are in flight, each verified as its own answer lands and its
 // lane refilled at once, as the STORE lanes are (runStoreBatches): one slow holder then holds
 // up only its own lane, not the verification of every answer that came back beside it.
-async function runFetchTasks(byPeer, maxIds, descriptorOf, onResult) {
+// With `repairKey` each request is a REPAIR_FETCH, [chunk key 64][FETCH request]: serving it
+// tells the holder that chunk is being repaired (§9).
+async function runFetchTasks(byPeer, maxIds, descriptorOf, onResult, repairKey = null) {
   const me = myPeer();
   const tally = repTally();
   // `blocks` aligns to `ids` (bytes|null each), or is null for an unreachable peer — not a §8 miss.
@@ -847,7 +904,10 @@ async function runFetchTasks(byPeer, maxIds, descriptorOf, onResult) {
     for (const { peer, slices } of slicesOf) if (s < slices.length) { tasks.push({ peer, slice: slices[s], ids: slices[s].map(fromHex) }); more = true; }
   }
   const fetchOne = async ({ peer, slice, ids }) => {
-    const bytes = await netSend(peer, MsgType.FETCH, encodeFetchBatchReq(ids), fetchAnswerBytes(ids.length));
+    const req = encodeFetchBatchReq(ids);
+    const bytes = repairKey === null
+      ? await netSend(peer, MsgType.FETCH, req, fetchAnswerBytes(ids.length))
+      : await netSend(peer, MsgType.REPAIR_FETCH, [fromHex(repairKey), req], fetchAnswerBytes(ids.length));
     if (bytes === null) return apply(peer, slice, ids, null); // unreachable
     let decoded;
     try { decoded = decodeFetchBatchRes(bytes, ids.length); }
@@ -909,8 +969,9 @@ async function runFetchTasks(byPeer, maxIds, descriptorOf, onResult) {
 // fewest blocks queued this round, the better-scored on a tie. Always taking the
 // best-scored would read a whole replicated file from one holder and leave the others'
 // links idle. A holder scored below zero is still passed over while another has the block (§7).
-// `got` may arrive holding blocks already in hand (repair's audit), and is filled in place.
-async function gatherBlocks(descriptors, holders, got = new Map()) {
+// `got` may arrive holding blocks already in hand, and is filled in place. `repairKey`, when
+// set, marks every fetch as that chunk's repair (runFetchTasks).
+async function gatherBlocks(descriptors, holders, got = new Map(), repairKey = null) {
   const descriptorOf = new Map();
   for (const d of descriptors) for (const id of d.blockIds) descriptorOf.set(toHex(id), d);
   const tried = new Map();
@@ -961,7 +1022,7 @@ async function gatherBlocks(descriptors, holders, got = new Map()) {
     await runFetchTasks(byPeer, maxIds, (h) => descriptorOf.get(h), (peer, h, b) => {
       triedOf(h).add(peer);
       if (b && !got.has(h)) got.set(h, b);
-    });
+    }, repairKey);
   }
   return got;
 }
@@ -1041,7 +1102,7 @@ async function placeStream(s, bytes, level, base) {
   const wb = putWindowBytes();
   for (let off = 0; off === 0 || off < bytes.length; off += wb) {   // an empty file is still one chunk
     const chunks = await encodeWindow(bytes.subarray(off, Math.min(off + wb, bytes.length)), base + off, s.K, level, s.group);
-    for (const ch of chunks) out.push(ch.descriptor);
+    for (const ch of chunks) { out.push(ch.descriptor); s.own.push(ch.descriptor); }
     await pipePlacement(s, placeChunksBatched(chunks, "chunk", s.rank).then((peerCount) => recordPlacements(s, chunks, peerCount)));
   }
   return out;
@@ -1102,7 +1163,7 @@ async function putStart(group) {
       + descriptorBytes(group) + " B each) so a file's descriptor list can reach a single root — raise blockSize or k");
   }
   if (CFG.k > 1) await assertCodecFits(CFG.k, CFG.m, CFG.blockSize);
-  putStream = { K: await randomKey(), group, rank: await makeRanker(group), offset: 0, descriptors: [], placedIds: [], placed: 0, intended: 0, placing: null };
+  putStream = { K: await randomKey(), group, rank: await makeRanker(group), offset: 0, descriptors: [], own: [], placedIds: [], placed: 0, intended: 0, placing: null };
   return putWindowBytes();
 }
 // Fold placed chunks into the stream's durability accounting (§8). Counts REPLICA
@@ -1143,6 +1204,7 @@ async function putFinish() {
     let envs = s.descriptors;
     for (let level = 1; envs.length > 1; level++) envs = await placeStream(s, encodeDescriptorList(envs), level, 0);
     await settlePlacements(s);
+    await saveOwnFile(envs[0], s.own);
     // The ONE PUT result format, shared with every driver (host/protocol.ts).
     return encodePutResult({
       key: s.K, root: envs[0], chunkCount: s.descriptors.length,
@@ -1306,8 +1368,8 @@ function noteVerified(peer, t, ok) {
 }
 // Verify one block per picked peer, each a single-block FETCH so the deadline bounds one
 // disk read and one block on the wire. Unreachable or UNANSWERED is no verdict; wrong,
-// malformed or late is a miss. A block that hashes is kept for healing, late or not.
-async function verifySample(d, picks, bytes) {
+// malformed or late is a miss.
+async function verifySample(d, picks) {
   const tally = repTally();
   await Promise.all(picks.map(async ({ peer, h }) => {
     const id = fromHex(h), timing = {};
@@ -1317,7 +1379,6 @@ async function verifySample(d, picks, bytes) {
     try { b = decodeFetchBatchRes(r, 1)[0]; } catch { b = null; }
     if (b === FETCH_UNANSWERED) return;
     const good = b !== null && bytesEqual(await blockHash(d, b, call), id);
-    if (good && !bytes.has(h)) bytes.set(h, b);
     const ok = good && !(timing.ms > cfgMs("verifyDeadlineMs"));
     noteVerified(peer, Date.now(), ok);
     tally.note(d.group, peer, ok ? 1 : 0, ok ? 0 : 1);
@@ -1327,8 +1388,7 @@ async function verifySample(d, picks, bytes) {
 // Audit a chunk's blocks (§9 step 1): have/want for the advertised holders, then a
 // verification-fetch of one block from every advertiser the ledger holds no fresh pass for,
 // plus AUDIT_SAMPLE of the rest. Live = advertised and freshly verified; this node's own
-// copies count as live without a fetch. Returns { live: Map hex → Set(peer), bytes: Map hex →
-// a verified copy } — only what the samples fetched, so heal gathers anything else it needs.
+// copies count as live without a fetch. Returns Map hex → Set(peer).
 async function liveHolders(d) {
   const advertised = await haveWant(d.blockIds);
   const me = myPeer(), t = Date.now();
@@ -1338,88 +1398,140 @@ async function liveHolders(d) {
   for (const [peer, h] of sampleOf) (verifiedLive(peer, t) ? fresh : picks).push({ peer, h });
   fresh.sort((a, b) => verifiedAt.get(a.peer).pass - verifiedAt.get(b.peer).pass);
   picks.push(...fresh.slice(0, AUDIT_SAMPLE));
-  const bytes = new Map();
-  await verifySample(d, picks, bytes);
+  await verifySample(d, picks);
   const now = Date.now(), live = new Map();
   for (const [h, peers] of advertised) live.set(h, new Set([...peers].filter((p) => p === me || verifiedLive(p, now))));
-  return { live, bytes };
+  return live;
 }
-// Heal one chunk back toward full redundancy (§9). Wanted copies per block = its
-// multiplicity in the id list (copyTargets); a short block is topped up from a live
-// holder's copy, or reconstructed from any k live blocks if coded (k≥2) with no live
-// holder — a k=1 block can only be copied while one copy survives. `verified` holds the
-// audit's copies; whatever else is needed is fetched from live holders here.
-async function heal(d, descEnv, holders, verified) {
-  const copiesOf = (h) => (holders.get(h) || new Set()).size;
-  const want = copyTargets(d);
-
-  const lost = d.k > 1 && d.blockIds.some((id) => copiesOf(toHex(id)) === 0);
-  if (lost) await gatherBlocks([d], holders, verified);
-  const short = [];
-  for (const [h, target] of want) if (copiesOf(h) > 0 && copiesOf(h) < target && !verified.has(h)) short.push(fromHex(h));
-  if (short.length) await gatherBlocks([{ ...d, k: short.length, blockIds: short }], holders, verified);
-
-  const regenerated = new Map();
-  if (lost) {
-    const present = [];
-    for (let idx = 0; idx < d.blockIds.length && present.length < d.k; idx++) {
-      const b = verified.get(toHex(d.blockIds[idx])); // present iff that id has a live holder
-      if (b) present.push({ index: idx, bytes: b });
-    }
-    if (present.length >= d.k) {
-      const data = await rsDecode(d.k, d.m, d.blockSize, present);
-      const all = [...data, ...await rsEncode(d.k, d.m, d.blockSize, data)];
-      for (let i = 0; i < all.length; i++) {
-        // Re-certify against the already-signed id (§9): a mismatch means a bad
-        // input/decode — drop it, never propagate (a poisoned descriptor can't mint).
-        if (bytesEqual(await blockHash(d, all[i], call), d.blockIds[i])) regenerated.set(toHex(d.blockIds[i]), all[i]);
-      }
-    }
+// ── repair by request (§9) ──
+// A missing copy is rebuilt by the device that will keep it. A holder whose audit finds a
+// chunk short sends a group member holding none of it a REPAIR request: the signed
+// descriptor, the block wanted, and who holds which blocks. The member decides under its
+// own admission and, if it agrees, fetches what it needs, rebuilds the block, checks it
+// against its signed id and stores it. Agreeing is a promise, not a guarantee: if nothing
+// lands, the chunk's repair note expires and a later audit asks someone else.
+const REPAIR_NOTE_MS = 2 * 60 * 1000;
+// Chunk key → until when this node treats it as being repaired: one it asked a member to
+// repair, or one whose repair fetches it served. Either way it sends no request for it.
+const repairing = new Map();
+function chunkKey(env) { return toHex(env.subarray(32, 96)); }
+function noteRepairing(key, t) {
+  for (const [k, until] of repairing) if (until <= t) repairing.delete(k);
+  repairing.set(key, t + REPAIR_NOTE_MS);
+}
+function isRepairing(key, t) { const until = repairing.get(key); return until !== undefined && until > t; }
+// ── this node's own files (§13.1) ──
+// Every chunk this node authored, as its signed descriptors, so its own audit sees who holds
+// its data: the ledger's holdings, and a repair request when one of them is short. A PUT
+// adds `own.<root key>.<n>` records, each an encoded descriptor list of up to
+// OWN_PART_BYTES. No content key is kept. A pass audits OWN_AUDIT_PER_PASS of them in turn.
+const OWN_PREFIX = "own.";
+const OWN_PART_BYTES = 128 * 1024;
+const OWN_AUDIT_PER_PASS = 32;
+let ownChunks = null, ownCursor = 0;
+async function loadOwnChunks() {
+  if (ownChunks !== null) return ownChunks;
+  const out = [];
+  for (const key of await storeKeys()) {
+    if (!key.startsWith(OWN_PREFIX)) continue;
+    const part = await fsGet(key, call, OWN_PART_BYTES + 1024);
+    try { if (part) for (const env of decodeDescriptorList(part)) out.push(env); } catch { /* a torn part */ }
   }
-
-  // Every peer already holding part of this chunk. Restored copies go somewhere else
-  // (§6, §10 — the sibling rule, which is also what keeps r replicas distinct).
+  ownChunks = out;
+  return out;
+}
+// Record a PUT's chunks, index levels included. A failure leaves the file unaudited by its
+// owner, not unstored, so it does not fail the PUT.
+async function saveOwnFile(rootEnv, envs) {
+  try {
+    const own = await loadOwnChunks();
+    const parts = [];
+    let part = [], bytes = 0;
+    for (const env of envs) {
+      if (part.length > 0 && bytes + 4 + env.length > OWN_PART_BYTES) { parts.push(part); part = []; bytes = 0; }
+      part.push(env); bytes += 4 + env.length;
+    }
+    if (part.length > 0) parts.push(part);
+    const rootKey = chunkKey(rootEnv);
+    for (let i = 0; i < parts.length; i++) await fsPut(OWN_PREFIX + rootKey + "." + i, [encodeDescriptorList(parts[i])], call);
+    for (const env of envs) own.push(env);
+  } catch { /* unaudited, see above */ }
+}
+async function nextOwnChunks() {
+  const own = await loadOwnChunks();
+  const out = [];
+  for (let i = 0; i < Math.min(OWN_AUDIT_PER_PASS, own.length); i++) out.push(own[(ownCursor + i) % own.length]);
+  if (own.length > 0) ownCursor = (ownCursor + out.length) % own.length;
+  return out;
+}
+// Ask group members to repair what an audited chunk lacks, one member per missing
+// dependable copy, telling each how urgent it is (`margin`). `leaving` is a holder to count
+// as gone (this node, releasing its copy), though it still serves until then. Answers how
+// many members agreed.
+async function requestRepairs(d, env, live, margin, leaving = null) {
+  const key = chunkKey(env);
+  if (isRepairing(key, Date.now())) return 0;
+  const counts = dependableCopies(d, live, leaving), have = new Map();
+  for (let i = 0; i < d.blockIds.length; i++) have.set(toHex(d.blockIds[i]), counts[i]);
+  const missing = [];
+  for (const [h, target] of copyTargets(d)) for (let c = have.get(h); c < target; c++) missing.push(h);
+  // Rebuildable at all: a k = 1 block from one live copy, a coded block from any k blocks.
+  let liveDistinct = 0;
+  for (const h of copyTargets(d).keys()) if ((live.get(h) || new Set()).size > 0) liveDistinct++;
+  if (missing.length === 0 || liveDistinct < d.k) return 0;
   const occupied = new Set();
-  for (const set of holders.values()) for (const p of set) occupied.add(p);
-
-  // Copies still owed, expressed as PLACEMENT SLOTS — same shape a PUT window hands
-  // the engine. A block already at full redundancy, or with no reconstructable copy,
-  // contributes no slots.
-  const slotIds = [], slotBlocks = [];
-  for (const [h, target] of want) {
-    const bytes = verified.get(h) || regenerated.get(h);
-    if (!bytes) continue;
-    const id = fromHex(h);
-    for (let have = copiesOf(h); have < target; have++) { slotIds.push(id); slotBlocks.push(bytes); }
+  for (const set of live.values()) for (const p of set) occupied.add(p);
+  const hints = [];
+  for (const [h, peers] of live) for (const peer of peers) hints.push({ peer, blockId: fromHex(h) });
+  const cands = await rank((await groupPeers(d.group, call)).filter((p) => !occupied.has(p)), d.group);
+  // A member that declines is passed over for the next. One that does not answer may still
+  // have agreed, so its copy counts as promised and nobody else is asked for it this time.
+  let next = 0, accepted = 0, unknown = 0;
+  for (const h of missing) {
+    while (next < cands.length) {
+      const r = await netSend(cands[next++], MsgType.REPAIR, encodeRepairReq({ descriptor: env, target: fromHex(h), margin, hints }));
+      if (r === null) { unknown++; break; }
+      if (r.length === 1 && r[0] === VERDICT_ACCEPTED) { accepted++; break; }
+    }
   }
-  if (slotIds.length === 0) return 0;
-
-  // Floor 0 — repair is best-effort: a pass places what the cohort will take and the next
-  // pass retries the rest, where a PUT would rather fail than under-place a new file.
-  const job = makeJob(slotIds, slotBlocks, descEnv, 0, occupied, d.group);
-  await placeChunksBatched([job]);
-  let replaced = 0;
-  for (const p of job.placedPeer) if (p) replaced++;
-  return replaced;
+  if (accepted + unknown > 0) noteRepairing(key, Date.now());
+  return accepted;
 }
-// Audit and, if under-replicated, heal one chunk from its signed descriptor.
-async function repairChunk(descEnv) {
-  const sd = await verifyDescriptor(descEnv, call);         // forged/unsigned/malformed → null (§4.3)
-  if (!sd) return 0;
+// The copies of each listed block a chunk can count on: its live, dependable holders,
+// less `leaving` (a holder about to drop its copy).
+function dependableCopies(d, live, leaving = null) {
+  return d.blockIds.map((id) => {
+    let n = 0;
+    for (const p of live.get(toHex(id)) || []) if (p !== leaving && dependable(d.group, p)) n++;
+    return n;
+  });
+}
+// Audit one chunk from its signed descriptor: { d, env, live, margin } if it is short, else
+// null. Health is the loss margin over dependable copies only (§8, §9), so a chunk whose
+// copies sit on peers that are often offline is repaired onto steadier ones before it loses
+// anything. Margin and low-water mark ⌈m/2⌉ both come from the SIGNED descriptor — a
+// mixed-geometry cohort (§4.1) repairs each chunk to the count its own author signed. For a
+// chunk this node authored, the audit also records who holds it (the ledger's holdings).
+async function auditChunk(env) {
+  const sd = await verifyDescriptor(env, call);             // forged/unsigned/malformed → null (§4.3)
+  if (!sd) return null;
   const d = sd.descriptor;
-  const { live: holders, bytes: verified } = await liveHolders(d);
-  await retier(d, holders);
-  // Chunk health is one number (§8, §9): loss margin against low-water mark ⌈m/2⌉,
-  // both derived from the SIGNED descriptor — a mixed-geometry cohort (§4.1) repairs
-  // each chunk to the count its own author signed.
-  const copies = d.blockIds.map((id) => (holders.get(toHex(id)) || new Set()).size);
-  if (lossMargin(d, copies) >= lowWaterMargin(d)) return 0;          // healthy
-  return heal(d, descEnv, holders, verified);
+  const live = await liveHolders(d);
+  if (toHex(sd.authorPk) === myPeer()) recordHoldings(chunkKey(env), d, live);
+  await retier(d, live);
+  const margin = lossMargin(d, dependableCopies(d, live));
+  return margin >= lowWaterMargin(d) ? null : { d, env, live, margin };
+}
+// Audit one chunk and, if it is short, ask for its repair.
+async function repairChunk(env) {
+  const short = await auditChunk(env);
+  return short ? requestRepairs(short.d, short.env, short.live, short.margin) : 0;
 }
 // Move this node's copies of an audited chunk between the §14 tiers. A copy past its block's
 // target is surplus and drops to cache; a cached copy the chunk needs again is committed.
-// Every holder sorts a block's live holders the same way and keeps the first `target`, so
-// only the copies past the target step down, and a view that missed a holder keeps more.
+// Every holder sorts a block's live holders the same way, dependable ones first and then by
+// key, and keeps the first `target`: only the copies past the target step down, the least
+// dependable first, and a view that missed a holder keeps more.
 async function retier(d, live) {
   const me = myPeer();
   for (const [h, target] of copyTargets(d)) {
@@ -1427,28 +1539,185 @@ async function retier(d, live) {
     await ensureStoreIndex();
     const e = heldBlocks.get(h);
     if (!e || pendingDeletes.has(h)) continue;
-    const keep = [...(live.get(h) || [])].sort().indexOf(me) < target;
+    const order = [...(live.get(h) || [])].sort((a, b) =>
+      (Number(dependable(d.group, b)) - Number(dependable(d.group, a))) || (a < b ? -1 : a > b ? 1 : 0));
+    const keep = order.indexOf(me) < target;
     if (keep === e.cache) await setTier(h, !keep, call);
   }
 }
-// Run the repair loop over every chunk this node holds a block of (§9), then bring the store
-// back under quota if it is over. A chunk is told apart by its descriptor's signature, with
-// no hash call: every stored descriptor was verified on admission, and two verified envelopes
-// sharing a signature is a forgery.
+
+// ── repairs this node agreed to ──
+// block hex → { size, author, group }: the room a promised repair holds until its block
+// lands or the attempt ends. It counts against quota and the author's allowance, and as a
+// sibling, but HAVE does not report it held.
+const pendingRepairs = new Map();
+let pendingRepairBytes = 0;
+const pendingFor = new Map(); // allowanceKey → bytes promised for that author in that group
+function reserveRepair(h, size, author, group) {
+  pendingRepairs.set(h, { size, author, group });
+  pendingRepairBytes += size;
+  const key = allowanceKey(group, author);
+  pendingFor.set(key, (pendingFor.get(key) ?? 0) + size);
+}
+function dropRepair(h) {
+  const p = pendingRepairs.get(h);
+  if (!p) return null;
+  pendingRepairs.delete(h);
+  pendingRepairBytes -= p.size;
+  const key = allowanceKey(p.group, p.author);
+  pendingFor.set(key, pendingFor.get(key) - p.size);
+  return p;
+}
+// { target, descriptor, hints, attempt, due, until }: agreed repairs, each run once `due`.
+const repairJobs = [];
+// A fetch that fails is tried again, backing off, until the promise's window closes. Two
+// nodes each mid-pass can wait on each other until their requests time out, so a first
+// failure is ordinary.
+const REPAIR_RETRY_MS = 500, REPAIR_RETRY_MAX_MS = 30 * 1000;
+let wakeDue = Infinity; // when the armed wake fires, Infinity for none
+// Jobs run on a wake, after the request that asked for them has been answered, so no
+// request handler waits on the network. The wake is armed for the earliest job due.
+async function armRepairWake(via) {
+  if (repairJobs.length === 0) return;
+  const t = Date.now();
+  const due = Math.max(t, Math.min(...repairJobs.map((j) => j.due)));
+  if (due >= wakeDue) return;
+  wakeDue = due;
+  const ms = new Uint8Array(4);
+  wU32(ms, 0, due - t);
+  try { await via("timer/arm", ms); } catch { wakeDue = Infinity; }
+}
+// The most urgent due job: the lowest margin its asker reported, the earliest agreed on a tie.
+function takeDueJob(t) {
+  let best = -1;
+  for (let i = 0; i < repairJobs.length; i++) {
+    const j = repairJobs[i];
+    if (j.due <= t && (best < 0 || j.margin < repairJobs[best].margin)) best = i;
+  }
+  return best < 0 ? null : repairJobs.splice(best, 1)[0];
+}
+// One job per wake, so a wake is one bounded invocation; the next is armed while any remain.
+async function onWake() {
+  wakeDue = Infinity;
+  const job = takeDueJob(Date.now());
+  if (job) await runRepairJob(job);
+  await armRepairWake(call);
+  return EMPTY;
+}
+async function drainRepairJobs() {
+  for (let job; (job = takeDueJob(Date.now())) !== null;) await runRepairJob(job);
+  await armRepairWake(call);
+}
+// Fetch, rebuild, check and store one agreed block. A k = 1 block, or any block a live
+// holder still has, is copied; a lost coded block is decoded from any k blocks and
+// re-encoded. The fetches are marked as this chunk's repair, which tells each holder that
+// serves one to leave the chunk be (§9).
+async function runRepairJob(job) {
+  const h = toHex(job.target);
+  try {
+    const d = parseSignedDescriptor(job.descriptor).descriptor;
+    const key = chunkKey(job.descriptor), me = myPeer();
+    const holders = new Map();
+    for (const { peer, blockId } of job.hints) {
+      if (peer === me) continue;
+      const bh = toHex(blockId);
+      let s = holders.get(bh); if (!s) holders.set(bh, (s = new Set()));
+      s.add(peer);
+    }
+    const got = new Map();
+    let bytes = null;
+    if (holders.has(h)) {
+      await gatherBlocks([{ ...d, k: 1, blockIds: [job.target] }], holders, got, key);
+      bytes = got.get(h) ?? null;
+    }
+    if (bytes === null && d.k > 1) {
+      await gatherBlocks([d], holders, got, key);
+      const present = [];
+      for (let i = 0; i < d.blockIds.length && present.length < d.k; i++) {
+        const b = got.get(toHex(d.blockIds[i]));
+        if (b) present.push({ index: i, bytes: b });
+      }
+      if (present.length >= d.k) {
+        const data = await rsDecode(d.k, d.m, d.blockSize, present);
+        const all = [...data, ...await rsEncode(d.k, d.m, d.blockSize, data)];
+        const i = d.blockIds.findIndex((id) => bytesEqual(id, job.target));
+        // Re-certify against the signed id (§9): a bad input or decode is dropped, never stored.
+        if (i >= 0 && bytesEqual(await blockHash(d, all[i], call), job.target)) bytes = all[i];
+      }
+    }
+    if (bytes !== null) return commitRepair(h, bytes, job.descriptor, d.group);
+    const delay = Math.min(REPAIR_RETRY_MAX_MS, REPAIR_RETRY_MS * 2 ** job.attempt);
+    if (Date.now() + delay < job.until) {
+      job.attempt++;
+      job.due = Date.now() + delay;
+      repairJobs.push(job);
+      return;
+    }
+  } catch {
+    // A malformed job cannot get better by waiting.
+  }
+  // The promise lapses: the room goes, and the chunk's repair note expires on its own.
+  dropRepair(h);
+}
+// Turn a promised repair into a held block, evicting cache for room as a STORE does.
+async function commitRepair(h, bytes, env, group) {
+  await ensureStoreIndex();
+  const p = dropRepair(h);
+  if (!p || heldBlocks.has(h) || pendingDeletes.has(h)) return;
+  const short = p.size - (quota() - bytesUsed);
+  const evicted = short > 0 ? pickCacheVictims(short) : [];
+  indexSet(h, p.size, p.author, p.group, false);
+  liveStoreReservations.set(h, { size: p.size, author: p.author, group: p.group });
+  storeReservationVersion++;
+  await deleteBlocks(evicted, call);
+  try { await storeWrite(fromHex(h), bytes, env, group); } catch { /* storeWrite marked the index for a rebuild */ }
+}
+// Accept or decline one REPAIR request (§9), under the same admission a STORE meets.
+async function acceptRepair(payload, caller) {
+  let req;
+  try { req = decodeRepairReq(payload); } catch { return VERDICT_DESCRIPTOR; }
+  const [verdict] = await admitBatch([{ blockId: req.target, descriptor: req.descriptor }], caller, ADMIT_REPAIR);
+  if (verdict !== VERDICT_ACCEPTED) return verdict;
+  // Copies: the request is a view of a frame that is gone once this answer is.
+  const t = Date.now();
+  repairJobs.push({
+    target: req.target.slice(), descriptor: req.descriptor.slice(),
+    hints: req.hints.map((x) => ({ peer: x.peer, blockId: x.blockId.slice() })),
+    margin: req.margin, attempt: 0, due: t, until: t + REPAIR_NOTE_MS,
+  });
+  await armRepairWake(holderCall);
+  return VERDICT_ACCEPTED;
+}
+
+// A repair pass (§9): run the repairs this node agreed to that are due, audit every chunk it
+// holds a block of, then ask for the repair of those that are short, all at the end of the
+// pass and together, so the members asked are answered before they start fetching from this
+// node. Then bring the store back under quota if it is over. A chunk is told apart by its
+// descriptor's signature, with no hash call: every stored descriptor was verified on
+// admission, and two verified envelopes sharing a signature is a forgery. Answers how many
+// repairs members agreed to.
 async function doRepair() {
-  const seen = new Set();
-  let replaced = 0;
+  await drainRepairJobs();
+  await observeAvailability();
+  const seen = new Set(), short = [];
+  const audit = async (env) => {
+    const key = chunkKey(env);
+    if (seen.has(key)) return;
+    seen.add(key);
+    const s = await auditChunk(env);
+    if (s) short.push(s);
+  };
   for (const id of await storeList()) {
     const descriptor = await storeGetDescriptor(id, call);
-    if (!descriptor) continue;
-    const key = toHex(descriptor.subarray(32, 96));
-    if (seen.has(key)) continue;
-    seen.add(key);
-    replaced += await repairChunk(descriptor);
+    if (descriptor) await audit(descriptor);
   }
+  for (const env of await nextOwnChunks()) await audit(env);
+  short.sort((a, b) => a.margin - b.margin); // the most urgent asked first
+  const counts = await Promise.all(short.map((s) => requestRepairs(s.d, s.env, s.live, s.margin)));
+  const requested = counts.reduce((a, b) => a + b, 0);
   await relieveQuota();
   const out = new Uint8Array(4);
-  wU32(out, 0, replaced);
+  wU32(out, 0, requested);
   return out;
 }
 // Over quota (§14 eviction, steps 1 and 3), as when the operator lowers it: drop cache,
@@ -1471,23 +1740,19 @@ async function relieveQuota() {
     await releaseCommitment(h);
   }
 }
-// Graceful release (§14): re-place this copy on a peer holding none of its chunk, then drop
-// it. With no taker it goes only if the chunk stays at or above low water without it, so
-// shedding never itself makes repair necessary.
+// Graceful release (§14): drop this copy once the chunk stays at or above low water
+// without it. Until then, ask members to repair the copies it would leave missing, and try
+// again on a later pass, so shedding never itself leaves the chunk short.
 async function releaseCommitment(h) {
   const rec = await storeGet(fromHex(h), call);
   const sd = rec && await verifyDescriptor(rec.descriptor, call);
   if (sd) {
     const d = sd.descriptor, me = myPeer();
-    const { live } = await liveHolders(d);
-    const occupied = new Set();
-    for (const set of live.values()) for (const p of set) occupied.add(p);
-    occupied.add(me);
-    const job = makeJob([fromHex(h)], [rec.bytes], rec.descriptor, 0, occupied, d.group);
-    await placeChunksBatched([job]);
-    if (!job.placedPeer[0]) {
-      const copies = d.blockIds.map((id) => { const s = live.get(toHex(id)) || new Set(); return s.size - (toHex(id) === h && s.has(me) ? 1 : 0); });
-      if (lossMargin(d, copies) < lowWaterMargin(d)) return false;
+    const live = await liveHolders(d);
+    const margin = lossMargin(d, dependableCopies(d, live, me));
+    if (margin < lowWaterMargin(d)) {
+      await requestRepairs(d, rec.descriptor, live, margin, me);
+      return false;
     }
   }
   await ensureStoreIndex();
@@ -1516,12 +1781,14 @@ let storeReservationVersion = 0;
 // author-signed `quota` in CFG would let a bundle grant itself disk). No generous
 // default either — an under-injecting driver falls to 0 and FAILS CLOSED.
 function quota() { return LOCAL.quota != null ? LOCAL.quota : 0; }
-// How much of the quota an author may fill with its own placements in one group (§13.2): all
-// of it with standing there, none below zero, and newcomerShare of it with no record yet.
-function allowanceFor(score) {
+// How much of the quota an author's blocks may fill in one group (§13.2): newcomerShare of
+// it to start, plus what the author verifiably holds for this node there, up to the whole
+// quota, so the group holds for a peer about as much as it holds for the group. Nothing
+// while it fails more checks than it passes.
+function allowanceFor(reliability, heldForThisNode) {
   const share = CFG.newcomerShare;
   if (!(share >= 0 && share <= 1)) throw new Error("config: no newcomerShare — the host derives it (core.ts normaliseConfig)");
-  return score > 0 ? quota() : score < 0 ? 0 : quota() * share;
+  return reliability < 0 ? 0 : Math.min(quota(), quota() * share + heldForThisNode);
 }
 function allowanceKey(group, authorHex) { return group + "/" + authorHex; }
 function touchedAt(h) { return touched.get(h) ?? 0; }
@@ -1659,39 +1926,44 @@ async function deleteBlocks(hexes, via) {
     }
   }));
 }
+// What an admission is for: OFFER checks only; STORE reserves the block in the index for the
+// write that follows; REPAIR reserves room for a block this node will rebuild itself.
+const ADMIT_OFFER = 0, ADMIT_STORE = 1, ADMIT_REPAIR = 2;
 // Admission (§4.3 descriptor, §5.1 group, §6 sibling rule, §14 quota, §13.2 allowance),
 // enforced by the holder itself so the §10 invariant survives a malicious placer. A batch is
 // checked cumulatively: room, allowance and siblings count as blocks are provisionally
-// accepted. OFFER is the advisory pre-check; STORE re-checks with `reserve=true` and passes
-// `size`, the block in hand, and `parsed`, the descriptor it already parsed to hash it, and
-// collects the cache blocks evicted to make room in `evicted`. The signed descriptor is
-// required on every path — no descriptor-less branch past the sibling rule. `caller` sent
-// the batch.
-async function admitBatch(offers, caller, reserve = false, evicted = null) {
+// accepted. Bytes are pushed (OFFER, STORE) only by the chunk's author; anyone else's copy is
+// one this node pulls, after a REPAIR request (§9). Every block, pushed or pulled, counts
+// against its author's allowance in the chunk's group. A STORE passes `size`, the block in
+// hand, and `parsed`, the descriptor it already parsed to hash it, and collects the cache
+// blocks evicted to make room in `evicted`. The signed descriptor is required on every path —
+// no descriptor-less branch past the sibling rule. `caller` sent the batch.
+async function admitBatch(offers, caller, mode = ADMIT_OFFER, evicted = null) {
   // A batch is one immutable admission snapshot. Issue its independent seam work
   // together (the holder's budget share paces it), then apply quota +
   // provisional-sibling decisions in wire order.
   const signed = await Promise.all(offers.map((o) => verifyDescriptor(o.descriptor, holderCall, o.parsed)));
-  // A caller placing chunks it authored is a routine placement, charged to its allowance in
-  // the chunk's group. A repairer re-placing another author's chunk is not (§14: repair
-  // outranks routine).
   const callerHex = toHex(caller), me = myPeer();
-  const routine = (sd) => toHex(sd.authorPk) === callerHex;
-  const allowance = new Map(); // group → the caller's allowance there
+  const allowance = new Map(); // allowanceKey → the author's allowance in that group
   const t = Date.now();
   for (const sd of signed) {
-    if (!sd || !routine(sd) || allowance.has(sd.descriptor.group)) continue;
-    allowance.set(sd.descriptor.group, allowanceFor(await repScore(sd.descriptor.group, caller, t, holderCall)));
+    if (!sd) continue;
+    const key = allowanceKey(sd.descriptor.group, toHex(sd.authorPk));
+    if (!allowance.has(key)) {
+      const rel = await repScore(sd.descriptor.group, sd.authorPk, t, holderCall);
+      allowance.set(key, allowanceFor(rel, heldFor(sd.descriptor.group, toHex(sd.authorPk))));
+    }
   }
   // Do this after crypto/score awaits: once it returns, the quota/sibling decision
-  // and optional STORE reservations below run without yielding, making the snapshot
-  // atomic with respect to other inbound calls while disk writes remain concurrent.
+  // and the reservations below run without yielding, making the snapshot atomic
+  // with respect to other inbound calls while disk writes remain concurrent.
   await ensureStoreIndex();
-  // Cache gives way to commitments, so a commitment needs room only beside the committed tier.
-  let room = Math.max(0, quota() - (bytesUsed - cacheBytes));
-  const callerUsed = new Map(); // group → the caller's committed bytes there, this batch included
-  const usedIn = (group) => callerUsed.get(group) ?? committedFor.get(allowanceKey(group, callerHex)) ?? 0;
-  const held = (h) => heldBlocks.has(h) || pendingDeletes.has(h);
+  // Cache gives way to commitments, so a commitment needs room only beside the committed
+  // tier and the repairs this node has promised.
+  let room = Math.max(0, quota() - (bytesUsed - cacheBytes) - pendingRepairBytes);
+  const used = new Map(); // allowanceKey → bytes counted for that author so far, this batch included
+  const usedBy = (key) => used.get(key) ?? (committedFor.get(key) ?? 0) + (pendingFor.get(key) ?? 0);
+  const held = (h) => heldBlocks.has(h) || pendingDeletes.has(h) || pendingRepairs.has(h);
   const provisional = new Set();
   const verdicts = [];
   for (let oi = 0; oi < offers.length; oi++) {
@@ -1702,6 +1974,7 @@ async function admitBatch(offers, caller, reserve = false, evicted = null) {
     // group the chunk names, or this node itself, and so must the caller. A key that merely
     // signed proves nothing, since the envelope carries its own pubkey.
     if (!inGroup(d.group, callerHex) || (authorHex !== me && !inGroup(d.group, authorHex))) { verdicts.push(VERDICT_GROUP); continue; }
+    if (mode !== ADMIT_REPAIR && authorHex !== callerHex) { verdicts.push(VERDICT_NOT_AUTHOR); continue; }
     if (!descriptorContains(d, o.blockId)) { verdicts.push(VERDICT_DESCRIPTOR); continue; } // not a block of this chunk
     // Geometry is the SIGNED descriptor's, never a field the sender picks: every block
     // is exactly blockSize bytes, so bytes in hand that disagree are not the block that
@@ -1710,8 +1983,8 @@ async function admitBatch(offers, caller, reserve = false, evicted = null) {
     // Charge exactly what storeWrite commits: frame + descriptor + ciphertext.
     const cost = STORE_REC_HEAD + d.blockSize + o.descriptor.length;
     if (cost > room) { verdicts.push(VERDICT_QUOTA); continue; }
-    const own = routine(sd);
-    if (own && usedIn(d.group) + cost > allowance.get(d.group)) { verdicts.push(VERDICT_ALLOWANCE); continue; }
+    const key = allowanceKey(d.group, authorHex);
+    if (usedBy(key) + cost > allowance.get(key)) { verdicts.push(VERDICT_ALLOWANCE); continue; }
     // The sibling rule, over the whole id list. A block this holder ALREADY has counts:
     // a k=1 chunk lists its one block m+1 times, so those m+1 slots are m+1 distinct
     // peers — accepting a second copy here would silently burn one of them and leave the
@@ -1724,16 +1997,18 @@ async function admitBatch(offers, caller, reserve = false, evicted = null) {
     }
     if (sibling) { verdicts.push(VERDICT_SIBLING); continue; }
     room -= cost;
-    if (own) callerUsed.set(d.group, usedIn(d.group) + cost);
+    used.set(key, usedBy(key) + cost);
     const blockHex = toHex(o.blockId);
     provisional.add(blockHex);
-    if (reserve) {
+    if (mode === ADMIT_STORE) {
       // Evict cache (§14 step 1) for whatever the free space falls short of.
       const short = cost - (quota() - bytesUsed);
       if (short > 0) for (const h of pickCacheVictims(short)) evicted.push(h);
       indexSet(blockHex, cost, authorHex, d.group, false);
       liveStoreReservations.set(blockHex, { size: cost, author: authorHex, group: d.group });
       storeReservationVersion++;
+    } else if (mode === ADMIT_REPAIR) {
+      reserveRepair(blockHex, cost, authorHex, d.group);
     }
     verdicts.push(VERDICT_ACCEPTED);
   }
@@ -1755,7 +2030,7 @@ async function acceptStoreBatch(stores, caller) {
   const evicted = [];
   const admitted = await admitBatch(valid.map(({ index, store: s }) => ({
     blockId: s.blockId, descriptor: s.descriptor, size: s.bytes.length, parsed: parsed[index],
-  })), caller, true, evicted);
+  })), caller, ADMIT_STORE, evicted);
   await Promise.all([deleteBlocks(evicted, holderCall), ...valid.map(async ({ index, store: s }, i) => {
     if (admitted[i] !== VERDICT_ACCEPTED) { verdicts[index] = admitted[i]; return; }
     try { await storeWrite(s.blockId, s.bytes, s.descriptor, parsed[index].descriptor.group); verdicts[index] = VERDICT_ACCEPTED; }
@@ -1837,6 +2112,7 @@ async function handle(arg) {
       case Op.SCORE: return repScoreBytes(groupName(payload.subarray(32)), payload.subarray(0, 32), Date.now());
       case Op.GROUPS: setRoster(decodeGroups(payload)); return EMPTY;
       case Op.STATS: return encodeStats();
+      case "wake": return onWake();
       default: return EMPTY;
     }
   }
@@ -1852,6 +2128,11 @@ async function handle(arg) {
   else if (type === MsgType.OFFER) out = encodeMask(await admitBatch(decodeOfferBatch(payload), caller));
   else if (type === MsgType.STORE) out = encodeMask(await acceptStoreBatch(decodeStoreBatch(payload), caller));
   else if (type === MsgType.FETCH) out = encodeFetchBatchRes(await serveFetch(decodeFetchBatchReq(payload)));
+  else if (type === MsgType.REPAIR) out = encodeMask([await acceptRepair(payload, caller)]);
+  else if (type === MsgType.REPAIR_FETCH && payload.length >= 64) {
+    noteRepairing(toHex(payload.subarray(0, 64)), Date.now());
+    out = encodeFetchBatchRes(await serveFetch(decodeFetchBatchReq(payload.subarray(64))));
+  }
   else out = EMPTY;
   statsRecv[type]++;
   statsRecvBytes[type] += payload.length;
