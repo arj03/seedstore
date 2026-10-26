@@ -14,7 +14,6 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { loadCrypto } from "seedkernel-wasm";
-import { verifyBundle } from "seedkernel-wasm/bundle";
 import { writeStorageBundle } from "./storage-bundle.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -52,17 +51,11 @@ let prevVersion = 0;
 if (existsSync(versionPath)) {
   const v = Number(readFileSync(versionPath, "utf8").trim());
   if (Number.isInteger(v) && v > 0) prevVersion = v;
-} else if (existsSync(bundlePath)) {
-  // Older tree with no version file yet: seed the mark from the last built bundle.
-  try {
-    const prev = verifyBundle(sodium, new Uint8Array(readFileSync(bundlePath)));
-    if (Number.isInteger(prev.manifest.version)) prevVersion = prev.manifest.version;
-  } catch { /* unreadable / pre-integer version → treat as none */ }
 } else if (!mintedKey) {
   // The dangerous case: a persisted key (an established namespace) but no record of how far
   // its version has been published. Warn loudly rather than quietly restart at 1.
   console.warn(
-    `  ⚠ author key exists but no version high-water mark (${versionPath}) and no prior bundle in ${out} — ` +
+    `  ⚠ author key exists but no version high-water mark (${versionPath}) — ` +
     `restarting version at 1.\n` +
     `    If you have already published under this author, a deployed shell will REFUSE this bundle as a ` +
     `downgrade (seedkernel §12.4). Put the real last-published version number in ${versionPath} and re-run.`);

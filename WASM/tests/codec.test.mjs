@@ -183,7 +183,7 @@ export async function run(t) {
     t.ok(recovered && eq(recovered, data), "data-only decode == data");
   }
 
-  t.group("codec: defaults RS(10,6) randomized loss up to m=6");
+  t.group("codec: the larger-cohort RS(10,6) randomized loss up to m=6");
   {
     const k = 10, m = 6, n = 16, bs = 256;
     let trials = 0, ok = 0;

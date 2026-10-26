@@ -45,6 +45,18 @@ export interface StorageConfig {
    *  from it (~/6) when unset. Host-only — passed as THIS BUNDLE's realm bound
    *  (seedkernel §12.3), never shell-wide, so the transport guest doesn't get it. */
   realmMemoryBytes?: number;
+  /** How long a holder that passed a verification-fetch keeps counting as live for
+   *  the blocks it advertises (§8). A repair audit re-checks holders past it, and
+   *  samples a couple of the rest. */
+  verifyFreshMs?: number;
+  /** The latency bound on a verification-fetch (§8): a correct block answered later
+   *  than this fails the check, since a holder regenerating it on demand needs k
+   *  round trips and a decode where a stored block needs one disk read. */
+  verifyDeadlineMs?: number;
+  /** The share of quota an author this holder has no standing with may fill with its
+   *  own placements (§13.2). Positive standing lifts it to the whole quota, negative
+   *  drops it to nothing. 1 turns the allowance off, e.g. among one person's devices. */
+  newcomerShare?: number;
 }
 
 /** Default fan-out window (fanoutWindow): how many per-holder STORE/FETCH
@@ -60,6 +72,11 @@ export const DEFAULT_REALM_MEMORY_BYTES = 64 * 1024 * 1024;
  *  Quota is operator policy, never signed into a bundle — a driver supplies it at
  *  boot and it's injected into the guest's LOCAL; the holder alone enforces it. */
 export const DEFAULT_QUOTA_BYTES = 64 * 1024 * 1024;
+
+/** Defaults for the §8 verification knobs and the §13.2 newcomer allowance. */
+export const DEFAULT_VERIFY_FRESH_MS = 15 * 60 * 1000;
+export const DEFAULT_VERIFY_DEADLINE_MS = 2000;
+export const DEFAULT_NEWCOMER_SHARE = 0.5;
 
 /** The block size a real DEPLOYMENT uses — one named constant so "production
  *  geometry" isn't a magic number copied per site. 256 KiB keeps a k=2 codec
@@ -96,6 +113,7 @@ export function defaultConfig(blockSize: number, k = 2, m = 2): StorageConfig {
  *  in is immaterial — only the KEYS of the result are read. */
 const CONFIG_KEYS: ReadonlySet<string> = new Set([
   ...Object.keys(defaultConfig(TEST_BLOCK_SIZE)), "realmMemoryBytes", "windowTargetBytes",
+  "verifyFreshMs", "verifyDeadlineMs", "newcomerShare",
 ]);
 
 /** Reject unknown keys in a caller-supplied config (StorageConfig is a closed
@@ -137,6 +155,10 @@ export function normaliseConfig(raw: Partial<Record<string, unknown>>): Partial<
     const realm = c.realmMemoryBytes ?? DEFAULT_REALM_MEMORY_BYTES;
     c.windowTargetBytes = Math.round(realm / 6);
   }
+  if (c.verifyFreshMs == null) c.verifyFreshMs = DEFAULT_VERIFY_FRESH_MS;
+  if (c.verifyDeadlineMs == null) c.verifyDeadlineMs = DEFAULT_VERIFY_DEADLINE_MS;
+  if (c.newcomerShare == null) c.newcomerShare = DEFAULT_NEWCOMER_SHARE;
+  if (!(c.newcomerShare >= 0 && c.newcomerShare <= 1)) throw new Error("config: newcomerShare must lie in [0, 1]");
 
   return c;
 }

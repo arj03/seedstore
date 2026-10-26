@@ -80,7 +80,8 @@ export async function run(t) {
   ];
   const source = readFileSync(new URL("../build/host/tier2-guest.js", import.meta.url), "utf8");
   for (let i = 0; i < badReplies.length; i++) {
-    const ctx = vm.createContext({ APP: { k: 1, m: 2, blockSize: 1024, maxMessageBytes: 8192, fanoutWindow: 4 }, LOCAL: {},
+    const ctx = vm.createContext({ APP: { k: 1, m: 2, blockSize: 1024, maxMessageBytes: 8192, fanoutWindow: 4,
+      verifyFreshMs: 60000, verifyDeadlineMs: 2000 }, LOCAL: {},
       Uint8Array, badReply: badReplies[i], good, d, env, K, crypto,
       verifySigned: bytes => verifyDescriptor(sodium, bytes) !== null });
     vm.runInContext(source, ctx);
@@ -160,6 +161,37 @@ export async function run(t) {
     })()`, ctx);
     t.ok(r.err && /fewer than k blocks/.test(r.err), `the GET ends on its own §8 verdict (${r.err && r.err.slice(0, 70)})`);
     t.eq(r.asked, 2, "each lying holder is asked once, and its no-progress answer is final");
+  }
+
+  t.group("security: a verification-fetch answered past its deadline does not count the holder live (§8)");
+  {
+    // A holder regenerating a block on demand answers correct bytes, only slowly. The
+    // audit keeps the bytes (they hash) but does not count that holder as storing them.
+    const ctx = vm.createContext({ APP: { k: 1, m: 2, blockSize: 1024, maxMessageBytes: 8192, fanoutWindow: 4,
+      verifyFreshMs: 60000, verifyDeadlineMs: 50 }, LOCAL: {}, Uint8Array, d, good, crypto });
+    vm.runInContext(source, ctx);
+    const r = await vm.runInContext(`(async () => {
+      for (const name of ["liveHolders", "netSend", "haveWant", "myPeer", "repObserve", "blake2b"]) {
+        if (typeof globalThis[name] !== "function") throw new Error("fault injection: the guest no longer defines " + name);
+      }
+      globalThis.myPeer = () => "self";
+      const misses = [];
+      globalThis.repObserve = async (peer, time, passes, missed) => { if (missed) misses.push(toHex(peer)); };
+      globalThis.blake2b = async (req) => crypto.hash(req.subarray(2));
+      const slow = "01".repeat(32), fast = "02".repeat(32);
+      globalThis.haveWant = async (ids) => new Map(ids.map((id) => [toHex(id), new Set([slow, fast])]));
+      globalThis.netSend = async (peer, type, payload, answerBytes, timing) => {
+        if (timing) timing.ms = peer === slow ? 5000 : 1;
+        return good;
+      };
+      const { live, bytes } = await liveHolders(d);
+      const h = toHex(d.blockIds[0]);
+      return { slowLive: live.get(h).has(slow), fastLive: live.get(h).has(fast), kept: bytes.has(h), misses };
+    })()`, ctx);
+    t.ok(r.fastLive, "the holder that answered in time is live");
+    t.ok(!r.slowLive, "the holder that answered late is not counted as holding the block");
+    t.ok(r.kept, "the late but correct bytes are still kept for healing");
+    t.eq(r.misses.length, 1, "the late answer is scored as a miss");
   }
 
   t.group("security: a FETCH cannot pull more out of a holder's store than one reply carries");

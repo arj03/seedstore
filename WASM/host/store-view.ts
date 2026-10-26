@@ -7,7 +7,7 @@
 // Reads the backend live rather than caching, since the guest writes out of band.
 
 import { toHex, fromHex } from "./util.js";
-import { STORE_REC as REC, decodeStoreRecord, type StoredBlock } from "./store-record.js";
+import { STORE_REC as REC, STORE_TAG, decodeStoreRecord, decodeStoreTag, type StoredBlock } from "./store-record.js";
 import type { Fs } from "seedkernel-wasm/fs";
 
 export type { StoredBlock };
@@ -20,11 +20,13 @@ export interface BlobView {
   has(id: Uint8Array): boolean;
   /** All stored ids (optionally restricted to a hex prefix). */
   list(prefix?: string): Uint8Array[];
-  /** Committed-tier bytes on the backend (§14): every `.rec`. What the holder
+  /** Bytes on the backend, both tiers (§14): every `.rec`. What the holder
    *  charges against its quota — but this view only
    *  reports it; the quota itself is the node's (operator) policy and the guest's
    *  to enforce. */
   usedBytes(): number;
+  /** The block's §14 tier (TIER_COMMITTED or TIER_CACHE), or null if not held. */
+  tier(id: Uint8Array): number | null;
 }
 
 /** The read view over the host's flat-key `fs` service: a node directory on
@@ -54,5 +56,10 @@ export class FsBlobView implements BlobView {
 
   usedBytes(): number {
     return this.fs.list().filter((key) => key.endsWith(REC)).reduce((used, key) => used + Math.max(0, this.fs.size(key)), 0);
+  }
+
+  tier(id: Uint8Array): number | null {
+    if (!this.has(id)) return null;
+    return decodeStoreTag(this.fs.get(toHex(id) + STORE_TAG))?.tier ?? null;
   }
 }

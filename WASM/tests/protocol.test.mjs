@@ -10,8 +10,9 @@ import {
   encodeStoreBatch, decodeStoreBatch,
   encodeFetchBatchReq, decodeFetchBatchReq, encodeFetchBatchRes, decodeFetchBatchRes,
   FETCH_UNANSWERED, MsgType,
-  VERDICT_ACCEPTED, VERDICT_DECLINED, VERDICT_QUOTA, VERDICT_SIBLING, VERDICT_DESCRIPTOR,
+  VERDICT_ACCEPTED, VERDICT_DECLINED, VERDICT_QUOTA, VERDICT_SIBLING, VERDICT_DESCRIPTOR, VERDICT_ALLOWANCE,
 } from "../build/host/protocol.js";
+import { TIER_CACHE, TIER_COMMITTED, encodeStoreTag } from "../build/host/store-record.js";
 import { signDescriptor } from "../build/host/descriptor.js";
 import {
   loadSodium, loadWasmBytes, LoopbackNetwork, createConnectedCohort,
@@ -125,10 +126,12 @@ export async function run(t) {
     const [a, b] = await createConnectedCohort({ suppressLinkLog: true, count: 2, network: net, sodium, wasm, timeoutMs: TIMEOUT });
     try {
       // The host admits 256 unresolved host calls per realm. A cold index that launched
-      // one fs/size call per record in a single Promise.all would make record 257 throw
+      // one fs call per record in a single Promise.all would make record 257 throw
       // at initialization, and every HAVE/OFFER would return an empty reply.
       for (let i = 0; i < 257; i++) {
-        b.fs.put(i.toString(16).padStart(64, "0") + ".rec", new Uint8Array(4));
+        const hex = i.toString(16).padStart(64, "0");
+        b.fs.put(hex + ".tag", encodeStoreTag(TIER_COMMITTED, a.identity.publicKey));
+        b.fs.put(hex + ".rec", new Uint8Array(4));
       }
       const known = fromHex((256).toString(16).padStart(64, "0"));
       const absent = new Uint8Array(32).fill(255);
@@ -229,7 +232,7 @@ export async function run(t) {
     // this is a pure §14 quota decision. The holder charges what it will commit — the
     // 100-byte block + 157-byte descriptor + 4-byte record frame = 261 each — reading
     // the size from signed geometry, never from the offer. Room for two, not three.
-    const [a, b] = await createConnectedCohort({ suppressLinkLog: true, count: 2, network: net, sodium, wasm, quota: 530, timeoutMs: TIMEOUT });
+    const [a, b] = await createConnectedCohort({ suppressLinkLog: true, count: 2, network: net, sodium, wasm, quota: 530, config: { newcomerShare: 1 }, timeoutMs: TIMEOUT });
     try {
       const solo = (blockId) => signDescriptor(
         sodium, { level: 0, k: 1, m: 0, blockSize: 100, tailBytes: 100, authTag: authTag(), blockIds: [blockId] }, a.identity.publicKey, a.identity.privateKey,
@@ -247,7 +250,7 @@ export async function run(t) {
   {
     const net = new LoopbackNetwork();
     // Room for one 1000-byte block + its 157-byte descriptor, not two.
-    const [a, b] = await createConnectedCohort({ suppressLinkLog: true, count: 2, network: net, sodium, wasm, quota: 1500, timeoutMs: TIMEOUT });
+    const [a, b] = await createConnectedCohort({ suppressLinkLog: true, count: 2, network: net, sodium, wasm, quota: 1500, config: { newcomerShare: 1 }, timeoutMs: TIMEOUT });
     try {
       const b0 = bytes(1000, 1), b1 = bytes(1000, 2);
       const i0 = b.crypto.blockId(a.identity.publicKey, b0), i1 = b.crypto.blockId(a.identity.publicKey, b1);
@@ -261,6 +264,64 @@ export async function run(t) {
       t.eq(stored[0], VERDICT_ACCEPTED, "first block stored");
       t.eq(stored[1], VERDICT_QUOTA, "second rejected — its predecessor in the batch already spent the quota (§14)");
       t.ok(b.store.has(i0) && !b.store.has(i1), "only the first block actually committed to the store");
+    } finally { a.close(); b.close(); }
+  }
+
+  t.group("an author with no standing fills only its newcomer share; a repairer's placement is not charged to it (§13.2)");
+  {
+    const net = new LoopbackNetwork();
+    // Each block costs 1161 (1000 + 157 + 4). The default newcomerShare of 0.5 grants a
+    // stranger 1500 of the 3000 quota: one block, not two, though the quota has room.
+    const [a, b, c] = await createConnectedCohort({ suppressLinkLog: true, count: 3, network: net, sodium, wasm, quota: 3000, timeoutMs: TIMEOUT });
+    try {
+      const b0 = bytes(1000, 3), b1 = bytes(1000, 4);
+      const i0 = b.crypto.blockId(a.identity.publicKey, b0), i1 = b.crypto.blockId(a.identity.publicKey, b1);
+      const solo = (blockId) => signDescriptor(
+        sodium, { level: 0, k: 1, m: 0, blockSize: 1000, tailBytes: 1000, authTag: authTag(), blockIds: [blockId] }, a.identity.publicKey, a.identity.privateKey,
+      );
+      const stored = decodeMask(await a.request(b.peerId, typed(MsgType.STORE, encodeStoreBatch([
+        { blockId: i0, descriptor: solo(i0), bytes: b0 },
+        { blockId: i1, descriptor: solo(i1), bytes: b1 },
+      ]))));
+      t.eq(stored[0], VERDICT_ACCEPTED, "the author's first block fits its allowance");
+      t.eq(stored[1], VERDICT_ALLOWANCE, "its second is over the newcomer share, and says so");
+      const repaired = decodeMask(await c.request(b.peerId, typed(MsgType.STORE, encodeStoreBatch([
+        { blockId: i1, descriptor: solo(i1), bytes: b1 },
+      ]))));
+      t.eq(repaired[0], VERDICT_ACCEPTED, "the same block re-placed by a third-party repairer is accepted");
+      t.ok(b.store.has(i0) && b.store.has(i1), "both blocks are held");
+    } finally { a.close(); b.close(); c.close(); }
+  }
+
+  t.group("a STORE that needs room evicts cache, never a commitment (§14)");
+  {
+    const net = new LoopbackNetwork();
+    const [a, b] = await createConnectedCohort({ suppressLinkLog: true, count: 2, network: net, sodium, wasm, quota: 2500, config: { newcomerShare: 1 }, timeoutMs: TIMEOUT });
+    try {
+      const solo = (blockId) => signDescriptor(
+        sodium, { level: 0, k: 1, m: 0, blockSize: 1000, tailBytes: 1000, authTag: authTag(), blockIds: [blockId] }, a.identity.publicKey, a.identity.privateKey,
+      );
+      // One committed and one cached block planted before the holder first builds its
+      // index: 2322 of 2500 used, 1161 of it evictable.
+      const kept = bytes(1000, 5), cached = bytes(1000, 6), fresh = bytes(1000, 7);
+      const iKept = b.crypto.blockId(a.identity.publicKey, kept), iCached = b.crypto.blockId(a.identity.publicKey, cached);
+      const iFresh = b.crypto.blockId(a.identity.publicKey, fresh);
+      plantBlock(b.fs, toHex(iKept), kept, solo(iKept));
+      plantBlock(b.fs, toHex(iCached), cached, solo(iCached), TIER_CACHE);
+      t.eq(b.store.tier(iCached), TIER_CACHE, "the planted copy reads back as cache");
+      t.eq(b.store.tier(iKept), TIER_COMMITTED, "a planted commitment reads back as committed");
+
+      const stored = decodeMask(await a.request(b.peerId, typed(MsgType.STORE, encodeStoreBatch([
+        { blockId: iFresh, descriptor: solo(iFresh), bytes: fresh },
+      ]))));
+      t.eq(stored[0], VERDICT_ACCEPTED, "the new commitment is admitted against the committed tier alone");
+      t.ok(!b.store.has(iCached), "the cached copy was evicted to make room");
+      t.ok(b.store.has(iKept) && b.store.has(iFresh), "both commitments are held");
+      t.ok(b.store.usedBytes() <= 2500, `the store stays within quota (${b.store.usedBytes()} B)`);
+      const again = decodeMask(await a.request(b.peerId, typed(MsgType.OFFER, encodeOfferBatch([
+        { blockId: iCached, descriptor: solo(iCached) },
+      ]))));
+      t.eq(again[0], VERDICT_QUOTA, "with no cache left, a third commitment is refused outright");
     } finally { a.close(); b.close(); }
   }
 

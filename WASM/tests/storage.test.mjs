@@ -17,6 +17,7 @@ import { parseSignedDescriptor, signDescriptor, encodeDescriptorList } from "../
 import { memoryRawFiles } from "seedkernel-wasm/fs-memory";
 import { toHex, fromHex, bytesEqual } from "../build/host/util.js";
 import { liveBlockCount, newKey, plantBlock } from "./helpers.mjs";
+import { TIER_CACHE, TIER_COMMITTED } from "../build/host/store-record.js";
 
 const TIMEOUT = 40; // ms — keep offline-peer timeouts snappy in tests
 
@@ -640,6 +641,104 @@ export async function run(t) {
       }
       t.eq(oversize, 0, "no block on the wire exceeds blockSize — the index has no size ceiling");
     } finally { nodes.forEach((n) => n.close()); }
+  }
+
+  // The distinct chunks a node holds a block of, told apart by descriptor signature.
+  const chunksHeld = (node) => new Set(node.store.list().map((id) => toHex(node.store.get(id).descriptor.subarray(32, 96)))).size;
+
+  t.group("a repair audit samples verification-fetches instead of fetching every block (§8, §9)");
+  {
+    const net = new LoopbackNetwork();
+    const cfg = { k: 2, m: 6, blockSize: 1024 };            // n = 8: an audit sees 7 other holders per chunk
+    const nodes = await createConnectedCohort({ suppressLinkLog: true, count: 10, network: net, sodium, wasm, config: cfg, timeoutMs: TIMEOUT });
+    try {
+      const put = await nodes[0].put(file(8192, 61));
+      const holder = nodes.slice(1).sort((x, y) => chunksHeld(y) - chunksHeld(x))[0];
+      const chunks = chunksHeld(holder);
+      t.ok(chunks >= 2, `the holder holds blocks of several chunks (${chunks})`);
+      t.eq(await holder.runRepair(), 0, "a healthy file needs no repair");
+      await holder.stats();
+      t.eq(await holder.runRepair(), 0, "nor on a second pass");
+      const fetches = (await holder.stats()).get(MsgType.FETCH).sent;
+      t.ok(fetches <= 2 * chunks, `once its peers are verified, a pass samples at most 2 per chunk (${fetches} FETCHes, ${chunks} chunks; a full audit is 7 per chunk)`);
+      t.ok(bytesEqual(await nodes[0].get(put.root, put.key), new Uint8Array(file(8192, 61))), "the file still reads");
+    } finally { nodes.forEach((n) => n.close()); net.close(); }
+  }
+
+  t.group("a holder that advertises a block it no longer serves is caught by the sample and routed around (§8)");
+  {
+    const net = new LoopbackNetwork();
+    const cfg = { k: 1, m: 1, blockSize: 1024 };
+    const nodes = await createConnectedCohort({ suppressLinkLog: true, count: 5, network: net, sodium, wasm, config: cfg, timeoutMs: TIMEOUT });
+    try {
+      const put = await nodes[0].put(file(1024, 67));
+      const id = put.blockIds[0];
+      const [repairer, liar] = nodes.filter((n) => n !== nodes[0] && n.store.has(id));
+      t.eq(await repairer.runRepair(), 0, "both copies verify on the first pass");
+      // Gone from disk, but still in the holder's index, so it keeps answering HAVE yes.
+      liar.fs.delete(toHex(id) + ".rec");
+      t.ok(!liar.store.has(id), "the liar no longer holds the block");
+      const replaced = await repairer.runRepair();
+      t.ok(replaced >= 1, `the freshly verified liar was re-sampled, failed, and the copy re-placed (placed=${replaced})`);
+      const fresh = nodes.filter((n) => n !== repairer && n !== liar && n.store.has(id));
+      t.eq(fresh.length, 1, "the restored copy is on a peer other than the liar");
+    } finally { nodes.forEach((n) => n.close()); net.close(); }
+  }
+
+  t.group("a copy past its block's target drops to cache, and is committed again when needed (§14)");
+  {
+    const net = new LoopbackNetwork();
+    const cfg = { k: 1, m: 1, blockSize: 1024 };            // target: 2 copies
+    const nodes = await createConnectedCohort({ suppressLinkLog: true, count: 5, network: net, sodium, wasm, config: cfg, timeoutMs: TIMEOUT });
+    try {
+      const owner = nodes[0];
+      const put = await owner.put(file(1024, 71));
+      const id = put.blockIds[0];
+      const first = nodes.filter((n) => n !== owner && n.store.has(id));
+      // A third copy, as two repairers healing at once would leave.
+      const extra = nodes.find((n) => n !== owner && !n.store.has(id));
+      const rec = first[0].store.get(id);
+      const verdict = decodeMask(await owner.request(extra.peerId, typed(MsgType.STORE, encodeStoreBatch([{ blockId: id, descriptor: rec.descriptor, bytes: rec.bytes }]))));
+      t.eq(verdict[0], VERDICT_ACCEPTED, "a third copy lands");
+      const holders = [...first, extra];
+      let replaced = 0;
+      for (const n of holders) replaced += await n.runRepair();
+      t.eq(replaced, 0, "an over-replicated chunk needs no repair");
+      const cached = holders.filter((n) => n.store.tier(id) === TIER_CACHE);
+      const last = [...holders].sort((a, b) => (a.peerId < b.peerId ? -1 : 1))[2];
+      t.eq(cached.length, 1, "exactly one of the three copies stepped down to cache");
+      t.ok(cached[0] === last, "the one that sorts past the target, as every holder computes it");
+
+      net.setOffline(holders.find((n) => n !== last).peerId);
+      replaced = 0;
+      for (const n of holders) if (net.isOnline(n.peerId)) replaced += await n.runRepair();
+      t.eq(replaced, 0, "two copies remain: still healthy");
+      t.eq(last.store.tier(id), TIER_COMMITTED, "the cached copy is committed again once the chunk needs it");
+    } finally { nodes.forEach((n) => n.close()); net.close(); }
+  }
+
+  t.group("over quota, a holder releases commitments only after re-placing them elsewhere (§14)");
+  {
+    const net = new LoopbackNetwork();
+    // Each planted block costs 1161 (1000 + 157 + 4): two overrun a 1500-byte quota.
+    const [a, b, c] = await createConnectedCohort({ suppressLinkLog: true, count: 3, network: net, sodium, wasm, quota: 1500, config: { newcomerShare: 1 }, timeoutMs: TIMEOUT });
+    try {
+      const ids = [];
+      for (const seed of [81, 82]) {
+        const bytes = file(1000, seed);
+        const id = b.crypto.blockId(a.identity.publicKey, bytes);
+        const env = signDescriptor(sodium, { level: 0, k: 1, m: 0, blockSize: 1000, tailBytes: 1000, authTag: new Uint8Array(16), blockIds: [id] },
+          a.identity.publicKey, a.identity.privateKey);
+        plantBlock(b.fs, toHex(id), bytes, env);
+        ids.push(id);
+      }
+      t.ok(b.store.usedBytes() > 1500, `the holder starts over quota (${b.store.usedBytes()} B)`);
+      await b.runRepair();
+      t.ok(b.store.usedBytes() <= 1500, `the pass brings it back under quota (${b.store.usedBytes()} B)`);
+      const released = ids.filter((id) => !b.store.has(id));
+      t.eq(released.length, 1, "one commitment released, no more than needed");
+      t.ok(released.length === 1 && (a.store.has(released[0]) || c.store.has(released[0])), "the released block lives on another peer");
+    } finally { a.close(); b.close(); c.close(); net.close(); }
   }
 }
 

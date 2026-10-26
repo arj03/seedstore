@@ -6,7 +6,7 @@
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { concatBytes } from "../build/host/util.js";
-import { STORE_REC, storeRecordHead } from "../build/host/store-record.js";
+import { STORE_REC, STORE_TAG, TIER_COMMITTED, encodeStoreTag, storeRecordHead } from "../build/host/store-record.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 export const root = join(__dirname, "..");
@@ -45,12 +45,13 @@ export function liveBlockCount(nodes, net, ids) {
 
 /** Plant a block straight into a node's store, bypassing the protocol —
  *  for tests that need a holder to already have something. Writes the guest's
- *  `<hex>.rec` record (host/store-record.ts) directly, since admission is the
+ *  `<hex>.tag` and `<hex>.rec` (host/store-record.ts) directly, since admission is the
  *  guest holder's alone.
  *
  *  Seed BEFORE the holder is otherwise exercised: the guest rebuilds its §14
  *  byte total from the fs lazily, so a later plant is invisible to it until
  *  the realm is rebuilt. */
-export function plantBlock(fs, idHex, bytes, descriptor) {
+export function plantBlock(fs, idHex, bytes, descriptor, tier = TIER_COMMITTED) {
+  fs.put(idHex + STORE_TAG, encodeStoreTag(tier, descriptor.subarray(0, 32)));
   fs.put(idHex + STORE_REC, concatBytes([storeRecordHead(descriptor.length), descriptor, bytes]));
 }

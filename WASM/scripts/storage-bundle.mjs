@@ -120,6 +120,9 @@ export function writeStorageBundle({ path, sk, build, version = 1 }) {
       maxMessageBytes: cfg.maxMessageBytes,
       fanoutWindow: cfg.fanoutWindow,
       windowTargetBytes: cfg.windowTargetBytes,
+      verifyFreshMs: cfg.verifyFreshMs,
+      verifyDeadlineMs: cfg.verifyDeadlineMs,
+      newcomerShare: cfg.newcomerShare,
     },
   });
 

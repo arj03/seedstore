@@ -30,7 +30,7 @@ const OP_ENCODE: i32 = 1;
 const OP_DECODE: i32 = 2;
 
 // Bounds chosen so the GF matrices fit MATRIX_SIZE (n ≤ 64 → augmented n*2n =
-// 8192 bytes). The code defaults to RS(2,2), the spec to RS(10,6), and the
+// 8192 bytes). The default is RS(2,2), a larger cohort runs RS(10,6), and the
 // cold-archive extension is RS(20,20) → n = 40 (§4.1): all comfortably inside these caps.
 const MAX_K: i32 = 32;
 const MAX_M: i32 = 32;

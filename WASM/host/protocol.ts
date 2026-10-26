@@ -87,7 +87,7 @@ export const FETCH_ENTRY_HEAD = 1 + 4;  // a PRESENT block's [found u8][len u32]
 
 // ── the response mask shared by HAVE, OFFER, and STORE ──────────────────────
 // All three replies are the same shape: one byte per batch entry (HAVE: held
-// 1/0; OFFER/STORE: a VERDICT_* code). A verdict ≠ 1 is a decline; codes 2-5
+// 1/0; OFFER/STORE: a VERDICT_* code). A verdict ≠ 1 is a decline; codes 2-6
 // carry advisory diagnostics for an exact initiator error message.
 export function encodeMask(bits: (boolean | number)[]): Uint8Array {
   const out = new Uint8Array(bits.length);
@@ -174,6 +174,9 @@ export const VERDICT_DESCRIPTOR = 4; // descriptor verify failed (§4.3)
 // error, realm OOM) — distinct from VERDICT_QUOTA since one is a policy number to
 // raise and the other a broken holder to inspect.
 export const VERDICT_ERROR      = 5;
+// The author's own placements already fill what this holder grants it at its
+// standing (§13.2) — quota remains for others, and repair placements still land.
+export const VERDICT_ALLOWANCE  = 6;
 
 // ── STORE (the push, §6 step 4) ─────────────────────────────────────────────
 // Batched per holder: every block headed to a peer streams in one message,

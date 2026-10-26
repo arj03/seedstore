@@ -196,7 +196,7 @@ bytes.
 | --- | --- | --- |
 | GF(2⁸) + systematic Reed–Solomon encode/decode | `assembly/codec/`, which is WASM with no grants, called as `host.call("codec", …)` | §4.1, §9 |
 | Decayed per-peer reciprocity counters | `assembly/reputation/`, which is WASM with no grants | §13 |
-| The whole protocol: PUT/GET, the index tree, placement, have/want, repair, and the holder side (admission, sibling rule, quota, store writes) | `host/tier2-guest.orchestration.js`, assembled with the shared cores into `build/host/tier2-guest.js` by `scripts/build-guest.mjs` | §5–§10, §14 |
+| The whole protocol: PUT/GET, the index tree, placement, have/want, repair, and the holder side (admission, sibling rule, quota, allowance, tiers, eviction, store writes) | `host/tier2-guest.orchestration.js`, assembled with the shared cores into `build/host/tier2-guest.js` by `scripts/build-guest.mjs` | §5–§10, §14 |
 | Wire format for HAVE/OFFER/STORE/FETCH | `host/protocol.ts` (shared with the guest) | §18 |
 | Descriptor layout, tags, copy targets, loss margin | `host/descriptor-core.ts` (shared with the guest) | §4.1, §4.3, §8 |
 | Scoped descriptor sign/verify, host side | `host/descriptor.ts` | §16 |
@@ -224,7 +224,35 @@ the host-side mirror in `descriptor.ts` uses the same two names. Each signed for
 **The holder's store.** On first access the guest rebuilds its index of held ids and
 quota usage from `FS_LIST`/`FS_SIZE`. After that it updates the index on each STORE,
 so sibling checks don't need filesystem calls. A block commits as one
-`<block-id>.rec` file (`[descriptor length][descriptor][ciphertext]`).
+`<block-id>.rec` file (`[descriptor length][descriptor][ciphertext]`), with a
+`<block-id>.tag` beside it (`[tier][author]`) that records its §14 tier and the author
+its bytes count against. The tag is written first, so a record without one never
+committed and is not held.
+
+**Tiers and eviction (§14).** Every accepted block starts committed. A repair audit
+that finds a block above its target moves the surplus copies to cache: every holder
+sorts the block's live holders the same way, and the ones past the target step down.
+A later audit that finds the chunk short again moves them back. A STORE needs room
+only beside the committed tier, and evicts cache, coldest first, for any shortfall.
+When the store is over quota (the operator lowered it), the repair pass drops cache
+first. It then releases commitments, lowest-standing author first. Each one is
+re-placed on another peer first, or kept if the chunk would drop below low water
+without it.
+
+**Admission weighs standing (§13.2).** An author placing its own chunks may fill
+`newcomerShare` (default 0.5) of a holder's quota while the holder has no record of
+it, all of it with positive standing, and none with negative standing. The holder
+answers `allowance` past that. A repairer re-placing another author's chunk is not
+charged to anyone's allowance, so repair outranks routine placement. Set
+`newcomerShare: 1` to turn this off, for example among one person's own devices.
+
+**Sampled verification (§8).** A repair audit fetches one block from each advertising
+holder that has no verification pass in the last `verifyFreshMs` (default 15 min),
+plus 2 of the rest, least recently verified first. Each is a one-block FETCH, and a
+correct answer slower than `verifyDeadlineMs` (default 2 s) fails. A holder counts as
+live for every block it advertises while its last pass is fresh, so a pass costs
+about 2 fetches per chunk once the cohort is verified. Heal then fetches only the
+blocks it copies or decodes from.
 
 **One realm.** The initiator and holder sides share one confined realm and its one
 `handle` entrypoint, which runs one invocation at a time (seedkernel §12.3). So when an
@@ -240,10 +268,10 @@ affects correctness.
 | `codec` | any-*k*-of-*n* recovery across every loss pattern, deterministic encode, systematic pass-through, block-id ≡ libsodium, byte-identical re-encode |
 | `bridges` | the host crypto primitives |
 | `descriptor` | descriptor round trips, tamper evidence under the scoped signature, index-list encryption, multiplicity as the replica count, loss margin |
-| `protocol` | batched OFFER/STORE/FETCH encoding; batch-wide sibling and quota rules; a missing, forged, foreign or mismatched descriptor is declined; concurrent STOREs can't race a sibling reservation |
+| `protocol` | batched OFFER/STORE/FETCH encoding; batch-wide sibling, quota and newcomer-allowance rules; a STORE evicts cache, never a commitment; a missing, forged, foreign or mismatched descriptor is declined; concurrent STOREs can't race a sibling reservation |
 | `reputation` | passes raise the score, misses penalize it, scores decay |
-| `storage` | multi-node PUT→GET, small-file replication, offline tolerance, repair (including mixed geometry), key sharing, crypto-shredding, reciprocity |
-| `security` | a peer can't claim another author's block ids, roots are authenticated before use, malformed holder responses can't abort GET or repair, FETCH reply bounds |
+| `storage` | multi-node PUT→GET, small-file replication, offline tolerance, repair (including mixed geometry), sampled audits, a holder advertising what it cannot serve, cache demotion and re-promotion, graceful release over quota, key sharing, crypto-shredding, reciprocity |
+| `security` | a peer can't claim another author's block ids, roots are authenticated before use, malformed holder responses can't abort GET or repair, a late verification answer is not live, FETCH reply bounds |
 | `concurrency` | round-trip economy over a latency-bearing link, asserted as request counts |
 | `net` | the store persisting across a cold reopen, a cohort over real TCP, a browser-like node over real WebSocket |
 | `browser` | a node booted through the `fetch`-based browser entry |
@@ -268,7 +296,7 @@ windows, the host-call ledger, and the guest deadline.
 | --- | ---: |
 | `codec.wasm`, including SIMD RS and GF tables | 8.7 KB |
 | `reputation.wasm` | 5.3 KB |
-| the guest, minified | 64 KB (16 KB gzipped) |
+| the guest, minified | 75 KB (20 KB gzipped) |
 
 Those three files are all of seedstore's runtime code. Everything else is the
 seedkernel host and its core libsodium, which any app on that host shares.
@@ -320,25 +348,18 @@ form in some places and leaves other parts of the spec unbuilt.
 
 ### Not yet built
 
-- **Sampled, latency-bounded verification (§8, §9).** The spec samples a
-  verification-fetch or two per audit. Here a repair pass fetches every advertised
-  block of the chunk, in full, from every peer that advertises it, and any reply
-  that hashes correctly counts as live, however long it took. Every holder of a
-  chunk runs that audit, so with RS(10, 6) one pass moves roughly 15× the chunk's
-  stored size across the cohort (each of its 16 holders downloads the other 15
-  blocks). That is fine for tests and demos, but it sets the
-  cost of running repair at real data sizes.
-- **Eviction (§14).** Nothing is ever evicted: the holder has no delete path, and
-  blocks stay until the operator removes them. There are no committed and cache
-  tiers either, so every stored block is held the same way.
+- **A read cache (§14).** The cache tier holds only surplus copies that repair
+  stepped down. A node does not keep blocks it fetched while reading.
 - **Reclaiming removed files (§11).** Removal is crypto-shredding only, and the
-  shredded blocks are never reclaimed. Without eviction they never age out, and
-  because every holder repairs every chunk it holds, repair keeps them at full
-  redundancy indefinitely.
-- **Reciprocity-weighted admission (§13.2, §14).** Admission is quota plus the
-  sibling rule. It does not weigh the offerer's standing, social closeness or how
-  under-replicated the chunk is, and there is no tit-for-tat allowance, so any
-  known cohort peer can fill a holder's whole quota.
+  shredded blocks are never reclaimed. Eviction drops cache and, over quota, the
+  lowest-standing commitments, but nothing ages out a long-unread committed block.
+  Because every holder repairs every chunk it holds, repair keeps shredded chunks
+  at full redundancy indefinitely.
+- **The rest of admission (§14).** Admission weighs the author's standing, but not
+  social closeness, since nodes carry no cluster tag. A holder does not measure how
+  under-replicated an offered chunk is either. It treats any placement by someone
+  other than the author as repair, so an author with a friend to place for it gets
+  past its allowance.
 - **The full reciprocity score (§13.1).** The score counts passes and misses on the
   fetches that GET and repair audits already make, with a 7-day half-life. It is not
   netted against how much a node stores for that peer. There is no separate

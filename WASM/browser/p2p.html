@@ -214,8 +214,7 @@ const windowTargetBytesFor = (mode) => qNum("window", mode === "ws" ? 24 : 8) * 
 const realmMemoryBytesFor = () => qNum("heap", 256) * 1024 * 1024;
 // Parallel TCP flows per holder — WS only (WebRTC is one data channel). Stripes bulk
 // frames across N sockets to fill a link a single flow can't, once the window no longer
-// idles the wire. Holders must run the multi-link routing core (a legacy single-link
-// holder collapses the 2nd conn). ?conns=1 to A/B against a single flow.
+// idles the wire. ?conns=1 to A/B against a single flow.
 //
 // Default 8, the most a holder admits from one address: the transport's
 // `maxHalfOpenPerSource` caps links across every tier, authenticated included, and
@@ -516,6 +515,10 @@ $("store").onclick = async () => {
         log(`  ⚠ ${count} holder reply/replies refused on QUOTA — those holders are OUT OF STORAGE (quota/disk full).`);
         log("    GET keeps working because serving a read never checks the quota; only a write (OFFER) does.");
         log("    fix: clear each holder's data directory, or raise its quota, then retry.");
+      }
+      if (/allowance/.test(reasons)) {
+        log(`  ⚠ ${count} holder reply/replies refused on ALLOWANCE — this tab has no standing with them yet, so it may fill only their newcomerShare of quota (§13.2).`);
+        log("    fix: hold and serve blocks for those holders to earn standing, or set newcomerShare: 1 in their local config.");
       }
       if (/descriptor/.test(reasons)) {
         log("  ⚠ holders rejected the DESCRIPTOR — it does not verify under their app's signing scope (§16).");

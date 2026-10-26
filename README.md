@@ -16,8 +16,8 @@ and it runs the same way in Node, the browser and seedkernel's native binary.
 
 > **Status:** experimental. [`WASM/`](WASM/) implements Part I of the spec, the minimal
 > system, except for the pieces listed under
-> [not yet built](WASM/README.md#not-yet-built), such as eviction and sampled repair
-> audits. The optional Part II extensions are not implemented. The wire format still
+> [not yet built](WASM/README.md#not-yet-built), such as a read cache and reclaiming
+> removed files. The optional Part II extensions are not implemented. The wire format still
 > changes without a compatibility promise.
 
 ## How it works
@@ -34,8 +34,9 @@ The whole design rests on five ideas:
   has been tampered with doesn't match its name and is dropped. Bulk data needs no
   signatures.
 - **Erasure coding.** Reed–Solomon `RS(k, m)` turns each chunk into `k + m` blocks on
-  distinct peers, and any `k` of them rebuild the chunk. The default `RS(10, 6)`
-  survives 6 lost holders at 1.6× storage cost.
+  distinct peers, and any `k` of them rebuild the chunk. The default `RS(2, 2)`
+  survives 2 lost holders at 2× storage cost and needs only 4 peers per chunk. A cohort
+  of 16 or more can run `RS(10, 6)`, which survives 6 at 1.6×.
 - **A have/want exchange.** "Who has these block ids?" is the whole discovery layer.
   Holders are found live, so nothing about who holds what goes stale.
 

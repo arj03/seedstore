@@ -25,6 +25,26 @@ export function storeRecordHead(descriptorLength: number): Uint8Array {
   return head;
 }
 
+// Beside each record, `<block id hex>.tag`: [tier u8][author public key 32], the §14
+// tier and the chunk author whose allowance the block counts against (§13.2). It is
+// written first, so a record without one never committed and is not held.
+export const STORE_TAG = ".tag";
+export const TIER_COMMITTED = 0, TIER_CACHE = 1;
+export const STORE_TAG_LEN = 1 + 32;
+
+export function encodeStoreTag(tier: number, author: Uint8Array): Uint8Array {
+  const tag = new Uint8Array(STORE_TAG_LEN);
+  tag[0] = tier;
+  tag.set(author.subarray(0, 32), 1);
+  return tag;
+}
+
+/** The tag's tier and author, or null for a missing or malformed tag. */
+export function decodeStoreTag(tag: Uint8Array | null): { tier: number; author: Uint8Array } | null {
+  if (!tag || tag.length !== STORE_TAG_LEN || (tag[0] !== TIER_COMMITTED && tag[0] !== TIER_CACHE)) return null;
+  return { tier: tag[0], author: tag.subarray(1) };
+}
+
 /** Views into `rec`, or null for a record too short to hold its own descriptor. */
 export function decodeStoreRecord(rec: Uint8Array | null): StoredBlock | null {
   if (!rec || rec.length < STORE_REC_HEAD) return null;

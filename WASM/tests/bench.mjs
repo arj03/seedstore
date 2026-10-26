@@ -18,7 +18,7 @@ const crypto = new Crypto(sodium);
 const codec = await CodecClient.load(new Uint8Array(readFileSync("build/codec.wasm")));
 
 const MB = 1024 * 1024;
-const K = 10, M = 6, B = 64 * 1024;       // defaults RS(10,6), 64 KB blocks
+const K = 10, M = 6, B = 64 * 1024;       // the larger-cohort RS(10,6), 64 KB blocks
 const FILE = 100 * MB;
 const chunkData = K * B;                   // 640 KB of data per chunk
 const numChunks = Math.ceil(FILE / chunkData);
