@@ -410,14 +410,96 @@ async function availObserve(group, peerHex, t, present) {
 const ownHoldings = new Map();
 const heldForMe = new Map(); // repKey → bytes
 function recordHoldings(key, d, live) {
-  const old = ownHoldings.get(key);
-  if (old) for (const [p, n] of old.peers) heldForMe.set(repKey(old.group, p), heldForMe.get(repKey(old.group, p)) - n);
   const peers = new Map(), me = myPeer();
   for (const set of live.values()) for (const p of set) if (p !== me) peers.set(p, (peers.get(p) ?? 0) + d.blockSize);
-  ownHoldings.set(key, { group: d.group, peers });
-  for (const [p, n] of peers) heldForMe.set(repKey(d.group, p), (heldForMe.get(repKey(d.group, p)) ?? 0) + n);
+  setHoldings(key, d.group, peers);
+  const part = ownPartOf.get(key);
+  if (part !== undefined) dirtyParts.add(part);
+}
+function setHoldings(key, group, peers) {
+  const old = ownHoldings.get(key);
+  if (old) for (const [p, n] of old.peers) heldForMe.set(repKey(old.group, p), heldForMe.get(repKey(old.group, p)) - n);
+  ownHoldings.set(key, { group, peers });
+  for (const [p, n] of peers) heldForMe.set(repKey(group, p), (heldForMe.get(repKey(group, p)) ?? 0) + n);
 }
 function heldFor(group, peerHex) { return heldForMe.get(repKey(group, peerHex)) ?? 0; }
+
+// ── the ledger on disk ──
+// Reliability, availability and holdings set allowances, eviction order and placement, so a
+// restart must not reset them: an author this node had caught failing would get a newcomer's
+// allowance back, and a peer holding a lot for this node would drop to one. Reliability,
+// availability and the own-audit cursor go in LEDGER_KEY; holdings go per own part, in a
+// `held.<part key>` record beside it, since they are kept per chunk and a pass re-audits only a
+// few. Both are written at the end of every repair pass (saveLedger) and read back once,
+// before an invocation does anything else (`handle`). Verification passes (verifiedAt) are
+// not kept: they go stale within verifyFreshMs anyway, and the first audit re-checks every
+// holder.
+const LEDGER_KEY = "ledger", HELD_PREFIX = "held.";
+const LEDGER_MAX_BYTES = 1 << 20;
+const ownPartOf = new Map(); // own chunk key → the own part listing it
+const ownParts = new Map();  // own part key → its chunk keys, in order
+const dirtyParts = new Set(); // own parts whose holdings changed since the last save
+let restored = null;
+function ensureRestored(via) {
+  if (restored === null) restored = (async () => {
+    await loadLedger(via);
+    // A failure leaves ownChunks unset, so the next pass loads the own chunks again.
+    try { await loadOwnChunks(); } catch { ownChunks = null; }
+  })();
+  return restored;
+}
+async function loadLedger(via) {
+  try {
+    const raw = await fsGet(LEDGER_KEY, via, LEDGER_MAX_BYTES);
+    if (!raw) return;
+    const saved = JSON.parse(bytesToStr(raw));
+    if (saved.v !== 1) return;
+    const restore = (rows, into) => {
+      for (const [key, serve, miss, last] of rows) {
+        if (typeof key === "string" && [serve, miss, last].every(Number.isFinite) && !into.has(key)) into.set(key, { serve, miss, last });
+      }
+    };
+    restore(saved.reliability, peerReps);
+    restore(saved.availability, availReps);
+    if (Number.isInteger(saved.cursor) && saved.cursor >= 0) ownCursor = saved.cursor;
+  } catch { /* unreadable or torn: start over, as a first boot does */ }
+}
+// One own part's holdings: [peer hex], then per chunk in the part's order 0 or [[peer index, bytes]].
+async function loadPartHoldings(part, group) {
+  try {
+    const raw = await fsGet(HELD_PREFIX + part, call, LEDGER_MAX_BYTES);
+    if (!raw) return;
+    const saved = JSON.parse(bytesToStr(raw));
+    const keys = ownParts.get(part);
+    if (saved.v !== 1 || !keys || saved.held.length !== keys.length) return;
+    for (let i = 0; i < keys.length; i++) {
+      if (!saved.held[i]) continue;
+      const peers = new Map();
+      for (const [pi, n] of saved.held[i]) if (typeof saved.peers[pi] === "string" && Number.isFinite(n)) peers.set(saved.peers[pi], n);
+      setHoldings(keys[i], group, peers);
+    }
+  } catch { /* unreadable: the part's chunks count as unseen until audited again */ }
+}
+async function saveLedger() {
+  const rows = (map) => [...map].map(([key, r]) => [key, r.serve, r.miss, r.last]);
+  const text = JSON.stringify({ v: 1, reliability: rows(peerReps), availability: rows(availReps), cursor: ownCursor });
+  try { if (text.length <= LEDGER_MAX_BYTES) await fsPut(LEDGER_KEY, [strBytes(text)], call); } catch { /* the next pass writes it */ }
+  for (const part of [...dirtyParts]) {
+    const peers = [], index = new Map();
+    const held = (ownParts.get(part) ?? []).map((key) => {
+      const h = ownHoldings.get(key);
+      if (!h || h.peers.size === 0) return 0;
+      return [...h.peers].map(([p, n]) => {
+        if (!index.has(p)) { index.set(p, peers.length); peers.push(p); }
+        return [index.get(p), n];
+      });
+    });
+    try {
+      await fsPut(HELD_PREFIX + part, [strBytes(JSON.stringify({ v: 1, peers, held }))], call);
+      dirtyParts.delete(part);
+    } catch { /* still dirty: the next pass writes it */ }
+  }
+}
 
 // ── local store over fs ─────────────────────────────────────────────────────
 // One <hex>.rec per block (host/store-record.ts). The index of what is held is the
@@ -1458,16 +1540,28 @@ const OWN_PREFIX = "own.";
 const OWN_PART_BYTES = 128 * 1024;
 const OWN_AUDIT_PER_PASS = 32;
 let ownChunks = null, ownCursor = 0;
+// Parts load in key order, so the audit cursor saved in the ledger resumes near where it was.
 async function loadOwnChunks() {
   if (ownChunks !== null) return ownChunks;
   const out = [];
-  for (const key of await storeKeys()) {
-    if (!key.startsWith(OWN_PREFIX)) continue;
+  for (const key of (await storeKeys()).filter((k) => k.startsWith(OWN_PREFIX)).sort()) {
     const part = await fsGet(key, call, OWN_PART_BYTES + 1024);
-    try { if (part) for (const env of decodeDescriptorList(part)) out.push(env); } catch { /* a torn part */ }
+    let envs;
+    try { envs = part ? decodeDescriptorList(part) : []; } catch { continue; /* a torn part */ }
+    if (envs.length === 0) continue;
+    registerOwnPart(key, envs);
+    for (const env of envs) out.push(env);
+    let group = null;
+    try { group = parseSignedDescriptor(envs[0]).descriptor.group; } catch { /* no holdings to restore */ }
+    if (group !== null) await loadPartHoldings(key, group);
   }
   ownChunks = out;
   return out;
+}
+function registerOwnPart(part, envs) {
+  const keys = envs.map(chunkKey);
+  ownParts.set(part, keys);
+  for (const key of keys) ownPartOf.set(key, part);
 }
 // Record a PUT's chunks, index levels included. A failure leaves the file unaudited by its
 // owner, not unstored, so it does not fail the PUT.
@@ -1482,7 +1576,10 @@ async function saveOwnFile(rootEnv, envs) {
     }
     if (part.length > 0) parts.push(part);
     const rootKey = chunkKey(rootEnv);
-    for (let i = 0; i < parts.length; i++) await fsPut(OWN_PREFIX + rootKey + "." + i, [encodeDescriptorList(parts[i])], call);
+    for (let i = 0; i < parts.length; i++) {
+      await fsPut(OWN_PREFIX + rootKey + "." + i, [encodeDescriptorList(parts[i])], call);
+      registerOwnPart(OWN_PREFIX + rootKey + "." + i, parts[i]);
+    }
     for (const env of envs) own.push(env);
   } catch { /* unaudited, see above */ }
 }
@@ -1747,6 +1844,7 @@ async function doRepair() {
   const counts = await Promise.all(short.map((s) => requestRepairs(s.d, s.env, s.live, s.margin)));
   const requested = counts.reduce((a, b) => a + b, 0);
   await relieveQuota();
+  await saveLedger();
   const out = new Uint8Array(4);
   wU32(out, 0, requested);
   return out;
@@ -2125,6 +2223,7 @@ async function handle(arg) {
   // after it is THIS app's own shape (util.ts `callerOf`/`readOp`) - the same shape
   // the host-side `invoke` uses.
   const { fromHost, caller, body } = callerOf(arg);
+  await ensureRestored(fromHost ? call : holderCall); // the saved ledger, before anything reads it
   // The host's loopback (caller = 32 zero bytes) drives the initiator ops; a peer's
   // frame carries a MsgType byte instead of an op name, and the caller id tells them apart.
   if (fromHost) {

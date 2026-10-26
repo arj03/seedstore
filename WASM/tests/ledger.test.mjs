@@ -92,4 +92,100 @@ export async function run(t) {
       t.eq(await store(3), VERDICT_ALLOWANCE, "and no further");
     } finally { [a, b, c].forEach((n) => n.close()); net.close(); }
   }
+
+  t.group("ledger: reliability, availability, holdings and the audit cursor survive a restart (§13)");
+  {
+    // Boots of the production guest over one store: the first PUTs a file's descriptors as
+    // its own, sees who holds them and writes the ledger as a pass ends; the next reads it
+    // all back before anything else.
+    const disk = new Map(), text = (b) => String.fromCharCode(...b);
+    const u32 = (n) => { const b = new Uint8Array(4); new DataView(b.buffer).setUint32(0, n); return b; };
+    const host = {
+      call: async (name, payload) => {
+        if (name === "fs/put") {
+          const n = new DataView(payload.buffer, payload.byteOffset).getUint32(0);
+          disk.set(text(payload.subarray(4, 4 + n)), payload.slice(4 + n));
+          return new Uint8Array(0);
+        }
+        if (name === "fs/get") {
+          const v = disk.get(text(payload));
+          if (!v) return Uint8Array.of(0);
+          const out = new Uint8Array(1 + v.length); out[0] = 1; out.set(v, 1);
+          return out;
+        }
+        if (name === "fs/list") {
+          const parts = [u32(disk.size)];
+          for (const key of disk.keys()) parts.push(u32(key.length), Uint8Array.from(key, (c) => c.charCodeAt(0)));
+          const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
+          let o = 0; for (const p of parts) { out.set(p, o); o += p.length; }
+          return out;
+        }
+        throw new Error("unexpected host call " + name);
+      },
+    };
+    const author = newKey();
+    const envs = [1, 2, 3].map((seed) => {
+      const id = crypto.blockId(author.publicKey, new Uint8Array(1024).fill(seed));
+      return signDescriptor(sodium, { group: "g", level: 0, k: 1, m: 1, blockSize: 1024, tailBytes: 1024,
+        authTag: new Uint8Array(16), blockIds: [id, id] }, author.publicKey, author.privateKey);
+    });
+    const source = readFileSync(new URL("../build/host/tier2-guest.js", import.meta.url), "utf8");
+    const boot = () => {
+      const ctx = vm.createContext({ APP: { k: 1, m: 1, blockSize: 1024, maxMessageBytes: 8192, fanoutWindow: 4,
+        verifyFreshMs: 60000, verifyDeadlineMs: 30000, newcomerShare: 0.5 }, LOCAL: {}, Uint8Array, host, envs });
+      vm.runInContext(source, ctx);
+      vm.runInContext(`globalThis.myPeer = () => "0f".repeat(32);`, ctx);
+      return ctx;
+    };
+    const names = ["ensureRestored", "saveLedger", "saveOwnFile", "recordHoldings", "heldFor", "availability", "repKey", "myPeer"];
+    const check = `for (const name of ${JSON.stringify(names)}) {
+      if (typeof globalThis[name] !== "function") throw new Error("fault injection: the guest no longer defines " + name);
+    }`;
+    // `live` for a k = 1 chunk: its one id, held by `peers`.
+    const helpers = `const a = "01".repeat(32), b = "02".repeat(32);
+      const held = (env, peers) => {
+        const d = parseSignedDescriptor(env).descriptor;
+        recordHoldings(chunkKey(env), d, new Map([[toHex(d.blockIds[0]), new Set(peers)]]));
+      };`;
+    await vm.runInContext(`(async () => {
+      ${check}
+      ${helpers}
+      await ensureRestored(call);
+      await saveOwnFile(envs[0], envs);
+      const now = Date.now();
+      peerReps.set(repKey("g", a), { serve: 3, miss: 1, last: now });
+      availReps.set(repKey("g", a), { serve: 9, miss: 1, last: now });
+      held(envs[0], [a, b]);
+      held(envs[1], [a]);
+      ownCursor = 2;
+      await saveLedger();
+    })()`, boot());
+    const r = await vm.runInContext(`(async () => {
+      ${check}
+      ${helpers}
+      await ensureRestored(call);
+      const rel = peerReps.get(repKey("g", a));
+      const out = { serve: rel && rel.serve, miss: rel && rel.miss, avail: availability("g", a),
+        heldA: heldFor("g", a), heldB: heldFor("g", b), cursor: ownCursor, own: ownChunks.length };
+      held(envs[0], [a]); // re-audited: b no longer holds it
+      out.reauditA = heldFor("g", a);
+      out.reauditB = heldFor("g", b);
+      return out;
+    })()`, boot());
+    t.eq([r.serve, r.miss], [3, 1], "reliability is read back");
+    t.ok(Math.abs(r.avail - 0.9) < 1e-9, "availability is read back");
+    t.eq([r.heldA, r.heldB], [2048, 1024], "holdings are read back per chunk");
+    t.eq(r.cursor, 2, "the own-audit cursor resumes where it was");
+    t.eq(r.own, 3, "the file list is read back");
+    t.eq([r.reauditA, r.reauditB], [2048, 0], "re-auditing a restored chunk replaces its holdings, never adds to them");
+
+    for (const key of disk.keys()) if (key === "ledger" || key.startsWith("held.")) disk.set(key, Uint8Array.from("{torn", (c) => c.charCodeAt(0)));
+    const torn = await vm.runInContext(`(async () => {
+      ${helpers}
+      await ensureRestored(call);
+      return { reps: peerReps.size, avail: availReps.size, held: heldFor("g", a), own: ownChunks.length };
+    })()`, boot());
+    t.eq([torn.reps, torn.avail, torn.held], [0, 0, 0], "a torn ledger is read as none, as on a first boot");
+    t.eq(torn.own, 3, "and the file list still loads");
+  }
 }

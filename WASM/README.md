@@ -293,6 +293,11 @@ the next request reads the new one, so a separate groups app can keep it.
   signed descriptors as `own.*` records (no content key), and each repair pass audits
   32 of them in turn, as it audits the chunks it holds.
 
+The ledger is written to the store after every repair pass and read back before the
+node's first request, so a restart keeps it: reliability, availability and the own-audit
+cursor in a `ledger` record, and holdings per chunk in a `held.<part>` record beside each
+`own.*` part.
+
 Everything that weighs a peer reads that ledger:
 
 - **Ranking.** Placement, repair targets and reads order peers by reliability ×
@@ -424,9 +429,9 @@ form in some places and leaves other parts of the spec unbuilt.
   members, but it cannot tell which members fail together, such as two devices on one
   power strip, since nothing a node observes says so until it happens.
 - **The ledger stays local.** Each device keeps its own: what a friend holds for my
-  laptop raises its allowance at my laptop, not at my phone. Agreed repairs, the
-  availability and holdings counts live in memory, so a restart starts them over (the
-  file list itself is on disk).
+  laptop raises its allowance at my laptop, not at my phone. Agreed repairs and
+  verification passes live in memory, so a restart drops the repairs it had promised
+  and re-checks every holder; the rest of the ledger and the file list are on disk.
 - **Browser storage (§12).** A tab's block store is in RAM, because the
   OPFS/IndexedDB backend isn't built yet, so a tab that acts as a holder forgets
   everything on reload (see [Browser demos](#browser-demos)).
