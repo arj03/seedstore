@@ -97,23 +97,18 @@ Then PUT and GET from a client that lists the holders as `--peers`
 PEERS="<pkA>@127.0.0.1:7401,<pkB>@127.0.0.1:7402,<pkC>@127.0.0.1:7403,<pkD>@127.0.0.1:7404"
 
 node "$SHELL" --policy allowed-keys.json --bundle ./bundle/seedstore.skb --local-config roster.json \
-     --dir ./client --key ./client.key --peers "$PEERS" --op put < ./notes.txt > ./receipt.bin
-
-# A GET takes K ‖ root, cut out of the PUT receipt:
-#   [K 32][chunkCount u32][placed u32][intended u32][rootLen u32][root …][idCount u32][ids …]
-node -e 'const b=require("fs").readFileSync("receipt.bin"), n=b.readUInt32BE(44);
-process.stdout.write(Buffer.concat([b.subarray(0,32), b.subarray(48,48+n)]))' > getarg.bin
+     --dir ./client --key ./client.key --peers "$PEERS" --op put < ./notes.txt > ./notes.token
 
 node "$SHELL" --policy allowed-keys.json --bundle ./bundle/seedstore.skb --local-config roster.json \
-     --dir ./client --key ./client.key --peers "$PEERS" --op get < ./getarg.bin > ./restored.txt
+     --dir ./client --key ./client.key --peers "$PEERS" --op get < ./notes.token > ./restored.txt
 ```
 
 `--op` is the host's only app-facing flag (seedkernel §12.8). It passes stdin to the
 named op on the app's `handle` and writes the answer to stdout. Operator logging goes
-to stderr, so the redirects carry only app bytes. The root is a signed descriptor of
-variable length (§4.3), which is why the GET argument reads its length from the
-receipt. Keep `K`: without it, the holders hold permanent noise (§11). `--op put` stores
-into the node's only group; a node with several streams through the library and names one.
+to stderr, so the redirects carry only app bytes. `put` answers the file token, a line
+`<root hex>:<key hex>`, and `get` takes it back. Keep it private: it carries the file key
+`K`, and without `K` the holders hold permanent noise (§11). `--op put` stores into the
+node's only group; a node with several streams through the library and names one.
 
 The roster is storage's, so a stranger can still complete a handshake with these
 nodes, and is then answered nothing. Who may link at all is the transport's own

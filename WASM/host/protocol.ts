@@ -37,11 +37,11 @@ export const MsgType = {
 // caller (the seedkernel CLI's `--op`) and StorageNode both address it without
 // agreeing on a tag byte.
 export const Op = {
-  PUT: "put",               // whole-file, into the node's only group: [plaintext ..] → the PutResult envelope
+  PUT: "put",               // whole-file, into the node's only group: [plaintext ..] → the file token, one line of text
   PUT_START: "putStart",    // open the stream into a group: [group ..], or empty for the only one → [windowBytes u32][stream u32]
   PUT_WINDOW: "putWindow",  // feed one window: [stream u32][plaintext ..]
   PUT_FINISH: "putFinish",  // seal the stream: [stream u32] → the PutResult envelope
-  GET: "get",               // whole-file: [K 32][root ..] → plaintext
+  GET: "get",               // whole-file: the file token → plaintext
   GET_START: "getStart",    // open the stream: [K 32][root ..] → [fileSize u64][stream u32]
   GET_NEXT: "getNext",      // the next window of plaintext, empty at the end: [stream u32]
   REPAIR: "repair",         // one repair pass → [replaced u32]
@@ -400,7 +400,7 @@ export function decodeFetchBatchRes(buf: Uint8Array, expectedCount?: number): Fe
   return out;
 }
 
-// ── the PUT result (Op.PUT / Op.PUT_FINISH) ─────────────────────────────────
+// ── the PUT result (Op.PUT_FINISH) ──────────────────────────────────────────
 // Encoded by the guest, read by every driver:
 //   [K 32][chunkCount u32][placed u32][intended u32][rootLen u32][root ...][idCount u32]{id 32}
 // root is a variable-length signed descriptor, hence the length prefix.
@@ -442,4 +442,18 @@ export function decodePutResult(r: Uint8Array): PutResult {
     replicasIntended: readU32BE(r, 40),
     blockIds,
   };
+}
+
+/** A file token (SPEC §18.1): `<root hex>:<key hex>`, everything a reader needs, the
+ *  decryption key included, so whoever holds it can read the file. */
+export interface FileToken { root: Uint8Array; key: Uint8Array }
+
+export function encodeToken(t: FileToken): string {
+  return toHex(t.root) + ":" + toHex(t.key);
+}
+
+export function decodeToken(text: string): FileToken {
+  const m = /^([0-9a-f]+):([0-9a-f]{64})$/i.exec(text.trim());
+  if (!m || m[1].length % 2 !== 0) throw new Error("token: want <root hex>:<key hex>");
+  return { root: fromHex(m[1].toLowerCase()), key: fromHex(m[2].toLowerCase()) };
 }

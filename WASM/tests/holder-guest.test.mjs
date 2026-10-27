@@ -21,10 +21,10 @@ import { bootNodeShell } from "seedkernel-wasm/shell-node";
 import {
   loadSodium, generateKeyPair, LoopbackNetwork, createConnectedCohort,
 } from "../build/host/node.js";
-import { toHex, bytesEqual, concatBytes } from "../build/host/util.js";
+import { toHex, bytesEqual } from "../build/host/util.js";
 import { writeOp } from "seedkernel-wasm/op-frame";
 import { netAddr, netReady } from "../build/host/storage-node.js";
-import { Op, decodePutResult, encodeGroups } from "../build/host/protocol.js";
+import { Op, encodeGroups } from "../build/host/protocol.js";
 import { buildBundle } from "./bundle-fixture.mjs";
 import { makeT } from "./harness.mjs";
 
@@ -105,15 +105,14 @@ export async function run(t) {
       await connectAll(net, shells);
       try {
         const data = file(12800, 7); // several blocks → the RS path, placed across the cohort
-        const r = await shells[0].app.invoke(writeOp(Op.PUT, data));
-        const { key, root } = decodePutResult(r);
+        const token = await shells[0].app.invoke(writeOp(Op.PUT, data));
 
         let holding = 0;
         for (const e of shells.slice(1)) if (e.shell.fs.list().some((k) => k.endsWith(".rec"))) holding++;
         t.ok(holding >= 4, "the confined holders admitted + stored blocks (fs writes via the guest)");
         t.eq(shells[0].shell.fs.list().filter((k) => k.endsWith(".rec")).length, 0, "the initiator holds no block — durability is the cohort's; it keeps only its file list");
 
-        const got = await shells[0].app.invoke(writeOp(Op.GET, concatBytes([key, root])));
+        const got = await shells[0].app.invoke(writeOp(Op.GET, token));
         t.ok(bytesEqual(got, data), "PUT → GET round-trips: a generic shell served the holder side from the confined guest");
       } finally {
         shells.forEach((e) => e.shell.close());
@@ -142,14 +141,13 @@ export async function run(t) {
         // Concurrent: the shell's guest PUT (its initiator parks on net) runs while
         // the StorageNode places STOREs on that same shell — the shell's holder path
         // must answer (queued behind the parked initiator, served as it drains).
-        const [rA, putB] = await Promise.all([
+        const [tokenA, putB] = await Promise.all([
           shells[0].app.invoke(writeOp(Op.PUT, dataA)),
           sn.put(dataB),
         ]);
-        const { key: keyA, root: rootA } = decodePutResult(rA);
 
         const [gotA, gotB] = await Promise.all([
-          shells[0].app.invoke(writeOp(Op.GET, concatBytes([keyA, rootA]))),
+          shells[0].app.invoke(writeOp(Op.GET, tokenA)),
           sn.get(putB.root, putB.key),
         ]);
         t.ok(bytesEqual(gotA, dataA), "the shell's own file round-trips despite serving holder requests mid-PUT");

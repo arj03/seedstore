@@ -549,7 +549,7 @@ The read-only ops answer one JSON object carrying `"v": 1`; a client refuses ano
 | `holdings` | none | this node's `quota`, `used` and `cache` bytes; per author, group and tier the blocks and bytes it keeps, what that author keeps for it, and for committed blocks the author's allowance (§13.2); and every peer keeping something for it |
 | `probe` | a root descriptor, or none for every file | a `have` sent now to every member of every group for the files' blocks: per member whether it is linked, answered (`up`), turned the node away (`refused`: an empty answer, §5.1), its round trip and how many blocks it has; per file its chunks at full redundancy, short, and unreadable from the members up |
 
-A **file token** is `<root hex>:<key hex>`: the root descriptor and the file key, which is all a reader needs. It reads the file, so it is shared like the key it carries (§4.4).
+A **file token** is `<root hex>:<key hex>`: the root descriptor and the file key, which is all a reader needs. It reads the file, so it is shared like the key it carries (§4.4). For a tool with no framing of its own, `put` takes a whole file into the node's only group and answers its token as one line of text, and `get` takes a token and answers the whole file.
 
 ---
 

@@ -433,6 +433,17 @@ export async function run(t) {
     net.close();
   }
 
+  t.group("PUT on fewer linked holders than k fails naming that, not a timeout (§6)");
+  {
+    const net = new LoopbackNetwork();
+    const nodes = await createConnectedCohort({ suppressLinkLog: true, count: 2, network: net, sodium, wasm, config: { k: 2, m: 2, blockSize: 1024 }, timeoutMs: TIMEOUT }); // owner + 1 holder < k=2
+    let err = null;
+    try { await nodes[0].put(file(4800, 31)); } catch (x) { err = x; }
+    t.ok(err && /has 1 linked member\(s\) besides this node, and a chunk needs 2/.test(err.message), `the error names the shortfall (${err?.message})`);
+    nodes.forEach((n) => n.close());
+    net.close();
+  }
+
   t.group("maxMessageBytes mismatch: a holder's smaller FETCH cap degrades, never fails (§18)");
   {
     // maxMessageBytes is per-node operator policy, so a cohort can diverge: this

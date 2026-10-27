@@ -5,7 +5,7 @@
 import { writeOp } from "seedkernel-wasm/op-frame";
 import { Op, decodePutResult, type PutResult } from "./protocol.js";
 import { groupBytes } from "./descriptor-core.js";
-import { toHex, fromHex, readU32BE, readU64BE, concatBytes } from "./util.js";
+import { readU32BE, readU64BE, concatBytes } from "./util.js";
 
 /** One op frame (`[opLen u8][op][args]`) in, the guest's answer out. */
 export type Invoke = (frame: Uint8Array) => Promise<Uint8Array>;
@@ -121,16 +121,4 @@ export class StoreClient {
   }
 }
 
-/** A file token (SPEC §18.1): `<root hex>:<key hex>`, everything a reader needs, the
- *  decryption key included, so whoever holds it can read the file. */
-export interface FileToken { root: Uint8Array; key: Uint8Array }
-
-export function encodeToken(t: FileToken): string {
-  return toHex(t.root) + ":" + toHex(t.key);
-}
-
-export function decodeToken(text: string): FileToken {
-  const m = /^([0-9a-f]+):([0-9a-f]{64})$/i.exec(text.trim());
-  if (!m || m[1].length % 2 !== 0) throw new Error("token: want <root hex>:<key hex>");
-  return { root: fromHex(m[1].toLowerCase()), key: fromHex(m[2].toLowerCase()) };
-}
+export { encodeToken, decodeToken, type FileToken } from "./protocol.js";

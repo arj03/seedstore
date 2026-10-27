@@ -24,10 +24,10 @@ import { bootNodeShell } from "seedkernel-wasm/shell-node";
 import {
   loadSodium, generateKeyPair, LoopbackNetwork, createConnectedCohort,
 } from "../build/host/node.js";
-import { toHex, bytesEqual, concatBytes } from "../build/host/util.js";
+import { toHex, bytesEqual } from "../build/host/util.js";
 import { writeOp } from "seedkernel-wasm/op-frame";
 import { netAddr, netReady } from "../build/host/storage-node.js";
-import { Op, decodePutResult } from "../build/host/protocol.js";
+import { Op } from "../build/host/protocol.js";
 import { buildBundle } from "./bundle-fixture.mjs";
 import { makeT } from "./harness.mjs";
 
@@ -116,15 +116,14 @@ export async function run(t) {
 
       // PUT, orchestrated by the confined guest the shell loaded.
       const data = file(9600, 7); // > k blocks → multi-chunk RS path
-      const r = await loaded.invoke(writeOp(Op.PUT, data));
-      const { key, root } = decodePutResult(r);
+      const token = await loaded.invoke(writeOp(Op.PUT, data));
       let holding = 0;
       for (const h of holders) if (h.store.list().length > 0) holding++;
       t.ok(holding >= 4, "the shell's guest placed blocks across several distinct holders");
       t.eq(shell.fs.list().filter((k) => k.endsWith(".rec")).length, 0, "the shell itself holds no block — durability is the cohort's; it keeps only its file list");
 
       // GET, same confined guest, reconstructing from the holders.
-      const got = await loaded.invoke(writeOp(Op.GET, concatBytes([key, root])));
+      const got = await loaded.invoke(writeOp(Op.GET, token));
       t.ok(bytesEqual(got, data), "PUT → GET round-trips: the generic shell ran storage over the seam's names");
 
       // A shell whose policy does not allow the bundle author refuses to load it.

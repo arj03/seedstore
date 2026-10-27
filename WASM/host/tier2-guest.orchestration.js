@@ -926,10 +926,14 @@ async function placeChunksBatched(jobs, what, ranker) {
       // Integer keys iterate in ascending verdict order, so the reasons list is stable.
       const verdicts = Object.keys(declined);
       const total = verdicts.reduce((sum, v) => sum + declined[v], 0);
+      // Fewer linked members than the floor fails whatever they answer, so it is named first.
       // No verdicts at all is itself the diagnosis — "holders declined" would point at the
       // wrong place. An empty answer is a holder turning requests away unread; no answer at
       // all is a deadline or an unreachable peer.
-      const why = verdicts.length
+      const linked = candsOf.get(ch).length;
+      const why = linked < ch.floor
+        ? "group \"" + ch.group + "\" has " + linked + " linked member(s) besides this node, and a chunk needs " + ch.floor + " distinct holders. Link more of its members (--op probe lists them)"
+        : verdicts.length
         ? "holders declined (" + total + " holders: " + verdicts.map((v) => VERDICT_REASONS[v]).join(", ") + "). Check quota and newcomerShare (--local-config), signing scope (§16), or connect more holders"
         : refused
           ? "no holder returned a verdict — " + refused + " request(s) were answered empty: the holder was over its per-source delivery window, or serves no seedstore app"
@@ -1289,11 +1293,10 @@ async function putFinish(id) {
     for (let level = 1; envs.length > 1; level++) envs = await placeStream(s, encodeDescriptorList(envs), level, 0);
     await settlePlacements(s);
     await saveOwnFile(envs[0], s.own);
-    // The ONE PUT result format, shared with every driver (host/protocol.ts).
-    return encodePutResult({
+    return {
       key: s.K, root: envs[0], chunkCount: s.descriptors.length,
       replicasLanded: s.placed, replicasIntended: s.intended, blockIds: s.placedIds,
-    });
+    };
   });
 }
 
@@ -1313,17 +1316,17 @@ async function doPutStart(arg) {
 }
 // [stream u32][plaintext]: one window, raw, since the stream holds everything else.
 async function doPutWindow(arg) { await putFeed(rU32(arg, 0), arg.subarray(4)); return EMPTY; }
-// Whole-file PUT: one call, bytes in, result out — for drivers with no protocol
-// structure of their own, such as the CLI's `--op put < file`. It stores into the node's
-// only group; a node with several streams instead (PUT_START names the group). Runs the
-// same session as the streamed path; only the 1× plaintext is resident.
+// Whole-file PUT: one call, bytes in, the file token out as a line of text, for drivers
+// with no protocol structure of their own, such as the CLI's `--op put < file`. It stores
+// into the node's only group; a node with several streams instead (PUT_START names the
+// group). Runs the same session as the streamed path; only the 1× plaintext is resident.
 async function doPut(plaintext) {
   const { id } = await putStart(putGroup(EMPTY)), wb = putWindowBytes();
   for (let off = 0; ; off += wb) {
     await putFeed(id, plaintext.subarray(off, Math.min(off + wb, plaintext.length)));
     if (off + wb >= plaintext.length) break;
   }
-  return putFinish(id);
+  return strBytes(encodeToken(await putFinish(id)) + "\n");
 }
 
 // ── GET (§7) ─────────────────────────────────────────────────────────────────
@@ -1424,7 +1427,8 @@ async function doGetStart(arg) {
 // Whole-file GET: the counterpart of the whole-file `put`, draining the same stream in
 // one call for the byte-in/byte-out drivers.
 async function doGet(arg) {
-  const { id } = await getStart(arg.slice(32), arg.slice(0, 32)), parts = [];
+  const { root, key } = decodeToken(bytesToStr(arg));
+  const { id } = await getStart(root, key), parts = [];
   for (;;) {
     const part = await getNext(id);
     if (part.length === 0) return concat(parts);
@@ -2248,7 +2252,7 @@ async function handle(arg) {
       case Op.PUT: return doPut(payload);
       case Op.PUT_START: return doPutStart(payload);
       case Op.PUT_WINDOW: return doPutWindow(payload);
-      case Op.PUT_FINISH: return putFinish(rU32(payload, 0));
+      case Op.PUT_FINISH: return encodePutResult(await putFinish(rU32(payload, 0)));
       case Op.GET: return doGet(payload);
       case Op.GET_START: return doGetStart(payload);
       case Op.GET_NEXT: return getNext(rU32(payload, 0));
