@@ -88,3 +88,6 @@ export { netAddr, netPeer, netRelay, netRelayState, netContact, netReady, netPee
 export type { StorageConfig, Identity } from "./core.js";
 export { defaultConfig, PRODUCTION_BLOCK_SIZE, TEST_BLOCK_SIZE, STORAGE_APP, STORAGE_PROTO } from "./core.js";
 export { toHex, fromHex } from "./util.js";
+// The client surface (SPEC §18.1): typed ops over any invoke, and the file token.
+export { StoreClient, encodeToken, decodeToken, CLIENT_VERSION } from "./client.js";
+export type { Invoke, FileInfo, FilePlacement, Holdings, Probe, FileToken } from "./client.js";

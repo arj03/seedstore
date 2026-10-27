@@ -38,18 +38,23 @@ export const MsgType = {
 // agreeing on a tag byte.
 export const Op = {
   PUT: "put",               // whole-file, into the node's only group: [plaintext ..] → the PutResult envelope
-  PUT_START: "putStart",    // open the stream into a group: [group ..], or empty for the only one → [windowBytes u32]
-  PUT_WINDOW: "putWindow",  // feed one window of plaintext
-  PUT_FINISH: "putFinish",  // seal the stream → the PutResult envelope
+  PUT_START: "putStart",    // open the stream into a group: [group ..], or empty for the only one → [windowBytes u32][stream u32]
+  PUT_WINDOW: "putWindow",  // feed one window: [stream u32][plaintext ..]
+  PUT_FINISH: "putFinish",  // seal the stream: [stream u32] → the PutResult envelope
   GET: "get",               // whole-file: [K 32][root ..] → plaintext
-  GET_START: "getStart",    // open the stream: [K 32][root ..] → [fileSize u64]
-  GET_NEXT: "getNext",      // the next window of plaintext
+  GET_START: "getStart",    // open the stream: [K 32][root ..] → [fileSize u64][stream u32]
+  GET_NEXT: "getNext",      // the next window of plaintext, empty at the end: [stream u32]
   REPAIR: "repair",         // one repair pass → [replaced u32]
   REQUEST: "request",       // one control-plane message: [peer 32][type u8][payload] → [ok u8][resp]
   SCORE: "score",           // this node's decayed standing for a peer in a group: [peer 32][group ..] → [score f64 LE]
   GROUPS: "groups",         // replace the roster: encodeGroups → (empty)
   WARM: "warm",             // JIT warm-up, no result
   STATS: "stats",           // request counters, read-and-cleared: → `RequestStats` (below)
+  // The client surface (SPEC §18.1): read-only, each answering versioned JSON (host/client.ts).
+  FILES: "files",           // this node's own files → { files }
+  PLACEMENT: "placement",   // [root ..] or empty for every file → { files } with per-chunk holders
+  HOLDINGS: "holdings",     // what this node keeps, per author/group/tier → { holds, keepsForUs, … }
+  PROBE: "probe",           // [root ..] or empty: HAVE to every roster member now → { peers, files }
 } as const;
 
 // ── the STATS op wire format (§18) ──────────────────────────────────────────

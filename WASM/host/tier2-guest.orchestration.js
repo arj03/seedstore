@@ -386,18 +386,17 @@ function dependable(group, peerHex) { return peerHex === myPeer() || availabilit
 // One observation per group member per repair pass: is it linked now.
 async function observeAvailability() {
   const linked = new Set(decodePeers(await netOp("peers", EMPTY, call)));
-  const me = myPeer(), t = Date.now(), work = [];
-  for (const [group, members] of groups) for (const p of members) if (p !== me) work.push(availObserve(group, p, t, linked.has(p)));
-  await Promise.all(work);
-}
-async function availObserve(group, peerHex, t, present) {
-  const key = repKey(group, peerHex);
-  let rep = availReps.get(key);
-  if (rep === undefined) {
+  const me = myPeer(), t = Date.now(), seen = [];
+  for (const [group, members] of groups) for (const p of members) if (p !== me) seen.push([group, p]);
+  // Prune once and seat every new member first: a prune per new entry would drop the
+  // others' fresh zero entries before their observations land.
+  if (seen.some(([g, p]) => !availReps.has(repKey(g, p)))) {
     pruneStalePeers(availReps, t);
-    rep = { ...ZERO_REP };
-    availReps.set(key, rep);
+    for (const [g, p] of seen) if (!availReps.has(repKey(g, p))) availReps.set(repKey(g, p), { ...ZERO_REP });
   }
+  await Promise.all(seen.map(([g, p]) => availObserve(availReps.get(repKey(g, p)), t, linked.has(p))));
+}
+async function availObserve(rep, t, present) {
   try {
     const resp = await call(REP_NAME, encodeObserveReq(rep.serve, rep.miss, rep.last, t, present ? 1 : 0, present ? 0 : 1));
     if (resp.length < 32) return;
@@ -1218,18 +1217,21 @@ async function streamStep(s, step) {
 // ── the streamed PUT session ─────────────────────────────────────────────────
 // Protocol state a PUT carries between windows (K, offset, descriptors, replica
 // accounting) lives here in realm state rather than round-tripped through the
-// driver. Safe by construction: every driver runs one initiator op to completion
-// before the next (StorageNode's runExclusive), so streams never overlap.
-let putStream = null;
-function requirePut() {
-  if (!putStream) throw new Error("put: no stream open — call putStart first");
+// driver. A node keeps one PUT stream and one GET stream, each named by the id its start
+// answered, and every later op names its stream. A later start replaces the stream, so
+// two drivers on one node (two tools over the control endpoint, say) fail rather than
+// mix their files, and a stream its driver abandoned is simply replaced.
+let putStream = null, streamSeq = 0;
+const nextStreamId = () => (streamSeq = (streamSeq + 1) >>> 0);
+function requirePut(id) {
+  if (!putStream || putStream.id !== id) throw new Error("put: stream " + id + " is not open: it ended, or a later putStart replaced it");
   return putStream;
 }
 // The largest a signed descriptor in `group` gets, framed for the descriptor list: the
 // deployment's own (k, m), since a partial chunk lists fewer ids (§4.3).
 function descriptorBytes(group) { return 4 + 32 + 64 + MIN_CORE - 1 + group.length + (CFG.k + CFG.m) * BLOCK_ID_LEN; }
-// Open a stream: mint K and answer with the plaintext window the driver should feed.
-// It takes no file size: each chunk signs its own `tailBytes` (§4.3).
+// Open a stream: mint K and answer the stream; the driver feeds it `putWindowBytes()` at
+// a time. It takes no file size: each chunk signs its own `tailBytes` (§4.3).
 //
 // A chunk must hold at least two descriptors, or a descriptor list could never
 // shrink to a single root — checked here, once, before a byte moves, as is a coded
@@ -1245,8 +1247,8 @@ async function putStart(group) {
       + descriptorBytes(group) + " B each) so a file's descriptor list can reach a single root — raise blockSize or k");
   }
   if (CFG.k > 1) await assertCodecFits(CFG.k, CFG.m, CFG.blockSize);
-  putStream = { K: await randomKey(), group, rank: await makeRanker(group), offset: 0, descriptors: [], own: [], placedIds: [], placed: 0, intended: 0, placing: null };
-  return putWindowBytes();
+  putStream = { id: nextStreamId(), K: await randomKey(), group, rank: await makeRanker(group), offset: 0, descriptors: [], own: [], placedIds: [], placed: 0, intended: 0, placing: null };
+  return putStream;
 }
 // Fold placed chunks into the stream's durability accounting (§8). Counts REPLICA
 // PLACEMENTS (one filled slot), not distinct ids — a k=1 chunk is one id on m+1
@@ -1265,8 +1267,8 @@ function recordPlacements(s, chunks, peerCount) {
 // returns once the window BEFORE it is placed, leaving this one placing behind the next
 // feed (placeStream); the driver never learns the window's byte offset, because the
 // stream knows it.
-async function putFeed(slice) {
-  const s = requirePut();
+async function putFeed(id, slice) {
+  const s = requirePut(id);
   await streamStep(s, async () => {
     for (const env of await placeStream(s, slice, LEVEL_BODY, s.offset)) s.descriptors.push(env);
   });
@@ -1278,8 +1280,8 @@ async function putFeed(slice) {
 // The descriptors this PUT placed are bytes too, so they go through placeStream at
 // increasing `level` until one chunk is left — its descriptor is the file's root
 // (§4.3). A file that fits one chunk has no index: its own descriptor IS the root.
-async function putFinish() {
-  const s = requirePut();
+async function putFinish(id) {
+  const s = requirePut(id);
   putStream = null;
   if (!s.descriptors.length) throw new Error("put: stream sealed with no data — call putWindow at least once before putFinish");
   return streamStep(s, async () => {
@@ -1301,22 +1303,27 @@ function putGroup(nameBytes) {
   if (groups.size !== 1) throw new Error("put: name a group — this node has " + (groups.size === 0 ? "none" : [...groups.keys()].join(", ")));
   return [...groups.keys()][0];
 }
-// [group ..] → [windowBytes u32]: open the stream, report the feed size. An empty argument
-// is the node's only group.
-async function doPutStart(arg) { const out = new Uint8Array(4); wU32(out, 0, await putStart(putGroup(arg))); return out; }
-// The window's plaintext, raw — no framing, since the stream holds everything else.
-async function doPutWindow(arg) { await putFeed(arg); return EMPTY; }
+// [group ..] → [windowBytes u32][stream u32]: open the stream, report the feed size. An
+// empty argument is the node's only group.
+async function doPutStart(arg) {
+  const s = await putStart(putGroup(arg)), out = new Uint8Array(8);
+  wU32(out, 0, putWindowBytes());
+  wU32(out, 4, s.id);
+  return out;
+}
+// [stream u32][plaintext]: one window, raw, since the stream holds everything else.
+async function doPutWindow(arg) { await putFeed(rU32(arg, 0), arg.subarray(4)); return EMPTY; }
 // Whole-file PUT: one call, bytes in, result out — for drivers with no protocol
 // structure of their own, such as the CLI's `--op put < file`. It stores into the node's
 // only group; a node with several streams instead (PUT_START names the group). Runs the
 // same session as the streamed path; only the 1× plaintext is resident.
 async function doPut(plaintext) {
-  const wb = await putStart(putGroup(EMPTY));
+  const { id } = await putStart(putGroup(EMPTY)), wb = putWindowBytes();
   for (let off = 0; ; off += wb) {
-    await putFeed(plaintext.subarray(off, Math.min(off + wb, plaintext.length)));
+    await putFeed(id, plaintext.subarray(off, Math.min(off + wb, plaintext.length)));
     if (off + wb >= plaintext.length) break;
   }
-  return putFinish();
+  return putFinish(id);
 }
 
 // ── GET (§7) ─────────────────────────────────────────────────────────────────
@@ -1343,8 +1350,9 @@ async function reconstructChunks(ds, K, chunkStart) {
   return concat(parts);
 }
 // ── the streamed GET session ─────────────────────────────────────────────────
-// The mirror of the PUT stream: getStart walks the index to the leaf descriptors,
-// kept in realm state; getNext then reconstructs one window's chunks at a time.
+// The mirror of the PUT stream, named by its id the same way: getStart walks the index
+// to the leaf descriptors, kept in realm state; getNext then reconstructs one window's
+// chunks at a time.
 let getStream = null;
 // Open a stream from the ROOT DESCRIPTOR the reader was handed. Signed `level` says
 // what it describes: 0 is the file's ciphertext, ℓ > 0 an index over level ℓ−1.
@@ -1369,8 +1377,8 @@ async function getStart(rootEnv, K) {
     fileSize += d.tailBytes;
     if (d.k * d.blockSize > maxChunkBytes) maxChunkBytes = d.k * d.blockSize;
   }
-  getStream = { K, ds, next: 0, windowChunks: getWindowChunks(maxChunkBytes), ahead: null };
-  return fileSize;
+  getStream = { id: nextStreamId(), size: fileSize, K, ds, next: 0, windowChunks: getWindowChunks(maxChunkBytes), ahead: null };
+  return getStream;
 }
 // Start reconstructing the stream's next window, or null once every window is started.
 function startWindow(s) {
@@ -1389,36 +1397,39 @@ function startWindow(s) {
 // HAVE and FETCH round trips run while this one lands and the driver drains it, instead
 // of the wire idling through every boundary. At most two windows are in flight; they
 // share the realm's host-call budget through the ledger (hostBudget).
-async function getNext() {
+async function getNext(id) {
   const s = getStream;
-  if (!s) throw new Error("get: no stream open — call getStart first");
+  if (!s || s.id !== id) throw new Error("get: stream " + id + " is not open: it ended, or a later getStart replaced it");
   const window = s.ahead ?? startWindow(s);
   if (!window) { getStream = null; return EMPTY; }
   s.ahead = startWindow(s);
   try { return await window; }
   catch (err) {
     // A failed read ends the stream, once the window behind it has settled.
-    getStream = null;
+    if (getStream === s) getStream = null;
     if (s.ahead) await s.ahead.catch(() => {});
     throw err;
   }
 }
 
-// [K 32][root ...] → [fileSize u64]: open the stream, report how much to drain. K leads so
-// the variable-length root can be the tail.
+// [K 32][root ...] → [fileSize u64][stream u32]: open the stream, report how much to
+// drain. K leads so the variable-length root can be the tail.
 async function doGetStart(arg) {
-  const out = new Uint8Array(8);
-  writeU64BE(out, 0, await getStart(arg.slice(32), arg.slice(0, 32)));
+  const s = await getStart(arg.slice(32), arg.slice(0, 32)), out = new Uint8Array(12);
+  writeU64BE(out, 0, s.size);
+  wU32(out, 8, s.id);
   return out;
 }
 
 // Whole-file GET: the counterpart of the whole-file `put`, draining the same stream in
 // one call for the byte-in/byte-out drivers.
 async function doGet(arg) {
-  await getStart(arg.slice(32), arg.slice(0, 32));
-  const parts = [];
-  while (getStream) parts.push(await getNext());
-  return concat(parts);
+  const { id } = await getStart(arg.slice(32), arg.slice(0, 32)), parts = [];
+  for (;;) {
+    const part = await getNext(id);
+    if (part.length === 0) return concat(parts);
+    parts.push(part);
+  }
 }
 
 // ── repair (§9) ────────────────────────────────────────────────────────────--
@@ -1558,10 +1569,15 @@ async function loadOwnChunks() {
   ownChunks = out;
   return out;
 }
+// Root key → part index → that part's envelopes, for the client ops (doFiles and after).
+const ownFiles = new Map();
 function registerOwnPart(part, envs) {
   const keys = envs.map(chunkKey);
   ownParts.set(part, keys);
   for (const key of keys) ownPartOf.set(key, part);
+  const dot = part.lastIndexOf("."), root = part.slice(OWN_PREFIX.length, dot);
+  if (!ownFiles.has(root)) ownFiles.set(root, new Map());
+  ownFiles.get(root).set(Number(part.slice(dot + 1)), envs);
 }
 // Record a PUT's chunks, index levels included. A failure leaves the file unaudited by its
 // owner, not unstored, so it does not fail the PUT.
@@ -2232,16 +2248,20 @@ async function handle(arg) {
       case Op.PUT: return doPut(payload);
       case Op.PUT_START: return doPutStart(payload);
       case Op.PUT_WINDOW: return doPutWindow(payload);
-      case Op.PUT_FINISH: return putFinish();
+      case Op.PUT_FINISH: return putFinish(rU32(payload, 0));
       case Op.GET: return doGet(payload);
       case Op.GET_START: return doGetStart(payload);
-      case Op.GET_NEXT: return getNext();
+      case Op.GET_NEXT: return getNext(rU32(payload, 0));
       case Op.REPAIR: return doRepair();
       case Op.REQUEST: return doRequest(payload);
       case Op.WARM: return doWarm();
       case Op.SCORE: return repScoreBytes(groupName(payload.subarray(32)), payload.subarray(0, 32), Date.now());
       case Op.GROUPS: setRoster(decodeGroups(payload)); return EMPTY;
       case Op.STATS: return encodeStats();
+      case Op.FILES: return doFiles();
+      case Op.PLACEMENT: return doPlacement(payload);
+      case Op.HOLDINGS: return doHoldings();
+      case Op.PROBE: return doProbe(payload);
       case "wake": return onWake();
       default: return EMPTY;
     }
@@ -2279,6 +2299,144 @@ async function handle(arg) {
 async function doRequest(arg) {
   const resp = await netSend(toHex(arg.subarray(0, 32)), arg[32], arg.subarray(33), MSG_ENVELOPE_BYTES + maxMsgBytes());
   return resp === null ? Uint8Array.from([0]) : concat([Uint8Array.from([1]), resp]);
+}
+
+// ── the client surface (SPEC §18.1) ──────────────────────────────────────────
+// Read-only host ops answering one versioned JSON object, so a tool asks the node what it
+// stores instead of reading its files. Keys and ids are hex; every name is ASCII.
+const CLIENT_V = 1;
+function answer(o) { return strBytes(JSON.stringify({ v: CLIENT_V, ...o })); }
+const round2 = (x) => Math.round(x * 100) / 100;
+
+// This node's own files, each as its root key, envelopes in part order and their parses.
+// `arg` is a root descriptor to pick one file by, or empty for every file.
+async function ownFileList(arg) {
+  await loadOwnChunks();
+  const want = arg.length > 0 ? chunkKey(arg) : null, out = [];
+  for (const [id, parts] of ownFiles) {
+    if (want !== null && id !== want) continue;
+    const envs = [...parts].sort((a, b) => a[0] - b[0]).flatMap(([, e]) => e), ds = [];
+    try { for (const env of envs) ds.push(parseSignedDescriptor(env).descriptor); } catch { continue; }
+    let top = 0;
+    for (let i = 1; i < ds.length; i++) if (ds[i].level > ds[top].level) top = i;
+    out.push({ id, envs, ds, root: envs[top] });
+  }
+  if (want !== null && out.length === 0) throw new Error("not one of this node's files: " + want.slice(0, 16) + "…");
+  return out;
+}
+function fileInfo(f) {
+  const body = f.ds.filter((d) => d.level === LEVEL_BODY), d0 = body[0] ?? f.ds[0];
+  let bytes = 0;
+  for (const d of body) bytes += d.tailBytes;
+  return { root: toHex(f.root), id: f.id, bytes, chunks: body.length, index: f.ds.length - body.length,
+    group: d0.group, k: d0.k, m: d0.m, blockSize: d0.blockSize };
+}
+async function doFiles() {
+  return answer({ files: (await ownFileList(EMPTY)).map(fileInfo) });
+}
+
+// Per chunk, the holders this node's ledger saw at its last audit (null: not audited since
+// it was put or loaded), and per member of the file's group its standing here.
+async function doPlacement(arg) {
+  const files = [];
+  for (const f of await ownFileList(arg)) {
+    const peers = {}, holdsChunks = new Map();
+    let healthy = 0, short = 0, unaudited = 0;
+    const chunkHolders = f.envs.map((env, i) => {
+      const d = f.ds[i], h = ownHoldings.get(chunkKey(env));
+      if (!h) { unaudited++; return { level: d.level, holders: null }; }
+      const holders = {};
+      let copies = 0;
+      for (const [p, n] of h.peers) {
+        holders[p] = n / d.blockSize; copies += holders[p];
+        holdsChunks.set(p, (holdsChunks.get(p) ?? 0) + 1);
+      }
+      if (copies >= d.k + d.m) healthy++; else short++;
+      return { level: d.level, holders };
+    });
+    const group = fileInfo(f).group;
+    const members = new Set([...(groups.get(group) ?? []), ...holdsChunks.keys()]);
+    members.delete(myPeer());
+    for (const p of members) {
+      const rel = peerReps.get(repKey(group, p)), av = availReps.get(repKey(group, p));
+      peers[p] = { holds: holdsChunks.get(p) ?? 0, member: inGroup(group, p),
+        reliability: rel ? [round2(rel.serve), round2(rel.miss)] : null,
+        availability: av ? [round2(av.serve), round2(av.miss)] : null };
+    }
+    files.push({ ...fileInfo(f), healthy, short, unaudited, peers, chunkHolders });
+  }
+  return answer({ files });
+}
+
+// What this node keeps, per author, group and tier, beside what each author keeps for it
+// (holdings, from auditing this node's own files) and the allowance that earns it (§13.2).
+async function doHoldings() {
+  await ensureStoreIndex();
+  const rows = new Map();
+  for (const e of heldBlocks.values()) {
+    const tier = e.cache ? "cache" : "committed", key = e.author + "/" + e.group + "/" + tier;
+    const r = rows.get(key) ?? { author: e.author, group: e.group, tier, blocks: 0, bytes: 0 };
+    r.blocks++; r.bytes += e.size;
+    rows.set(key, r);
+  }
+  const t = Date.now(), holds = [];
+  for (const r of rows.values()) {
+    r.keepsForUs = heldFor(r.group, r.author);
+    if (r.tier === "committed") r.allowance = allowanceFor(await repScore(r.group, fromHex(r.author), t), r.keepsForUs);
+    holds.push(r);
+  }
+  const keepsForUs = [];
+  for (const [key, bytes] of heldForMe) {
+    if (bytes <= 0) continue;
+    const slash = key.lastIndexOf("/");
+    keepsForUs.push({ group: key.slice(0, slash), peer: key.slice(slash + 1), bytes });
+  }
+  return answer({ quota: quota(), used: bytesUsed, cache: cacheBytes, holds, keepsForUs });
+}
+
+// Ask every roster member, now, which of this node's blocks it has: one file's (`arg`, its
+// root descriptor) or every file's. A HAVE goes out as the placement engine's would; no
+// answer is down, and an empty answer is a member that does not list this node (§5.1).
+async function doProbe(arg) {
+  const files = await ownFileList(arg), seen = new Set(), ids = [];
+  for (const f of files) for (const d of f.ds) for (const id of d.blockIds) {
+    const h = toHex(id);
+    if (!seen.has(h)) { seen.add(h); ids.push(id); }
+  }
+  const asked = ids.length > 0 ? ids : [new Uint8Array(BLOCK_ID_LEN)]; // nothing to ask: a ping
+  const maxIds = Math.max(1, Math.floor((maxMsgBytes() - BATCH_HEAD) / BLOCK_ID_LEN));
+  const me = myPeer(), linked = new Set(decodePeers(await netOp("peers", EMPTY, call)));
+  const members = [...rosterMembers].filter((p) => p !== me).sort();
+  const peers = await Promise.all(members.map(async (peer) => {
+    const out = { peer, linked: linked.has(peer), up: false, refused: false, rtt: null, has: new Set() };
+    for (const slice of sliceN(asked, maxIds)) {
+      const timing = {};
+      const mask = await netSend(peer, MsgType.HAVE, encodeHaveReq(slice), undefined, timing);
+      if (mask === null) break;
+      out.up = true;
+      if (out.rtt === null) out.rtt = timing.ms;
+      if (mask.length === 0) { out.refused = true; break; }
+      if (ids.length > 0) for (let j = 0; j < slice.length && j < mask.length; j++) if (mask[j] === 1) out.has.add(toHex(slice[j]));
+    }
+    return out;
+  }));
+  const mine = new Set();
+  for (const id of ids) if (await storeHas(id)) mine.add(toHex(id));
+  const perFile = files.map((f) => {
+    let healthy = 0, short = 0, lost = 0;
+    const holders = {};
+    for (const d of f.ds) {
+      const copies = d.blockIds.map((id) => {
+        const h = toHex(id);
+        return peers.filter((p) => p.has.has(h)).length + (mine.has(h) ? 1 : 0);
+      });
+      const margin = lossMargin(d, copies);
+      if (margin < 0) lost++; else if (margin >= d.m) healthy++; else short++;
+      for (const p of peers) if (d.blockIds.some((id) => p.has.has(toHex(id)))) holders[p.peer] = (holders[p.peer] ?? 0) + 1;
+    }
+    return { root: toHex(f.root), id: f.id, chunks: f.ds.length, healthy, short, lost, holders };
+  });
+  return answer({ asked: ids.length, peers: peers.map((p) => ({ ...p, has: p.has.size })), files: perFile });
 }
 
 // ── warm (boot-time JIT warmup) ──────────────────────────────────────────────

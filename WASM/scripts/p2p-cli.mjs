@@ -51,14 +51,10 @@ import { randomBytes, timingSafeEqual } from "node:crypto";
 
 import { WsNetwork } from "seedkernel-wasm/net-ws";
 import { nodeDatagrams } from "seedkernel-wasm/shell-node";
-import { bootShell } from "seedkernel-wasm/shell-core";
-import { MemoryFs } from "seedkernel-wasm/fs-memory";
 import { loadCrypto } from "seedkernel-wasm";
-import {
-  createStorageNode, storageRuntime, generateKeyPair, defaultConfig, PRODUCTION_BLOCK_SIZE, toHex, fromHex,
-  netPeer, netReady, netRelay, netRoutes,
-} from "../build/host/node.js";
-import { DEFAULT_QUOTA_BYTES, DEFAULT_REALM_MEMORY_BYTES } from "../build/host/core.js";
+import { generateKeyPair, defaultConfig, PRODUCTION_BLOCK_SIZE, toHex, fromHex, netRoutes } from "../build/host/node.js";
+import { DEFAULT_REALM_MEMORY_BYTES } from "../build/host/core.js";
+import { bootNode, peerSpecs } from "./boot-node.mjs";
 
 // ── args ─────────────────────────────────────────────────────────────────────
 const args = new Map();
@@ -70,8 +66,8 @@ for (let i = 2; i < process.argv.length; i++) {
   if (a.startsWith("--")) args.set(a.slice(2), process.argv[i + 1] && !process.argv[i + 1].startsWith("--") ? process.argv[++i] : "true");
 }
 const num = (k, d) => (args.has(k) ? Number(args.get(k)) : d);
-const peersArg = args.get("peers") ?? "";
-const specs = peersArg.split(/[\s,]+/).map((s) => s.trim()).filter(Boolean);
+const relayUrl = args.get("relay");
+const specs = peerSpecs(args.get("peers"), relayUrl);
 if (specs.length === 0) {
   console.error("need --peers \"pk[.secret]@host:port,…\"  (.secret = that peer's 32-byte hex contact secret, if it gates)");
   process.exit(1);
@@ -91,7 +87,6 @@ const mParam = num("m", 1);
 // admits no more links than that from one address and closes the rest at handshake.
 // Through a relay every connection is a splice, and the UDP path is one flow whose
 // window already runs as eight, so that mode defaults to one.
-const relayUrl = args.get("relay");
 const connsN = num("conns", relayUrl ? 1 : 8);
 const blockSize = num("block", PRODUCTION_BLOCK_SIZE / 1024) * 1024;
 // Per-message cap, and the real lever on a wire-bound link: a streaming window holds a
@@ -226,41 +221,29 @@ const config = { ...defaultConfig(blockSize, kParam, mParam), maxMessageBytes, f
 
 // The transport is a signed bundle: build the WS ChannelFactory first, then boot
 // the shared shell with it installed. The node is assembled by seedkernel's `bootShell`
-// here rather than a host's `standUp`, so the wrapped sodium rides into the shell and
-// record-layer AEAD costs stay instrumented. Storage geometry does NOT ride here.
-const instrumentedStandUp = (cfg) => bootShell({ ...cfg, sodium: wrapTransportSodium(sodium), fs: new MemoryFs() });
+// (boot-node.mjs) rather than a host's `standUp`, so the wrapped sodium rides into the
+// shell and record-layer AEAD costs stay instrumented. `config` is this node's LOCAL: it
+// reaches the guest with the bundle load. The signed transport owns dialing, fan-out,
+// retries and the readiness deadline; ready() is best-effort and resolves on its timeout,
+// so the linked set it leaves turns a partial startup into a useful error.
 const ws = new WsNetwork({ webSocketFactory: wsFactory });
-const runtime = await storageRuntime(instrumentedStandUp, {
-  identity,
-  timeoutMs,
-  channels: ws,
+const { node, runtime, peers: expectedIds, linked: peerUp, relayState } = await bootNode({
+  identity, sodium: wrapTransportSodium(sodium), channels: ws, timeoutMs, connsPerPeer: connsN,
   // Through a relay, this machine's datagram sockets, for direct UDP paths (seedkernel §12.7).
-  ...(relayUrl ? { datagrams: nodeDatagrams() } : {}),
-  connsPerPeer: connsN,
+  ...(relayUrl ? { datagrams: nodeDatagrams(), relay: relayUrl } : {}),
+  config, guestDeadlineMs, peers: specs, group: groupName,
 });
-
-// `config` is this node's LOCAL — it reaches the guest with the bundle load.
-const node = await createStorageNode({ runtime, config, quota: DEFAULT_QUOTA_BYTES, guestDeadlineMs });
+const expected = new Set(expectedIds);
 const wtargetText = wtargetMB > 0 ? `${wtargetMB} MB` : `${(node.config.windowTargetBytes / MB).toFixed(1)} MB (heap/6)`;
 const heapText = heapMB > 0 ? `${heapMB} MB` : `${DEFAULT_REALM_MEMORY_BYTES / MB} MiB (default)`;
 console.log(`node ready: RS(${kParam},${mParam}), ${blockSize / 1024} KiB blocks, batch ${Math.round(maxMessageBytes / 1024)} KiB, window ${windowN}, conns/peer ${connsN}, wtarget ${wtargetText}, heap ${heapText}, timeout ${timeoutMs} ms, guest deadline ${guestDeadlineMs ?? "host default"}${guestDeadlineMs == null ? "" : " ms"}`);
 
-if (relayUrl) console.log(`relay ${relayUrl}: ${await netRelay(runtime.shell, relayUrl)}`);
-const expected = new Set();
-for (const spec of specs) {
-  expected.add(await netPeer(runtime.shell, relayUrl && !spec.includes("@") ? `${spec}@relay+${relayUrl}` : spec, "ws"));
-}
-// The signed transport owns dialing, fan-out, retries and the readiness deadline.
-// ready() is best-effort and resolves on its timeout, so inspect its source-of-truth
-// peer set once afterward to turn a partial CLI startup into a useful error.
-await netReady(runtime.shell, 10000);
-const peerUp = new Set(await node.linkedPeers());
+if (relayUrl) console.log(`relay ${relayUrl}: ${relayState}`);
 for (const pid of peerUp) console.log(`link up: ${pid.slice(0, 8)}…`);
 if (![...expected].every((pid) => peerUp.has(pid))) {
   throw new Error(`only ${[...expected].filter((pid) => peerUp.has(pid)).length}/${expected.size} peers linked after 10 s`);
 }
 console.log(`${peerUp.size} peer(s) linked\n`);
-await node.setGroups({ [groupName]: [node.peerId, ...expected] });
 if (relayUrl) {
   const direct = async () => {
     let n = 0;

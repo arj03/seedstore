@@ -136,7 +136,7 @@
 <script type="module">
 import sodium, { useWasm } from "libsodium-wrappers";
 import { browserHost, readHostBlob } from "seedkernel-wasm/platform-web";
-import { createStorageNode, loadWasmBytes, storageRuntime } from "./host/browser.js";
+import { createStorageNode, loadWasmBytes, storageRuntime, encodeToken, decodeToken } from "./host/browser.js";
 import { netAddr, netPeer, netReady, netRelay, netRelayState } from "./host/storage-node.js";
 // Rooms are this page's: it meets peers in a relay room with seedrelay's room client and
 // hands them to the transport, which knows only keys and the relays that reach them.
@@ -507,7 +507,7 @@ $("store").onclick = async () => {
     const t0 = performance.now();
     const r = await node.put(data);
     const ms = performance.now() - t0;
-    const token = hex(r.root) + ":" + hex(r.key);
+    const token = encodeToken(r);
     $("token").textContent = token;
     // A PUT uploads (k+m)/k × the file (RS(1,1) = 2× — a copy to each holder), so
     // "wire MB/s" is the real upload rate; compare it to GET's MB/s. If wire MB/s ≈
@@ -583,11 +583,11 @@ $("store").onclick = async () => {
 
 $("get").onclick = async () => {
   try {
-    const [mHex, kHex] = $("getToken").value.trim().split(":");
-    if (!mHex || !kHex) { log("token must be rootHex:keyHex"); return; }
+    let tok;
+    try { tok = decodeToken($("getToken").value); } catch { log("token must be rootHex:keyHex"); return; }
     log("\nGET (locate via have/want, fetch any k, decode, decrypt)…");
     const t0 = performance.now();
-    const out = await node.get(fromHex(mHex), fromHex(kHex));
+    const out = await node.get(tok.root, tok.key);
     const ms = performance.now() - t0;
     const fileMB = out.length / (1024 * 1024);
     // GET downloads 1× the file (any k of n), so file MB/s is the download rate.

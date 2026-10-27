@@ -124,6 +124,25 @@ Every other flag belongs to the host: `--listen`/`--peers`/`--dir`/
 pure client, and a node with a listener serves until Ctrl-C. seedkernel's native
 single-file `seedkernel` binary loads the same bundle (seedkernel §12.9).
 
+A tool asks a node what it stores through the bundle's client ops (SPEC §18.1): `files`,
+`placement`, `holdings` and `probe`, beside PUT and GET. A node serving a directory takes them
+from this machine through seedkernel's control endpoint, so `seedkernel --dir ./data --op holdings`
+asks the running node, and so does `scripts/seedstore.mjs`:
+
+```sh
+node scripts/seedstore.mjs put photo.jpg --peers "pk@host:port,…" --dir client --save photo.token
+node scripts/seedstore.mjs get photo.token --peers "pk@host:port,…" --out photo.jpg
+node scripts/seedstore.mjs where --dir client --peers "pk@host:port,…" --live
+node scripts/seedstore.mjs holdings --dir ./data
+```
+
+With `--dir` it asks the node serving that directory, which answers itself, so the flags that
+boot a node are refused while it serves; when none does, it boots one there over that store.
+With `--peers` alone it boots one in memory. A booted node's identity is `--key`, a master
+seed as seedkernel's (default `./seedkernel.key`), so one booted over a directory is the node
+seedkernel would boot there. A token, `<root>:<key>`, reads the file back, so keep it
+private. `p2p.html` writes and reads the same tokens.
+
 To benchmark PUT/GET against live nodes listening with `--listen ws=…`, see `scripts/p2p-cli.mjs`
 and [PERFORMANCE.md](../docs/PERFORMANCE.md). It keeps its key in `p2p-cli.key` and prints it,
 for the holders' `groups.cohort`.
@@ -385,12 +404,15 @@ host/  tier2-guest.orchestration.js   the confined guest: the whole protocol
        protocol / descriptor-core / reputation-core / util   pure cores shared with the guest
        runtime.ts                     stands a node up on a seedkernel host
        storage-node.ts                installs the bundle on it, drives the guest
+       client.ts                      the client ops over any invoke, and the file token
        crypto / descriptor / sodium / store-view / core      host-side helpers
        node.ts / browser.ts / cluster.ts / loopback.ts       entry points, test cohorts
 browser/   index.html, p2p.html                        demos
 scripts/   build-guest / build-bundle / storage-bundle build steps
            build-browser-demo / minify / clean
-           p2p-cli                                     headless PUT/GET against live nodes
+           seedstore                                   put / get / ls / where / holdings / probe
+           p2p-cli                                     the PUT/GET benchmark against live nodes
+           boot-node                                   the one node assembly the scripts share
            serve-holder / smoke-relay / relay-room     console holders in a relay room
 tests/     *.test.mjs (run.mjs), bench*.mjs, harness + helpers + fixtures
 ```

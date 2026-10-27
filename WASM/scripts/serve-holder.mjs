@@ -14,8 +14,10 @@
 // not Bun (Bun's http upgrade swallows writes):
 //   cd ../../seedshell && npm run relay
 
-import { loadSodium, loadWasmBytes, bootStorageNode, inProcessStandUp, generateKeyPair, toHex, fromHex } from "../build/host/node.js";
+import { loadCrypto } from "seedkernel-wasm";
+import { generateKeyPair, toHex, fromHex } from "../build/host/node.js";
 import { nodeChannels, nodeDatagrams } from "seedkernel-wasm/shell-node";
+import { bootNode } from "./boot-node.mjs";
 import { joinRelayRoom, roomGroup } from "./relay-room.mjs";
 
 const short = (id) => id.slice(0, 12) + "…";
@@ -45,8 +47,7 @@ const contactSecret = (() => {
 // params and batch size.
 const config = { k: Number(process.env.K) || 1, m: Number(process.env.M) || 1, blockSize: Number(process.env.BS) || 256, maxMessageBytes: 48 * 1024 };
 
-const sodium = await loadSodium();
-const wasm = await loadWasmBytes();
+const sodium = await loadCrypto();
 const identity = generateKeyPair(sodium);
 
 // A real StorageNode serving HAVE / OFFER / STORE / FETCH over the P2P links, on a
@@ -55,9 +56,9 @@ const identity = generateKeyPair(sodium);
 // the transport bundle registers and links through the first, and signals those paths over
 // the links. A room shares one contact secret, so this node's own is the one its peers
 // present. Its store is an in-RAM fs, read back through the node's FsBlobView.
-const node = await bootStorageNode(inProcessStandUp, {
-  identity, timeoutMs: 6000, contactSecret, channels: nodeChannels(), datagrams: nodeDatagrams(),
-  sodium, ...wasm, config, quota: 64 * 1024 * 1024,
+const { node } = await bootNode({
+  identity, sodium, timeoutMs: 6000, contactSecret, channels: nodeChannels(), datagrams: nodeDatagrams(),
+  config, quota: 64 * 1024 * 1024,
 });
 // Meet in the room: members are dialed through the relay, and console ones move to UDP. Everyone
 // met there joins this node's group "room", the one p2p.html stores into (§5.1); the room's

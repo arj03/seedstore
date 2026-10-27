@@ -534,6 +534,23 @@ Every storage message is a request/response between two cohort peers on the auth
 
 PUT and GET are not messages; they are the coordinator's local API, and it speaks only these six to the cohort. Repair runs on `have`, `fetch`, `repair` and `repair-fetch` (§9). The optional verifiable-reputation layer (§20) adds `proof.challenge` / `proof.receipt` and `rep.gossip`, and the optional tombstone layer (§25) adds its signed tombstone; the base protocol uses none of them.
 
+### 18.1 The client surface
+
+The bundle's local API is its public interface for tools: ops on the host's loopback (`[opLen u8][op][args]`, caller zero, seedkernel §12.8), which no peer can reach. A tool asks the node what it stores rather than reading its files, so the guest stays the only code that knows the store's layout and the protocol. The same ops reach a node in this process through its app handle, and a running node through seedkernel's control endpoint (`seedkernel --dir <dir> --op <name>`, seedkernel §12.8). `host/client.ts` types them.
+
+PUT and GET stream: `putStart` (a group, or empty for the node's only one) answers `[windowBytes u32][stream u32]`, each `putWindow` takes `[stream u32]` and one window, and `putFinish` takes `[stream u32]` and answers the PUT result; `getStart` takes `[key 32][root]` and answers `[fileSize u64][stream u32]`, and `getNext` takes `[stream u32]` and answers each window until empty. A node keeps one stream of each kind: a later start replaces it, and an op naming a replaced stream is refused, so two clients on one node fail rather than mix their files, and a stream its client abandoned is simply replaced.
+
+The read-only ops answer one JSON object carrying `"v": 1`; a client refuses another version. Keys and block ids are hex.
+
+| Op | Argument | Answer |
+| --- | --- | --- |
+| `files` | none | `files`: per file this node put, its `root` (the root descriptor a GET starts from), `id` (the root's chunk key), `bytes`, `chunks`, `index` (index chunks), `group`, `k`, `m`, `blockSize` |
+| `placement` | a root descriptor, or none for every file | per file, as `files`, plus per chunk the holders and copies the ledger saw at that chunk's last audit (`null` before one), `healthy`/`short`/`unaudited` counts, and per member of the group what it holds and its reliability and availability counts (§13). The ledger in memory, not its last saved copy |
+| `holdings` | none | this node's `quota`, `used` and `cache` bytes; per author, group and tier the blocks and bytes it keeps, what that author keeps for it, and for committed blocks the author's allowance (§13.2); and every peer keeping something for it |
+| `probe` | a root descriptor, or none for every file | a `have` sent now to every member of every group for the files' blocks: per member whether it is linked, answered (`up`), turned the node away (`refused`: an empty answer, §5.1), its round trip and how many blocks it has; per file its chunks at full redundancy, short, and unreadable from the members up |
+
+A **file token** is `<root hex>:<key hex>`: the root descriptor and the file key, which is all a reader needs. It reads the file, so it is shared like the key it carries (§4.4).
+
 ---
 
 ## 19. Bootstrap additions

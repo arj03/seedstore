@@ -14,9 +14,10 @@ import {
   type Identity, type PeerId, type StorageConfig, defaultConfig, assertStorageConfig, normaliseConfig, DEFAULT_QUOTA_BYTES,
   TEST_BLOCK_SIZE, NET_SERVICE,
 } from "./core.js";
-import { Op, decodeStats, decodePutResult, encodeGroups, type Groups, type PutResult, type RequestStats } from "./protocol.js";
+import { Op, decodeStats, encodeGroups, type Groups, type PutResult, type RequestStats } from "./protocol.js";
+import { StoreClient } from "./client.js";
 import { groupBytes, validGroupName } from "./descriptor-core.js";
-import { toHex, fromHex, readU32BE, readU64BE, concatBytes } from "./util.js";
+import { toHex, fromHex, readU32BE, concatBytes } from "./util.js";
 import { parseDest } from "seedkernel-wasm/peer-addr";
 import type { Sodium } from "./sodium.js";
 import type { AppHandle, BootResult, Shell } from "seedkernel-wasm/shell-core";
@@ -211,6 +212,10 @@ export class StorageNode {
   /** The load's returned handle: app label + scoped fs view + the slot-bound loopback
    *  `invoke`. Invocation needs no shell-level identity lookup. */
   private readonly handle: AppHandle;
+  /** The bundle's client surface over this node's handle (host/client.ts). Its read-only ops
+   *  may run beside anything. Its put/get are unserialised: the guest keeps one stream of
+   *  each, so one overlapping another fails, where `put`/`get` below queue. */
+  readonly client: StoreClient;
   private repairLoopOn = false;
   private repairTimer: ReturnType<typeof setTimeout> | null = null;
   private inFlight: Promise<unknown> = Promise.resolve();
@@ -232,6 +237,7 @@ export class StorageNode {
     this.crypto = new Crypto(opts.sodium);
     this.net = net;
     this.handle = loaded;
+    this.client = new StoreClient((frame) => loaded.invoke(frame));
     this.appScope = loaded.appScope;
 
     // The guest's CFG (signed APP, then LOCAL over it), merged from the very LOCAL the
@@ -321,33 +327,13 @@ export class StorageNode {
   /** PUT a file (§6) into one of this node's groups, orchestrated in the guest, STREAMED.
    *  The group may be left out when the node has exactly one. */
   async put(plaintext: Uint8Array, opts: { group?: string } = {}): Promise<PutResult> {
-    const group = opts.group ?? soleGroup(this.groups);
-    return this.runExclusive(async () => {
-      const meta = await this.invoke(Op.PUT_START, groupBytes(group));
-      const windowBytes = readU32BE(meta, 0);
-      for (let off = 0; ; off += windowBytes) {
-        await this.invoke(Op.PUT_WINDOW, plaintext.subarray(off, Math.min(off + windowBytes, plaintext.length)));
-        if (off + windowBytes >= plaintext.length) break;
-      }
-      return decodePutResult(await this.invoke(Op.PUT_FINISH, NO_ARG));
-    });
+    return this.runExclusive(() => this.client.put(plaintext, opts));
   }
 
   /** GET a file (§7), orchestrated in the guest, STREAMED. `root` is the signed root
-   *  descriptor from the PUT (or shared alongside `key`); K leads the argument so the
-   *  variable-length root can be its tail. */
+   *  descriptor from the PUT (or shared alongside `key`). */
   async get(root: Uint8Array, key: Uint8Array): Promise<Uint8Array> {
-    return this.runExclusive(async () => {
-      const fileSize = readU64BE(await this.invoke(Op.GET_START, concatBytes([key, root])), 0);
-      const out = new Uint8Array(fileSize);
-      let written = 0;
-      while (written < fileSize) {
-        const part = await this.invoke(Op.GET_NEXT, NO_ARG);
-        if (part.length === 0) throw new Error(`get: stream ended ${written}/${fileSize} bytes in`);
-        out.set(part, written); written += part.length;
-      }
-      return out;
-    });
+    return this.runExclusive(() => this.client.get(root, key));
   }
 
   /** Issue ONE control-plane message to a peer and answer with its reply (§18).
