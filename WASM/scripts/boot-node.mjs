@@ -26,7 +26,7 @@ export async function bootNode({
   config, quota = DEFAULT_QUOTA_BYTES, guestDeadlineMs, relay, relaySecret, peers = [], group, readyMs = 10000,
 }) {
   const fs = dir ? new NodeFs(dir) : new MemoryFs();
-  const runtime = await storageRuntime((cfg) => bootShell({ ...cfg, sodium, fs }),
+  const runtime = await storageRuntime((cfg) => bootShell({ ...cfg, sodium, services: { fs, transport: cfg.transport } }),
     { identity, channels, datagrams, connsPerPeer, timeoutMs, contactSecret });
   const node = await createStorageNode({ runtime, config, quota, guestDeadlineMs });
   const relayState = relay ? await netRelay(runtime.shell, relay, relaySecret) : null;

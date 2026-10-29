@@ -11,7 +11,7 @@ import {
   encodeDescriptorList, decodeDescriptorList,
 } from "../build/host/descriptor.js";
 import { bytesEqual } from "../build/host/util.js";
-import { appSigner } from "seedkernel-wasm/guest-seam";
+import { appSigner } from "seedkernel-wasm/node";
 
 import { ensureSodium, newKey, paths } from "./helpers.mjs";
 

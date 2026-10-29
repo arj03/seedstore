@@ -13,7 +13,7 @@ import {
 } from "./descriptor-core.js";
 import { concatBytes } from "./util.js";
 import { STORAGE_APP } from "./core.js";
-import { appSigner } from "seedkernel-wasm/guest-seam";
+import { appSigner } from "seedkernel-wasm/node";
 
 export {
   BLOCK_ID_LEN,
