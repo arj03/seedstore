@@ -380,7 +380,7 @@ windows, the host-call ledger, and the guest deadline.
 | --- | ---: |
 | `codec.wasm`, including SIMD RS and GF tables | 8.7 KB |
 | `reputation.wasm` | 5.3 KB |
-| the guest, minified | 90 KB (23 KB gzipped) |
+| the guest, as the bundle signs it, without comments | 101 KB (27 KB gzipped) |
 
 Those three files are all of seedstore's runtime code. Everything else is the
 seedkernel host and its core libsodium, which any app on that host shares.

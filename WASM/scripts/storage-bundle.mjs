@@ -87,10 +87,8 @@ export function writeStorageBundle({ path, sk, build, version = 1 }) {
     name, wasm: new Uint8Array(readFileSync(join(build, `${name}.wasm`))),
   }));
 
-  // Ship the comment-stripped guest (scripts/minify.mjs, `node --check`-gated) to
-  // keep the signed bundle small; the signature covers these exact bytes (the guest
-  // is authored as TEXT — what verification decodes back, seedkernel's bundle.ts).
-  const guestSource = readFileSync(join(build, "host-min", "tier2-guest.js"), "utf8");
+  // The compiled guest; authorBundle signs it without its comments.
+  const guestSource = readFileSync(join(build, "host", "tier2-guest.js"), "utf8");
 
   // This is a DEPLOYED config, so it carries production geometry; one named constant
   // keeps this site and the CLI from drifting apart. normaliseConfig then fills the
