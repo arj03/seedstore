@@ -367,7 +367,7 @@ The benches (`tests/bench.mjs`, `bench-net.mjs`, `bench-holder.mjs`) are not par
 
 ## Performance
 
-In brief: the codec writes ~194 MB/s and reads ~2.7 GB/s on one core, so the network
+In brief: the codec writes ~175 MB/s and reads ~2.9 GB/s on one core, so the network
 sets end-to-end speed. A live WAN run with two holders measured ~12.0 MB/s PUT on the
 wire and ~19.3 MB/s GET, where raw TCP on the same link carries ~14 MB/s up and
 ~29 MB/s down. [PERFORMANCE.md](../docs/PERFORMANCE.md) has the tables, the commands

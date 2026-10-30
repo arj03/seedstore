@@ -68,6 +68,7 @@ async function measure(W) {
   const nodes = await createConnectedCohort({
     suppressLinkLog: true, count: 6, network: net, sodium, wasm,
     config: { ...config, fanoutWindow: W }, timeoutMs,
+    quota: Math.max(64 * MB, fileBytes * 4),
   });
   const owner = nodes[0];
 

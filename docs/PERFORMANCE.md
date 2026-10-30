@@ -6,17 +6,25 @@ references (`§n`) point to [SPEC.md](SPEC.md). Run the commands from `WASM/` af
 
 ## The codec
 
-100 MB, RS(10,6), 64 KB blocks, single-threaded (Node 20), measured with
+100 MB, RS(10,6), 64 KB blocks, single-threaded (Node 24), measured with
 `node tests/bench.mjs`:
 
 | | time | rate | |
 |---|---:|---:|---|
-| **write**: full (encrypt + hash + RS encode) | ~0.52 s | ~194 MB/s | |
-| &nbsp;&nbsp;↳ chacha20-poly1305 seal | ~0.25 s | ~405 MB/s | the detached tag lives in the descriptor |
-| &nbsp;&nbsp;↳ RS encode (SIMD) | ~0.07 s | ~1.5 GB/s | |
-| &nbsp;&nbsp;↳ BLAKE2b block ids | ~0.21 s | ~752 MB/s | hashes all *n* blocks (1.6×) |
-| **read**: all data present (systematic) | ~0.04 s | ~2.7 GB/s | the common path: a concat, no GF math |
-| **read**: one block missing (decode, SIMD) | ~0.06 s | ~1.7 GB/s | the common failure, §6/§21 |
+| **write**: full (encrypt + hash + RS encode) | ~0.57 s | ~175 MB/s | |
+| &nbsp;&nbsp;↳ chacha20-poly1305 seal | ~0.26 s | ~388 MB/s | the detached tag lives in the descriptor |
+| &nbsp;&nbsp;↳ RS encode (SIMD) | ~0.07 s | ~1.4 GB/s | |
+| &nbsp;&nbsp;↳ BLAKE2b block ids | ~0.25 s | ~654 MB/s | hashes all *n* blocks (1.6×) |
+| **read**: all data present (systematic) | ~0.04 s | ~2.9 GB/s | the common path: a concat, no GF math |
+| **read**: one block missing (decode, SIMD) | ~0.06 s | ~1.6 GB/s | the common failure, §6/§21 |
+
+**Node 20 was faster.** The same code reaches ~197 MB/s on a full write under Node 20
+(seal ~408 MB/s, RS encode ~1.5 GB/s, block ids ~755 MB/s, decode ~1.7 GB/s), and Node
+22 matches it. Nearly all of the ~11% is libsodium's wasm, which V8 13 compiles to
+slower code: warm, BLAKE2b runs ~23% slower and the seal ~10%, while plain JS got
+faster. RS encode loses ~8% because V8 13 rebuilds the SIMD mask constant at every
+use. Loading the mask from memory wins that back, but it only lifts a full write to
+~179 MB/s.
 
 Three optimizations got the codec here:
 
@@ -57,22 +65,26 @@ stream, so a 256 KiB record is split and reassembled without an extra round trip
 
 ### Modelled latency (`bench-net.mjs`)
 
-10 ms RTT, 4 MB, RS(2,2), 32 KiB blocks, 256 KiB batches in 48 KiB physical
+Node 24, 10 ms RTT, 4 MB, RS(2,2), 32 KiB blocks, 256 KiB batches in 48 KiB physical
 messages, window 32 (`node tests/bench-net.mjs 10 4 32 256 48 32`; leave off the
 final `32` to sweep the window):
 
 | | time | rate | |
 |---|---:|---:|---|
-| **PUT** | ~0.35 s | ~11.5 MB/s | ships the 2× erasure overhead: RS(2,2) is 2 data + 2 parity |
-| **GET** | ~0.20 s | ~19.7 MB/s | downloads any *k* of *n*, i.e. 1× the file |
+| **PUT** | ~0.33 s | ~12.0 MB/s | ships the 2× erasure overhead: RS(2,2) is 2 data + 2 parity |
+| **GET** | ~0.19 s | ~21.6 MB/s | downloads any *k* of *n*, i.e. 1× the file |
 
 The bench applies latency at the wire. Every message pays it in both directions, so
 one request/response costs a full RTT. The physical chunks of one message share a
 single delivery delay, as they would on an ordered byte stream.
 
 A 64 MB file over 40 ms with 1 MiB batches
-(`node tests/bench-net.mjs 40 64 256 1024 48 32`) runs PUT ~2.9 s (~22 MB/s) and GET
-~1.6 s (~41 MB/s). GET is the noisier of the two: 1.4–2.3 s across five runs.
+(`node tests/bench-net.mjs 40 64 256 1024 48 32`) runs PUT ~2.5 s (~26 MB/s) and GET
+~1.3 s (~50 MB/s). Across six runs PUT stayed within 2.4–2.6 s and GET within
+1.26–1.28 s.
+
+Node 22 runs these 2–4% faster. Node 20 can't run the bench: it has no
+`Promise.withResolvers`.
 
 ### Live WAN
 
@@ -159,7 +171,7 @@ encodes and sends its OFFERs, and the index places alongside the file's last win
 A streamed GET fetches the next window while the current one is decrypted and handed
 back. Without this, the wire would sit idle at every window boundary. Over a 40 ms
 link (16 MB, RS(2,2), 32 KiB blocks, 4 MiB windows;
-`node tests/bench-net.mjs 40 16 32 256 48 32 4`), PUT takes ~1.34 s and GET ~0.76 s.
+`node tests/bench-net.mjs 40 16 32 256 48 32 4`), PUT takes ~1.26 s and GET ~0.73 s.
 
 **One host-call ledger.** The two windows in flight share the realm's host-call
 budget through one ledger (`hostBudget`), and every initiator call is charged against
