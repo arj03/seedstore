@@ -259,10 +259,10 @@ the host-side mirror in `descriptor.ts` uses the same two names. Each signed for
 **The holder's store.** On first access the guest rebuilds its index of held ids and
 quota usage from `FS_LIST`/`FS_SIZE`. After that it updates the index on each STORE,
 so sibling checks don't need filesystem calls. A block commits as one
-`<block-id>.rec` file (`[descriptor length][descriptor][ciphertext]`), with a
-`<block-id>.tag` beside it (`[tier][author]`) that records its §14 tier and the author
-its bytes count against. The tag is written first, so a record without one never
-committed and is not held.
+`<block-id>.rec` file (`[descriptor length][descriptor][ciphertext]`), written atomically,
+so a record on disk is held. It counts against the author and group its descriptor names,
+which a restart reads back from the record. A block that changes §14 tier also gets a
+`<block-id>.tag` (`[tier][author][group]`), so the common write stays one file.
 
 **Tiers and eviction (§14).** Every accepted block starts committed. A repair audit
 that finds a block above its target moves the surplus copies to cache: every holder

@@ -7,7 +7,7 @@
 // Reads the backend live rather than caching, since the guest writes out of band.
 
 import { toHex, fromHex } from "./util.js";
-import { STORE_REC as REC, STORE_TAG, decodeStoreRecord, decodeStoreTag, type StoredBlock } from "./store-record.js";
+import { STORE_REC as REC, STORE_TAG, TIER_COMMITTED, decodeStoreRecord, decodeStoreTag, type StoredBlock } from "./store-record.js";
 import type { Fs } from "seedkernel-wasm/fs";
 
 export type { StoredBlock };
@@ -60,6 +60,7 @@ export class FsBlobView implements BlobView {
 
   tier(id: Uint8Array): number | null {
     if (!this.has(id)) return null;
-    return decodeStoreTag(this.fs.get(toHex(id) + STORE_TAG))?.tier ?? null;
+    const tag = this.fs.get(toHex(id) + STORE_TAG);
+    return tag ? decodeStoreTag(tag)?.tier ?? null : TIER_COMMITTED;
   }
 }

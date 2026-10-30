@@ -46,17 +46,18 @@ export function liveBlockCount(nodes, net, ids) {
 
 /** Plant a block straight into a node's store, bypassing the protocol —
  *  for tests that need a holder to already have something. Writes the guest's
- *  `<hex>.tag` and `<hex>.rec` (host/store-record.ts) directly, since admission is the
- *  guest holder's alone.
+ *  `<hex>.rec` and, for a cache block, `<hex>.tag` (host/store-record.ts) directly, since
+ *  admission is the guest holder's alone.
  *
  *  Seed BEFORE the holder is otherwise exercised: the guest rebuilds its §14
  *  byte total from the fs lazily, so a later plant is invisible to it until
  *  the realm is rebuilt. */
 export function plantBlock(fs, idHex, bytes, descriptor, tier = TIER_COMMITTED) {
-  // A test that only reads the bytes back may plant a stand-in descriptor: charge it to "cohort".
-  let group = "cohort";
+  // A test that only reads the bytes back may plant a stand-in descriptor, which cannot name
+  // its group: tag it, charged to "cohort".
+  let group;
   try { group = parseSignedDescriptor(descriptor).descriptor.group; } catch { /* a stand-in */ }
-  fs.put(idHex + STORE_TAG, encodeStoreTag(tier, descriptor.subarray(0, 32), group));
+  if (group === undefined || tier !== TIER_COMMITTED) fs.put(idHex + STORE_TAG, encodeStoreTag(tier, descriptor.subarray(0, 32), group ?? "cohort"));
   fs.put(idHex + STORE_REC, concatBytes([storeRecordHead(descriptor.length), descriptor, bytes]));
 }
 

@@ -1818,7 +1818,7 @@ async function commitRepair(h, bytes, env, group) {
   liveStoreReservations.set(h, { size: p.size, author: p.author, group: p.group });
   storeReservationVersion++;
   await deleteBlocks(evicted, call);
-  try { await storeWrite(fromHex(h), bytes, env, group); } catch { /* storeWrite marked the index for a rebuild */ }
+  try { await storeWrite(fromHex(h), bytes, env); } catch { /* storeWrite marked the index for a rebuild */ }
 }
 // Accept or decline one REPAIR request (§9), under the same admission a STORE meets.
 async function acceptRepair(payload, caller) {
@@ -1981,17 +1981,26 @@ async function ensureStoreIndex() {
     for (;;) {
       if (activeStoreWrites > 0) await storeWritesIdle;
       const reservationVersion = storeReservationVersion;
-      // A block is held when both files are: storeWrite writes the tag first, so a
-      // record without one never committed.
-      const recs = new Set(), tagged = [];
+      // A block is held when its record is: a put is atomic. Only a block that changed
+      // tier has a tag. Without one it is committed, under its descriptor's author and
+      // group, which costs a read of the record here and saves a file on every write.
+      const recs = [], tagged = new Set();
       for (const key of await storeKeys()) {
         if (key.length !== 68) continue;
-        if (key.endsWith(STORE_REC)) recs.add(key.slice(0, 64));
-        else if (key.endsWith(STORE_TAG)) tagged.push(key.slice(0, 64));
+        if (key.endsWith(STORE_REC)) recs.push(key.slice(0, 64));
+        else if (key.endsWith(STORE_TAG)) tagged.add(key.slice(0, 64));
       }
-      const entries = (await Promise.all(tagged.filter((hex) => recs.has(hex)).map(async (hex) => {
-        const tag = decodeStoreTag(await fsGet(hex + STORE_TAG, holderCall, STORE_TAG_MAX + 1));
-        return tag && { hex, size: await fsSize(hex + STORE_REC), author: toHex(tag.author), group: tag.group, cache: tag.tier === TIER_CACHE };
+      const entries = (await Promise.all(recs.map(async (hex) => {
+        if (tagged.has(hex)) {
+          const tag = decodeStoreTag(await fsGet(hex + STORE_TAG, holderCall, STORE_TAG_MAX + 1));
+          return tag && { hex, size: await fsSize(hex + STORE_REC), author: toHex(tag.author), group: tag.group, cache: tag.tier === TIER_CACHE };
+        }
+        const rec = await storeGet(fromHex(hex), holderCall);
+        if (!rec) return null;
+        try {
+          const size = STORE_REC_HEAD + rec.descriptor.length + rec.bytes.length;
+          return { hex, size, author: toHex(rec.descriptor.subarray(0, 32)), group: parseSignedDescriptor(rec.descriptor).descriptor.group, cache: false };
+        } catch { return null; }
       }))).filter((e) => e);
       if (reservationVersion !== storeReservationVersion || activeStoreWrites > 0) continue;
       heldBlocks = new Map();
@@ -2026,15 +2035,14 @@ async function setTier(h, cache, via) {
   indexSet(h, e.size, e.author, e.group, cache);
   try { await writeTag(h, cache, via); } catch { storeIndexDirty = true; }
 }
-// The one write path into the store: the tag, then one framed record, under the quota budget.
+// The one write path into the store: one framed record, under the quota budget.
 //
 // Backend failures (full disk, backend error, realm OOM) surface as holder errors:
 // a holder has no console, so the verdict byte is its only way to report them.
-async function storeWrite(id, bytes, descriptor, group) {
+async function storeWrite(id, bytes, descriptor) {
   const hex = toHex(id);
   beginStoreWrite();
   try {
-    await fsPut(hex + STORE_TAG, [encodeStoreTag(TIER_COMMITTED, descriptor.subarray(0, 32), group)], holderCall);
     await fsPut(hex + STORE_REC, [storeRecordHead(descriptor.length), descriptor, bytes], holderCall);
     touched.set(hex, Date.now());
   } catch (e) {
@@ -2182,7 +2190,7 @@ async function acceptStoreBatch(stores, caller) {
   })), caller, ADMIT_STORE, evicted);
   await Promise.all([deleteBlocks(evicted, holderCall), ...valid.map(async ({ index, store: s }, i) => {
     if (admitted[i] !== VERDICT_ACCEPTED) { verdicts[index] = admitted[i]; return; }
-    try { await storeWrite(s.blockId, s.bytes, s.descriptor, parsed[index].descriptor.group); verdicts[index] = VERDICT_ACCEPTED; }
+    try { await storeWrite(s.blockId, s.bytes, s.descriptor); verdicts[index] = VERDICT_ACCEPTED; }
     catch { verdicts[index] = VERDICT_ERROR; }
   })]);
   return verdicts;

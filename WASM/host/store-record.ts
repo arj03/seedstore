@@ -26,9 +26,9 @@ export function storeRecordHead(descriptorLength: number): Uint8Array {
   return head;
 }
 
-// Beside each record, `<block id hex>.tag`: [tier u8][author public key 32][group], the
-// §14 tier, and the author and group whose allowance the block counts against (§13.2).
-// It is written first, so a record without one never committed and is not held.
+// Beside a record that changed tier, `<block id hex>.tag`: [tier u8][author public key
+// 32][group], the §14 tier, and the author and group whose allowance the block counts
+// against (§13.2). A record without one is committed, under its descriptor's.
 export const STORE_TAG = ".tag";
 export const TIER_COMMITTED = 0, TIER_CACHE = 1;
 export const STORE_TAG_MAX = 1 + 32 + GROUP_MAX;

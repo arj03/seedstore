@@ -320,6 +320,9 @@ export async function run(t) {
         { blockId: iFresh, descriptor: solo(iFresh), bytes: fresh },
       ]))));
       t.eq(stored[0], VERDICT_ACCEPTED, "the new commitment is admitted against the committed tier alone");
+      const committed = (await b.client.holdings()).holds.find((h) => h.tier === "committed");
+      t.ok(committed.author === a.peerId && committed.group === "cohort" && committed.blocks === 2,
+        "a record with no tag is committed, under its descriptor's author and group");
       t.ok(!b.store.has(iCached), "the cached copy was evicted to make room");
       t.ok(b.store.has(iKept) && b.store.has(iFresh), "both commitments are held");
       t.ok(b.store.usedBytes() <= 2500, `the store stays within quota (${b.store.usedBytes()} B)`);
