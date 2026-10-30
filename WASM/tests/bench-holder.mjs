@@ -41,11 +41,14 @@ import { blockHashInput } from "../build/host/descriptor-core.js";
 import { nodeRawFiles } from "seedkernel-wasm/fs-node";
 import { nodeChannels } from "seedkernel-wasm/shell-node";
 
-const FILE_MB = Number(process.argv[2] ?? 16);
-const BLOCK_KIB = Number(process.argv[3] ?? PRODUCTION_BLOCK_SIZE / 1024);
-const K = Number(process.argv[4] ?? 1);
-const M = Number(process.argv[5] ?? 1);
-const ON_DISK = process.argv.includes("disk");
+// A holder process has its own arguments after these, so they are read only up to `--holder`.
+const holderArg = process.argv.indexOf("--holder");
+const args = process.argv.slice(2, holderArg < 0 ? undefined : holderArg);
+const FILE_MB = Number(args[0] ?? 16);
+const BLOCK_KIB = Number(args[1] ?? PRODUCTION_BLOCK_SIZE / 1024);
+const K = Number(args[2] ?? 1);
+const M = Number(args[3] ?? 1);
+const ON_DISK = args.includes("disk");
 
 const MB = 1024 * 1024;
 const blockSize = BLOCK_KIB * 1024;
@@ -78,7 +81,6 @@ const bootNode = (dir) => bootStorageNode(dir ? (cfg) => inProcessHost(nodeRawFi
 
 // A holder process: say where it listens, then answer each `stats` with Op.STATS. Its
 // group is itself and the initiator whose key it was handed.
-const holderArg = process.argv.indexOf("--holder");
 if (holderArg >= 0) {
   const node = await bootNode(process.argv[holderArg + 1] || undefined);
   await node.setGroups({ bench: [process.argv[holderArg + 2], node.peerId] });
