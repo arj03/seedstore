@@ -1350,6 +1350,9 @@ async function reconstructChunks(ds, K, chunkStart) {
       parts[base + j] = plain.length === d.tailBytes ? plain : plain.subarray(0, d.tailBytes);
     }));
   }
+  // `got` sits in a closure cycle, which only a GC frees, and a large allocation doesn't
+  // trigger one. Emptied here, a window's blocks don't outlive it into the next.
+  got.clear();
   return concat(parts);
 }
 // ── the streamed GET session ─────────────────────────────────────────────────
