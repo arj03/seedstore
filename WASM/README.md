@@ -164,7 +164,7 @@ const got = await nodes[0].get(put.root, put.key); // locate → fetch any k →
 in-memory channel pairs, so an in-process cohort exercises the shipped stack. There
 is one protocol implementation. Each node is one the seedkernel host stands up, with
 the signed transport installed (`storageRuntime` over a host's `standUp`: an in-memory
-host of its own per node here, `bootNodeShell` on a server, the page's `browserHost` in a
+host of its own per node here, `bootNodeShell` on a server, the page's `platformHost` on `browserPlatform` in a
 browser). `StorageNode` installs the signed storage bundle on it and drives the confined
 guest, and nothing else. A node's roster is `groups` at boot (`{ mine: [pk…], friends: [pk…] }`,
 hex keys) or `setGroups` later, and a PUT into one of several names it: `put(data, { group })`.

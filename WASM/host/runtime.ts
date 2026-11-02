@@ -2,7 +2,7 @@
 // it, through its own `standUp` (seedkernel §12.8, §12.9); this file only says what
 // storage wants of the node: an identity, admission of the bundle its operator hands it,
 // and its transport's sockets and settings. A page passes the host it runs
-// (seedkernel-wasm/platform-web `browserHost`), Node its own (`bootNodeShell`, or an
+// (`platformHost` on `browserPlatform`), Node its own (`bootNodeShell`, or an
 // in-memory host per node for in-process cohorts, node.ts).
 
 import type { PlatformHost } from "seedkernel-wasm/platform";
@@ -58,9 +58,9 @@ export interface StorageRuntimeOptions {
   timeoutMs?: number;
   /** STUN/TURN servers for WebRTC peers, as `RTCConfiguration.iceServers` takes them. */
   iceServers?: { urls: string | string[]; username?: string; credential?: string }[];
-  /** The signed transport bundle blob. Defaults to the one shipped in the
-   *  seedkernel artifact; an operator selecting a different transport passes
-   *  its blob here. */
+  /** The signed transport bundle blob. Defaults to the one a host's `standUp` carries
+   *  in its blob; an operator selecting a different transport, or standing up through
+   *  `bootShell` directly, passes its blob here. */
   transportBlob?: Uint8Array;
 }
 
@@ -82,7 +82,7 @@ export async function storageRuntime(standUp: StandUp, opts: StorageRuntimeOptio
       suppressLinkLog: opts.suppressLinkLog,
       datagrams: opts.datagrams,
       // Selecting these bytes authorizes them as the transport; a later change must
-      // replace this slot explicitly. Defaults to the seedkernel-shipped artifact.
+      // replace this slot explicitly. Defaults to the host blob's transport.
       bundle: opts.transportBlob,
       // Policies of the signed transport program, not socket-driver facts, so they ride
       // the LOAD as its LOCAL config. JSON, so omit absent values and spell peer ids as

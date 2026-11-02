@@ -3,6 +3,7 @@
 // on it, and its peers taught, dialed and put in one group.
 
 import { bootShell } from "seedkernel-wasm/shell-core";
+import { transportBundleBytes } from "seedkernel-wasm/transport-bundle";
 import { MemoryFs } from "seedkernel-wasm/fs-memory";
 import { NodeFs } from "seedkernel-wasm/fs-node";
 import { createStorageNode, storageRuntime, netPeer, netReady, netRelay } from "../build/host/node.js";
@@ -27,7 +28,7 @@ export async function bootNode({
 }) {
   const fs = dir ? new NodeFs(dir) : new MemoryFs();
   const runtime = await storageRuntime((cfg) => bootShell({ ...cfg, sodium, services: { fs, transport: cfg.transport } }),
-    { identity, channels, datagrams, connsPerPeer, timeoutMs, contactSecret });
+    { identity, channels, datagrams, connsPerPeer, timeoutMs, contactSecret, transportBlob: transportBundleBytes() });
   const node = await createStorageNode({ runtime, config, quota, guestDeadlineMs });
   const relayState = relay ? await netRelay(runtime.shell, relay, relaySecret) : null;
   const ids = [];

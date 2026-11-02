@@ -1,6 +1,6 @@
 // Stage a self-contained browser demo into build/browser-demo — ALL browser pages
 // plus the assets they share, so there is ONE staged dir (not one per page):
-//   - seedkernel's host blob (host.skb: its realm engine and the host's crypto)
+//   - seedkernel's host blob without its script (host-web.skb: its realm engine and the host's crypto)
 //   - this project's own libsodium (libsodium/), and the signed seedstore bundle
 //     (seedstore.skb: codec, reputation module and guest under one signature)
 //   - this project's compiled host, minified (build/host-min → host/)
@@ -12,7 +12,7 @@
 //
 // The pages' import maps resolve "seedkernel-wasm/*" → ./seedkernel/* and this
 // project's host → ./host/. Nothing is fetched from elsewhere at runtime — QuickJS and
-// the host's crypto (in host.skb) and libsodium ship under this dir, so it runs offline.
+// the host's crypto (in host-web.skb) and libsodium ship under this dir, so it runs offline.
 // Needs both builds' minified host and seedkernel's host blob: seedstore `npm run build`,
 // seedkernel `npm run build`.
 
@@ -152,24 +152,24 @@ async function copyJs(srcDir, dstDir) {
 await copyJs(seedstoreHost, join(out, "host"));
 await copyJs(seedkernelHost, join(out, "seedkernel"));
 
-// seedkernel's host blob: the host script, the realm engine every guest runs on, and the
+// seedkernel's host blob without its script: the realm engine every guest runs on, and the
 // host's crypto, libsodium and ML-DSA-65 (the PQ half of seedkernel's one manifest suite,
-// seedkernel §12.4, without which no bundle verifies). The pages' loader runs it
-// (seedkernel-wasm/platform-web `browserHost`): the host the Node and native nodes run.
+// seedkernel §12.4, without which no bundle verifies). The pages import the host itself
+// (seedkernel-wasm/platform `platformHost`) from the seedkernel tree staged above.
 {
-  const src = join(root, "..", "..", "seedkernel", "WASM", "build", "host.skb");
+  const src = join(root, "..", "..", "seedkernel", "WASM", "build", "host-web.skb");
   if (!existsSync(src)) {
-    console.error(`seedkernel host.skb not found at ${src} — build it first ` +
+    console.error(`seedkernel host-web.skb not found at ${src}, build it first ` +
       "(in seedkernel/WASM:  npm run build).");
     process.exit(1);
   }
-  await copy(src, join(out, "host.skb"));
+  await copy(src, join(out, "host-web.skb"));
 }
 
 // ── this project's own libsodium ─────────────────────────────────────────────
 // What the page's own code computes (block ids, key sealing, ChaCha20-Poly1305) is
 // seedstore's, so it runs on seedstore's own dependency, libsodium-wrappers, the whole
-// API. Its wasm is the libsodium.wasm already in host.skb, so the page fetches it once:
+// API. Its wasm is the libsodium.wasm already in host-web.skb, so the page fetches it once:
 // the wrapper is staged with its core's embedded base64 copy blanked, and patched to
 // instantiate the bytes the page hands it (`useWasm`, from seedkernel-wasm/platform-web
 // `readHostBlob(blob).sodium`) as its own instance beside the host's. The wrapper
@@ -190,7 +190,7 @@ await copyJs(seedkernelHost, join(out, "seedkernel"));
   // Emscripten glue runs only the wasm it was built with, so this package's libsodium
   // must be the build seedkernel's host blob carries: bump them together.
   const { readHostBlob } = await import("seedkernel-wasm/platform-web");
-  const blobWasm = readHostBlob(new Uint8Array(readFileSync(join(out, "host.skb")))).sodium;
+  const blobWasm = readHostBlob(new Uint8Array(readFileSync(join(out, "host-web.skb")))).sodium;
   if (!Buffer.from(core.slice(b64Start + 1, b64End), "base64").equals(blobWasm)) {
     console.error("libsodium-wrappers in node_modules is not the libsodium build in seedkernel's host blob — " +
       "pin seedstore's libsodium-wrappers to the version seedkernel/WASM/package.json pins, then `npm install`.");

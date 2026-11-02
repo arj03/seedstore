@@ -1,5 +1,5 @@
 // Browser entry point — fetches the seedstore bundle (.skb) and loads it onto a node the
-// page's seedkernel host stood up (seedkernel-wasm/platform-web `browserHost`, then
+// page's seedkernel host stood up (seedkernel-wasm/platform `platformHost` on `browserPlatform`, then
 // `storageRuntime`). The page readies its own libsodium for what storage computes
 // host-side. Browser nodes run the same protocol as long-running peers, differing only in
 // backend and default quota (§1, §12).

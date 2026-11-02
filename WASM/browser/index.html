@@ -18,11 +18,11 @@
      to its real ./seedkernel/*.js file (a folder-prefix map would resolve to an
      extensionless path a static server 404s). The minified seedkernel tree ships as
      host/ + services/ (its modules import each other by relative path), and only
-     specifiers this page's graph actually NAMES need an entry. The seedkernel host
-     itself is the host blob (./host.skb, staged by scripts/build-browser-demo.mjs),
-     whose own script the page's loader runs ("seedkernel-wasm/platform-web"
-     `browserHost`): the same host the Node and native nodes run, with its crypto and
-     realms. seedstore's own code only installs its bundle on that host and calls its
+     specifiers this page's graph actually NAMES need an entry. The page imports the
+     seedkernel host ("seedkernel-wasm/platform" `platformHost`) onto the browser
+     platform ("seedkernel-wasm/platform-web" `browserPlatform`), over the host blob
+     without its script (./host-web.skb, staged by scripts/build-browser-demo.mjs): its
+     realm engine and its crypto. seedstore's own code only installs its bundle on that host and calls its
      guest (op framing, peer addresses), and what it computes host-side runs on its own
      libsodium ("libsodium-wrappers", staged into ./libsodium/), so the demo runs fully
      offline. -->
@@ -30,7 +30,8 @@
 {
   "imports": {
     "seedkernel-wasm/platform-web":   "./seedkernel/host/platform-web.js",
-    "seedkernel-wasm/op-frame":       "./seedkernel/services/op-frame.js",
+    "seedkernel-wasm/platform":       "./seedkernel/host/platform.js",
+    "seedkernel-wasm/op-frame":       "./seedkernel/host/op-frame.js",
     "seedkernel-wasm/peer-addr":      "./seedkernel/services/peer-addr.js",
     "libsodium-wrappers":             "./libsodium/libsodium-wrappers.mjs"
   }
@@ -60,7 +61,8 @@
 
 <script type="module">
 import sodium, { useWasm } from "libsodium-wrappers";
-import { browserHost, readHostBlob } from "seedkernel-wasm/platform-web";
+import { browserPlatform, readHostBlob } from "seedkernel-wasm/platform-web";
+import { platformHost } from "seedkernel-wasm/platform";
 import { loadWasmBytes, createConnectedCohort, LoopbackNetwork } from "./host/browser.js";
 
 const logEl = document.getElementById("log");
@@ -71,11 +73,11 @@ let nodes, net, lastPut;
 
 (async () => {
   log("readying crypto (libsodium, and the seedkernel host's)…");
-  const hostRes = await fetch("./host.skb", { cache: "no-store" });
-  if (!hostRes.ok) throw new Error(`./host.skb was not served (HTTP ${hostRes.status})`);
+  const hostRes = await fetch("./host-web.skb", { cache: "no-store" });
+  if (!hostRes.ok) throw new Error(`./host-web.skb was not served (HTTP ${hostRes.status})`);
   const hostBlob = new Uint8Array(await hostRes.arrayBuffer());
-  // The page's seedkernel host: the blob's own script, which every node here stands up on.
-  const host = browserHost({ hostBlob });
+  // The page's seedkernel host, which every node here stands up on.
+  const host = platformHost(browserPlatform({ hostBlob }));
   // seedstore's own libsodium, on the libsodium.wasm the host blob already carries.
   useWasm(readHostBlob(hostBlob).sodium);
   await sodium.ready;
