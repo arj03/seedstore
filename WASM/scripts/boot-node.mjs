@@ -24,11 +24,11 @@ export function peerSpecs(arg, relay) {
  */
 export async function bootNode({
   identity, sodium, channels, datagrams, dir, connsPerPeer, timeoutMs, contactSecret,
-  config, quota = DEFAULT_QUOTA_BYTES, guestDeadlineMs, relay, relaySecret, peers = [], group, readyMs = 10000,
+  config, quota = DEFAULT_QUOTA_BYTES, guestDeadlineMs, relay, relaySecret, peers = [], group, readyMs = 10000, onStatus,
 }) {
   const fs = dir ? new NodeFs(dir) : new MemoryFs();
   const runtime = await storageRuntime((cfg) => bootShell({ ...cfg, sodium, services: { fs, transport: cfg.transport } }),
-    { identity, channels, datagrams, connsPerPeer, timeoutMs, contactSecret, transportBlob: transportBundleBytes() });
+    { identity, channels, datagrams, connsPerPeer, timeoutMs, contactSecret, onStatus, transportBlob: transportBundleBytes() });
   const node = await createStorageNode({ runtime, config, quota, guestDeadlineMs });
   const relayState = relay ? await netRelay(runtime.shell, relay, relaySecret) : null;
   const ids = [];

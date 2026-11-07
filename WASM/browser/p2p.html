@@ -85,20 +85,22 @@
     <strong>3+ tabs</strong> using the same room, or one tab plus console holders
     (<code>npm run serve:holder</code>), which a tab reaches through the relay.</p>
   <div class="row">
-    relay <input id="relay" class="url mono" type="text" value="ws://localhost:8080" />
+    relay <input id="relay" class="url mono" type="text" placeholder="ws://&lt;relay key&gt;.&lt;secret&gt;@127.0.0.1:8080, as seedrelay prints it" />
     room <input id="room" class="room mono" type="text" value="seedstore-demo" />
   </div>
   <div class="row">
-    secret <input id="contact" class="url mono" type="text" placeholder="optional — 32-byte hex, same in every tab (blank = open room)" />
+    secret <input id="contact" class="url mono" type="text" placeholder="optional — 32-byte hex, same in every tab (blank = the room's own)" />
   </div>
   <div class="row">
-    relay secret <input id="relaySecret" class="url mono" type="password" autocomplete="off" placeholder="optional — only for a private relay (seedrelay --secret)" />
+    relay secret <input id="relaySecret" class="url mono" type="password" autocomplete="off" placeholder="optional — 32-byte hex, if the relay URL does not carry it" />
   </div>
   <p class="muted">The secret is the room's credential: a peer that cannot produce it draws no
     response at all, the relay included. It never goes to the relay, which forwards only
-    ciphertext. Blank means an open room, which is fine on localhost. A <em>wrong</em> secret has no
-    error: peers simply never link. The relay secret is a different thing, the relay's own: a relay
-    started with <code>--secret</code> serves only nodes that prove it, and it never crosses the wire.</p>
+    ciphertext. Blank uses the room's own secret, derived from its name, so anyone who knows the
+    name can join; type one to gate the room further. A <em>wrong</em> secret has no error: peers
+    simply never link. The relay secret is a different thing, the relay's own, which its URL
+    carries as it prints it (<code>ws://&lt;key&gt;.&lt;secret&gt;@host</code>): only nodes that hold it are
+    served, and it never crosses the wire.</p>
 </div>
 <div id="wsConfig">
   <p class="muted">Dial natively-reachable nodes started with <code>seedkernel --listen ws=0.0.0.0:&lt;port&gt;</code>.
@@ -140,10 +142,10 @@ import sodium, { useWasm } from "libsodium-wrappers";
 import { browserPlatform, readHostBlob } from "seedkernel-wasm/platform-web";
 import { platformHost } from "seedkernel-wasm/platform";
 import { createStorageNode, loadWasmBytes, storageRuntime, encodeToken, decodeToken } from "./host/browser.js";
-import { netAddr, netPeer, netReady, netRelay, netRelayState } from "./host/storage-node.js";
+import { netAddr, netPeer, netReady, netRelay, netRelayState, netSecrets, netTell } from "./host/storage-node.js";
 // Rooms are this page's: it meets peers in a relay room with seedrelay's room client and
 // hands them to the transport, which knows only keys and the relays that reach them.
-import { roomClient } from "seedrelay/rooms";
+import { roomClient, roomSecret } from "seedrelay/rooms";
 import { RtcNetwork } from "seedkernel-wasm/net-rtc";
 import { WsNetwork } from "seedkernel-wasm/net-ws";
 import { combineChannels } from "seedkernel-wasm/socket-seam";
@@ -367,7 +369,7 @@ async function boot() {
       relayRoom = room || "global";
       const secretHex = $("contact").value.trim();
       if (secretHex && !/^[0-9a-f]{64}$/i.test(secretHex)) {
-        throw new Error("secret must be 32-byte hex (64 chars), or blank for an open room");
+        throw new Error("secret must be 32-byte hex (64 chars), or blank for the room's own");
       }
       contactSecret = secretHex
         ? Uint8Array.from(secretHex.match(/../g).map((b) => parseInt(b, 16)))
@@ -387,9 +389,12 @@ async function boot() {
     net = mode === "ws"
       ? new WsNetwork({ webSocketFactory: (u) => new WebSocket(u) })
       : combineChannels(new WsNetwork(), new RtcNetwork());
+    // Rooms travel on the transport's relay link, so the room client reads its status.
+    let rooms = null;
     runtime = await storageRuntime(host.standUp, {
       identity, timeoutMs, contactSecret,
       channels: net,
+      onStatus: (s) => rooms?.status(s),
       connsPerPeer: connsPerPeerFor(mode),
     });
 
@@ -422,21 +427,22 @@ async function boot() {
     } else {
       // Register on the relay, then meet the room: each member is dialed through the relay
       // (the smaller key of a pair dials), then moves to WebRTC.
-      await netRelay(runtime.shell, relayUrl, relaySecret);
       const me = hex(identity.publicKey);
-      const rooms = roomClient({
-        relay: relayUrl,
-        publicKey: identity.publicKey,
-        sign: (m) => sodium.crypto_sign_detached(m, identity.privateKey),
-        ...(relaySecret ? { secret: relaySecret, blake2b: (m) => sodium.crypto_generichash(64, m) } : {}),
+      // Members reach each other under the room's secret: the one typed, else the room's
+      // own, which everyone who knows its name holds.
+      const roomKey = contactSecret ?? await roomSecret(relayRoom);
+      await netSecrets(runtime.shell, [roomKey]);
+      rooms = roomClient({
+        tell: (bytes) => netTell(runtime.shell, bytes),
         onMember: (_room, key, present) => {
           if (!present || key === me) return;
           addMember(key);
-          void netAddr(runtime.shell, key, "relay+" + relayUrl, contactSecret)
+          void netAddr(runtime.shell, key, "relay+" + relayUrl, roomKey)
             .then(() => (me < key ? netReady(runtime.shell, 0) : undefined)).catch(() => {});
         },
         onRefused: (name) => log(`room ${name} is full on this relay`),
       });
+      await netRelay(runtime.shell, relayUrl, relaySecret);
       await rooms.join(relayRoom);
       watchRelay(relayUrl);
       log("waiting for peers — open this page in more tabs (same room).");

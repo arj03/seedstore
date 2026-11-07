@@ -23,7 +23,7 @@ import {
 } from "../build/host/node.js";
 import { toHex, bytesEqual } from "../build/host/util.js";
 import { writeOp } from "seedkernel-wasm/op-frame";
-import { netAddr, netReady } from "../build/host/storage-node.js";
+import { netAddr, netReady, netSecret } from "../build/host/storage-node.js";
 import { Op, encodeGroups } from "../build/host/protocol.js";
 import { buildBundle } from "./bundle-fixture.mjs";
 import { makeT } from "./harness.mjs";
@@ -82,7 +82,7 @@ export async function run(t) {
     for (const e of entries) {
       for (const o of entries) {
         if (e === o) continue;
-        await netAddr(e.shell, o.peerId, `tcp://127.0.0.1:${o.net.portOf("tcp")}`);
+        await netAddr(e.shell, o.peerId, `tcp://127.0.0.1:${o.net.portOf("tcp")}`, await netSecret(o.shell));
       }
     }
     await Promise.all(entries.map((e) => netReady(e.shell)));
@@ -178,8 +178,8 @@ export async function run(t) {
         count: 1, network: net, sodium, wasm: { bundleBlob }, config: { blockSize: 1024 }, timeoutMs: TIMEOUT,
       });
       for (const e of shells) {
-        await netAddr(sn.shell, e.peerId, `tcp://127.0.0.1:${e.net.portOf("tcp")}`);
-        await netAddr(e.shell, sn.peerId, `tcp://127.0.0.1:${sn.net.portOf("tcp")}`);
+        await netAddr(sn.shell, e.peerId, `tcp://127.0.0.1:${e.net.portOf("tcp")}`, await netSecret(e.shell));
+        await netAddr(e.shell, sn.peerId, `tcp://127.0.0.1:${sn.net.portOf("tcp")}`, await netSecret(sn.shell));
       }
       await Promise.all([netReady(sn.shell), ...shells.map((e) => netReady(e.shell))]);
       await joinCohort([...shells, { peerId: sn.peerId, node: sn }]);

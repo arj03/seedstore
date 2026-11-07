@@ -34,7 +34,7 @@ import { performance } from "node:perf_hooks";
 import { fileURLToPath } from "node:url";
 import {
   loadWasmBytes, loadSodium, PRODUCTION_BLOCK_SIZE, bootStorageNode, inProcessStandUp, inProcessHost,
-  generateKeyPair, netAddr, netReady,
+  generateKeyPair, netAddr, netReady, netSecret,
 } from "../build/host/node.js";
 import { bytesEqual } from "../build/host/util.js";
 import { blockHashInput } from "../build/host/descriptor-core.js";
@@ -85,7 +85,7 @@ if (holderArg >= 0) {
   const node = await bootNode(process.argv[holderArg + 1] || undefined);
   await node.setGroups({ bench: [process.argv[holderArg + 2], node.peerId] });
   process.on("message", async () => { process.send([...await node.stats()]); });
-  process.send({ peerId: node.peerId, port: node.net.portOf("tcp") });
+  process.send({ peerId: node.peerId, port: node.net.portOf("tcp"), secret: [...await netSecret(node.shell)] });
   await new Promise(() => {}); // until the bench kills it
 }
 
@@ -101,9 +101,9 @@ for (let i = 0; i < holders; i++) {
   const dir = ON_DISK ? mkdtempSync(join(tmpdir(), "seedstore-bench-holder-")) : "";
   if (dir) tmpDirs.push(dir);
   const child = fork(fileURLToPath(import.meta.url), [...process.argv.slice(2), "--holder", dir, initiator.peerId]);
-  const [{ peerId, port }] = await once(child, "message");
+  const [{ peerId, port, secret }] = await once(child, "message");
   children.push({ child, peerId });
-  await netAddr(initiator.shell, peerId, `tcp://127.0.0.1:${port}`);
+  await netAddr(initiator.shell, peerId, `tcp://127.0.0.1:${port}`, Uint8Array.from(secret));
 }
 await netReady(initiator.shell);
 const holderIds = children.map((c) => c.peerId);

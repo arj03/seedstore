@@ -26,7 +26,7 @@ import {
 } from "../build/host/node.js";
 import { toHex, bytesEqual } from "../build/host/util.js";
 import { writeOp } from "seedkernel-wasm/op-frame";
-import { netAddr, netReady } from "../build/host/storage-node.js";
+import { netAddr, netReady, netSecret } from "../build/host/storage-node.js";
 import { Op } from "../build/host/protocol.js";
 import { buildBundle } from "./bundle-fixture.mjs";
 import { makeT } from "./harness.mjs";
@@ -49,8 +49,8 @@ function file(n, seed = 1) {
  *  The adapter is the platform's — the shell does not carry one — so it is
  *  passed in beside the peer id it belongs to. */
 async function link(shell, shellNet, shellPeerId, node) {
-  await netAddr(node.shell, shellPeerId, `tcp://127.0.0.1:${shellNet.portOf("tcp")}`);
-  await netAddr(shell, node.peerId, `tcp://127.0.0.1:${node.net.portOf("tcp")}`);
+  await netAddr(node.shell, shellPeerId, `tcp://127.0.0.1:${shellNet.portOf("tcp")}`, await netSecret(shell));
+  await netAddr(shell, node.peerId, `tcp://127.0.0.1:${node.net.portOf("tcp")}`, await netSecret(node.shell));
   await Promise.all([netReady(shell), netReady(node.shell)]);
 }
 

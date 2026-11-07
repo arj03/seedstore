@@ -9,7 +9,6 @@
 
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
-import { randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import {
   loadSodium, loadWasmBytes, bootStorageNode, inProcessStandUp, generateKeyPair, fromHex, netRoutes,
@@ -17,7 +16,7 @@ import {
 import { MsgType, encodeHaveReq, decodeMask } from "../build/host/protocol.js";
 import { bytesEqual } from "../build/host/util.js";
 import { nodeChannels, nodeDatagrams } from "seedkernel-wasm/shell-node";
-import { joinRelayRoom, roomGroup } from "./relay-room.mjs";
+import { joinRelayRoom, relayStatus, roomGroup } from "./relay-room.mjs";
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -28,25 +27,23 @@ function typed(type, data) {
 }
 const HOLDERS = Number(process.env.HOLDERS) || 3;
 
-// The relay: a running one at RELAY=ws://host:port (with RELAY_SECRET if it is private), or
+// The relay: a running one at RELAY=ws://<relay key>.<secret>@host:port, as it prints it, or
 // the sibling seedrelay checkout's server, started here on a free port (seedrelay is a
-// sibling checkout, as seedkernel is). One started here is private, with a fresh secret,
-// so the smoke covers the relay's credential as it does the room's.
+// sibling checkout, as seedkernel is). One started here has the secret every relay has by
+// default, its key's own, so the smoke covers the relay's credential as it does the room's.
 const ROOM = process.env.ROOM ?? "smoke-relay-" + Math.random().toString(16).slice(2, 10);
-const RELAY_SECRET = process.env.RELAY ? process.env.RELAY_SECRET || undefined : randomBytes(16).toString("hex");
+const RELAY_SECRET = process.env.RELAY_SECRET || undefined;
 let relayProcess = null;
 async function startRelay() {
   if (process.env.RELAY) return process.env.RELAY.replace(/\/+$/, "");
   const server = fileURLToPath(new URL("../../../seedrelay/server.mjs", import.meta.url));
   if (!existsSync(server)) throw new Error(`no seedrelay at ${server}; check it out beside seedstore, or set RELAY`);
-  relayProcess = spawn(process.execPath, [server, "0"], {
-    stdio: ["ignore", "pipe", "inherit"], env: { ...process.env, RELAY_SECRETS: RELAY_SECRET },
-  });
+  relayProcess = spawn(process.execPath, [server, "0"], { stdio: ["ignore", "pipe", "inherit"] });
   return new Promise((resolve, reject) => {
     let out = "";
     relayProcess.stdout.on("data", (d) => {
       out += d;
-      const m = /listening on (ws:\/\/[^/\s]+)\//.exec(out);
+      const m = /listening on (ws:\/\/[0-9a-f]{64}\.[0-9a-f]{64}@\S+)/.exec(out);
       if (m) resolve(m[1]);
     });
     relayProcess.once("exit", (code) => reject(new Error(`seedrelay exited ${code}`)));
@@ -74,11 +71,12 @@ const CONTACT = process.env.CONTACT ? fromHex(process.env.CONTACT) : sodium.rand
 // storage bundle's own load, so the transport guest never sees it.
 async function makeNode(contact = CONTACT) {
   const identity = generateKeyPair(sodium);
+  const status = relayStatus();
   const node = await bootStorageNode(inProcessStandUp, {
     identity, timeoutMs: 8000, contactSecret: contact, channels: nodeChannels(), datagrams: nodeDatagrams(),
-    sodium, ...wasm, config, quota: 64 * 1024 * 1024,
+    sodium, ...wasm, config, quota: 64 * 1024 * 1024, onStatus: status.onStatus,
   });
-  return { node, identity, contact, room: null };
+  return { node, identity, contact, status, room: null };
 }
 
 const nodes = [];
@@ -89,8 +87,8 @@ try {
   // Meet in the room: each member is dialed through the relay, then moves to a UDP path.
   const enter = async (e) => {
     e.room = await joinRelayRoom({
-      shell: e.node.shell, identity: e.identity, sodium, relay: RELAY, room: ROOM, secret: e.contact,
-      relaySecret: RELAY_SECRET, onMember: roomGroup(e.node, "room"),
+      shell: e.node.shell, identity: e.identity, relay: RELAY, room: ROOM, secret: e.contact,
+      relaySecret: RELAY_SECRET, status: e.status, onMember: roomGroup(e.node, "room"),
     });
   };
   for (const e of nodes) await enter(e);

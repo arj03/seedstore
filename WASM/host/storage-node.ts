@@ -58,13 +58,20 @@ export function netAddr(
 }
 
 /** Rotate this node's inbound contact secret without replacing the transport. Omit it
- *  to make the node open — all-zero, spelled the same way `netAddr` spells an open
- *  peer. Contact policy belongs to the signed transport guest, so this is an ordinary
- *  local-service call rather than a driver option. */
+ *  to make the node open, which is public: anyone who reaches it is answered. All-zero,
+ *  spelled the same way `netAddr` spells an open peer. Contact policy belongs to the
+ *  signed transport guest, so this is an ordinary local-service call rather than a driver
+ *  option. Answers the secret now in force, empty when open. */
 export function netContact(
   shell: Pick<Shell, "call">, contactSecret?: Uint8Array,
 ): Promise<Uint8Array> {
   return transportOp(shell, new OpArgs("contact").blob(contactSecret ?? ZERO32));
+}
+
+/** The contact secret this node's address carries (`pk.secret@dest`): by default the one
+ *  its transport derives from its key; empty when the node is open. */
+export function netSecret(shell: Pick<Shell, "call">): Promise<Uint8Array> {
+  return transportOp(shell, new OpArgs("contact"));
 }
 
 /** Dial every peer the transport knows of and resolve once each authenticated, or the
@@ -102,17 +109,32 @@ export type RelayState = "none" | "up" | "redialing";
 /** The state byte the transport's `relay` and `relayState` ops both answer. */
 const relayStateOf = (b: Uint8Array): RelayState => (b[0] === 1 ? "up" : b[0] === 2 ? "redialing" : "none");
 
-/** Register on a relay, so peers can reach this node through it: a `ws://`/`wss://` URL
- *  with no path, "" to leave. Resolves to the relay's state once registered, or once that
+/** Register on a relay, so peers can reach this node through it: `ws[s]://<key>@host:port`,
+ *  the relay's key and address as it prints them, "" to leave. Resolves to the relay's state once registered, or once that
  *  attempt has failed and the transport is redialing. Which peers to reach is the app's to
  *  say, as `relay+` addresses (`netAddr`); the transport moves each relayed link to WebRTC
  *  when the node's channels also reach `rtc:` destinations (seedkernel §12.7). A private
- *  relay (seedrelay's `--secret`) also wants its `secret`, which the transport proves and
- *  never sends. */
+ *  relay (seedrelay's `--secret`) also wants its `secret`, its contact secret in hex,
+ *  which the transport proves and never sends. */
 export async function netRelay(shell: Pick<Shell, "call">, url: string, secret?: string): Promise<RelayState> {
   const op = new OpArgs("relay").text(url);
   if (secret) op.text(secret);
   return relayStateOf(await transportOp(shell, op));
+}
+
+/** Hand `bytes` to the home relay, unread (the transport's `tell`): rooms, as seedrelay's
+ *  rooms.mjs speaks them. Resolves to whether they went. */
+export async function netTell(shell: Pick<Shell, "call">, bytes: Uint8Array): Promise<boolean> {
+  return (await transportOp(shell, new OpArgs("tell").blob(bytes)))[0] === 1;
+}
+
+/** The secrets a caller may present beside this node's contact secret (the transport's
+ *  `secrets`), the whole list each time: a room's (seedrelay's `roomSecret`), so its
+ *  members are answered. */
+export async function netSecrets(shell: Pick<Shell, "call">, secrets: Uint8Array[]): Promise<void> {
+  const all = new Uint8Array(32 * secrets.length);
+  secrets.forEach((s, i) => all.set(s, 32 * i));
+  await transportOp(shell, new OpArgs("secrets").blob(all));
 }
 
 /** The relay's state now. */
@@ -291,9 +313,11 @@ export class StorageNode {
    *  its realm (seedkernel §12.10), so a node whose transport is replaced must be
    *  connected again. */
   static async connect(a: StorageNode, b: StorageNode): Promise<void> {
+    // Each is reached under the secret its own address carries, as an operator hands it out.
+    const [aSecret, bSecret] = await Promise.all([netSecret(a.shell), netSecret(b.shell)]);
     await Promise.all([
-      netAddr(a.shell, b.peerId, `tcp://127.0.0.1:${b.net.portOf("tcp")}`),
-      netAddr(b.shell, a.peerId, `tcp://127.0.0.1:${a.net.portOf("tcp")}`),
+      netAddr(a.shell, b.peerId, `tcp://127.0.0.1:${b.net.portOf("tcp")}`, bSecret.length > 0 ? bSecret : undefined),
+      netAddr(b.shell, a.peerId, `tcp://127.0.0.1:${a.net.portOf("tcp")}`, aSecret.length > 0 ? aSecret : undefined),
     ]);
     await Promise.all([netReady(a.shell), netReady(b.shell)]);
   }

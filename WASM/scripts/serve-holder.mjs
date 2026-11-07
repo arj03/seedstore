@@ -5,8 +5,8 @@
 // be punched. Console counterpart of browser/p2p.html: run a few of these, open p2p.html
 // on the SAME relay + room, drop a file.
 //
-//   node scripts/serve-holder.mjs                (npm run serve:holder)
-//   RELAY=ws://localhost:8080 ROOM=seedstore-demo node scripts/serve-holder.mjs
+//   RELAY=ws://<relay key>.<secret>@localhost:8080 npm run serve:holder
+//   RELAY=ws://<relay key>.<secret>@localhost:8080 ROOM=seedstore-demo node scripts/serve-holder.mjs
 //   RELAY_SECRET=$(cat relay.secret) ...      a private relay, started with --secret
 //
 // The transport bundle speaks the relay itself, over a node:net socket and its own
@@ -18,18 +18,23 @@ import { loadCrypto } from "seedkernel-wasm";
 import { generateKeyPair, toHex, fromHex } from "../build/host/node.js";
 import { nodeChannels, nodeDatagrams } from "seedkernel-wasm/shell-node";
 import { bootNode } from "./boot-node.mjs";
-import { joinRelayRoom, roomGroup } from "./relay-room.mjs";
+import { joinRelayRoom, relayStatus, roomGroup } from "./relay-room.mjs";
 
 const short = (id) => id.slice(0, 12) + "…";
-const base = (process.env.RELAY ?? "ws://localhost:8080").replace(/\/+$/, "");
+// The relay's address names its key, which seedrelay prints when it starts.
+if (!process.env.RELAY) {
+  console.error("RELAY must name the relay, ws://<relay key>.<secret>@host:port, as seedrelay prints it");
+  process.exit(1);
+}
+const base = process.env.RELAY.replace(/\/+$/, "");
 const room = process.env.ROOM ?? "seedstore-demo";
-// RELAY_SECRET — a private relay's secret (seedrelay's `--secret`), proved and never sent.
-// Unset => an open relay.
+// RELAY_SECRET — the relay's contact secret in hex, in place of the one RELAY's URL carries,
+// never sent.
 const relaySecret = process.env.RELAY_SECRET || undefined;
 
 // CONTACT — the room's shared contact secret, 32 bytes of hex. The cohort is
 // symmetric, so the value we demand of callers and present when dialing is the
-// same. Unset => open room. A mismatched secret has no error path (seedkernel §12.6.2) — a
+// same. Unset => the room's own, derived from its name (seedrelay's `roomSecret`). A mismatched secret has no error path (seedkernel §12.6.2) — a
 // gated peer refuses in silence, so "peers never link" is the symptom.
 //
 //   CONTACT=$(openssl rand -hex 32) ROOM=my-room node scripts/serve-holder.mjs
@@ -56,21 +61,22 @@ const identity = generateKeyPair(sodium);
 // the transport bundle registers and links through the first, and signals those paths over
 // the links. A room shares one contact secret, so this node's own is the one its peers
 // present. Its store is an in-RAM fs, read back through the node's FsBlobView.
+const status = relayStatus();
 const { node } = await bootNode({
   identity, sodium, timeoutMs: 6000, contactSecret, channels: nodeChannels(), datagrams: nodeDatagrams(),
-  config, quota: 64 * 1024 * 1024,
+  config, quota: 64 * 1024 * 1024, onStatus: status.onStatus,
 });
 // Meet in the room: members are dialed through the relay, and console ones move to UDP. Everyone
 // met there joins this node's group "room", the one p2p.html stores into (§5.1); the room's
 // contact secret is what keeps strangers out of it.
-await joinRelayRoom({ shell: node.shell, identity, sodium, relay: base, room, secret: contactSecret, relaySecret, onMember: roomGroup(node, "room") });
+await joinRelayRoom({ shell: node.shell, identity, relay: base, room, secret: contactSecret, relaySecret, status, onMember: roomGroup(node, "room") });
 
 console.log(`\nseedstore holder ${short(node.peerId)} ready — handlers installed: ${node.handlersInstalled()}`);
 console.log(`joined room "${room}" on ${base}${relaySecret ? " (private relay)" : ""}  (RS k=${config.k} m=${config.m}, ${config.blockSize} B blocks)`);
 console.log(`open browser/p2p.html with the SAME relay + room "${room}" (or run more holders), then store a file.`);
 console.log(contactSecret
   ? `contact secret: SET — peers must dial with the same CONTACT value or they draw silence.`
-  : `contact secret: none (open room) — set CONTACT=<32-byte hex> to gate who may reach this holder.`);
+  : `contact secret: the room's own, from its name; set CONTACT=<32-byte hex> to gate the room further.`);
 
 // Self-healing per spec §9: repair on a jittered interval rebuilds missing
 // blocks onto fresh peers when a chunk drops below its redundancy target — no

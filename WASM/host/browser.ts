@@ -36,7 +36,7 @@ export { createConnectedCohort } from "./cluster.js";
 export { storageRuntime, bootStorageNode } from "./runtime.js";
 export type { StorageNodeOptions, WasmBytes } from "./storage-node.js";
 export type { Groups } from "./protocol.js";
-export { netAddr, netPeer, netRelay, netRelayState, netContact, netReady, netPeers, netRoutes } from "./storage-node.js";
+export { netAddr, netPeer, netRelay, netRelayState, netTell, netSecrets, netSecret, netContact, netReady, netPeers, netRoutes } from "./storage-node.js";
 export type { StorageConfig, Identity } from "./core.js";
 export { defaultConfig, STORAGE_APP, STORAGE_PROTO } from "./core.js";
 // The client surface (SPEC §18.1): typed ops over any invoke, and the file token.

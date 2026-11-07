@@ -58,6 +58,9 @@ export interface StorageRuntimeOptions {
   timeoutMs?: number;
   /** STUN/TURN servers for WebRTC peers, as `RTCConfiguration.iceServers` takes them. */
   iceServers?: { urls: string | string[]; username?: string; credential?: string }[];
+  /** Every status the transport says (`link/status`), as a room client reads them
+   *  (seedrelay's rooms.mjs `status`). */
+  onStatus?: (status: Uint8Array) => void;
   /** The signed transport bundle blob. Defaults to the one a host's `standUp` carries
    *  in its blob; an operator selecting a different transport, or standing up through
    *  `bootShell` directly, passes its blob here. */
@@ -81,6 +84,7 @@ export async function storageRuntime(standUp: StandUp, opts: StorageRuntimeOptio
       listen: opts.listen,
       suppressLinkLog: opts.suppressLinkLog,
       datagrams: opts.datagrams,
+      onStatus: opts.onStatus,
       // Selecting these bytes authorizes them as the transport; a later change must
       // replace this slot explicitly. Defaults to the host blob's transport.
       bundle: opts.transportBlob,

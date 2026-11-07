@@ -203,22 +203,24 @@ retrieval token. You pick one of two transports on the page:
   out:
 
   ```sh
-  (cd ../../seedshell && npm run relay)  # seedrelay on ws://localhost:8080
-  npm run serve:holder                   # a console holder joining the room; run two
-  #   then pick WebRTC in p2p.html (relay ws://localhost:8080, room "seedstore-demo")
+  (cd ../../seedshell && npm run relay)  # prints its address, ws://<relay key>.<secret>@127.0.0.1:8080
+  RELAY=ws://<relay key>.<secret>@127.0.0.1:8080 npm run serve:holder   # a console holder; run two
+  #   then pick WebRTC in p2p.html (that relay address, room "seedstore-demo")
   ```
 
   Console holders have no WebRTC, so a tab's link to one stays on the relay. Between
   themselves they move to a UDP path (the transport's, seedkernel §12.7). `npm run
   smoke:relay` runs the PUT→GET path headless, with no browser, through the relay and
-  then over UDP, against the sibling seedrelay checkout's server, which it starts on a free port as a private
-  relay with a fresh secret; `RELAY=ws://host:port` points it at a running one.
+  then over UDP, against the sibling seedrelay checkout's server, which it starts on a free port, gated by
+  the secret it derives from its key; `RELAY=ws://<relay key>.<secret>@host:port` points it at a running one.
 
-  A private relay (seedrelay's `--secret`) serves only nodes that prove its secret.
-  Give it to the page's **relay secret** box, or to a console holder or the smoke as
-  `RELAY_SECRET`; `netRelay` passes it to the transport, and the room client proves
-  it with libsodium's BLAKE2b. It never crosses the wire, but whoever sees a
-  registration can test guesses at it, so it must be long and random.
+  A relay address names the relay's key, since a node's relay link runs seedkernel's
+  channel handshake pinned to it, and its contact secret, which every relay has unless it
+  is opened; rooms travel on that link too, so nothing on the path names a key. A URL
+  without the secret takes it from the page's **relay secret** box, or a console holder's
+  or the smoke's `RELAY_SECRET`; `netRelay` passes it to the transport, which presents it
+  in the handshake, so it never crosses the wire. A room is gated by its own secret,
+  derived from its name, unless a contact secret is given for it.
 
 A tab's block store is in RAM, because the OPFS/IndexedDB backend isn't built yet.
 Tabs acting as holders therefore forget everything on reload. For now, treat the

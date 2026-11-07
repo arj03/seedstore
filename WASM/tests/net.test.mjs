@@ -18,7 +18,7 @@ import {
   createConnectedCohort, loadSodium, loadWasmBytes, LoopbackNetwork, bootStorageNode, inProcessStandUp, inProcessHost,
   generateKeyPair,
 } from "../build/host/node.js";
-import { StorageNode, netAddr, netReady } from "../build/host/storage-node.js";
+import { StorageNode, netAddr, netReady, netSecret } from "../build/host/storage-node.js";
 import { nodeChannels } from "seedkernel-wasm/shell-node";
 import { FsBlobView } from "../build/host/store-view.js";
 import { NodeFs, nodeRawFiles } from "seedkernel-wasm/fs-node";
@@ -115,7 +115,7 @@ export async function run(t) {
       t.eq(net.view("nobody").connect("wss://127.0.0.1:1"), null,
         "wss is not a route this fabric has — no TLS under an in-process pair");
 
-      await netAddr(B.shell, S.peerId, `ws://127.0.0.1:${S.net.portOf("ws")}`);
+      await netAddr(B.shell, S.peerId, `ws://127.0.0.1:${S.net.portOf("ws")}`, await netSecret(S.shell));
       await netReady(B.shell, 5000);
       t.ok((await B.linkedPeers()).includes(S.peerId),
         "a ws:// dial into the fabric's ws listener authenticates");
