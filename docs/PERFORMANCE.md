@@ -123,16 +123,21 @@ per run) on a second WAN pair: a Node initiator, one remote holder and one local
 holder, both native `seedkernel`. Timing starts only once every link is up. The UDP
 arm meets the holders through a relay and waits for each link to move to its direct
 UDP path (seedkernel §12.7); the TCP arm dials their `ws` listeners. Three runs per
-arm, back to back:
+arm, alternating arms, each a PUT and two GETs:
 
 | | PUT (wire) | GET |
 |---|---:|---:|
-| **UDP**, one flow per holder | 17–19 MB/s | 28–37 MB/s |
-| **TCP**, 8 connections per holder | 14–17 MB/s | 33–34 MB/s |
+| **UDP**, one QUIC connection per holder | 16.1–18.5 MB/s | 32–39 MB/s |
+| **TCP**, 8 connections per holder | 14.3–16.2 MB/s | 24–34 MB/s |
 
-The UDP flow's window behaves as eight NewReno flows at once, the aggregate the eight
-TCP connections give. Only half of each PUT crosses the WAN, since the other holder is
-local, so these rates compare with each other and not with the table above.
+UDP is ahead by ~16% on both PUT and GET on the means, and tied or won every round. The
+UDP path is a QUIC connection (ngtcp2) under BBR. One flow stands where TCP opens eight,
+and at each loss one CUBIC flow gives up 30% of its rate where eight give up ~4%
+together, so CUBIC (the QUIC default) measured PUT at 0.74x TCP on the same pair. Only
+half of each PUT crosses the WAN, since the other holder is local, so these rates compare
+with each other and not with the table above. The local holder needs a `quota` in its
+local config: without one it stores nothing, every GET goes to the remote holder, and
+GET halves.
 
 `p2p-cli.mjs` runs either arm:
 
