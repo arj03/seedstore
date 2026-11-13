@@ -29,7 +29,7 @@ convention and the quota. The host only moves opaque bytes. So the same host can
 storage or any other signed app, and an upgrade to storage is new content rather than
 a new binary (§2.1, §17). The runtime side (the host, the guest seam and its grants,
 the confinement realm, the bundle format) is documented in
-[seedkernel RUNTIME §12](https://github.com/arj03/seedkernel/blob/main/docs/RUNTIME.md)
+[seedkernel ARCHITECTURE §12](https://github.com/arj03/seedkernel/blob/main/docs/ARCHITECTURE.md)
 and [CLIENT](https://github.com/arj03/seedkernel/blob/main/docs/CLIENT.md).
 
 ## Build
