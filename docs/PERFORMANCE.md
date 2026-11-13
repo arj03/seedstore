@@ -71,17 +71,17 @@ final `32` to sweep the window):
 
 | | time | rate | |
 |---|---:|---:|---|
-| **PUT** | ~0.33 s | ~12.0 MB/s | ships the 2× erasure overhead: RS(2,2) is 2 data + 2 parity |
-| **GET** | ~0.19 s | ~21.6 MB/s | downloads any *k* of *n*, i.e. 1× the file |
+| **PUT** | ~0.32 s | ~12.6 MB/s | ships the 2× erasure overhead: RS(2,2) is 2 data + 2 parity |
+| **GET** | ~0.17 s | ~23.8 MB/s | downloads any *k* of *n*, i.e. 1× the file |
 
 The bench applies latency at the wire. Every message pays it in both directions, so
 one request/response costs a full RTT. The physical chunks of one message share a
 single delivery delay, as they would on an ordered byte stream.
 
 A 64 MB file over 40 ms with 1 MiB batches
-(`node tests/bench-net.mjs 40 64 256 1024 48 32`) runs PUT ~2.5 s (~26 MB/s) and GET
-~1.3 s (~50 MB/s). Across six runs PUT stayed within 2.4–2.6 s and GET within
-1.26–1.28 s.
+(`node tests/bench-net.mjs 40 64 256 1024 48 32`) runs PUT ~2.3 s (~28 MB/s) and GET
+~1.1 s (~57 MB/s). Across six runs PUT stayed within 2.2–2.4 s and GET within
+1.09–1.15 s.
 
 Node 22 runs these 2–4% faster. Node 20 can't run the bench: it has no
 `Promise.withResolvers`.
@@ -176,7 +176,7 @@ encodes and sends its OFFERs, and the index places alongside the file's last win
 A streamed GET fetches the next window while the current one is decrypted and handed
 back. Without this, the wire would sit idle at every window boundary. Over a 40 ms
 link (16 MB, RS(2,2), 32 KiB blocks, 4 MiB windows;
-`node tests/bench-net.mjs 40 16 32 256 48 32 4`), PUT takes ~1.26 s and GET ~0.73 s.
+`node tests/bench-net.mjs 40 16 32 256 48 32 4`), PUT takes ~1.16 s and GET ~0.68 s.
 
 **One host-call ledger.** The two windows in flight share the realm's host-call
 budget through one ledger (`hostBudget`), and every initiator call is charged against
@@ -218,13 +218,13 @@ looks faster.
 `node tests/bench-holder.mjs 16 256 1 1 disk` isolates holder admission and durable
 STORE work on a real filesystem. Each holder runs in a process of its own, reached over
 loopback TCP through the real transport, as a deployed holder is. The median of six runs
-on Node 24: ~5.3 ms per 256 KiB block, a ~48 MB/s mean holder rate, and PUT ~0.51 s
-(~31 MB/s). About 2 ms of that block time is waiting, not work: each STORE batch awaits
+on Node 24: ~4.7 ms per 256 KiB block, a ~54 MB/s mean holder rate, and PUT ~0.45 s
+(~36 MB/s). About 2 ms of that block time is waiting, not work: each STORE batch awaits
 a score from the reputation module's worker before it admits, and the timer in `handle`
 runs through the wait. Without that await a block measures ~3.0 ms (~85 MB/s) and PUT
 stays the same, so the mean holder rate understates what a holder can take. The crypto
-floor is ~0.42 ms per block; the rest is the fs write, seam crossings and QuickJS. With
-the in-RAM fs (leave off `disk`) a block takes ~3.1 ms, so the disk is ~2.1 ms of it. The
+floor is ~0.40 ms per block; the rest is the fs write, seam crossings and QuickJS. With
+the in-RAM fs (leave off `disk`) a block takes ~2.7 ms, so the disk is ~2.0 ms of it. The
 capacity comparison uses total holder payload over the complete PUT wall time as a
-conservative floor (~63 MB/s, 8.8× the live run's demand). It separately sums the
-holders' measured rates for the active holder window (~97 MB/s). Node 22 is within 3%.
+conservative floor (~72 MB/s, 10× the live run's demand). It separately sums the
+holders' measured rates for the active holder window (~108 MB/s). Node 22 is within 3%.
