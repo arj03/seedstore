@@ -4,14 +4,14 @@
 // only has a read view (net.test.mjs); admission/quota policy is the confined
 // holder's, covered in protocol.test.mjs.
 
-import { Crypto, LEVEL_BODY } from "../build/host/crypto.js";
+import { LEVEL_BODY } from "../build/host/crypto.js";
 import { bytesEqual, toHex } from "../build/host/util.js";
 
-import { ensureSodium, newKey } from "./helpers.mjs";
+import { ensureSodium, newKey, testCrypto } from "./helpers.mjs";
 
 export async function run(t) {
   const sodium = await ensureSodium();
-  const crypto = new Crypto(sodium);
+  const crypto = testCrypto(sodium);
 
   t.group("util.toHex: unsigned words, leading zeros, tails and byte views");
   {
@@ -24,10 +24,11 @@ export async function run(t) {
     }
   }
 
-  t.group("crypto.hash: content hash is BLAKE2b-256 (§4.2)");
+  t.group("crypto.hash: content hash is SHA-256 (§4.2)");
   {
     const data = new TextEncoder().encode("block bytes");
-    t.ok(bytesEqual(crypto.hash(data), sodium.crypto_generichash(32, data)), "hash == libsodium BLAKE2b-256");
+    t.ok(toHex(crypto.hash(new TextEncoder().encode("abc"))) === "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad", "hash == SHA-256 (FIPS 180-4 \"abc\")");
+    t.eq(crypto.hash(data).length, 32, "32 bytes");
   }
 
   t.group("crypto.aead: detached tag keeps RS ciphertext length-preserving (§4.4)");

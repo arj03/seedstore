@@ -50,7 +50,8 @@ import { fileURLToPath } from "node:url";
 import { randomBytes, timingSafeEqual } from "node:crypto";
 
 import { WsNetwork } from "seedkernel-wasm/net-ws";
-import { nodeDatagrams } from "seedkernel-wasm/shell-node";
+import { nodeChannels, nodeDatagrams } from "seedkernel-wasm/shell-node";
+import { combineChannels } from "seedkernel-wasm/socket-seam";
 import { loadCrypto } from "seedkernel-wasm";
 import { generateKeyPair, defaultConfig, PRODUCTION_BLOCK_SIZE, toHex, fromHex, netRoutes } from "../build/host/node.js";
 import { DEFAULT_REALM_MEMORY_BYTES } from "../build/host/core.js";
@@ -85,9 +86,10 @@ const mParam = num("m", 1);
 // holders-per-chunk); holders must run the multi-link core. --conns 1 to A/B
 // against a single flow. Default 8, the transport's `maxHalfOpenPerSource`: a holder
 // admits no more links than that from one address and closes the rest at handshake.
-// Through a relay every connection is a splice, and the UDP path is one flow whose
-// window already runs as eight, so that mode defaults to one.
-const connsN = num("conns", relayUrl ? 1 : 8);
+// quic:// peers default to one: a BBR flow does not halve its rate at each loss, and more
+// measured no better on a WAN pair or on loopback. Through a relay every connection is a
+// splice, so that mode defaults to one too.
+const connsN = num("conns", relayUrl || specs.every((s) => s.includes("@quic://")) ? 1 : 8);
 const blockSize = num("block", PRODUCTION_BLOCK_SIZE / 1024) * 1024;
 // Per-message cap, and the real lever on a wire-bound link: a streaming window holds a
 // fixed number of blocks, so SMALLER messages put more of them in flight to feed the
@@ -147,15 +149,15 @@ setInterval(() => {
 
 function wrapTransportSodium(sodium) {
   const t = Object.create(sodium);
-  t.crypto_aead_chacha20poly1305_ietf_encrypt = (m, ad, ns, npub, key) => {
+  t.aesGcmSeal = (key, nonce, ad, m) => {
     const t0 = now();
-    const r = sodium.crypto_aead_chacha20poly1305_ietf_encrypt(m, ad, ns, npub, key);
+    const r = sodium.aesGcmSeal(key, nonce, ad, m);
     if (epoch) { epoch.seal.n++; epoch.seal.bytes += m.length; epoch.seal.ms += now() - t0; }
     return r;
   };
-  t.crypto_aead_chacha20poly1305_ietf_decrypt = (ns, c, ad, npub, key) => {
+  t.aesGcmOpen = (key, nonce, ad, c) => {
     const t0 = now();
-    const r = sodium.crypto_aead_chacha20poly1305_ietf_decrypt(ns, c, ad, npub, key);
+    const r = sodium.aesGcmOpen(key, nonce, ad, c);
     if (epoch) { epoch.open.n++; epoch.open.bytes += c.length; epoch.open.ms += now() - t0; }
     return r;
   };
@@ -228,9 +230,13 @@ const config = { ...defaultConfig(blockSize, kParam, mParam), maxMessageBytes, f
 // so the linked set it leaves turns a partial startup into a useful error.
 const ws = new WsNetwork({ webSocketFactory: wsFactory });
 const { node, runtime, peers: expectedIds, linked: peerUp, relayState } = await bootNode({
-  identity, sodium: wrapTransportSodium(sodium), channels: ws, timeoutMs, connsPerPeer: connsN,
-  // Through a relay, this machine's datagram sockets, for direct UDP paths (seedkernel §12.7).
-  ...(relayUrl ? { datagrams: nodeDatagrams(), relay: relayUrl } : {}),
+  // A tcp:// peer is dialed on Node's own sockets, beside the page's WebSocket.
+  identity, sodium: wrapTransportSodium(sodium),
+  channels: specs.some((s) => s.includes("@tcp://")) ? combineChannels(ws, nodeChannels()) : ws, timeoutMs, connsPerPeer: connsN,
+  // This machine's datagram sockets, for direct UDP paths: through a relay (seedkernel
+  // §12.7), or to a peer's quic:// listener.
+  ...(relayUrl || specs.some((s) => s.includes("@quic://")) ? { datagrams: nodeDatagrams() } : {}),
+  ...(relayUrl ? { relay: relayUrl } : {}),
   config, guestDeadlineMs, peers: specs, group: groupName,
 });
 const expected = new Set(expectedIds);

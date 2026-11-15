@@ -16,7 +16,7 @@ import { encodeFetchBatchReq, decodeFetchBatchRes, encodeStoreBatch, encodeHaveR
 import { parseSignedDescriptor, signDescriptor, encodeDescriptorList } from "../build/host/descriptor.js";
 import { memoryRawFiles } from "seedkernel-wasm/fs-memory";
 import { toHex, fromHex, bytesEqual } from "../build/host/util.js";
-import { eventually, joinGroup, liveBlockCount, newKey, plantBlock } from "./helpers.mjs";
+import { eventually, joinGroup, liveBlockCount, newKey, oracle, plantBlock } from "./helpers.mjs";
 import { TIER_CACHE, TIER_COMMITTED } from "../build/host/store-record.js";
 
 const TIMEOUT = 40; // ms — keep offline-peer timeouts snappy in tests
@@ -42,7 +42,7 @@ function chunkBlockIds(nodes) {
       const sb = node.store.get(id);
       if (!sb) continue;
       const sd = parseSignedDescriptor(sb.descriptor);
-      const key = toHex(node.crypto.hash(sb.descriptor));
+      const key = toHex(oracle.hash(sb.descriptor));
       if (!seen.has(key)) seen.set(key, sd.descriptor.blockIds);
     }
   }
@@ -553,7 +553,7 @@ export async function run(t) {
     const [a, b] = await createConnectedCohort({ suppressLinkLog: true, count: 2, network: net, sodium, wasm, config, timeoutMs: TIMEOUT });
     try {
       const bytes = file(config.blockSize, 77);
-      const bid = a.crypto.blockId(a.identity.publicKey, bytes);
+      const bid = oracle.blockId(a.identity.publicKey, bytes);
       const desc = (id, sk) => signDescriptor(
         sodium, { group: "cohort", level: 0, k: 1, m: 0, blockSize: config.blockSize, tailBytes: config.blockSize, authTag: new Uint8Array(16), blockIds: [bid] },
         id.publicKey, id.privateKey,
@@ -567,7 +567,7 @@ export async function run(t) {
       // scope. The signature verifies perfectly; the author is a stranger.
       const stranger = newKey();
       const bytes2 = file(config.blockSize, 78);
-      const bid2 = a.crypto.blockId(stranger.publicKey, bytes2);
+      const bid2 = oracle.blockId(stranger.publicKey, bytes2);
       const forged = signDescriptor(
         sodium, { group: "cohort", level: 0, k: 1, m: 0, blockSize: config.blockSize, tailBytes: config.blockSize, authTag: new Uint8Array(16), blockIds: [bid2] },
         stranger.publicKey, stranger.privateKey,
@@ -588,7 +588,7 @@ export async function run(t) {
     const [a, b] = await createConnectedCohort({ suppressLinkLog: true, count: 2, network: net, sodium, wasm, config, timeoutMs: TIMEOUT });
     try {
       const bytes = file(config.blockSize, 91);
-      const bid = a.crypto.blockId(a.identity.publicKey, bytes);
+      const bid = oracle.blockId(a.identity.publicKey, bytes);
       const env = signDescriptor(
         sodium, { group: "cohort", level: 0, k: 1, m: 2, blockSize: config.blockSize, tailBytes: config.blockSize, authTag: new Uint8Array(16), blockIds: [bid, bid, bid] },
         a.identity.publicKey, a.identity.privateKey,
@@ -614,18 +614,18 @@ export async function run(t) {
       const K = owner.crypto.randomKey();
       const sign = (d) => signDescriptor(sodium, d, owner.identity.publicKey, owner.identity.privateKey);
       const at = (level, sealed, tailBytes) => {
-        const id = owner.crypto.blockId(owner.identity.publicKey, sealed.ciphertext);
+        const id = oracle.blockId(owner.identity.publicKey, sealed.ciphertext);
         return { id, ciphertext: sealed.ciphertext, env: sign({ group: "cohort", level, k: 1, m: 1, blockSize: cfg.blockSize, tailBytes, authTag: sealed.authTag, blockIds: [id, id] }) };
       };
       // Inner: a level-1 chunk. Outer: ANOTHER level-1 chunk whose plaintext is a list
       // naming the inner one. The walk therefore goes 1 → 1 and never descends. tailBytes
       // is set honestly to the list length — zero padding would be caught earlier, by
       // decodeDescriptorList refusing a zero-length entry.
-      const inner = at(1, owner.crypto.encrypt(K, 1, 0, new Uint8Array(cfg.blockSize)), cfg.blockSize);
+      const inner = at(1, oracle.encrypt(K, 1, 0, new Uint8Array(cfg.blockSize)), cfg.blockSize);
       const list = encodeDescriptorList([inner.env]);
       const outerPlain = new Uint8Array(cfg.blockSize);
       outerPlain.set(list);
-      const outer = at(1, owner.crypto.encrypt(K, 1, 0, outerPlain), list.length);
+      const outer = at(1, oracle.encrypt(K, 1, 0, outerPlain), list.length);
       plantBlock(nodes[1].fs, toHex(outer.id), outer.ciphertext, outer.env);
 
       let err = null;
@@ -705,7 +705,7 @@ export async function run(t) {
 
       // A chunk naming a group the holder does not list it in is refused, whatever its signature.
       const bytes = file(1024, 94);
-      const id = b.crypto.blockId(d.identity.publicKey, bytes);
+      const id = oracle.blockId(d.identity.publicKey, bytes);
       const env = signDescriptor(sodium, { group: "x", level: 0, k: 1, m: 0, blockSize: 1024, tailBytes: 1024, authTag: new Uint8Array(16), blockIds: [id] },
         d.identity.publicKey, d.identity.privateKey);
       const verdict = decodeMask(await d.request(b.peerId, typed(MsgType.STORE, encodeStoreBatch([{ blockId: id, descriptor: env, bytes }]))));
@@ -797,7 +797,7 @@ export async function run(t) {
       const ids = [];
       for (const seed of [81, 82]) {
         const bytes = file(1000, seed);
-        const id = b.crypto.blockId(a.identity.publicKey, bytes);
+        const id = oracle.blockId(a.identity.publicKey, bytes);
         const env = signDescriptor(sodium, { group: "cohort", level: 0, k: 1, m: 0, blockSize: 1000, tailBytes: 1000, authTag: new Uint8Array(16), blockIds: [id] },
           a.identity.publicKey, a.identity.privateKey);
         plantBlock(b.fs, toHex(id), bytes, env);

@@ -5,8 +5,10 @@
 
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { createCipheriv, createDecipheriv, createHash } from "node:crypto";
 import { concatBytes } from "../build/host/util.js";
-import { parseSignedDescriptor } from "../build/host/descriptor-core.js";
+import { AUTH_TAG_LEN, blockHashInput, chunkNonce, parseSignedDescriptor } from "../build/host/descriptor-core.js";
+import { Crypto } from "../build/host/crypto.js";
 import { STORE_REC, STORE_TAG, TIER_COMMITTED, encodeStoreTag, storeRecordHead } from "../build/host/store-record.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -28,6 +30,37 @@ export async function ensureSodium() {
 
 export function newKey() {
   return generateKeyPair(sodium);
+}
+
+/** The guest's block ids and chunk sealing, as the host computes them (`crypto/sha256`,
+ *  `crypto/aes256gcm/*`), for tests that check what the guest stored (§4.2, §4.4). */
+export const oracle = {
+  /** SHA-256 of `bytes`. A block's id is `blockId`, not this. */
+  hash: (bytes) => new Uint8Array(createHash("sha256").update(bytes).digest()),
+  /** A block's id, bound to the descriptor's author (§4.2). */
+  blockId: (authorPk, bytes) => oracle.hash(blockHashInput(authorPk, bytes)),
+  /** A padded chunk sealed under K, its tag split off for the descriptor (§4.4). */
+  encrypt(K, level, index, message) {
+    const c = createCipheriv("aes-256-gcm", K, chunkNonce(level, index));
+    const ciphertext = new Uint8Array(Buffer.concat([c.update(message), c.final()]));
+    return { ciphertext, authTag: new Uint8Array(c.getAuthTag()) };
+  },
+  /** The chunk's plaintext, or null when the tag does not verify. */
+  decrypt(K, level, index, ciphertext, authTag) {
+    if (authTag.length !== AUTH_TAG_LEN) return null;
+    const d = createDecipheriv("aes-256-gcm", K, chunkNonce(level, index));
+    d.setAuthTag(authTag);
+    try {
+      return new Uint8Array(Buffer.concat([d.update(ciphertext), d.final()]));
+    } catch {
+      return null;
+    }
+  },
+};
+
+/** Storage's host `Crypto` (key sharing) with the guest's oracle beside it. */
+export function testCrypto(s = sodium) {
+  return Object.assign(new Crypto(s), oracle);
 }
 
 /** Count block-ids with ≥1 *live* holder — an online cohort node whose store

@@ -19,7 +19,7 @@ import {
   loadSodium, loadWasmBytes, LoopbackNetwork, createConnectedCohort,
 } from "../build/host/node.js";
 import { bytesEqual, fromHex, toHex } from "../build/host/util.js";
-import { plantBlock } from "./helpers.mjs";
+import { oracle, plantBlock } from "./helpers.mjs";
 
 const TIMEOUT = 200;
 
@@ -190,7 +190,7 @@ export async function run(t) {
     const [a, b] = await createConnectedCohort({ suppressLinkLog: true, count: 2, network: net, sodium, wasm, timeoutMs: TIMEOUT });
     try {
       const block0 = bytes(100, 41), block1 = bytes(100, 42);
-      const id0 = b.crypto.blockId(a.identity.publicKey, block0), id1 = b.crypto.blockId(a.identity.publicKey, block1);
+      const id0 = oracle.blockId(a.identity.publicKey, block0), id1 = oracle.blockId(a.identity.publicKey, block1);
       const env = signDescriptor(
         sodium, { group: "cohort", level: 0, k: 1, m: 1, blockSize: 100, tailBytes: 100, authTag: authTag(), blockIds: [id0, id1] },
         a.identity.publicKey, a.identity.privateKey,
@@ -254,7 +254,7 @@ export async function run(t) {
     const [a, b] = await createConnectedCohort({ suppressLinkLog: true, count: 2, network: net, sodium, wasm, quota: 1500, config: { newcomerShare: 1 }, timeoutMs: TIMEOUT });
     try {
       const b0 = bytes(1000, 1), b1 = bytes(1000, 2);
-      const i0 = b.crypto.blockId(a.identity.publicKey, b0), i1 = b.crypto.blockId(a.identity.publicKey, b1);
+      const i0 = oracle.blockId(a.identity.publicKey, b0), i1 = oracle.blockId(a.identity.publicKey, b1);
       const solo = (blockId) => signDescriptor(
         sodium, { group: "cohort", level: 0, k: 1, m: 0, blockSize: 1000, tailBytes: 1000, authTag: authTag(), blockIds: [blockId] }, a.identity.publicKey, a.identity.privateKey,
       );
@@ -276,7 +276,7 @@ export async function run(t) {
     const [a, b, c] = await createConnectedCohort({ suppressLinkLog: true, count: 3, network: net, sodium, wasm, quota: 3000, timeoutMs: TIMEOUT });
     try {
       const b0 = bytes(1000, 3), b1 = bytes(1000, 4);
-      const i0 = b.crypto.blockId(a.identity.publicKey, b0), i1 = b.crypto.blockId(a.identity.publicKey, b1);
+      const i0 = oracle.blockId(a.identity.publicKey, b0), i1 = oracle.blockId(a.identity.publicKey, b1);
       const solo = (blockId) => signDescriptor(
         sodium, { group: "cohort", level: 0, k: 1, m: 0, blockSize: 1000, tailBytes: 1000, authTag: authTag(), blockIds: [blockId] }, a.identity.publicKey, a.identity.privateKey,
       );
@@ -309,8 +309,8 @@ export async function run(t) {
       // One committed and one cached block planted before the holder first builds its
       // index: 2336 of 2500 used, 1168 of it evictable.
       const kept = bytes(1000, 5), cached = bytes(1000, 6), fresh = bytes(1000, 7);
-      const iKept = b.crypto.blockId(a.identity.publicKey, kept), iCached = b.crypto.blockId(a.identity.publicKey, cached);
-      const iFresh = b.crypto.blockId(a.identity.publicKey, fresh);
+      const iKept = oracle.blockId(a.identity.publicKey, kept), iCached = oracle.blockId(a.identity.publicKey, cached);
+      const iFresh = oracle.blockId(a.identity.publicKey, fresh);
       plantBlock(b.fs, toHex(iKept), kept, solo(iKept));
       plantBlock(b.fs, toHex(iCached), cached, solo(iCached), TIER_CACHE);
       t.eq(b.store.tier(iCached), TIER_CACHE, "the planted copy reads back as cache");
@@ -343,7 +343,7 @@ export async function run(t) {
     const [a, b] = await createConnectedCohort({ suppressLinkLog: true, count: 2, network: net, sodium, wasm, timeoutMs: TIMEOUT });
     try {
       const junk = bytes(100, 8);
-      const jid = b.crypto.blockId(a.identity.publicKey, junk);
+      const jid = oracle.blockId(a.identity.publicKey, junk);
       const stored = decodeMask(await a.request(b.peerId, typed(MsgType.STORE, encodeStoreBatch([
         { blockId: jid, descriptor: bytes(136, 1), bytes: junk }, // unsigned garbage in the descriptor slot
       ]))));
@@ -392,7 +392,7 @@ export async function run(t) {
     const [a, b] = await createConnectedCohort({ suppressLinkLog: true, count: 2, network: net, sodium, wasm, timeoutMs: TIMEOUT });
     try {
       const held = bytes(777, 4);
-      const heldId = b.crypto.hash(held);
+      const heldId = oracle.hash(held);
       // Seed the holder directly, bypassing the protocol. FETCH serves bytes and never
       // reads the descriptor, so any non-empty one will do.
       plantBlock(b.fs, toHex(heldId), held, new Uint8Array([1]));
@@ -402,7 +402,7 @@ export async function run(t) {
       t.eq(res.length, 2, "one entry per requested id");
       t.ok(res[0] && bytesEqual(res[0], held), "the held block comes back in the batch");
       t.eq(res[1], null, "the absent block comes back null — the reader falls to another holder");
-      t.ok(toHex(b.crypto.hash(res[0])) === toHex(heldId), "served bytes are content-addressed to their id (§4.2)");
+      t.ok(toHex(oracle.hash(res[0])) === toHex(heldId), "served bytes are content-addressed to their id (§4.2)");
     } finally { a.close(); b.close(); }
   }
 }

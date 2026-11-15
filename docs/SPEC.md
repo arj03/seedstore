@@ -144,7 +144,7 @@ The one rule this shape needs: a holder **declines a block it already holds**. A
 Each block is named by a hash over its author and its bytes:
 
 ```
-block_hash(author_pk, bytes) = BLAKE2b-256(ASCII("seedstore:block\0") ∥ author_pk[32] ∥ bytes)
+block_hash(author_pk, bytes) = SHA-256(ASCII("seedstore:block\0") ∥ author_pk[32] ∥ bytes)
 ```
 
 Content addressing makes every block **self-verifying**: a receiver recomputes the hash and rejects anything that doesn't match, so a malicious holder cannot return corrupt bytes undetected, and bulk data needs no signature (§3). Because the bytes are ciphertext (§4.4), a `block_id` is opaque and unguessable to anyone who has not handled that exact file.
@@ -170,7 +170,7 @@ descriptor D:
                        //   zero padding. A reader trims each chunk by its own signed number.
   group                // the group the author placed the file in (§5.1), 1–32 ASCII characters;
                        //   every holder reads it against its own roster
-  auth_tag             // the chunk's detached ChaCha20-Poly1305 tag (§4.4)
+  auth_tag             // the chunk's detached AES-256-GCM tag (§4.4)
   block_ids[0..n)      // ALWAYS n = k + m. Coded: 0..k data, k..n parity, one per peer.
                        //   k = 1: the same id listed m+1 times, one per peer (§4.1).
 signed by the file's author
@@ -215,9 +215,9 @@ The index says *what* blocks a file is made of, never *which* peers hold them. T
 
 ### 4.4 Encryption (the load-bearing privacy mechanism)
 
-The seedkernel channel encrypts each link hop by hop, but nothing it carries stays confidential once written to a holder's disk. **Encryption is what makes the closed network safe**: it lets you store on cohort peers who can read nothing, and it makes block-ids opaque. Seedstore encrypts **client-side, before erasure coding**, through the host's ChaCha20-Poly1305 transform (§2, §16):
+The seedkernel channel encrypts each link hop by hop, but nothing it carries stays confidential once written to a holder's disk. **Encryption is what makes the closed network safe**: it lets you store on cohort peers who can read nothing, and it makes block-ids opaque. Seedstore encrypts **client-side, before erasure coding**, through the host's AES-256-GCM transform (§2, §16):
 
-- **Per-file key, derived nonces.** Generate a random **content key** `K` per file. Seal each padded chunk under `K` with ChaCha20-Poly1305-IETF and a deterministic 12-byte nonce containing `level ∥ index`: the chunk's signed index level (§4.3) and its position within that level. A fresh `K` per file makes the nonce namespace unique, and within one file `(level, index)` never repeats; the level byte separates an index chunk from a body chunk at the same position. Index levels are encrypted under `K` the same way.
+- **Per-file key, derived nonces.** Generate a random **content key** `K` per file. Seal each padded chunk under `K` with AES-256-GCM and a deterministic 12-byte nonce containing `level ∥ index`: the chunk's signed index level (§4.3) and its position within that level. A fresh `K` per file makes the nonce namespace unique, and within one file `(level, index)` never repeats; the level byte separates an index chunk from a body chunk at the same position. Index levels are encrypted under `K` the same way.
 - **Detached tag.** Split each sealed chunk into same-length ciphertext plus its 16-byte tag. Only the ciphertext is sliced and erasure-coded; the tag travels in the signed descriptor (§4.3). So every stored block stays exactly `B` bytes, and the systematic data blocks are the ciphertext verbatim.
 - **Sharing a file is sharing the key, not moving bytes.** The owner sends a recipient `{ root_descriptor, seal(K → recipient_pubkey) }` over the authenticated channel, with `K` sealed to the recipient's node key (libsodium `crypto_box_seal`, converting the Ed25519 node key to X25519). `K` is never stored in clear on holders, which avoids the circularity of putting `K` inside an index that `K` encrypts. Re-sharing is one more sealed copy. Revocation that must deny future reads rotates `K` and re-encrypts (§23).
 - **No accidental dedup.** Random per-file keys mean two files never produce colliding ciphertext, so a `block_id` means something only to someone who has handled that exact file. Convergent encryption (key = hash(plaintext)) is an opt-in for deployments that want cross-user dedup and accept its equality leak (§24).
@@ -486,12 +486,12 @@ Storage's confined logic reaches the world through seedkernel's one guest seam, 
 | `node` | granted service | `node/sign`/`node/verify` under the slot's own scope (below); the node's public key arrives as `HOST.identity` |
 | `fs` | granted service | the donated blob store (§12): flat keys to bytes in storage's own keyspace; existence is `size ≥ 0`, and `fs/stat` gives the backend's used and available bytes for the quota |
 | `_net` | the transport bundle's local service | addressed request/response to a cohort peer over its authenticated channel, with a timeout; a fan-out is the guest's own concurrent sends (seedkernel §12.10) |
-| `crypto/blake2b`, `crypto/chacha20poly1305-ietf/{seal,open}`, `crypto/random` | ungated host transforms | the §4.2 content hash, §4.4 authenticated encryption, and the entropy for content keys (nonces are derived, not drawn, §4.4) |
+| `crypto/sha256`, `crypto/aes256gcm/{seal,open}`, `crypto/random` | ungated host transforms | the §4.2 content hash, §4.4 authenticated encryption, and the entropy for content keys (nonces are derived, not drawn, §4.4) |
 | `codec`, `reputation` | the bundle's own modules, by bare name | ungated, since they are the bundle's own verified bytes |
 
 Time is the realm's own `Date.now()` (liveness, repair jitter, score decay). Storage adds no backend of its own.
 
-**Crypto is reused, not added.** The transforms above are the host's. Block ids never leave storage (§4.2), so BLAKE2b-256 is storage's own choice even though the host supplies it. Key sealing (§4.4) is not on the guest seam, so it lives beside the guest, in `host/crypto.ts`, on seedstore's own `libsodium-wrappers` (the npm package on Node; in a page, the same package over the libsodium.wasm the page's host already carries). Storage ships no crypto of its own except Reed–Solomon.
+**Crypto is reused, not added.** The transforms above are the host's. Block ids never leave storage (§4.2), so SHA-256 is storage's own choice even though the host supplies it; SHA-256 and AES-256-GCM are the platform's own wherever it has them. Key sealing (§4.4) is not on the guest seam, so it lives beside the guest, in `host/crypto.ts`, on seedstore's own `libsodium-wrappers-sumo` (the npm package on Node; in a page, the same package over the libsodium.wasm the page's host already carries). Storage ships no crypto of its own except Reed–Solomon.
 
 **Signatures are scoped, and every signed format is tagged.** Storage signs its objects (the chunk descriptor, §4.3, and the optional tombstone, §25, file head, §27.3, and receipt, §20.1) through `node/sign` and checks them with `node/verify`. The host binds every such signature to the slot's scope, derived from the bundle's `app` label (seedkernel §12.2). So a storage signature verifies only as a storage signature, never as a bundle, a handshake or another app's object, and it verifies on every node running storage under the same label, whoever authored the bundle. Checking one needs only the signer's public key, so keyless repair (§9) is untouched. Within that scope each signed format opens with a **distinct leading tag**, so a signed object of one type can never be replayed as another. No key material ever reaches storage.
 
@@ -505,7 +505,7 @@ All storage *logic* is Tier 2: confined, grant-bounded, and reaching I/O only th
 | --- | --- | --- | --- |
 | `codec` | WASM module | none (pure) | **Reed–Solomon encode and decode** over GF(2⁸) on ciphertext blocks: the only algorithm storage ships in WASM |
 | `reputation` | WASM module | none (pure) | decayed per-peer reciprocity counters from witnessed verification-fetches and served reads, and the `reputation.score` query (§13). Swapped for the §20 receipts-and-transitive-trust version when portable reputation is needed |
-| **the guest** (cohort, coordinator and repair in one realm) | zero-authority JS realm | `node`, `fs`, `timer`, `_net` (`guest.requires`): its whole reach, in one signed list | **Initiator:** slicing ciphertext into `B`-byte blocks; block ids (`crypto/blake2b`); sealing and opening chunks with detached tags (§4.4); building and checking descriptors; content-key generation (`crypto/random`); PUT/GET with placement negotiation and windowed transfer; the peer set; have/want, liveness and verification-fetch sampling (§8); reciprocity accounting (§13); the repair loop (§9), and the repairs it agreed to rebuild. **Holder:** admission, the sibling rule, content addressing, quota, eviction (§14) and store writes |
+| **the guest** (cohort, coordinator and repair in one realm) | zero-authority JS realm | `node`, `fs`, `timer`, `_net` (`guest.requires`): its whole reach, in one signed list | **Initiator:** slicing ciphertext into `B`-byte blocks; block ids (`crypto/sha256`); sealing and opening chunks with detached tags (§4.4); building and checking descriptors; content-key generation (`crypto/random`); PUT/GET with placement negotiation and windowed transfer; the peer set; have/want, liveness and verification-fetch sampling (§8); reciprocity accounting (§13); the repair loop (§9), and the repairs it agreed to rebuild. **Holder:** admission, the sibling rule, content addressing, quota, eviction (§14) and store writes |
 
 The two pure modules hold **no** grants, so even if buggy they can never reach disk or network; Reed–Solomon and the trust math are exactly where you want that guarantee.
 
@@ -668,7 +668,7 @@ Add only if a deployment stores *mutable* files rather than write-once blobs. A 
 
 ### 27.1 The nonce-reuse hazard (the rule you cannot skip)
 
-§4.4 derives a deterministic nonce from `level ∥ index` under the file's `K`. An edit must never re-encrypt changed bytes under the old `(K, nonce)`: ChaCha20-Poly1305 nonce reuse exposes plaintext relations and breaks the authenticator. Two disciplines honor that:
+§4.4 derives a deterministic nonce from `level ∥ index` under the file's `K`. An edit must never re-encrypt changed bytes under the old `(K, nonce)`: AES-256-GCM nonce reuse exposes plaintext relations and leaks the authentication key, so it also opens the door to forgeries. Two disciplines honor that:
 
 - **Rotate `K` per version.** Mint a fresh content key and re-encrypt the whole file (the §23 rotation). This folds editing into crypto-shredding: the old version becomes permanent noise the moment its key is dropped (§11). The price is that a new `K` changes the ciphertext of *every* chunk, so nothing is shared across versions, and the new `K` must be re-sealed to every reader (§4.4). Right for an occasional rewrite, wrong for a one-line change to a large file.
 - **Version the nonce, keep `K`.** The 12-byte nonce has seven unused bytes after `level ∥ index`, so changed chunks can draw a fresh nonce while unchanged chunks keep theirs. One construction derives those bytes from the chunk's plaintext, so different plaintext selects a different nonce; the derivation bytes ride in the signed descriptor (§4.3). Readers keep the same `K`, so distributing an edit is just handing over the new root. The trade-off is losing the rotate-to-shred coupling, plus a plaintext-equality leak across chunks under the same key.

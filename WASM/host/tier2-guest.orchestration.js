@@ -165,20 +165,17 @@ function holderCall(name, payload, answerBytes = MSG_ENVELOPE_BYTES) {
 
 // ── crypto primitives + storage framing ──
 // Pure transforms reach the host under the `crypto/` prefix (seedkernel §12.2):
-// BLAKE2b-256 for block-ids and ChaCha20-Poly1305 for at-rest encryption.
+// SHA-256 for block-ids and AES-256-GCM for at-rest encryption, native on every target.
 // node/sign and node/verify apply the scoped `DOMAIN_guest ‖ scope` prefix on the
 // host side — the guest never holds or reconstructs it. Every seam name answers a
 // Promise, so every helper here is awaited by its callers.
-// `crypto/blake2b` takes [outLen][keyLen][key][msg]; block-ids are its unkeyed 32 bytes.
-function blake2b(req, via) { return via("crypto/blake2b", req, 32); }
-// The request is built around the block in one buffer: blockHashInput leaves room for the head.
+// `crypto/sha256` takes the message whole and answers its 32 bytes.
+function sha256(req, via) { return via("crypto/sha256", req, 32); }
 function blockHash(d, bytes, via) {
-  const req = blockHashInput(d.authorPk, bytes, 2);
-  req[0] = 32;
-  return blake2b(req, via);
+  return sha256(blockHashInput(d.authorPk, bytes), via);
 }
-const P_SEAL = "crypto/chacha20poly1305-ietf/seal";
-const P_OPEN = "crypto/chacha20poly1305-ietf/open";
+const P_SEAL = "crypto/aes256gcm/seal";
+const P_OPEN = "crypto/aes256gcm/open";
 // The AEAD names take [npub 12][key 32][adLen u32][ad][bytes]; chunks bind no associated
 // data (the nonce already names level and index), so adLen stays four zero bytes. The
 // message's pieces are written straight in, so they need no join of their own.
@@ -205,7 +202,7 @@ function myPeer() { return HOST.identity; }
 // descriptor keeps it long after the blocks are placed.
 async function encrypt(K, level, index, msg) {
   const sealed = await call(P_SEAL, aeadRequest(K, level, index, [msg]), msg.length + AUTH_TAG_LEN);
-  if (sealed.length !== msg.length + AUTH_TAG_LEN) throw new Error("encrypt: unexpected ChaCha20-Poly1305 output length");
+  if (sealed.length !== msg.length + AUTH_TAG_LEN) throw new Error("encrypt: unexpected AES-256-GCM output length");
   return { ciphertext: sealed.subarray(0, msg.length), authTag: sealed.slice(msg.length) };
 }
 // `ctParts` is the chunk's ciphertext as its blocks, in order (assembleChunk).

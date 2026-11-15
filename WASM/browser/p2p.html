@@ -33,7 +33,7 @@
      and its crypto. The page brings the
      sockets (WebSocket, WebRTC); seedstore's own code only installs its bundle and calls
      its guest, and what it computes host-side runs on its own libsodium
-     ("libsodium-wrappers", staged into ./libsodium/), so the demo runs fully offline.
+     ("libsodium-wrappers-sumo", staged into ./libsodium/), so the demo runs fully offline.
      This project's host is relative (./host/). -->
 <script type="importmap">
 {
@@ -46,7 +46,7 @@
     "seedkernel-wasm/socket-seam":    "./seedkernel/services/socket-seam.js",
     "seedrelay/rooms":                "./seedrelay/rooms.mjs",
     "seedkernel-wasm/net-ws":         "./seedkernel/services/net-ws.js",
-    "libsodium-wrappers":             "./libsodium/libsodium-wrappers.mjs"
+    "libsodium-wrappers-sumo":        "./libsodium/libsodium-wrappers.mjs"
   }
 }
 </script>
@@ -138,7 +138,7 @@
 <div id="log"></div>
 
 <script type="module">
-import sodium, { useWasm } from "libsodium-wrappers";
+import sodium, { useWasm } from "libsodium-wrappers-sumo";
 import { browserPlatform, readHostBlob } from "seedkernel-wasm/platform-web";
 import { platformHost } from "seedkernel-wasm/platform";
 import { createStorageNode, loadWasmBytes, storageRuntime, encodeToken, decodeToken } from "./host/browser.js";

@@ -50,7 +50,7 @@ export function authorKeysFor(edSk) {
 //   • the network — a bundle (the transport) claiming `_net` under its own `services`
 //     list, reached over the same `host.call` by one cross-realm call (seedkernel §12.10).
 //
-// Pure transforms (BLAKE2b, ChaCha20-Poly1305, entropy, and this bundle's own
+// Pure transforms (SHA-256, AES-256-GCM, entropy, and this bundle's own
 // codec/reputation modules) are not grants and are never listed here; time is the
 // realm's own `Date.now()`.
 const STORAGE_REQUIRES = [

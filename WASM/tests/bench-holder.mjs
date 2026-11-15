@@ -7,12 +7,13 @@
 // active-window rates.
 //
 // Each holder runs in a process of its own (this script with `--holder`), reached over
-// loopback TCP through the real transport, as a deployed holder is: a holder that blocks
-// its loop on its own disk write stalls only itself, not the initiator or another holder.
+// loopback TCP through the real transport and on Node's own AES and SHA-256, as a deployed
+// holder is: a holder that blocks its loop on its own disk write stalls only itself, not
+// the initiator or another holder.
 // Each times every inbound request inside the guest's own `handle` (the `recv` half of
 // Op.STATS): admit -> hash -> verify -> fs write -> reply, no initiator work.
 //
-// Per STORE'd block: BLAKE2b, one Ed25519 verify, the §6 sibling check against
+// Per STORE'd block: SHA-256, one Ed25519 verify, the §6 sibling check against
 // the holder-owned index, then one framed-record fsPut. Geometry defaults to the
 // live deployment's (RS(1,1), 256 KiB blocks) for comparability with p2p-cli runs.
 //
@@ -26,6 +27,7 @@
 //        node tests/bench-holder.mjs 16 256 2 2    (RS(2,2) — 4 holders)
 
 import { fork } from "node:child_process";
+import { createHash } from "node:crypto";
 import { once } from "node:events";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -33,11 +35,12 @@ import { join } from "node:path";
 import { performance } from "node:perf_hooks";
 import { fileURLToPath } from "node:url";
 import {
-  loadWasmBytes, loadSodium, PRODUCTION_BLOCK_SIZE, bootStorageNode, inProcessStandUp, inProcessHost,
+  loadWasmBytes, loadSodium, PRODUCTION_BLOCK_SIZE, bootStorageNode, inProcessHost,
   generateKeyPair, netAddr, netReady, netSecret,
 } from "../build/host/node.js";
 import { bytesEqual } from "../build/host/util.js";
 import { blockHashInput } from "../build/host/descriptor-core.js";
+import { nodeSymmetric } from "seedkernel-wasm";
 import { nodeRawFiles } from "seedkernel-wasm/fs-node";
 import { nodeChannels } from "seedkernel-wasm/shell-node";
 
@@ -66,7 +69,7 @@ const sodium = await loadSodium();
 const wasm = await loadWasmBytes();
 
 /** One node on real loopback TCP, on disk when `dir` is set. */
-const bootNode = (dir) => bootStorageNode(dir ? (cfg) => inProcessHost(nodeRawFiles).standUp(cfg) : inProcessStandUp, {
+const bootNode = (dir) => bootStorageNode((cfg) => inProcessHost(dir ? nodeRawFiles : undefined, nodeSymmetric).standUp(cfg), {
   sodium,
   bundleBlob: wasm.bundleBlob,
   identity: generateKeyPair(sodium), dir,
@@ -186,16 +189,16 @@ if (offerReqs) {
   // The holder names a block by hashing domain ‖ authorPk ‖ bytes (§4.2), not the
   // bytes alone — price both, so the binding's share of the floor is visible.
   let h0 = performance.now();
-  for (let i = 0; i < reps; i++) sodium.crypto_generichash(32, block);
+  for (let i = 0; i < reps; i++) createHash("sha256").update(block).digest();
   const bareHashMs = (performance.now() - h0) / reps;
   h0 = performance.now();
-  for (let i = 0; i < reps; i++) sodium.crypto_generichash(32, blockHashInput(kp.publicKey, block));
+  for (let i = 0; i < reps; i++) createHash("sha256").update(blockHashInput(kp.publicKey, block)).digest();
   const hashMs = (performance.now() - h0) / reps;
   h0 = performance.now();
   for (let i = 0; i < reps; i++) sodium.crypto_sign_verify_detached(sig, msg, kp.publicKey);
   const verifyMs = (performance.now() - h0) / reps;
   const floorMs = hashMs + verifyMs;
-  console.log(`\ncrypto floor (host-side libsodium, same block size):`);
+  console.log(`\ncrypto floor (host-side SHA-256 and libsodium Ed25519, same block size):`);
   console.log(`  block-id/block ${fmt(hashMs, 3)} ms + Ed25519 verify ${fmt(verifyMs, 3)} ms = ${fmt(floorMs, 3)} ms → ${fmt(rate(blockSize, floorMs), 0)} MB/s`);
   console.log(`  (the id's author binding is ${fmt(hashMs - bareHashMs, 3)} ms of that — a bare content hash would be ${fmt(bareHashMs, 3)} ms,`);
   console.log(`   i.e. ${fmt((hashMs - bareHashMs) / (storeMs / Math.max(1, totalBlocks)) * 100, 1)}% of what the holder actually spends per block)`);

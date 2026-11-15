@@ -5,3 +5,5 @@ bundle/
 *.version
 *.lock
 package-lock.json
+scripts/bench-native/ctl/ctl
+scripts/bench-native/ctl/ctl.exe

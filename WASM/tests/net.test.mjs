@@ -29,7 +29,7 @@ import {
 } from "../build/host/protocol.js";
 import { signDescriptor } from "../build/host/descriptor.js";
 import { toHex, fromHex, bytesEqual } from "../build/host/util.js";
-import { joinGroup, plantBlock } from "./helpers.mjs";
+import { joinGroup, oracle, plantBlock } from "./helpers.mjs";
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -121,7 +121,7 @@ export async function run(t) {
         "a ws:// dial into the fabric's ws listener authenticates");
 
       const bytes = file(8192, 33);
-      const bid = S.crypto.blockId(idB.publicKey, bytes);
+      const bid = oracle.blockId(idB.publicKey, bytes);
       const desc = signDescriptor(sodium, { group: "cohort", level: 0, k: 1, m: 0, blockSize: bytes.length, tailBytes: bytes.length, authTag: new Uint8Array(16), blockIds: [bid] }, idB.publicKey, idB.privateKey);
       const stored = decodeMask(await B.request(S.peerId, typed(MsgType.STORE, encodeStoreBatch([{ blockId: bid, descriptor: desc, bytes }]))));
       t.eq(stored[0], VERDICT_ACCEPTED, "STORE lands through the ws codec");
@@ -144,7 +144,7 @@ export async function run(t) {
       const fs = new NodeFs(dir);
       const view = new FsBlobView(fs);
       const bytes = file(64, 2);
-      const id = sodium.crypto_generichash(32, bytes);
+      const id = oracle.hash(bytes);
       const desc = new Uint8Array([9, 8, 7, 6]);
 
       t.ok(!view.has(id), "absent before anything is written");
@@ -162,7 +162,7 @@ export async function run(t) {
       // The view holds no index of its own, so it sees writes it did not make —
       // which is the point: on a live node the guest is the one writing.
       const bytes2 = file(32, 5);
-      const id2 = sodium.crypto_generichash(32, bytes2);
+      const id2 = oracle.hash(bytes2);
       const desc2 = new Uint8Array([5, 4]);
       plantBlock(fs, toHex(id2), bytes2, desc2);
       t.eq(view.list().length, 2, "a write made behind the view's back still shows up");
@@ -265,7 +265,7 @@ export async function run(t) {
 
     try {
       const bytes = file(64, 21);
-      const bid = S.crypto.blockId(idB.publicKey, bytes);
+      const bid = oracle.blockId(idB.publicKey, bytes);
 
       const have0 = await B.request(S.peerId, typed(MsgType.HAVE, encodeHaveReq([bid])));
       t.eq(decodeMask(have0)[0], VERDICT_DECLINED, "HAVE → false before the block exists (over ws)");

@@ -8,13 +8,14 @@
 
 import { readFileSync } from "node:fs";
 import { performance } from "node:perf_hooks";
-import { Crypto, LEVEL_BODY } from "../build/host/crypto.js";
+import { LEVEL_BODY } from "../build/host/crypto.js";
+import { testCrypto } from "./helpers.mjs";
 import { blockHashInput } from "../build/host/descriptor-core.js";
 import { CodecClient } from "./codec-client.mjs";
 import { loadSodium } from "../build/host/sodium.js";
 
 const sodium = await loadSodium();
-const crypto = new Crypto(sodium);
+const crypto = testCrypto(sodium);
 const codec = await CodecClient.load(new Uint8Array(readFileSync("build/codec.wasm")));
 
 const MB = 1024 * 1024;
@@ -78,7 +79,7 @@ for (let c = 0; c < numChunks; c++) crypto.encrypt(key, LEVEL_BODY, c, data.suba
 let encr = performance.now() - t0;
 
 // Name the n blocks of every chunk (data + parity = 1.6× the file). A block id is
-// BLAKE2b over ASCII domain ‖ authorPk ‖ ciphertext (§4.2), so it costs one
+// SHA-256 over ASCII domain ‖ authorPk ‖ ciphertext (§4.2), so it costs one
 // block-sized copy on top of the bare hash. Priced three ways: the copy alone, the
 // bare hash, and the id itself.
 const authorPk = crypto.randomKey();
@@ -119,9 +120,9 @@ const rate = (ms) => (FILE / MB / (ms / 1000)).toFixed(0);
 console.log(`\nRS(${K},${M}), B=${B / 1024} KB, ${FILE / MB} MB → ${numChunks} chunks, ${1.6}x stored\n`);
 console.log(`  WRITE`);
 console.log(`    RS encode                    ${enc.toFixed(0).padStart(6)} ms   ${rate(enc).padStart(5)} MB/s`);
-console.log(`    encrypt (chacha20-poly1305)  ${encr.toFixed(0).padStart(6)} ms   ${rate(encr).padStart(5)} MB/s`);
+console.log(`    encrypt (aes-256-gcm)       ${encr.toFixed(0).padStart(6)} ms   ${rate(encr).padStart(5)} MB/s`);
 const blockRate = (ms) => (FILE * 1.6 / MB / (ms / 1000)).toFixed(0).padStart(5);
-console.log(`    block-ids (BLAKE2b)          ${hsh.toFixed(0).padStart(6)} ms   ${blockRate(hsh)} MB/s   (names n blocks = 1.6×)  [acc ${hsum & 255}]`);
+console.log(`    block-ids (SHA-256)          ${hsh.toFixed(0).padStart(6)} ms   ${blockRate(hsh)} MB/s   (names n blocks = 1.6×)  [acc ${hsum & 255}]`);
 console.log(`      ├ bare content hash        ${bare.ms.toFixed(0).padStart(6)} ms   ${blockRate(bare.ms)} MB/s   ← what the author binding replaced`);
 console.log(`      └ domain‖pk‖bytes copy     ${cpy.ms.toFixed(0).padStart(6)} ms   ${blockRate(cpy.ms)} MB/s   ← the binding's added work`);
 console.log(`    encrypt+id+encode (full)     ${full.toFixed(0).padStart(6)} ms   ${rate(full).padStart(5)} MB/s`);

@@ -1,11 +1,10 @@
 import { readFileSync } from "node:fs";
 import vm from "node:vm";
-import { Crypto } from "../build/host/crypto.js";
 import { signDescriptor, verifyDescriptor, parseSignedDescriptor } from "../build/host/descriptor.js";
 import { encodeStoreBatch, encodeFetchBatchRes, MsgType, VERDICT_ACCEPTED, VERDICT_NOT_AUTHOR } from "../build/host/protocol.js";
 import { loadSodium, loadWasmBytes, LoopbackNetwork, createConnectedCohort } from "../build/host/node.js";
 import { bytesEqual, writeU32BE } from "../build/host/util.js";
-import { newKey } from "./helpers.mjs";
+import { newKey, testCrypto } from "./helpers.mjs";
 import { makeT } from "./harness.mjs";
 
 function typed(type, payload) {
@@ -15,7 +14,7 @@ function typed(type, payload) {
 
 export async function run(t) {
   const sodium = await loadSodium(), wasm = await loadWasmBytes();
-  const crypto = new Crypto(sodium);
+  const crypto = testCrypto(sodium);
   const net = new LoopbackNetwork();
   const nodes = await createConnectedCohort({ suppressLinkLog: true, count: 3, network: net, sodium, wasm,
     config: { k: 1, m: 1, blockSize: 1024 }, timeoutMs: 200 });
@@ -98,7 +97,7 @@ export async function run(t) {
                           "encodeFetchBatchRes", "decodeFetchBatchReq", "decodeFetchBatchRes"]) {
         if (typeof globalThis[name] !== "function") throw new Error("fault injection: the guest no longer defines " + name);
       }
-      stub("blake2b", async req => crypto.hash(req.subarray(2)));
+      stub("sha256", async req => crypto.hash(req));
       stub("decrypt", async (K, level, index, parts, tag) => {
         const out = crypto.decrypt(K, level, index, concatBytes(parts), tag);
         if (!out) throw new Error("authentication failed");
@@ -172,13 +171,13 @@ export async function run(t) {
       verifyFreshMs: 60000, verifyDeadlineMs: 50 }, LOCAL: {}, Uint8Array, d, good, crypto });
     vm.runInContext(source, ctx);
     const r = await vm.runInContext(`(async () => {
-      for (const name of ["liveHolders", "netSend", "haveWant", "myPeer", "repObserve", "blake2b"]) {
+      for (const name of ["liveHolders", "netSend", "haveWant", "myPeer", "repObserve", "sha256"]) {
         if (typeof globalThis[name] !== "function") throw new Error("fault injection: the guest no longer defines " + name);
       }
       globalThis.myPeer = () => "self";
       const misses = [];
       globalThis.repObserve = async (group, peer, time, passes, missed) => { if (missed) misses.push(toHex(peer)); };
-      globalThis.blake2b = async (req) => crypto.hash(req.subarray(2));
+      globalThis.sha256 = async (req) => crypto.hash(req);
       const slow = "01".repeat(32), fast = "02".repeat(32);
       globalThis.haveWant = async (ids) => new Map(ids.map((id) => [toHex(id), new Set([slow, fast])]));
       globalThis.netSend = async (peer, type, payload, answerBytes, timing) => {

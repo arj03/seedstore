@@ -246,11 +246,11 @@ The guest is assembled from `util`, `reputation-core`, `protocol` and
 descriptor have **one** definition, not a hand-copied second one.
 
 **Crypto is reused, not bundled.** The guest calls the host's ungated
-`crypto/blake2b` and `crypto/chacha20poly1305-ietf/{seal,open}` transforms. It
+`crypto/sha256` and `crypto/aes256gcm/{seal,open}` transforms. It
 keeps ciphertext length-preserving for RS and carries each detached 16-byte tag
 inside the signed descriptor. A block id includes the descriptor's author in the hash
 (§4.2):
-`BLAKE2b-256("seedstore:block\0" ‖ authorPk[32] ‖ ciphertext)`. Key-sealing lives
+`SHA-256("seedstore:block\0" ‖ authorPk[32] ‖ ciphertext)`. Key-sealing lives
 host-side in `host/crypto.ts`.
 
 **Signatures are scoped.** The guest signs with `node/sign` and verifies with

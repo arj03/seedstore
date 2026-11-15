@@ -3,7 +3,8 @@
 // zero-latency LoopbackNetwork, so neither sees the cost that dominates a real
 // cross-machine cohort: wall-clock ~ (serial round-trip count) x RTT. This
 // drives real latency through the link and sweeps the guest's fanoutWindow to
-// find where widening it stops helping, for both directions.
+// find where widening it stops helping, for both directions. Its nodes run on Node's own
+// AES and SHA-256, as a Node node does.
 //
 // The window binds hardest when the transport cap forces ~one block per
 // STORE/FETCH message (the WebRTC case), so the cap defaults to blockKiB + 16.
@@ -20,7 +21,8 @@
 import { performance } from "node:perf_hooks";
 import { readFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
-import { loadWasmBytes, loadSodium, createConnectedCohort } from "../build/host/node.js";
+import { nodeSymmetric } from "seedkernel-wasm";
+import { loadWasmBytes, loadSodium, createConnectedCohort, inProcessHost } from "../build/host/node.js";
 import { bytesEqual } from "../build/host/util.js";
 import { MsgType } from "../build/host/protocol.js";
 import { LatencyNetwork } from "./latency-net.mjs";
@@ -67,6 +69,7 @@ async function measure(W) {
   // n = k + m = 4 distinct holders per chunk; give the cohort a little headroom.
   const nodes = await createConnectedCohort({
     suppressLinkLog: true, count: 6, network: net, sodium, wasm,
+    standUp: (cfg) => inProcessHost(undefined, nodeSymmetric).standUp(cfg),
     config: { ...config, fanoutWindow: W }, timeoutMs,
     quota: Math.max(64 * MB, fileBytes * 4),
   });

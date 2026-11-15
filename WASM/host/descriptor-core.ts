@@ -40,7 +40,7 @@ export interface Descriptor {
   blockSize: number;
   tailBytes: number;    // real plaintext bytes in this chunk; the rest is zero padding
   group: string;        // the group the author placed it in; each holder reads it against its own roster
-  authTag: Uint8Array;  // ChaCha20-Poly1305 tag over this chunk's padded ciphertext
+  authTag: Uint8Array;  // AES-256-GCM tag over this chunk's padded ciphertext
   blockIds: Uint8Array[]; // k + m ids by generator-row index; a k=1 chunk repeats its one id
 }
 
@@ -131,14 +131,13 @@ export function parseSignedDescriptor(env: Uint8Array): SignedDescriptor {
 const BLOCK_DOMAIN = new Uint8Array([115,101,101,100,115,116,111,114,101,58,98,108,111,99,107,0]);
 
 /** Domain-separated block identity. The author is inseparable from the bytes,
- *  so re-signing someone else's descriptor cannot claim their stored ids. `lead`
- *  zero bytes go in front, for a caller framing a hash request around the input. */
-export function blockHashInput(authorPk: Uint8Array, bytes: Uint8Array, lead = 0): Uint8Array {
+ *  so re-signing someone else's descriptor cannot claim their stored ids. */
+export function blockHashInput(authorPk: Uint8Array, bytes: Uint8Array): Uint8Array {
   if (authorPk.length !== 32) throw new Error("block id: author key must be 32 bytes");
-  const out = new Uint8Array(lead + BLOCK_DOMAIN.length + 32 + bytes.length);
-  out.set(BLOCK_DOMAIN, lead);
-  out.set(authorPk, lead + BLOCK_DOMAIN.length);
-  out.set(bytes, lead + BLOCK_DOMAIN.length + 32);
+  const out = new Uint8Array(BLOCK_DOMAIN.length + 32 + bytes.length);
+  out.set(BLOCK_DOMAIN, 0);
+  out.set(authorPk, BLOCK_DOMAIN.length);
+  out.set(bytes, BLOCK_DOMAIN.length + 32);
   return out;
 }
 

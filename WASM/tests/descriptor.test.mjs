@@ -2,7 +2,6 @@
 
 import { readFileSync } from "node:fs";
 
-import { Crypto } from "../build/host/crypto.js";
 import { CodecClient } from "./codec-client.mjs";
 import {
   encodeDescriptorCore, decodeDescriptorCore,
@@ -13,11 +12,11 @@ import {
 import { bytesEqual } from "../build/host/util.js";
 import { appSigner } from "seedkernel-wasm/node";
 
-import { ensureSodium, newKey, paths } from "./helpers.mjs";
+import { ensureSodium, newKey, paths, testCrypto } from "./helpers.mjs";
 
 export async function run(t) {
   const sodium = await ensureSodium();
-  const crypto = new Crypto(sodium);
+  const crypto = testCrypto(sodium);
   const tag = () => new Uint8Array(16);
   const codec = await CodecClient.load(new Uint8Array(readFileSync(paths.codec)));
 

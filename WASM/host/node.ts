@@ -8,7 +8,9 @@ import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { platformHost, type PlatformHost } from "seedkernel-wasm/platform";
-import { browserPlatform, type BrowserPlatformOptions } from "seedkernel-wasm/platform-web";
+import { webBridge, type BrowserPlatformOptions } from "seedkernel-wasm/platform-web";
+import { memoryRawFiles } from "seedkernel-wasm/fs-memory";
+import type { nodeSymmetric } from "seedkernel-wasm";
 
 import { loadSodium, generateKeyPair } from "./sodium.js";
 import { StorageNode, type StorageNodeOptions, type WasmBytes } from "./storage-node.js";
@@ -31,12 +33,24 @@ export async function loadWasmBytes(dir = buildDir): Promise<WasmBytes> {
 let hostBlob: Uint8Array | undefined;
 /** A seedkernel host in this process, on the package's host blob, with no sockets or
  *  datagrams of its own (its nodes take the channels they are given) and its own engine
- *  instances, as a separate machine has. Its store is memory unless `files` names another
- *  (seedkernel-wasm/fs-node `nodeRawFiles` for disk). A node serving from disk on the
- *  machine's own sockets takes seedkernel-wasm/shell-node `bootNodeShell` instead. */
-export function inProcessHost(files?: BrowserPlatformOptions["files"]): PlatformHost {
-  hostBlob ??= new Uint8Array(readFileSync(createRequire(import.meta.url).resolve("seedkernel-wasm/host.skb")));
-  return platformHost(browserPlatform({ hostBlob, files }));
+ *  instances, as a separate machine has. A page's bridge, whose AES answers on a later turn,
+ *  with Node's module workers, which give the transport's QUIC module node:crypto's AES, since a
+ *  node given datagrams runs the transport's UDP path. `symmetric` (seedkernel-wasm `nodeSymmetric`)
+ *  gives it a Node node's AES and SHA-256 in the page's place. Its store is memory unless
+ *  `files` names another (seedkernel-wasm/fs-node `nodeRawFiles` for disk). A node serving
+ *  from disk on the machine's own sockets takes seedkernel-wasm/shell-node `bootNodeShell`
+ *  instead. */
+export function inProcessHost(files?: BrowserPlatformOptions["files"], symmetric?: typeof nodeSymmetric): PlatformHost {
+  const blob = hostBlob ??= new Uint8Array(readFileSync(createRequire(import.meta.url).resolve("seedkernel-wasm/host.skb")));
+  return platformHost({
+    bridge: {
+      ...webBridge().bridge,
+      ...symmetric,
+      hostBlob: () => blob,
+      stageHost: () => { throw new Error("host: an in-process host takes no updates"); },
+    },
+    fs: files ?? memoryRawFiles(),
+  });
 }
 
 /** A node on an in-memory host of its own: what an in-process cohort stands each node up

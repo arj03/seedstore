@@ -167,8 +167,8 @@ await copyJs(seedkernelHost, join(out, "seedkernel"));
 }
 
 // ── this project's own libsodium ─────────────────────────────────────────────
-// What the page's own code computes (block ids, key sealing, ChaCha20-Poly1305) is
-// seedstore's, so it runs on seedstore's own dependency, libsodium-wrappers, the whole
+// What the page's own code computes (identities, signatures and key sealing) is
+// seedstore's, so it runs on seedstore's own dependency, libsodium-wrappers-sumo, the whole
 // API. Its wasm is the libsodium.wasm already in host-web.skb, so the page fetches it once:
 // the wrapper is staged with its core's embedded base64 copy blanked, and patched to
 // instantiate the bytes the page hands it (`useWasm`, from seedkernel-wasm/platform-web
@@ -176,31 +176,31 @@ await copyJs(seedkernelHost, join(out, "seedkernel"));
 // starts its init at import, so the bytes arrive through a promise it waits on.
 {
   const nm = join(root, "node_modules");
-  const coreSrc = join(nm, "libsodium", "dist", "modules-esm", "libsodium.mjs");
-  const wrapSrc = join(nm, "libsodium-wrappers", "dist", "modules-esm", "libsodium-wrappers.mjs");
+  const coreSrc = join(nm, "libsodium-sumo", "dist", "modules-sumo-esm", "libsodium-sumo.mjs");
+  const wrapSrc = join(nm, "libsodium-wrappers-sumo", "dist", "modules-sumo-esm", "libsodium-wrappers.mjs");
   if (!existsSync(coreSrc) || !existsSync(wrapSrc)) {
-    console.error("libsodium-wrappers not found in node_modules — run `npm install`.");
+    console.error("libsodium-wrappers-sumo not found in node_modules — run `npm install`.");
     process.exit(1);
   }
   const core = readFileSync(coreSrc, "utf8");
   // The embedded wasm is a base64 string literal beginning "AGFzbQ" (the "\0asm" magic).
   const b64Start = core.indexOf('"AGFzbQ');
   const b64End = b64Start < 0 ? -1 : core.indexOf('"', b64Start + 1);
-  if (b64End < 0) throw new Error("could not locate the base64 wasm in libsodium.mjs — upstream layout changed?");
+  if (b64End < 0) throw new Error("could not locate the base64 wasm in libsodium-sumo.mjs — upstream layout changed?");
   // Emscripten glue runs only the wasm it was built with, so this package's libsodium
   // must be the build seedkernel's host blob carries: bump them together.
   const { readHostBlob } = await import("seedkernel-wasm/platform-web");
   const blobWasm = readHostBlob(new Uint8Array(readFileSync(join(out, "host-web.skb")))).sodium;
   if (!Buffer.from(core.slice(b64Start + 1, b64End), "base64").equals(blobWasm)) {
-    console.error("libsodium-wrappers in node_modules is not the libsodium build in seedkernel's host blob — " +
-      "pin seedstore's libsodium-wrappers to the version seedkernel/WASM/package.json pins, then `npm install`.");
+    console.error("libsodium-wrappers-sumo in node_modules is not the libsodium build in seedkernel's host blob — " +
+      "pin seedstore's libsodium-wrappers-sumo to the libsodium-sumo version seedkernel/WASM/package.json pins, then `npm install`.");
     process.exit(1);
   }
   const wrap = readFileSync(wrapSrc, "utf8");
   const wrapPatched = "let giveWasm;const wasmBytes=new Promise((r)=>{giveWasm=r;});" +
     "export function useWasm(bytes){giveWasm(bytes);}" +
     wrap
-      .replace('import e from"libsodium"', 'import e from"./libsodium-core.mjs"')
+      .replace('import e from"libsodium-sumo"', 'import e from"./libsodium-core.mjs"')
       .replace(
         "a({getRandomValue:function(){",
         "a({instantiateWasm:async(imports,cb)=>{" +
@@ -208,7 +208,7 @@ await copyJs(seedkernelHost, join(out, "seedkernel"));
           "cb(instance);" +
         "},getRandomValue:function(){");
   if (!wrapPatched.includes("./libsodium-core.mjs") || !wrapPatched.includes("instantiateWasm")) {
-    throw new Error("libsodium-wrappers patch failed — upstream layout changed?");
+    throw new Error("libsodium-wrappers-sumo patch failed — upstream layout changed?");
   }
   mkdirSync(join(out, "libsodium"), { recursive: true });
   const write = (name, data) => {

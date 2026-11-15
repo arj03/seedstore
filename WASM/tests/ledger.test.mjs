@@ -5,11 +5,10 @@
 
 import { readFileSync } from "node:fs";
 import vm from "node:vm";
-import { Crypto } from "../build/host/crypto.js";
 import { signDescriptor } from "../build/host/descriptor.js";
 import { encodeStoreBatch, encodeFetchBatchRes, decodeMask, MsgType, VERDICT_ACCEPTED, VERDICT_ALLOWANCE } from "../build/host/protocol.js";
 import { loadSodium, loadWasmBytes, LoopbackNetwork, createConnectedCohort } from "../build/host/node.js";
-import { newKey } from "./helpers.mjs";
+import { newKey, testCrypto } from "./helpers.mjs";
 
 function typed(type, data) {
   const out = new Uint8Array(1 + data.length);
@@ -19,7 +18,7 @@ function typed(type, data) {
 
 export async function run(t) {
   const sodium = await loadSodium(), wasm = await loadWasmBytes();
-  const crypto = new Crypto(sodium);
+  const crypto = testCrypto(sodium);
 
   t.group("ledger: a chunk counts only dependable copies, peers rank by reliability × availability, repairs run most urgent first");
   {
@@ -36,13 +35,13 @@ export async function run(t) {
       good: encodeFetchBatchRes([bytes]) });
     vm.runInContext(source, ctx);
     const r = await vm.runInContext(`(async () => {
-      for (const name of ["auditChunk", "rank", "takeDueJob", "haveWant", "netSend", "verifyEnv", "myPeer", "repObserve", "blake2b"]) {
+      for (const name of ["auditChunk", "rank", "takeDueJob", "haveWant", "netSend", "verifyEnv", "myPeer", "repObserve", "sha256"]) {
         if (typeof globalThis[name] !== "function") throw new Error("fault injection: the guest no longer defines " + name);
       }
       const steady = "01".repeat(32), flaky = "02".repeat(32);
       globalThis.myPeer = () => "self";
       globalThis.verifyEnv = async () => true;
-      globalThis.blake2b = async (req) => crypto.hash(req.subarray(2));
+      globalThis.sha256 = async (req) => crypto.hash(req);
       globalThis.repObserve = async () => {};
       globalThis.haveWant = async (ids) => new Map(ids.map((id) => [toHex(id), new Set([steady, flaky])]));
       globalThis.netSend = async () => good;

@@ -24,7 +24,7 @@
      without its script (./host-web.skb, staged by scripts/build-browser-demo.mjs): its
      realm engine and its crypto. seedstore's own code only installs its bundle on that host and calls its
      guest (op framing, peer addresses), and what it computes host-side runs on its own
-     libsodium ("libsodium-wrappers", staged into ./libsodium/), so the demo runs fully
+     libsodium ("libsodium-wrappers-sumo", staged into ./libsodium/), so the demo runs fully
      offline. -->
 <script type="importmap">
 {
@@ -33,7 +33,7 @@
     "seedkernel-wasm/platform":       "./seedkernel/host/platform.js",
     "seedkernel-wasm/op-frame":       "./seedkernel/host/op-frame.js",
     "seedkernel-wasm/peer-addr":      "./seedkernel/services/peer-addr.js",
-    "libsodium-wrappers":             "./libsodium/libsodium-wrappers.mjs"
+    "libsodium-wrappers-sumo":        "./libsodium/libsodium-wrappers.mjs"
   }
 }
 </script>
@@ -60,7 +60,7 @@
 <div id="log"></div>
 
 <script type="module">
-import sodium, { useWasm } from "libsodium-wrappers";
+import sodium, { useWasm } from "libsodium-wrappers-sumo";
 import { browserPlatform, readHostBlob } from "seedkernel-wasm/platform-web";
 import { platformHost } from "seedkernel-wasm/platform";
 import { loadWasmBytes, createConnectedCohort, LoopbackNetwork } from "./host/browser.js";
