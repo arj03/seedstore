@@ -21,7 +21,7 @@
 //   --key <file>  a booted node's master seed, as seedkernel's --key (default
 //                 ./seedkernel.key, created on first run), so a node booted over a
 //                 directory is the one seedkernel would boot there.
-//   A booted node's geometry: --k 1 --m 1 --block 256 (KiB).
+//   A booted node's geometry: --k 1 --m 1 --block 512 (KiB).
 //
 // A token is `<root hex>:<key hex>` and reads the file back, so keep it private.
 
@@ -90,7 +90,7 @@ async function connect() {
   if (!/^[0-9a-f]{64}$/i.test(seed)) throw new Error(`--key ${keyPath}: want a 32-byte master seed in hex, as seedkernel's --key`);
   const identity = deriveNodeKey(sodium, fromHex(seed.toLowerCase()));
   const relay = args.get("relay");
-  const config = { ...defaultConfig(num("block", PRODUCTION_BLOCK_SIZE / 1024) * 1024, num("k", 1), num("m", 1)), maxMessageBytes: 512 * 1024 };
+  const config = { ...defaultConfig(num("block", PRODUCTION_BLOCK_SIZE / 1024) * 1024, num("k", 1), num("m", 1)), maxMessageBytes: 1024 * 1024 };
   const { node, runtime, peers, linked } = await bootNode({
     identity, sodium, dir, channels: nodeChannels(), ...(relay ? { datagrams: nodeDatagrams(), relay } : {}),
     timeoutMs: num("timeout", 5000), config, peers: peerSpecs(args.get("peers"), relay), group: args.get("group") ?? "cohort",

@@ -376,9 +376,11 @@ The benches (`tests/bench.mjs`, `bench-net.mjs`, `bench-holder.mjs`) are not par
 In brief: the codec writes ~175 MB/s and reads ~2.9 GB/s on one core, so the network
 sets end-to-end speed. A live WAN run with two holders measured ~12.0 MB/s PUT on the
 wire and ~19.3 MB/s GET, where raw TCP on the same link carries ~14 MB/s up and
-~29 MB/s down. [PERFORMANCE.md](../docs/PERFORMANCE.md) has the tables, the commands
-to reproduce them, and the transfer-engine tuning notes: per-lane refill, pipelined
-windows, the host-call ledger, and the guest deadline.
+~29 MB/s down. On one machine every block costs fixed work on each node, so blocks are
+512 KiB: native PUT runs ~210 MB/s on the wire on Linux and ~150 MB/s on Windows.
+[PERFORMANCE.md](../docs/PERFORMANCE.md) has the tables, the commands to reproduce them,
+and the transfer-engine tuning notes: block size, per-lane refill, pipelined windows,
+the host-call ledger, and the guest deadline.
 
 ## Footprint
 

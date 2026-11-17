@@ -8,6 +8,8 @@
 #   ARMS    lo-tcp lo-quic (default), wan-tcp, wan-quic
 #   ROUNDS  how many times to run every arm, alternating (default 3)
 #   SIZE    MiB per PUT (default 50), GETS per PUT (default 2)
+#   BLOCK, BATCH  block size and message cap in KiB (default 512, 1024)
+#   QUIC_CONNS    connections per holder on the quic arms (default 1, as p2p-cli's)
 #   WAN_TCP, WAN_QUIC  the remote holder for the wan arms, <key>.<contact>@tcp://host:port
 #           and <key>.<contact>@quic://ip:port. Its local config must list the initiator's
 #           key, printed below, in its group.
@@ -58,7 +60,7 @@ I=$(key i)
 echo "initiator $I"
 echo "{\"quota\": 4294967296, \"groups\": {\"cohort\": [\"$I\"]}}" > holder.json
 echo '{"connsPerPeer": 8, "requestTimeoutMs": 30000}' > conns-tcp.json
-echo '{"connsPerPeer": 4, "requestTimeoutMs": 30000}' > conns-quic.json
+echo "{\"connsPerPeer\": ${QUIC_CONNS:-1}, \"requestTimeoutMs\": 30000}" > conns-quic.json
 
 arm() {
   echo "== $1"
@@ -76,7 +78,7 @@ arm() {
     wan-tcp) peers="$h2,$h1@tcp://127.0.0.1:47220" ;;
     wan-quic) peers="$h2,$h1@quic://127.0.0.1:47222" ;;
   esac
-  echo "{\"k\":1,\"m\":1,\"blockSize\":262144,\"maxMessageBytes\":524288,\"fanoutWindow\":64,\"windowTargetBytes\":25165824,\"groups\":{\"cohort\":[\"$I\",\"${h1%%.*}\",\"${h2%%.*}\"]}}" > initiator.json
+  echo "{\"k\":1,\"m\":1,\"blockSize\":$((${BLOCK:-512} * 1024)),\"maxMessageBytes\":$((${BATCH:-1024} * 1024)),\"fanoutWindow\":64,\"windowTargetBytes\":25165824,\"groups\":{\"cohort\":[\"$I\",\"${h1%%.*}\",\"${h2%%.*}\"]}}" > initiator.json
   node i --local-config initiator.json --transport-config "conns-${1#*-}.json" --listen 127.0.0.1:47260 --peers "$peers"
   ready i && timeout 240 "$CTL" ./i "${SIZE:-50}" "${GETS:-2}" 2>&1 | sed 's/^/  /'
 }

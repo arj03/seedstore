@@ -16,7 +16,7 @@
 // Usage (Node ≥20 needs the WebSocket global):
 //   node --experimental-websocket scripts/p2p-cli.mjs \
 //     --peers "pk[.secret]@host:port,…" [--size 10] [--file path] \
-//     [--puts 1] [--gets 1] [--k 1] [--m 1] [--block 256] [--batch 512] [--window 64] \
+//     [--puts 1] [--gets 1] [--k 1] [--m 1] [--block 512] [--batch 1024] [--window 64] \
 //     [--conns 8] [--wtarget 24] [--heap 256] [--timeout 5000] [--guest-deadline 60000] \
 //     [--relay ws://host:port] [--key p2p-cli.key] [--group cohort]
 //
@@ -97,7 +97,7 @@ const blockSize = num("block", PRODUCTION_BLOCK_SIZE / 1024) * 1024;
 // Those two are the SAME shape at the 256 KiB production block — two framed blocks miss a
 // 512 KiB cap by ten bytes, so both carry one — but at 256 every message overruns its own
 // cap onto the over-cap fallback, so 512 is that shape's honest spelling.
-const maxMessageBytes = num("batch", 512) * 1024;
+const maxMessageBytes = num("batch", 1024) * 1024;
 const windowN = num("window", 64);
 // Streamed PUT/GET window (--wtarget MB): bigger windows mean fewer inter-window
 // barriers but a larger guest heap footprint (peak ~3x window at RS(1,1)), so raise

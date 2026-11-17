@@ -81,10 +81,11 @@ export const DEFAULT_VERIFY_DEADLINE_MS = 30 * 1000;
 export const DEFAULT_NEWCOMER_SHARE = 0.5;
 
 /** The block size a real DEPLOYMENT uses — one named constant so "production
- *  geometry" isn't a magic number copied per site. 256 KiB keeps a k=2 codec
- *  request within the deployed codec's proven scratch size. The browser demo
- *  picks its own per-transport size instead and does not use this. */
-export const PRODUCTION_BLOCK_SIZE = 256 * 1024;
+ *  geometry" isn't a magic number copied per site. Each block costs fixed work on every
+ *  node (a message, a hash, a record), so 512 KiB measured ~1.2–1.6× the PUT of 256 KiB,
+ *  and 1 MiB lost on a lossy WAN (docs/PERFORMANCE.md). A k=2 codec request still fits
+ *  the codec's 2 MB scratch. The browser demo picks its own per-transport size. */
+export const PRODUCTION_BLOCK_SIZE = 512 * 1024;
 
 /** The block size TESTS use — small enough that a few-kB payload still exercises
  *  multi-block chunking, a real RS encode/decode and an index level, which is the

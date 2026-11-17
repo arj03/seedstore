@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import vm from "node:vm";
 import { signDescriptor, verifyDescriptor, parseSignedDescriptor } from "../build/host/descriptor.js";
-import { encodeStoreBatch, encodeFetchBatchRes, MsgType, VERDICT_ACCEPTED, VERDICT_NOT_AUTHOR } from "../build/host/protocol.js";
+import { encodeStoreBatch, encodeOfferBatch, decodeMask, encodeFetchBatchRes, MsgType, VERDICT_ACCEPTED, VERDICT_NOT_AUTHOR } from "../build/host/protocol.js";
 import { loadSodium, loadWasmBytes, LoopbackNetwork, createConnectedCohort } from "../build/host/node.js";
 import { bytesEqual, writeU32BE } from "../build/host/util.js";
 import { newKey, testCrypto } from "./helpers.mjs";
@@ -39,6 +39,17 @@ export async function run(t) {
     t.ok(await store(forged) !== VERDICT_ACCEPTED, "re-signing cannot replace an existing record either");
     t.ok(bytesEqual(holder.store.get(id).descriptor, legitimate), "the author's repair metadata stays intact");
     t.ok(!bytesEqual(id, crypto.blockId(attacker.identity.publicKey, bytes)), "identical ciphertext under another author has a different id");
+    // A holder skips re-verifying an envelope it verified at OFFER, but only the exact
+    // bytes: the same signature over a changed core is verified, and fails.
+    const bytes2 = sodium.randombytes_buf(1024), id2 = crypto.blockId(owner.identity.publicKey, bytes2);
+    const legit2 = sign(owner, { ...d, blockIds: [id2, id2] });
+    t.eq(decodeMask(await owner.request(holder.peerId, typed(MsgType.OFFER, encodeOfferBatch([{ blockId: id2, descriptor: legit2 }]))))[0],
+      VERDICT_ACCEPTED, "the OFFER verifies the envelope");
+    const altered = legit2.slice();
+    writeU32BE(altered, 96 + 8, 1000); // tailBytes, under the same signature
+    t.ok((await owner.request(holder.peerId, typed(MsgType.STORE, encodeStoreBatch([{ blockId: id2, descriptor: altered, bytes: bytes2 }]))))[0]
+      !== VERDICT_ACCEPTED, "a STORE reusing that signature over a changed descriptor is refused");
+    t.ok(!holder.store.has(id2), "and nothing is stored");
     // Without the binding: a bare content hash names no author,
     // so it is not a block id whoever signs the descriptor around it.
     const unboundId = crypto.hash(bytes);

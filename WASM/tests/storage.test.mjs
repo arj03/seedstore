@@ -110,6 +110,13 @@ export async function run(t) {
     const put = await owner.put(data);
     const got = await owner.get(put.root, put.key);
     t.ok(bytesEqual(got, data), "sub-chunk file round-trips via per-chunk k");
+    // A small file is not padded out to whole blocks: its chunk shrinks its block too.
+    const small = await owner.put(file(40, 3));
+    const sd = parseSignedDescriptor(small.root).descriptor;
+    t.eq(sd.blockSize, 48, "a 40-byte file's chunk uses a 48-byte block (16-byte aligned), not the deployment's");
+    const held = nodes.flatMap((n) => n.store.list().filter((id) => bytesEqual(id, sd.blockIds[0])).map((id) => n.store.get(id).bytes.length));
+    t.ok(held.length === config.m + 1 && held.every((n) => n === 48), "every holder keeps the short block at its own size");
+    t.ok(bytesEqual(await owner.get(small.root, small.key), file(40, 3)), "and it reads back");
     nodes.forEach((n) => n.close());
     net.close();
   }
@@ -651,12 +658,12 @@ export async function run(t) {
       t.ok(put.root.length === 32 + 64 + 13 + 1 + "cohort".length + 16 + 4 * 32, "the root is a signed descriptor envelope, not a 32-byte id");
       t.ok(parseSignedDescriptor(put.root).descriptor.level >= 2, "the roll-up needed more than one index level");
       t.ok(bytesEqual(await nodes[0].get(put.root, put.key), data), "a multi-level index round-trips");
-      // Every block placed is exactly blockSize, index blocks included, so no block
-      // grows with the file and nothing caps its size.
+      // No block placed exceeds blockSize, index blocks included (a short chunk's are
+      // smaller), so no block grows with the file and nothing caps its size.
       let oversize = 0;
       for (const n of nodes) {
         for (const id of n.store.list()) {
-          if (n.store.get(id).bytes.length !== cfg.blockSize) oversize++;
+          if (n.store.get(id).bytes.length > cfg.blockSize) oversize++;
         }
       }
       t.eq(oversize, 0, "no block on the wire exceeds blockSize — the index has no size ceiling");

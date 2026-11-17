@@ -123,7 +123,7 @@ A file is encrypted (§4.4) and the ciphertext is cut into **blocks** of `B` byt
 
 **A block is a shard is the unit on the wire.** Because a chunk is exactly `k` blocks, there is no separate "fragment" object to slice, list or address: a chunk's descriptor is simply its list of `n` block-ids, and one block per message slot is true by construction. (Fixed-size chunking is the simplest choice. Content-defined chunking would allow cross-file dedup at the cost of variable-length blocks that no longer map one-to-one onto shards; §27.2.)
 
-**Every chunk is coded at its own `k`.** A chunk carries `kc = max(1, ceil(plaintext / B))` data blocks (at most the deployment's `k`) and is `RS(kc, m)` encoded, so a short chunk is never padded out to the full `k`.
+**Every chunk is coded at its own `k`.** A chunk carries `kc = max(1, ceil(plaintext / B))` data blocks (at most the deployment's `k`) and is `RS(kc, m)` encoded, so a short chunk is never padded out to the full `k`. Its blocks shrink the same way: a short chunk's block size is the smallest multiple of 16 bytes that holds its plaintext in `kc` blocks, so a small file, or a file's last chunk, is not padded out to whole blocks on every holder. The descriptor records that size as the chunk's `B` (§4.3), so nothing else changes.
 
 - At `kc ≥ 2` this produces `kc + m` distinct blocks.
 - At `kc = 1`, `RS(1, m)` degenerates: every parity block is byte-identical to the lone data block. The codec is skipped and the one block is placed on `m + 1` distinct peers instead.

@@ -225,11 +225,21 @@ async function decrypt(K, level, index, ctParts, authTag) {
 async function signCore(core) {
   return concat([identity(), await call("node/sign", core), core]);
 }
+// Envelopes that verified, by signature: a holder sees each descriptor at OFFER and again
+// at STORE, so the second check is a byte compare, not an Ed25519 verify. Only the exact
+// bytes that verified hit; the oldest go first past VERIFIED_MAX.
+const VERIFIED_MAX = 4096;
+const verified = new Map();
 async function verifyEnv(env, via) {
+  const sig = bytesToStr(env.subarray(32, 96)), seen = verified.get(sig);
+  if (seen && bytesEqual(seen, env)) return true;
   // The seam's argument IS the envelope — [pk 32][sig 64][msg] concatenated is
   // `env` itself, so it is passed whole, uncopied.
   const v = await via("node/verify", env, 1);
-  return v[0] === 1;
+  if (v[0] !== 1) return false;
+  verified.set(sig, env.slice());
+  if (verified.size > VERIFIED_MAX) verified.delete(verified.keys().next().value);
+  return true;
 }
 
 // ── codec + reputation ──
@@ -797,6 +807,8 @@ function makeJob(slotIds, slotBlocks, descriptor, floor, exclude, group) {
 function makeChunk(d, blocks, descriptor) {
   return makeJob(d.blockIds.slice(), blocks.slice(), descriptor, d.k, new Set(), d.group);
 }
+// A short chunk's block size is a multiple of this: the codec's SIMD lane width.
+const BLOCK_ALIGN = 16;
 // Encode + sign one chunk at its OWN k = ceil(plain / blockSize), not padded to the
 // deployment's k. At k=1, RS(1,m) parity ≡ data, so the codec is skipped and the
 // chunk simply lists its lone block m+1 times (§4.1). Nonce = (level, GLOBAL index
@@ -806,14 +818,17 @@ async function encodeChunk(source, localCi, globalCi, K, level, group) {
   const c = CFG;
   const plain = source.subarray(localCi * c.k * c.blockSize, (localCi + 1) * c.k * c.blockSize);
   const kc = Math.max(1, Math.ceil(plain.length / c.blockSize));
-  const sealed = await encrypt(K, level, globalCi, padTo(plain, kc * c.blockSize));
-  const dataBlocks = splitBlocks(sealed.ciphertext, c.blockSize);
+  // A short chunk also shrinks its blocks to what holds it, so a small file or a file's
+  // tail is not padded out to whole blocks on every holder (§4.1).
+  const bs = Math.min(c.blockSize, Math.max(BLOCK_ALIGN, Math.ceil(plain.length / kc / BLOCK_ALIGN) * BLOCK_ALIGN));
+  const sealed = await encrypt(K, level, globalCi, padTo(plain, kc * bs));
+  const dataBlocks = splitBlocks(sealed.ciphertext, bs);
   const blocks = kc === 1 ? new Array(c.m + 1).fill(dataBlocks[0])
-                          : [...dataBlocks, ...await rsEncode(kc, c.m, c.blockSize, dataBlocks)];
+                          : [...dataBlocks, ...await rsEncode(kc, c.m, bs, dataBlocks)];
   const author = { authorPk: identity() };
   const ids = kc === 1 ? new Array(c.m + 1).fill(await blockHash(author, dataBlocks[0], call))
                        : await Promise.all(blocks.map((b) => blockHash(author, b, call)));
-  const d = { level, k: kc, m: c.m, blockSize: c.blockSize, tailBytes: plain.length, group, authTag: sealed.authTag, blockIds: ids };
+  const d = { level, k: kc, m: c.m, blockSize: bs, tailBytes: plain.length, group, authTag: sealed.authTag, blockIds: ids };
   return makeChunk(d, blocks, await signChunk(d));
 }
 // The decline reasons a holder's verdict can name, for the error a failed PUT throws.

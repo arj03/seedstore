@@ -117,28 +117,28 @@ directions.
 
 ### QUIC and TCP on one pair
 
-The same geometry (RS(1,1), 256 KiB blocks, 512 KiB batches, a 24 MB window, 50 MB per
-run) on a second WAN pair: a Node initiator, one remote holder and one local holder,
-both native `seedkernel` listening on TCP and QUIC. Both arms dial the holders directly,
-with no relay. Timing starts only once every link is up. Three runs per arm, alternating
-arms, each a PUT and two GETs:
+The same geometry (RS(1,1), 512 KiB blocks, 1 MiB batches, a 24 MB window, 50 MB per
+run) on a second WAN pair: a native initiator, one remote holder and one local holder,
+all native `seedkernel` listening on TCP and QUIC (`scripts/bench-native/run.sh`,
+`ARMS="wan-tcp wan-quic"`). Both arms dial the holders directly, with no relay. Timing
+starts only once every link is up. Three runs per arm, each a PUT and two GETs, the
+TCP and 4-connection QUIC arms alternating and the 1-connection arm right after:
 
 | | PUT (wire) | GET |
 |---|---:|---:|
-| **QUIC**, 4 connections per holder | 14.1–16.0 MB/s | 28–42 MB/s |
-| **QUIC**, 1 connection per holder | 15.5–16.6 MB/s | 35–41 MB/s |
-| **TCP**, 8 connections per holder | 13.9–15.5 MB/s | 15–36 MB/s |
+| **QUIC**, 4 connections per holder | 15.3–17.2 MB/s | 25–37 MB/s |
+| **QUIC**, 1 connection per holder | 15.1–16.1 MB/s | 31–39 MB/s |
+| **TCP**, 8 connections per holder | 13.2–17.5 MB/s | 26–35 MB/s |
 
-The uplink capped every arm's PUT at about the same rate, so the arms differ only in
-GET, where QUIC is ahead: one TCP round read 15–25 MB/s, and without it TCP measured
-32–36. With the uplink the limit, four QUIC connections did no better than one, so one is
-p2p-cli's default for `quic://` peers. The QUIC connection (ngtcp2) runs under BBR. One
-flow stands where TCP opens eight, and at each loss one CUBIC flow gives up 30% of its
-rate where eight give up ~4% together, so CUBIC (the QUIC default) measured PUT at 0.74x
-TCP on the same pair. Only half of each PUT crosses the WAN, since the other holder is
-local, so these rates compare with each other and not with the table above. The local
-holder needs a `quota` in its local config: without one it stores nothing, every GET
-goes to the remote holder, and GET halves.
+The uplink capped every arm's PUT at about the same rate. One QUIC connection matched
+four on PUT and read GET fastest and most steadily, so one is p2p-cli's and `run.sh`'s
+default for `quic://` peers. The QUIC connection (ngtcp2) runs under BBR. One flow stands
+where TCP opens eight, and at each loss one CUBIC flow gives up 30% of its rate where
+eight give up ~4% together, so CUBIC (the QUIC default) measured PUT at 0.74x TCP on the
+same pair. Only half of each PUT crosses the WAN, since the other holder is local, so
+these rates compare with each other and not with the table above. The local holder needs
+a `quota` in its local config: without one it stores nothing, every GET goes to the
+remote holder, and GET halves.
 
 With both holders on the initiator's machine, over loopback (same geometry, a native
 initiator, fresh holders for every run, three rounds alternating arms), the order flips.
@@ -206,6 +206,48 @@ can't show refill or straggler effects. It does show guest CPU nearly at full va
 the `toHex` work alone moved its PUT by 7% and its GET by 10%, which the live link
 doesn't show. Use `bench-net` to price guest CPU, and judge wire behaviour on a live
 cohort.
+
+## Block size: what each block costs
+
+Each block costs fixed work on every node, whatever its size: a STORE or FETCH message
+through the transport realm, a hash, a record on the holder, and the guest's JavaScript
+around each. Interpreted QuickJS runs that JavaScript at ~60 ns per loop step under the
+native loader. Timing every engine export and host call on a native Linux initiator
+(RS(1,1), 200 MB, warmed) put ~0.5 ms of seedstore guest JS and ~0.2 ms of transport JS
+behind every block, spread across many small steps rather than one hot spot. Bulk copies
+are cheap (a 256 KiB `slice` costs 7.5 µs). A holder pays the same per block, plus a file
+write: on Windows a temp-file write and rename costs ~1 ms in Go, the largest single
+holder cost there.
+
+Fitting PUT time against block count gave ~1.1 ms of fixed cost per chunk at 256 KiB
+blocks, ~40% of the PUT. Bigger blocks amortize it, but over a lossy WAN fewer, larger
+messages leave connections idle when one stalls: 1 MiB blocks lost ~20% of PUT there.
+512 KiB blocks with a 1 MiB message cap kept the local gain without that loss, so they
+are the default (`PRODUCTION_BLOCK_SIZE`). A short chunk shrinks its blocks to fit
+(SPEC §4.1), so small files don't pay for the bigger block.
+
+Native seedkernel on every node, two holders, RS(1,1), 200 MB, a warmed node, three
+interleaved rounds per arm; `scripts/bench-native/run.sh` runs the local rows:
+
+| | 256 KiB blocks, 512 KiB messages | 512 KiB blocks, 1 MiB messages |
+|---|---:|---:|
+| Linux (WSL2) local PUT (wire) | 161 MB/s | **212 MB/s** |
+| Linux local GET | 117 MB/s | **135 MB/s** |
+| Windows local PUT (wire) | 95 MB/s | **153 MB/s** |
+| Windows local GET | 143 MB/s | **170 MB/s** |
+| Lossy WAN PUT (wire): 40 ms RTT, 0.5% loss | 96 MB/s | 96 MB/s |
+| Lossy WAN GET | 66 MB/s | **81 MB/s** |
+| Rate-limited WAN PUT (wire): 40 ms RTT, 300 Mbit/s | 31 MB/s | 32 MB/s |
+
+The WAN rows are `tc netem` on Linux loopback (100 MB per run), not a live path: confirm
+against live holders before trusting them for a real deployment. Windows holders spend
+about twice the CPU per block that Linux holders do, mostly in the file write, which is
+why Windows gains most. The first transfer after boot runs ~20% slower than the rest
+while the realms' memory grows; the table is warmed.
+
+A holder also verifies each descriptor once, not twice: it keeps the envelopes that
+verified at OFFER and compares the STORE's bytes against them, cutting holder CPU by
+~5–8%.
 
 ## How the transfer engine is tuned
 
