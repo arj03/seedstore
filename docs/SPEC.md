@@ -2,7 +2,9 @@
 
 ## 1. Introduction
 
-This is the design spec. For an overview and a quick start, see the [README](../README.md). For the implementation of Part I, and where it departs from this spec, see [WASM/README.md](../WASM/README.md).
+This is the design spec. For an overview and a quick start, see the [README](../README.md). For the implementation of Part I, and where it departs from this spec, see [ARCHITECTURE](ARCHITECTURE.md).
+
+Where to start: §1–§2.1 for the goals, the closed-network assumption and the trust tiers; §4 for the data model (blocks, chunks, the signed descriptor and encryption); §6–§9 for PUT, GET, availability and self-healing; §15 for what the design protects and what it leaks; §18 for the whole control plane, six request/response messages; and Part II (§20–§27) for the optional extensions, such as verifiable reputation, LRC, tombstones, Shamir key recovery and edits.
 
 Seedkernel routes a wire protocol id to one bundle's confined guest over an encrypted, authenticated channel. It has no notion of a file, and nowhere for a multi-megabyte one to live. Seedstore is that store, built only from pieces seedkernel already provides: a channel that pins who is speaking, a protocol id to dispatch on, and a signed bundle that carries the code and its authority. Bulk bytes live beside the dispatch path, referenced by content hash (§3).
 
@@ -82,7 +84,7 @@ Running a seedstore node extends your trusted computing base (TCB), but the part
 - **WASM** for the pure, hot compute (`codec`, `reputation`), which holds no grants at all.
 - **A zero-authority JS realm** for the orchestration (cohort, coordinator, repair) and the holder side (admission, the sibling rule, content addressing, quota, store writes), which are async and multi-step. Both roles share one realm and its one entrypoint, which runs one invocation at a time ([GUEST §12.3](https://github.com/arj03/seedkernel/blob/main/docs/GUEST.md)).
 
-The line that matters: **"trusting seedstore" means trusting Tier 1 (small, stable, the host's), not Tier 2 (large, churning, upgradeable).** A buggy or compromised Tier-2 unit can only compute and call the services it was granted. A node *is* the generic host plus this bundle; the [WASM implementation README](../WASM/README.md) says how to run one.
+The line that matters: **"trusting seedstore" means trusting Tier 1 (small, stable, the host's), not Tier 2 (large, churning, upgradeable).** A buggy or compromised Tier-2 unit can only compute and call the services it was granted. A node *is* the generic host plus this bundle; the [README](../README.md#running-nodes) says how to run one.
 
 ---
 
