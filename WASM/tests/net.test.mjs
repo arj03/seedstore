@@ -30,6 +30,9 @@ import {
 import { signDescriptor } from "../build/host/descriptor.js";
 import { toHex, fromHex, bytesEqual } from "../build/host/util.js";
 import { joinGroup, oracle, plantBlock } from "./helpers.mjs";
+import { STORE_INDEX, encodeStoreIndex, decodeStoreIndex } from "../build/host/store-record.js";
+import { bootNode } from "../scripts/boot-node.mjs";
+import { loadCrypto } from "seedkernel-wasm";
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -172,6 +175,58 @@ export async function run(t) {
       t.ok(reopened.has(id), "reopened view still has the block");
       t.eq(reopened.usedBytes(), rec1 + 4 + desc2.length + bytes2.length, "reopened used is correct (both records)");
       t.ok(bytesEqual(reopened.get(id).bytes, bytes), "reopened get returns the bytes");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  // ── the holder's saved index ───────────────────────────────────────────────
+  t.group("a holder restarts from its saved index, and the listing still decides what is held (§12)");
+  {
+    const rows = [["aa".repeat(32), { size: 10, author: "01".repeat(32), group: "cohort" }],
+      ["bb".repeat(32), { size: 20, author: "02".repeat(32), group: "friends" }]];
+    const back = decodeStoreIndex(encodeStoreIndex(rows));
+    t.ok(back && back.size === 2 && back.get("bb".repeat(32)).size === 20 && back.get("bb".repeat(32)).group === "friends"
+      && back.get("aa".repeat(32)).author === "01".repeat(32), "the index round-trips");
+    t.eq(decodeStoreIndex(encodeStoreIndex(rows).subarray(0, 50)), null, "a torn index reads as none");
+
+    const dir = mkdtempSync(join(tmpdir(), "seedstore-idx-"));
+    const identity = generateKeyPair(sodium), author = generateKeyPair(sodium);
+    const shellCrypto = await loadCrypto();
+    const boot = () => bootNode({ identity, sodium: shellCrypto, dir, channels: nodeChannels(), config: { k: 1, m: 1, blockSize: 1024 }, quota: 1 << 30 });
+    const held = async () => {
+      const { node } = await boot();
+      try {
+        const h = await node.client.holdings();
+        return { blocks: h.holds.reduce((a, r) => a + r.blocks, 0), used: h.used, view: node.store.usedBytes(), fs: node.fs };
+      } finally { node.close(); }
+    };
+    try {
+      const { node } = await boot();
+      const fs = scopedFs(new NodeFs(dir), node.appScope);
+      node.close();
+      const plant = () => {
+        const bytes = sodium.randombytes_buf(1024), id = oracle.blockId(author.publicKey, bytes);
+        plantBlock(fs, toHex(id), bytes, signDescriptor(sodium, { group: "cohort", level: 0, k: 1, m: 1, blockSize: 1024,
+          tailBytes: 1024, authTag: new Uint8Array(16), blockIds: [id, id] }, author.publicKey, author.privateKey));
+        return toHex(id);
+      };
+      const ids = [];
+      for (let i = 0; i < 300; i++) ids.push(plant());
+      let h = await held();
+      t.eq(h.blocks, 300, "a first boot reads every record");
+      t.ok(decodeStoreIndex(fs.get(STORE_INDEX))?.size === 300, "and saves the index it built");
+      t.eq(h.used, h.view, "charging what the records hold");
+
+      for (const hex of ids.slice(0, 5)) fs.delete(hex + ".rec");
+      for (let i = 0; i < 3; i++) plant();
+      h = await held();
+      t.eq(h.blocks, 298, "a restart drops records gone since the save and reads the ones added");
+      t.eq(h.used, h.view, "and still charges exactly what is on disk");
+
+      fs.put(STORE_INDEX, new Uint8Array([1, 2, 3]));
+      h = await held();
+      t.eq(h.blocks, 298, "a torn index falls back to reading the records");
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

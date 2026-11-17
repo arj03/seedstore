@@ -36,7 +36,12 @@ const EMPTY = new Uint8Array(0);
 // fs keys are ASCII (hex + a short suffix); QuickJS has no TextEncoder, so map
 // chars to bytes by hand, the same way toHex/fromHex avoid Buffer.
 function strBytes(s) { const o = new Uint8Array(s.length); for (let i = 0; i < s.length; i++) o[i] = s.charCodeAt(i) & 255; return o; }
-function bytesToStr(b) { let s = ""; for (let i = 0; i < b.length; i++) s += String.fromCharCode(b[i]); return s; }
+// One fromCharCode per 4 KiB, not an append per byte, which QuickJS pays dearly for.
+function bytesToStr(b) {
+  let s = "";
+  for (let i = 0; i < b.length; i += 4096) s += String.fromCharCode.apply(null, b.subarray(i, i + 4096));
+  return s;
+}
 
 // ── the guest seam: storage policy over GENERIC host names ────────────────
 // Thin wrappers over the seam's application-neutral names (crypto/fs/module/
@@ -507,13 +512,14 @@ async function fsGet(keyStr, via, answerBytes = CFG.blockSize + 1024) {
 async function storeHas(id) { await ensureStoreIndex(); return heldBlocks.has(toHex(id)); }
 async function storeGet(id, via) { return decodeStoreRecord(await fsGet(toHex(id) + STORE_REC, via)); }
 async function storeGetBytes(id, via) { const r = await storeGet(id, via); return r ? r.bytes : null; }
-async function storeGetDescriptor(id, via) { const r = await storeGet(id, via); return r ? r.descriptor : null; }
+// A copy: a view would keep the whole record alive for as long as the descriptor is kept.
+async function storeGetDescriptor(id, via) { const r = await storeGet(id, via); return r ? r.descriptor.slice() : null; }
 async function storeKeys() {
   const r = await holderCall("fs/list", EMPTY), out = [];
   let o = 0; const n = rU32(r, o); o += 4;
   for (let i = 0; i < n; i++) {
     const klen = rU32(r, o); o += 4;
-    const key = bytesToStr(r.slice(o, o + klen)); o += klen;
+    const key = bytesToStr(r.subarray(o, o + klen)); o += klen;
     out.push(key);
   }
   return out;
@@ -1844,6 +1850,8 @@ async function acceptRepair(payload, caller) {
 // descriptor's signature, with no hash call: every stored descriptor was verified on
 // admission, and two verified envelopes sharing a signature is a forgery. Answers how many
 // repairs members agreed to.
+const REPAIR_SCAN_MS = 1500;
+let heldCursor = 0;
 async function doRepair() {
   await drainRepairJobs();
   await observeAvailability();
@@ -1855,10 +1863,15 @@ async function doRepair() {
     const s = await auditChunk(env);
     if (s) short.push(s);
   };
-  for (const id of await storeList()) {
-    const descriptor = await storeGetDescriptor(id, call);
+  // Held blocks from where the last pass stopped, for as long as REPAIR_SCAN_MS allows, so a
+  // pass stays inside the guest deadline however much is held: each costs a record read.
+  const held = await storeList(), t0 = Date.now();
+  let scanned = 0;
+  while (scanned < held.length && Date.now() - t0 < REPAIR_SCAN_MS) {
+    const descriptor = await storeGetDescriptor(held[(heldCursor + scanned++) % held.length], call);
     if (descriptor) await audit(descriptor);
   }
+  heldCursor = held.length > 0 ? (heldCursor + scanned) % held.length : 0;
   for (const env of await nextOwnChunks()) await audit(env);
   short.sort((a, b) => a.margin - b.margin); // the most urgent asked first
   const counts = await Promise.all(short.map((s) => requestRepairs(s.d, s.env, s.live, s.margin)));
@@ -1945,9 +1958,10 @@ function charge(e, sign) {
   const key = allowanceKey(e.group, e.author);
   committedFor.set(key, (committedFor.get(key) ?? 0) + sign * e.size);
 }
-function indexSet(h, size, author, group, cache) {
-  const e = { size, author, group, cache };
+function indexSet(h, size, author, group, cache, id) {
+  const e = { size, author, group, cache, id };
   heldBlocks.set(h, e);
+  indexUnsaved++;
   bytesUsed += size;
   if (cache) cacheBytes += size; else charge(e, 1);
 }
@@ -1969,8 +1983,16 @@ function endStoreWrite() {
   }
 }
 async function fsSize(keyStr) { const v = rU32(await holderCall("fs/size", strBytes(keyStr), 4), 0); return v === 0xffffffff ? 0 : v; }
-// A cold holder's index can take thousands of fs/size calls; the holder's share of the
-// host-call budget (hostBudget) paces them under the host's per-realm cap.
+// Run `fn` over `items`, at most `n` at once: a whole record per call is too much to have
+// every one of thousands in flight in the realm.
+async function eachLimit(items, n, fn) {
+  let i = 0;
+  await Promise.all(Array.from({ length: Math.min(n, items.length) }, async () => { while (i < items.length) await fn(items[i++]); }));
+}
+// The index starts from its saved copy (STORE_INDEX), so a restart reads only the records
+// added since the last save, and the tags.
+const INDEX_READS = 16, INDEX_SAVE_MIN = 128, INDEX_PARTIAL_SAVE = 512;
+let indexUnsaved = 0, indexSaving = null;
 async function ensureStoreIndex() {
   if (!storeIndexDirty && heldBlocks !== null && bytesUsed >= 0) return;
   if (storeIndexPromise === null) storeIndexPromise = (async () => {
@@ -1983,35 +2005,66 @@ async function ensureStoreIndex() {
       const reservationVersion = storeReservationVersion;
       // A block is held when its record is: a put is atomic. Only a block that changed
       // tier has a tag. Without one it is committed, under its descriptor's author and
-      // group, which costs a read of the record here and saves a file on every write.
+      // group, from the saved index or else a read of the record.
       const recs = [], tagged = new Set();
       for (const key of await storeKeys()) {
         if (key.length !== 68) continue;
         if (key.endsWith(STORE_REC)) recs.push(key.slice(0, 64));
         else if (key.endsWith(STORE_TAG)) tagged.add(key.slice(0, 64));
       }
-      const entries = (await Promise.all(recs.map(async (hex) => {
+      const saved = decodeStoreIndex(await fsGet(STORE_INDEX, holderCall, 64 + recs.length * 44)) ?? new Map();
+      const entries = [], unknown = [];
+      for (const hex of recs) {
+        const s = saved.get(hex);
+        if (tagged.has(hex) || !s) unknown.push(hex);
+        else entries.push({ hex, size: s.size, author: s.author, group: s.group, cache: false, id: s.id });
+      }
+      const read = unknown.filter((hex) => !tagged.has(hex)).length;
+      let readSince = 0, partialSaving = false;
+      await eachLimit(unknown, INDEX_READS, async (hex) => {
+        const s = saved.get(hex);
         if (tagged.has(hex)) {
           const tag = decodeStoreTag(await fsGet(hex + STORE_TAG, holderCall, STORE_TAG_MAX + 1));
-          return tag && { hex, size: await fsSize(hex + STORE_REC), author: toHex(tag.author), group: tag.group, cache: tag.tier === TIER_CACHE };
+          if (tag) entries.push({ hex, size: s ? s.size : await fsSize(hex + STORE_REC), author: toHex(tag.author), group: tag.group, cache: tag.tier === TIER_CACHE });
+          return;
         }
         const rec = await storeGet(fromHex(hex), holderCall);
-        if (!rec) return null;
+        if (!rec) return;
         try {
           const size = STORE_REC_HEAD + rec.descriptor.length + rec.bytes.length;
-          return { hex, size, author: toHex(rec.descriptor.subarray(0, 32)), group: parseSignedDescriptor(rec.descriptor).descriptor.group, cache: false };
-        } catch { return null; }
-      }))).filter((e) => e);
+          entries.push({ hex, size, author: toHex(rec.descriptor.subarray(0, 32)), group: parseSignedDescriptor(rec.descriptor).descriptor.group, cache: false });
+        } catch { return; /* unreadable: not held */ }
+        // Save what is read so far now and then, doubling the gap: a store too large to read
+        // inside one guest deadline is read over several requests, each resuming from here.
+        if (++readSince >= Math.max(INDEX_PARTIAL_SAVE, entries.length >> 1) && !partialSaving) {
+          readSince = 0;
+          partialSaving = true;
+          try { await fsPut(STORE_INDEX, [encodeStoreIndex(entries.map((e) => [e.hex, e]))], holderCall); } catch { /* the next one */ }
+          partialSaving = false;
+        }
+      });
       if (reservationVersion !== storeReservationVersion || activeStoreWrites > 0) continue;
       heldBlocks = new Map();
       bytesUsed = 0; cacheBytes = 0; committedFor = new Map();
-      for (const e of entries) indexSet(e.hex, e.size, e.author, e.group, e.cache);
+      for (const e of entries) indexSet(e.hex, e.size, e.author, e.group, e.cache, e.id);
       for (const [hex, r] of liveStoreReservations) if (!heldBlocks.has(hex)) indexSet(hex, r.size, r.author, r.group, false);
       storeIndexDirty = false;
+      // What the next restart would read again, or skip; the next save past the threshold covers it.
+      indexUnsaved = read + Math.abs(saved.size - (recs.length - read));
       return;
     }
   })();
   try { await storeIndexPromise; } finally { storeIndexPromise = null; }
+  await saveStoreIndex();
+}
+// Save the index once an eighth of it is new, so a restart reads at most about that share
+// of the records, and saving costs about eight rows written per block stored.
+async function saveStoreIndex() {
+  if (indexSaving !== null || heldBlocks === null || indexUnsaved < Math.max(INDEX_SAVE_MIN, heldBlocks.size >> 3)) return;
+  const n = indexUnsaved;
+  indexUnsaved = 0;
+  indexSaving = fsPut(STORE_INDEX, [encodeStoreIndex(heldBlocks)], holderCall).catch(() => { indexUnsaved += n; });
+  try { await indexSaving; } finally { indexSaving = null; }
 }
 async function fsPut(keyStr, parts, via) {
   const kb = strBytes(keyStr);
@@ -2032,7 +2085,7 @@ async function setTier(h, cache, via) {
   const e = heldBlocks.get(h);
   if (!e || e.cache === cache) return;
   indexDrop(h);
-  indexSet(h, e.size, e.author, e.group, cache);
+  indexSet(h, e.size, e.author, e.group, cache, e.id);
   try { await writeTag(h, cache, via); } catch { storeIndexDirty = true; }
 }
 // The one write path into the store: one framed record, under the quota budget.
@@ -2193,6 +2246,7 @@ async function acceptStoreBatch(stores, caller) {
     try { await storeWrite(s.blockId, s.bytes, s.descriptor); verdicts[index] = VERDICT_ACCEPTED; }
     catch { verdicts[index] = VERDICT_ERROR; }
   })]);
+  await saveStoreIndex();
   return verdicts;
 }
 // Serve a batched FETCH, capped at maxMsgBytes. A held block that won't fit, or an id never
