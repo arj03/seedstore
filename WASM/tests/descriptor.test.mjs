@@ -10,7 +10,7 @@ import {
   encodeDescriptorList, decodeDescriptorList,
 } from "../build/host/descriptor.js";
 import { bytesEqual } from "../build/host/util.js";
-import { appSigner } from "seedkernel-wasm/node";
+import { appSigner } from "seedkernel-wasm/identity";
 
 import { ensureSodium, newKey, paths, testCrypto } from "./helpers.mjs";
 

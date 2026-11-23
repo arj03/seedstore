@@ -13,7 +13,7 @@ import {
 } from "./descriptor-core.js";
 import { concatBytes } from "./util.js";
 import { STORAGE_APP } from "./core.js";
-import { appSigner } from "seedkernel-wasm/node";
+import { appSigner } from "seedkernel-wasm/identity";
 
 export {
   BLOCK_ID_LEN,
@@ -41,7 +41,7 @@ function storageSigner(sodium: Sodium, authorPk: Uint8Array, authorSk: Uint8Arra
 
 /** A signed chunk descriptor as stored alongside every block and listed in the
  *  file's index (§4.3): [authorPk 32][sig 64][core ...]. Signing stays sender-side
- *  in the host (§16) — this mirrors what the guest's scoped `node/sign` seam does
+ *  in the host (§16) — this mirrors what the guest's scoped `identity/sign` seam does
  *  (Ed25519 over `DOMAIN_guest ‖ scope ‖ core`, the scope of `STORAGE_APP`). */
 export function signDescriptor(
   sodium: Sodium, d: Descriptor, authorPk: Uint8Array, authorSk: Uint8Array,

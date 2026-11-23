@@ -6,7 +6,7 @@
 //
 // Two deliberate choices:
 //   • `requires` declares SERVICES, not method names — the unit a manifest grants
-//     is `node`/`fs` (and a local service id), never `node/sign` or `fs/get`.
+//     is `identity`/`fs` (and a local service id), never `identity/sign` or `fs/get`.
 //     The host gates a `host.call` by the method's SERVICE (seedkernel §12.2).
 //   • `quota` and anything runtime-derived (e.g. the signing scope) are absent
 //     from the signed config — both are host-applied facts, never author content.
@@ -45,7 +45,7 @@ export function authorKeysFor(edSk) {
 // Everything the storage guest reaches, EXACTLY (`guest.requires`): a `host.call`
 // naming a host method is refused unless the method's SERVICE is in this list, and a
 // local service id is callable only when it is listed here.
-//   • `node` — sign/verify scoped to this bundle's app label.
+//   • `identity` — sign/verify scoped to this bundle's app label.
 //   • `fs` — this app's own keyspace.
 //   • the network — a bundle (the transport) claiming `_net` under its own `services`
 //     list, reached over the same `host.call` by one cross-realm call (seedkernel §12.10).
@@ -54,7 +54,7 @@ export function authorKeysFor(edSk) {
 // codec/reputation modules) are not grants and are never listed here; time is the
 // realm's own `Date.now()`.
 const STORAGE_REQUIRES = [
-  "node",
+  "identity",
   "fs",
   // A repair the node agreed to runs on a wake, after the request that asked for it (§9).
   "timer",

@@ -171,7 +171,7 @@ function holderCall(name, payload, answerBytes = MSG_ENVELOPE_BYTES) {
 // ── crypto primitives + storage framing ──
 // Pure transforms reach the host under the `crypto/` prefix (seedkernel §12.2):
 // SHA-256 for block-ids and AES-256-GCM for at-rest encryption, native on every target.
-// node/sign and node/verify apply the scoped `DOMAIN_guest ‖ scope` prefix on the
+// identity/sign and identity/verify apply the scoped `DOMAIN_guest ‖ scope` prefix on the
 // host side — the guest never holds or reconstructs it. Every seam name answers a
 // Promise, so every helper here is awaited by its callers.
 // `crypto/sha256` takes the message whole and answers its 32 bytes.
@@ -220,10 +220,10 @@ async function decrypt(K, level, index, ctParts, authTag) {
   return opened.subarray(1);
 }
 // Signed chunk descriptor envelope: [authorPk 32][sig 64][core] (§4.3, §16).
-// node/sign applies the scoped prefix and returns just the signature; the stored
+// identity/sign applies the scoped prefix and returns just the signature; the stored
 // envelope carries only [pk][sig][core] — the prefix is preimage-only, never sent.
 async function signCore(core) {
-  return concat([identity(), await call("node/sign", core), core]);
+  return concat([identity(), await call("identity/sign", core), core]);
 }
 // Envelopes that verified, by signature: a holder sees each descriptor at OFFER and again
 // at STORE, so the second check is a byte compare, not an Ed25519 verify. Only the exact
@@ -235,7 +235,7 @@ async function verifyEnv(env, via) {
   if (seen && bytesEqual(seen, env)) return true;
   // The seam's argument IS the envelope — [pk 32][sig 64][msg] concatenated is
   // `env` itself, so it is passed whole, uncopied.
-  const v = await via("node/verify", env, 1);
+  const v = await via("identity/verify", env, 1);
   if (v[0] !== 1) return false;
   verified.set(sig, env.slice());
   if (verified.size > VERIFIED_MAX) verified.delete(verified.keys().next().value);

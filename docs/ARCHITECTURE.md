@@ -58,8 +58,8 @@ the descriptor's author in the hash (§4.2):
 `SHA-256("seedstore:block\0" ‖ authorPk[32] ‖ ciphertext)`. Key-sealing lives host-side
 in `host/crypto.ts`.
 
-**Signatures are scoped.** The guest signs with `node/sign` and verifies with
-`node/verify`, which the host scopes to the bundle's `app` label (seedkernel §12.2), and
+**Signatures are scoped.** The guest signs with `identity/sign` and verifies with
+`identity/verify`, which the host scopes to the bundle's `app` label (seedkernel §12.2), and
 the host-side mirror in `descriptor.ts` uses the same two names. Each signed format opens
 with its own tag: `TAG_DESCRIPTOR = 0x01`, with `0x02` (tombstone) and `0x03` (head)
 reserved for Part II. A holder sees each descriptor at OFFER and again at STORE, so it
