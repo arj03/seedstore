@@ -328,8 +328,8 @@ export class StorageNode {
 
   // ── PUT / GET / repair / share — all local ops through the load's handle ─────
 
-  /** Serialize initiator ops: each call to this app's one entrypoint (`handle`,
-   *  seedkernel §12.2) awaits the previous before running through `this.handle`. */
+  /** Serialize initiator ops: each call to this app's host entrypoint (`onHost`,
+   *  seedkernel §12.3) awaits the previous before running through `this.handle`. */
   private runExclusive<T>(body: () => Promise<T>): Promise<T> {
     if (this.closed) return Promise.reject(new Error("storage node closed"));
     const p = this.inFlight.then(body);

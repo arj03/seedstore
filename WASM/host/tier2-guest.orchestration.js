@@ -5,7 +5,7 @@
 // crypto, fs and node calls within the same one.
 //
 // Both roles (initiator and holder) share this one realm/entrypoint (`handle`,
-// split by `callerOf`/`readOp`); the realm's per-realm FIFO (seedkernel
+// split by `readOp`); the realm's per-realm FIFO (seedkernel
 // realm-queue.ts) keeps them from interleaving.
 //
 // A plain script (no imports/exports/ambient authority), prepended with `APP`/`LOCAL`
@@ -15,7 +15,7 @@
 "use strict";
 
 // ── byte helpers ────────────────────────────────────────────────────────────
-// toHex/fromHex/bytesEqual/concatBytes/writeU32BE/readU32BE/writeU64BE/callerOf/readOp/writeOp are stitched
+// toHex/fromHex/bytesEqual/concatBytes/writeU32BE/readU32BE/writeU64BE/readOp/writeOp are stitched
 // in from host/util.ts by scripts/build-guest.mjs. Short local aliases for this body.
 const concat = concatBytes, wU32 = writeU32BE, rU32 = readU32BE;
 // Views, not copies: every consumer of a block (a frame, a hash or AEAD request) copies it anyway.
@@ -2311,19 +2311,14 @@ async function serveFetch(ids) {
 // from the shared host/protocol.ts — the holder admits over the same §18 format the
 // initiator speaks, by construction.
 
-// The one entrypoint, declared top-level: the host invokes `handle` with
-// `[caller 32][body …]` and nothing else (seedkernel §12.2). A peer's control message
-// is `[type u8][payload]`; a STORE batch's writes overlap, its quota and sibling
-// reservations already taken atomically in admitBatch.
-async function handle(arg) {
-  // The host's part of the argument is exactly the 32-byte caller; everything
-  // after it is THIS app's own shape (util.ts `callerOf`/`readOp`) - the same shape
-  // the host-side `invoke` uses.
-  const { fromHost, caller, body } = callerOf(arg);
-  await ensureRestored(fromHost ? call : holderCall); // the saved ledger, before anything reads it
-  // The host's loopback (caller = 32 zero bytes) drives the initiator ops; a peer's
-  // frame carries a MsgType byte instead of an op name, and the caller id tells them apart.
-  if (fromHost) {
+// The entrypoints, declared top-level, one per kind of caller (seedkernel §12.3). The host
+// drives the initiator ops at onHost, each body THIS app's own op framing (`readOp`), the
+// same shape the host-side `invoke` uses. A peer's control message reaches onPeer as
+// `[type u8][payload]`; a STORE batch's writes overlap, its quota and sibling reservations
+// already taken atomically in admitBatch. No app reaches this guest: it claims no service.
+async function onHost(body) {
+  await ensureRestored(call); // the saved ledger, before anything reads it
+  {
     const { op, args: payload } = readOp(body);
     switch (op) {
       case Op.PUT: return doPut(payload);
@@ -2347,8 +2342,12 @@ async function handle(arg) {
       default: return EMPTY;
     }
   }
-  // A peer's wire frame: answer it, timing + counting it as holder work (the
-  // `recv*` half of the STATS op, since the host has no inbound seam of its own).
+}
+
+// A peer's wire frame: answer it, timing + counting it as holder work (the `recv*` half of
+// the STATS op, since the host has no inbound seam of its own).
+async function onPeer(caller, body) {
+  await ensureRestored(holderCall); // the saved ledger, before anything reads it
   const type = body[0], payload = body.subarray(1); // a view — the decoders below own no bytes
   // A link is not membership (§5.1): a peer in none of this node's groups learns nothing,
   // not even what it holds, and an empty answer is what a turned-away request gets.

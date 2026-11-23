@@ -156,8 +156,9 @@ than a slow one) fails. A holder counts as live for every block it advertises wh
 last pass is fresh, so a pass costs about 2 fetches per chunk once the cohort is verified.
 Heal then fetches only the blocks it copies or decodes from.
 
-**One realm.** The initiator and holder sides share one confined realm and its one
-`handle` entrypoint, which runs one invocation at a time (seedkernel §12.3). So when an
+**One realm.** The initiator and holder sides share one confined realm: the host drives
+the initiator at `onHost`, and peers reach the holder at `onPeer`. The realm runs one
+invocation at a time (seedkernel §12.3). So when an
 initiator is parked on an `await`, an inbound request queues behind it. That costs latency
 on a busy node, but it never affects correctness.
 
