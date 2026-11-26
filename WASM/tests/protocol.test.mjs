@@ -11,7 +11,7 @@ import {
   encodeFetchBatchReq, decodeFetchBatchReq, encodeFetchBatchRes, decodeFetchBatchRes,
   FETCH_UNANSWERED, MsgType,
   VERDICT_ACCEPTED, VERDICT_DECLINED, VERDICT_QUOTA, VERDICT_SIBLING, VERDICT_DESCRIPTOR, VERDICT_ALLOWANCE,
-  VERDICT_NOT_AUTHOR, encodeRepairReq,
+  VERDICT_NOT_AUTHOR, encodeRepairReq, encodeGroups, decodeGroups,
 } from "../build/host/protocol.js";
 import { TIER_CACHE, TIER_COMMITTED, encodeStoreTag } from "../build/host/store-record.js";
 import { signDescriptor } from "../build/host/descriptor.js";
@@ -42,6 +42,22 @@ function bytes(n, seed) {
 
 export async function run(t) {
   const authTag = () => new Uint8Array(16);
+  t.group("a node's groups round-trip Op.GROUPS, with current and retired keys (§5.1)");
+  {
+    const k1 = "01".repeat(32), k2 = "02".repeat(32), k3 = "03".repeat(32), id = "ab".repeat(32);
+    const back = decodeGroups(encodeGroups({ friends: [k1, k2], [id]: { keys: [k2], retired: [k1, k3] } }));
+    t.eq([...back.get("friends").keys].join(), [k1, k2].join(), "a group given as keys alone keeps them as its current keys");
+    t.eq(back.get("friends").retired.size, 0, "and has no retired keys");
+    t.eq([...back.get(id).keys].join(), k2, "a 64-character name carries its current keys");
+    t.eq([...back.get(id).retired].join(), [k1, k3].join(), "and its retired keys");
+    let err = null;
+    try { decodeGroups(encodeGroups({ x: [k1] }).subarray(0, 30)); } catch (x) { err = x; }
+    t.ok(err && /truncated/.test(err.message), "a cut-off encoding is refused");
+    err = null;
+    try { encodeGroups({ ["a".repeat(65)]: [k1] }); } catch (x) { err = x; }
+    t.ok(err !== null, "a name of 65 characters is refused");
+  }
+
   t.group("OFFER batch + accept-mask round-trip the wire");
   {
     const offers = [

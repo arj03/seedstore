@@ -18,7 +18,7 @@ export function peerSpecs(arg, relay) {
 /**
  * `sodium` is the shell's crypto (seedkernel-wasm `loadCrypto`, which p2p-cli wraps to time
  * the record layer). `dir` keeps the store on disk, in memory when omitted. `peers` are
- * specs (`peerSpecs`); with `group`, the roster is that group of this node and them.
+ * specs (`peerSpecs`); with `group`, this node's groups are that one group of this node and them.
  * Resolves once every peer linked or `readyMs` passed: `peers` are their ids, `linked`
  * those up.
  */

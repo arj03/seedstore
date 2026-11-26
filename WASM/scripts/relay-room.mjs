@@ -6,7 +6,7 @@ import { roomClient, roomSecret } from "../../../seedrelay/rooms.mjs";
 import { netAddr, netReady, netRelay, netSecrets, netTell } from "../build/host/storage-node.js";
 import { toHex } from "../build/host/util.js";
 
-/** The roster a room implies: one group, `name`, of this node and every member it has met
+/** The groups a room implies: one group, `name`, of this node and every member it has met
  *  there, kept on `node` as they appear. Pass the answer as joinRelayRoom's `onMember`. The
  *  room's contact secret is what gates who can be met. */
 export function roomGroup(node, name) {

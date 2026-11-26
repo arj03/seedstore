@@ -148,7 +148,7 @@ bundle's signed defaults. Every key is optional.
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `quota` | none | Bytes this node stores for others. Without it a `seedkernel` node stores nothing; the scripts' nodes default to 64 MiB. |
-| `groups` | `{}` | Named groups of peer keys (hex), `{ "cohort": ["<key>", …] }`. A node stores for and answers only these peers, and a PUT goes into one group. |
+| `groups` | `{}` | Named groups of peer keys (hex), `{ "cohort": ["<key>", …] }`. A node stores for and answers only these peers, and a PUT goes into one group. A group can also retire keys, `{ "cohort": { "keys": [...], "retired": [...] } }`: a retired key can no longer send or place anything, but the files it put are still kept and repaired. |
 | `newcomerShare` | `0.5` | The share of `quota` an author with no standing here may fill. `1` turns the allowance off, for one person's own devices. |
 | `k`, `m` | `2`, `2` | The Reed–Solomon geometry of new files. Each chunk records its own, so readers and repairers need no config. |
 | `blockSize` | 524288 | Bytes per block. A file's last chunk uses smaller blocks. |
@@ -202,7 +202,7 @@ const got = await nodes[0].get(put.root, put.key);
 ```
 
 `LoopbackNetwork` runs the real transport bundle over in-memory channel pairs, so an
-in-process cohort exercises the shipped stack. A node's roster is `groups` at boot, or
+in-process cohort exercises the shipped stack. A node's groups are `groups` at boot, or
 `setGroups` later, and a PUT into one of several names it: `put(data, { group })`.
 
 ## Scripts

@@ -130,7 +130,7 @@ export function assertStorageConfig(config?: Partial<StorageConfig>): void {
   for (const key of Object.keys(config)) {
     if (CONFIG_KEYS.has(key)) continue;
     if (key === "groups") {
-      throw new Error("StorageConfig has no `groups`: the roster is operator policy, passed as the sibling " +
+      throw new Error("StorageConfig has no `groups`: the groups are operator policy, passed as the sibling " +
         "option `groups` on StorageNode.create({ groups }), or set later with setGroups.");
     }
     if (key === "quota") {

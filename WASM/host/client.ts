@@ -87,7 +87,7 @@ export class StoreClient {
     return this.json<Holdings>(Op.HOLDINGS);
   }
 
-  /** Ask the node's roster now which blocks of one file, or of every file, they have. */
+  /** Ask every current key of the node's groups now which blocks of one file, or of every file, they have. */
   async probe(root?: Uint8Array): Promise<Probe> {
     return this.json<Probe>(Op.PROBE, root);
   }

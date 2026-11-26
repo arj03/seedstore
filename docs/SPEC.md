@@ -22,7 +22,7 @@ Seedkernel routes a wire protocol id to one bundle's confined guest over an encr
 
 - **No new host concepts.** Storage is one signed bundle (pure-transform WASM modules plus a confined guest) and six request/response messages (§18), gated by the channel that already pins every peer and the policy that already admits every bundle.
 - **Integrity comes from content addressing, not signatures.** A block either hashes to its name or is discarded, so bulk transfer needs no per-message verification (§3).
-- **Identity comes from the channel.** A peer *is* the node public key its authenticated channel pinned (§2). Nothing is signed to establish it.
+- **Identity comes from the channel.** A peer *is* the node public key its authenticated channel pinned (§2). Nothing is signed to establish it. Storage knows peers only by key; who a key belongs to is for whatever keeps the groups (§5.1).
 - **Redundancy is erasure coding, not replication.** Any *k* of *n* blocks reconstruct a chunk (§4.1).
 - **Placement is by relationship, not global address.** Blocks live on cohort peers chosen by negotiation, and who holds what is discovered live. There is no global index, by design (§5).
 - **Confidentiality is structural.** The wire is encrypted, stored data is encrypted so holders see only ciphertext (§4.4), and no directory maps content to holders.
@@ -170,8 +170,8 @@ descriptor D:
                        //   config and readers never disagree with writers
   tail_bytes           // how many of the chunk's k×B plaintext bytes are real; the rest is
                        //   zero padding. A reader trims each chunk by its own signed number.
-  group                // the group the author placed the file in (§5.1), 1–32 ASCII characters;
-                       //   every holder reads it against its own roster
+  group                // the group the author placed the file in (§5.1), 1–64 ASCII characters;
+                       //   every holder reads it against its own keys for that group
   auth_tag             // the chunk's detached AES-256-GCM tag (§4.4)
   block_ids[0..n)      // ALWAYS n = k + m. Coded: 0..k data, k..n parity, one per peer.
                        //   k = 1: the same id listed m+1 times, one per peer (§4.1).
@@ -181,10 +181,12 @@ signed by the file's author
 **Admission checks.** Before accepting a block, a peer verifies three things about its descriptor:
 
 1. The author's signature is valid, over the scoped, tag-led preimage of §16.
-2. **The signing key, and the peer placing the block, are members of the group the descriptor names, in the holder's own roster** (§5.1).
+2. **The signing key is a current or retired key of the group the descriptor names, and the peer placing the block is a current key of it**, in the holder's own groups (§5.1).
 3. The block's own `block_id` is in `block_ids`.
 
-The second check is what makes the first mean anything. The envelope carries the author's public key inside itself, so a signature checked against that key alone proves only that somebody held *some* private key: any cohort peer could mint a fresh keypair, self-sign a descriptor with a truncated sibling list, and concentrate a chunk on itself. Anchoring the author to a group member costs nothing and makes a forgery **attributable**, which is reciprocity's job (§13). The price is that a group is mutual: a writer must be in its holders' rosters under the group it names, and a peer dropped from the roster can no longer have its files repaired.
+The second check is what makes the first mean anything. The envelope carries the author's public key inside itself, so a signature checked against that key alone proves only that somebody held *some* private key: any cohort peer could mint a fresh keypair, self-sign a descriptor with a truncated sibling list, and concentrate a chunk on itself. Anchoring the author to a group's key costs nothing and makes a forgery **attributable**, which is reciprocity's job (§13). The price is that a group is mutual: a writer's key must be in the group it names at its holders, and a key removed from the group can no longer have its files repaired. A retired key keeps them.
+
+**A retired key places nothing new.** `offer` and `store` come only from the chunk's author (§18), so on a placement the author is the sender, and new data can be placed only by a current key. Repair still accepts chunks a retired key authored, because its sender is the repairing peer, which sends with its own current key. So retiring a stolen or replaced key stops it at once at every holder that has the change, without losing what it stored before. Until a holder's groups retire it, the key still counts there as current (§28).
 
 A block that fails any check is rejected. The descriptor is therefore **mandatory on every placement message** (§18). Otherwise any cohort peer could put arbitrary bytes on a holder while sidestepping these checks and the sibling rule (§6). The descriptor's signed `B` is also what a holder charges against its quota (§14).
 
@@ -238,11 +240,13 @@ Two questions need answers (*which peers should hold a block?* and *who holds it
 
 A node keeps connections to a **bounded set of peers it has a relationship with**: direct contacts plus, optionally, a hop or two out. There is no global index or routing table, and nothing about who holds what exists outside your cohort. New peers join the way Scuttlebutt peers do, by introduction or through a rendezvous point. Cohorts are tens to low hundreds of peers, which keeps every operation here cheap.
 
-**The cohort is a roster of named groups**, kept by each node: say `mine` for one person's devices and `friends` for a circle of friends, each a list of member keys. The cohort is every member of every group, and nobody else: an authenticated link alone admits nothing, and a node answers no request from a peer outside its roster. The roster is dynamic. Whatever keeps it, the operator or a separate groups app, replaces it whole at any time, and the next request is judged by the new one. Who may link at all stays the transport's own setting.
+**The cohort is a set of named groups of keys**, kept by each node: say `mine` for one person's devices and `friends` for a circle of friends. A group has **current keys**, which may send, place data and author chunks, and **retired keys**, which may do none of that, but whose chunks are still kept and repaired. The cohort is every current key of every group, and nobody else: an authenticated link alone admits nothing, and a node answers no request from a peer that is not a current key in its groups. The groups are dynamic. Whatever keeps them replaces them whole at any time, and the next request is judged by the new ones. Who may link at all stays the transport's own setting.
 
-- **A file lives in one group.** A PUT names the group, the descriptor signs its name (§4.3), and its blocks are placed on that group's members only. A holder stores a chunk only if it lists both the author and the placer under that name.
-- **Goodwill is per group** (§13). Standing a peer earns by serving one group's chunks counts in that group and no other, and so does the allowance it buys (§13.2). Being a reliable friend earns nothing among someone's own devices, and the reverse.
-- **Names are local.** Each node keeps its own member list per name, so `friends` means whoever this node lists as friends. Two nodes cooperate on a group when each lists the other under the same name.
+**Storage knows only keys.** Whatever keeps the groups decides who is in them and why: an operator typing keys, or an app that names people by something that outlives a key, which hands storage that person's current key and the keys it had before as retired ones. Storage makes no call to it, and cannot tell the two apart. Retiring a key rather than removing it is how a lost or replaced device's files stay alive (§4.3).
+
+- **A file lives in one group.** A PUT names the group, the descriptor signs its name (§4.3), and its blocks are placed on that group's current keys only. A holder stores a chunk only if the placer is a current key under that name and the author a current or retired one.
+- **Goodwill is per group** (§13). Standing a peer earns by serving one group's chunks counts in that group and no other, and so does the allowance it buys (§13.2). Being a reliable friend earns nothing among someone's own devices, and the reverse. Standing belongs to a key, so a replacement key starts with none.
+- **Names are local.** Each node keeps its own keys per name, so `friends` means whoever this node lists as friends. Two nodes cooperate on a group when each lists the other under the same name. A name is up to 64 characters, so whatever keeps the groups can use an id that is the same on every node, such as a 32-byte id in hex.
 
 ### 5.2 Have/want is the whole discovery layer
 
@@ -532,7 +536,7 @@ Every storage message is a request/response between two cohort peers on the auth
 | `repair` | one block to rebuild: the chunk's **signed descriptor**, the `block_id` wanted, the chunk's dependable margin, and who holds which blocks now (§9) | one **verdict** byte, the codes of `offer`. Accepted is a promise to fetch, rebuild, verify and store the block. |
 | `repair-fetch` | a `fetch` made while repairing a chunk, led by that chunk's key (its descriptor signature) | as `fetch`. Serving it tells the holder the chunk is being repaired, which defers the holder's own request for one window at most (§9). |
 
-`offer` and `store` are accepted only from the chunk's author: they are how an author places its own data. Their verdicts add 5 = holder error, 6 = over the author's allowance, 7 = not in the chunk's group (§5.1) and 8 = not the author.
+`offer` and `store` are accepted only from the chunk's author, sending with a current key of the chunk's group: they are how an author places its own data. Their verdicts add 5 = holder error, 6 = over the author's allowance, 7 = not in the chunk's group (§5.1) and 8 = not the author.
 
 PUT and GET are not messages; they are the coordinator's local API, and it speaks only these six to the cohort. Repair runs on `have`, `fetch`, `repair` and `repair-fetch` (§9). The optional verifiable-reputation layer (§20) adds `proof.challenge` / `proof.receipt` and `rep.gossip`, and the optional tombstone layer (§25) adds its signed tombstone; the base protocol uses none of them.
 
@@ -694,7 +698,7 @@ file head (signed by the owner, the §2 identity):
   seq            // monotonic per (signer, file_id)
 ```
 
-Replay protection is the head's own `seq`, the first per-signer sequence in the design (§17): the highest `seq` from the file's author wins, and a stale or replayed head is dropped. The head is small, signed, and replicated through the cohort like any other control message; resolving a file becomes one extra hop (head → root) before the §7 GET.
+Replay protection is the head's own `seq`, the first per-signer sequence in the design (§17): the highest `seq` from the file's author wins, and a stale or replayed head is dropped. A head belongs to the key that signs it, so an author that moves to a new key starts new heads under it, and a retired key's heads stay as they were. The head is small, signed, and replicated through the cohort like any other control message; resolving a file becomes one extra hop (head → root) before the §7 GET.
 
 **Single-writer is the easy case** (your own files across your own devices, or one owner per file), and it is all this extension covers. **Concurrent multi-writer editing is a different problem** this design does not solve: two heads at the same `seq` are a genuine conflict, and reconciling them needs last-writer-wins, a merge policy, or a CRDT over the file's index. Keep mutable files single-author unless you are prepared to build that.
 
@@ -713,6 +717,7 @@ Old versions are not deleted; they are **no longer pointed at**. Each prior root
 - **Grace window `G` and liveness cadence**: set so ordinary offline patterns (overnight, commute, reboot) never trigger repair, but real departures do within a bounded time. Too short causes churn storms; too long slows healing. This includes how often, and how widely, to sample verification-fetches (§8).
 - **Repair jitter**: trades healing speed against repair traffic and duplicate repair. (The low-water mark is *not* a separate knob: it is `⌈m/2⌉` of the margin each chunk's descriptor signs, §8–§9, so it moves with `(k, m)` and cannot drift out of step with the geometry it guards.)
 - **Cohort uptime**: the load-bearing durability decision (§9). Each chunk's holders should include at least one well-connected, long-lived peer so repair can always run.
+- **Retiring a key across holders**: until a holder's groups retire a key, it still counts there as current, so a thief holding it can still place data with that holder. How quickly whatever keeps the groups hands storage the change bounds that window (§4.3, §5.1).
 - **Reciprocity decay and weighting**: the half-life of the local score, and how strongly to net give against take (§13).
 - **Committed/cache split and eviction weights**: how much quota a node reserves for commitments versus opportunistic cache, and the weighting of the eviction score (§14).
 - **Tombstone retention** (with §25 enabled): how long a holder keeps a tombstone after the referenced blocks are gone.

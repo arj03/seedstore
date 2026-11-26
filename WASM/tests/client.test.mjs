@@ -1,5 +1,5 @@
 // The client surface (SPEC §18.1): the read-only ops answer from the guest's own state —
-// its files, the ledger in memory, its store index, and a live HAVE to its roster — and
+// its files, the ledger in memory, its store index, and a live HAVE to its groups — and
 // the token carries a file between nodes.
 
 import { loadSodium, loadWasmBytes, LoopbackNetwork, createConnectedCohort, toHex } from "../build/host/node.js";

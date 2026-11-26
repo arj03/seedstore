@@ -12,7 +12,7 @@ import {
   LoopbackNetwork, loadWasmBytes, loadSodium, createConnectedCohort, StorageNode,
   bootStorageNode, inProcessStandUp, inProcessHost,
 } from "../build/host/node.js";
-import { encodeFetchBatchReq, decodeFetchBatchRes, encodeStoreBatch, encodeHaveReq, decodeMask, FETCH_UNANSWERED, VERDICT_ACCEPTED, VERDICT_DECLINED, VERDICT_QUOTA, VERDICT_SIBLING, VERDICT_DESCRIPTOR, VERDICT_GROUP, MsgType } from "../build/host/protocol.js";
+import { encodeFetchBatchReq, decodeFetchBatchRes, encodeStoreBatch, encodeHaveReq, decodeMask, FETCH_UNANSWERED, VERDICT_ACCEPTED, VERDICT_DECLINED, VERDICT_QUOTA, VERDICT_SIBLING, VERDICT_DESCRIPTOR, VERDICT_GROUP, VERDICT_NOT_AUTHOR, MsgType, encodeRepairReq } from "../build/host/protocol.js";
 import { parseSignedDescriptor, signDescriptor, encodeDescriptorList } from "../build/host/descriptor.js";
 import { memoryRawFiles } from "seedkernel-wasm/fs-memory";
 import { toHex, fromHex, bytesEqual } from "../build/host/util.js";
@@ -670,7 +670,7 @@ export async function run(t) {
     } finally { nodes.forEach((n) => n.close()); }
   }
 
-  t.group("a linked peer outside the roster is answered nothing, and the roster changes at runtime (§5.1)");
+  t.group("a linked peer outside the groups is answered nothing, and the groups change at runtime (§5.1)");
   {
     const net = new LoopbackNetwork();
     // Four linked nodes, three of them a group: a link alone admits nothing.
@@ -689,6 +689,41 @@ export async function run(t) {
       await b.setGroups({ cohort: [a.peerId, b.peerId, c.peerId] });
       t.eq(await have(), 0, "and once b drops it again, b goes quiet");
     } finally { [a, b, c, stranger].forEach((n) => n.close()); net.close(); }
+  }
+
+  t.group("a retired key places nothing new, but its chunks are still repaired (§4.3, §5.1)");
+  {
+    const net = new LoopbackNetwork();
+    const cfg = { k: 1, m: 1, blockSize: 1024 };
+    const name = "ab".repeat(32); // 64 characters: a 32-byte id in hex
+    const nodes = await createConnectedCohort({ suppressLinkLog: true, count: 3, network: net, sodium, wasm, config: cfg, timeoutMs: TIMEOUT,
+      groups: (ids) => ({ [name]: ids }) });
+    const [a, b, c] = nodes;
+    try {
+      const put = await a.put(file(2048, 95));
+      t.ok(bytesEqual(await a.get(put.root, put.key), file(2048, 95)), "a group named by a 64-character id stores and reads");
+
+      // A chunk a authored, which b is asked to keep after a's key is retired.
+      const bytes = file(1024, 96);
+      const id = oracle.blockId(a.identity.publicKey, bytes);
+      const env = signDescriptor(sodium, { group: name, level: 0, k: 1, m: 0, blockSize: 1024, tailBytes: 1024, authTag: new Uint8Array(16), blockIds: [id] },
+        a.identity.publicKey, a.identity.privateKey);
+      const store = (from) => from.request(b.peerId, typed(MsgType.STORE, encodeStoreBatch([{ blockId: id, descriptor: env, bytes }])));
+      const repair = async (from) => decodeMask(await from.request(b.peerId,
+        typed(MsgType.REPAIR, encodeRepairReq({ descriptor: env, target: id, margin: 0, hints: [] }))))[0];
+
+      await b.setGroups({ [name]: { keys: [b.peerId, c.peerId], retired: [a.peerId] } });
+      t.eq((await store(a)).length, 0, "a retired key is answered nothing, so it places nothing new");
+      t.eq(decodeMask(await store(c))[0], VERDICT_NOT_AUTHOR, "nor can a current key place a chunk the retired key authored");
+      t.eq(await repair(c), VERDICT_ACCEPTED, "but a repair of a chunk the retired key authored is accepted");
+
+      await b.setGroups({ [name]: [b.peerId, c.peerId] });
+      t.eq(await repair(c), VERDICT_GROUP, "once the key is removed rather than retired, its chunks are no longer repaired");
+
+      let err = null;
+      try { await b.setGroups({ [name]: { keys: [b.peerId], retired: [b.peerId] } }); } catch (x) { err = x; }
+      t.ok(err && /both current and retired/.test(err.message), "a key cannot be both current and retired");
+    } finally { nodes.forEach((n) => n.close()); net.close(); }
   }
 
   t.group("a PUT stays inside its group, and goodwill earned in one group counts only there (§5.1, §13)");

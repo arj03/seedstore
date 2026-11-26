@@ -37,7 +37,7 @@ and [CLIENT](https://github.com/arj03/seedkernel/blob/main/docs/CLIENT.md).
 | --- | --- | --- |
 | GF(2⁸) + systematic Reed–Solomon encode/decode | `assembly/codec/`, which is WASM with no grants, called as `host.call("codec", …)` | §4.1, §9 |
 | Decayed per-peer reciprocity counters | `assembly/reputation/`, which is WASM with no grants | §13 |
-| The whole protocol: PUT/GET, the index tree, placement, have/want, repair (auditing, asking, and rebuilding what this node agreed to), and the holder side (the roster, admission, sibling rule, quota, allowance, tiers, eviction, store writes) | `host/tier2-guest.orchestration.js`, assembled with the shared cores into `build/host/tier2-guest.js` by `scripts/build-guest.mjs` | §5–§10, §14 |
+| The whole protocol: PUT/GET, the index tree, placement, have/want, repair (auditing, asking, and rebuilding what this node agreed to), and the holder side (the groups, admission, sibling rule, quota, allowance, tiers, eviction, store writes) | `host/tier2-guest.orchestration.js`, assembled with the shared cores into `build/host/tier2-guest.js` by `scripts/build-guest.mjs` | §5–§10, §14 |
 | Wire format for HAVE/OFFER/STORE/FETCH | `host/protocol.ts` (shared with the guest) | §18 |
 | Descriptor layout, tags, copy targets, loss margin | `host/descriptor-core.ts` (shared with the guest) | §4.1, §4.3, §8 |
 | The holder's record, tag and saved index | `host/store-record.ts` (shared with the guest) | §12 |
@@ -107,14 +107,17 @@ the last one stopped, so a large store is audited over several passes. STORE and
 are accepted only from the chunk's author, so nobody pushes bytes onto a holder for
 someone else.
 
-**Groups (§5.1).** Each node keeps a roster of named groups, operator policy like the
-quota: `groups` at boot, `setGroups` later. A node answers nothing to a peer outside it. A
-PUT names one group and signs the name into every descriptor, its blocks go only to that
-group's linked members, and a holder admits a block only if it lists both the author and
-the sender under that name (`not-in-group` otherwise). Standing is kept per (group, peer):
-a peer's service counts in the group of the chunk it served. The roster is dynamic:
-`setGroups` (the guest's `groups` op) replaces it whole, and the next request reads the
-new one, so a separate groups app can keep it.
+**Groups (§5.1).** Each node keeps named groups of keys, operator policy like the quota:
+`groups` at boot, `setGroups` later. A group is its current keys, or `{ keys, retired }`.
+A node answers nothing to a peer that is not a current key. A PUT names one group and signs
+the name into every descriptor, its blocks go only to that group's linked current keys, and
+a holder admits a block only if the sender is a current key under that name and the author
+a current or retired one (`not-in-group` otherwise). OFFER and STORE also need the author to
+be the sender, so a retired key places nothing new while its chunks are still repaired.
+Standing is kept per (group, peer): a peer's service counts in the group of the chunk it
+served. The groups are dynamic: `setGroups` (the guest's `groups` op) replaces them whole,
+and the next request reads the new ones, so something other than the operator can keep
+them. A name is up to 64 characters, which fits a 32-byte id in hex.
 
 ## The ledger (§13)
 
@@ -171,10 +174,10 @@ on a busy node, but it never affects correctness.
 | `codec` | any-*k*-of-*n* recovery across every loss pattern, deterministic encode, systematic pass-through, block-id ≡ libsodium, byte-identical re-encode |
 | `bridges` | the host crypto primitives |
 | `descriptor` | descriptor round trips, tamper evidence under the scoped signature, index-list encryption, multiplicity as the replica count, loss margin |
-| `protocol` | batched OFFER/STORE/FETCH encoding; batch-wide sibling, quota and newcomer-allowance rules; a STORE evicts cache, never a commitment; a missing, forged, foreign or mismatched descriptor is declined; concurrent STOREs can't race a sibling reservation |
+| `protocol` | batched OFFER/STORE/FETCH encoding; groups with current and retired keys round-trip, and a 65-character name is refused; batch-wide sibling, quota and newcomer-allowance rules; a STORE evicts cache, never a commitment; a missing, forged, foreign or mismatched descriptor is declined; concurrent STOREs can't race a sibling reservation |
 | `reputation` | passes raise the score, misses penalize it, scores decay |
 | `ledger` | a chunk counting only dependable copies, ranking by reliability × availability, repairs most urgent first, the allowance netted against what an author holds for the holder |
-| `storage` | multi-node PUT→GET, small-file replication and short blocks, offline tolerance, repair (including mixed geometry), groups (strangers refused, placement inside a group, per-group standing), sampled audits, a holder advertising what it cannot serve, cache demotion and re-promotion, graceful release over quota, key sharing, crypto-shredding, reciprocity |
+| `storage` | multi-node PUT→GET, small-file replication and short blocks, offline tolerance, repair (including mixed geometry), groups (strangers refused, placement inside a group, per-group standing, a retired key places nothing new while its chunks are still repaired, 64-character names), sampled audits, a holder advertising what it cannot serve, cache demotion and re-promotion, graceful release over quota, key sharing, crypto-shredding, reciprocity |
 | `security` | a peer can't claim another author's block ids, roots are authenticated before use, a reused signature over a changed descriptor is refused, malformed holder responses can't abort GET or repair, a third party cannot push an author's block, a late verification answer is not live, FETCH reply bounds |
 | `concurrency` | round-trip economy over a latency-bearing link, asserted as request counts |
 | `net` | the store persisting across a cold reopen, a restart from the saved index, a cohort over real TCP, a browser-like node over real WebSocket |

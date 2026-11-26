@@ -94,7 +94,7 @@ export function plantBlock(fs, idHex, bytes, descriptor, tier = TIER_COMMITTED) 
   fs.put(idHex + STORE_REC, concatBytes([storeRecordHead(descriptor.length), descriptor, bytes]));
 }
 
-/** Put `nodes` in one group, `name`, after they booted without a roster. */
+/** Put `nodes` in one group, `name`, after they booted without groups. */
 export async function joinGroup(nodes, name = "cohort") {
   const groups = { [name]: nodes.map((n) => n.peerId) };
   await Promise.all(nodes.map((n) => n.setGroups(groups)));

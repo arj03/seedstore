@@ -14,9 +14,9 @@ import {
   type Identity, type PeerId, type StorageConfig, defaultConfig, assertStorageConfig, normaliseConfig, DEFAULT_QUOTA_BYTES,
   TEST_BLOCK_SIZE, NET_SERVICE,
 } from "./core.js";
-import { Op, decodeStats, encodeGroups, type Groups, type PutResult, type RequestStats } from "./protocol.js";
+import { Op, decodeStats, encodeGroups, groupKeySets, type Groups, type PutResult, type RequestStats } from "./protocol.js";
 import { StoreClient } from "./client.js";
-import { groupBytes, validGroupName } from "./descriptor-core.js";
+import { GROUP_MAX, groupBytes, validGroupName } from "./descriptor-core.js";
 import { toHex, fromHex, readU32BE, concatBytes } from "./util.js";
 import { parseDest } from "seedkernel-wasm/peer-addr";
 import type { Sodium } from "./sodium.js";
@@ -192,10 +192,11 @@ export interface StorageNodeOptions {
   config?: Partial<StorageConfig>;
   store?: BlobView;
   quota?: number;
-  /** This node's groups (§5.1): name → member keys as hex. Every member of every group is
-   *  its cohort, and a chunk is stored only among its own group. Operator policy, like
-   *  `quota`, so it is never signed. Omitted ⇒ no groups: the node stores for nobody and
-   *  answers nobody until `setGroups`. */
+  /** This node's groups (§5.1): name → keys as hex, either the current keys alone or
+   *  `{ keys, retired }`. Every current key of every group is its cohort, a chunk is stored
+   *  only among its own group, and a retired key's chunks are still kept and repaired.
+   *  Operator policy, like `quota`, so it is never signed. Omitted ⇒ no groups: the node
+   *  stores for nobody and answers nobody until `setGroups`. */
   groups?: Groups;
   /** The realm's invocation budget (seedkernel §12.3): queue wait + guest execution +
    *  a deferred answer. A DIFFERENT clock from the transport's `timeoutMs`, the
@@ -218,7 +219,7 @@ export class StorageNode {
   readonly fs: Fs;
   readonly store: BlobView;
   readonly quota: number;
-  /** The roster the guest holds, as last set. */
+  /** The groups the guest holds, as last set. */
   groups: Groups;
   readonly crypto: Crypto;
   readonly sodium: Sodium;
@@ -344,8 +345,8 @@ export class StorageNode {
   }
 
   /** Replace this node's groups (§5.1), whole, at any time: the next request, admission
-   *  and placement read the new roster. Whatever keeps the roster (an operator, or a
-   *  groups app) drives it through here. */
+   *  and placement read the new ones. Whatever keeps the groups drives it through here:
+   *  an operator, or an app that turns its own members into current and retired keys. */
   async setGroups(groups: Groups): Promise<void> {
     const checked = checkGroups(groups);
     await this.runExclusive(() => this.invoke(Op.GROUPS, encodeGroups(checked)));
@@ -467,20 +468,29 @@ function localConfigFor(opts: StorageNodeOptions): LocalConfig {
   return { guest: { ...guest, quota: opts.quota ?? DEFAULT_QUOTA_BYTES, groups: checkGroups(opts.groups ?? {}) }, realmMemoryBytes };
 }
 
-/** A roster with valid names and lowercase 64-hex keys, each listed once. */
+/** Groups with valid names and lowercase 64-hex keys, each listed once, and no key both
+ *  current and retired. A group with no retired keys comes back as its current keys alone. */
 export function checkGroups(groups: Groups): Groups {
   const out: Groups = {};
-  for (const [name, members] of Object.entries(groups)) {
-    if (!validGroupName(name)) throw new Error(`groups: "${name}" is not a group name (1-32 of A-Z a-z 0-9 . _ -)`);
-    const keys = new Set<string>();
-    for (const m of members) {
-      const key = String(m).toLowerCase();
-      if (!/^[0-9a-f]{64}$/.test(key)) throw new Error(`groups: "${m}" in ${name} is not a 64-hex-character key`);
-      keys.add(key);
-    }
-    out[name] = [...keys];
+  for (const [name, given] of Object.entries(groups)) {
+    if (!validGroupName(name)) throw new Error(`groups: "${name}" is not a group name (1-${GROUP_MAX} of A-Z a-z 0-9 . _ -)`);
+    const { keys, retired } = groupKeySets(given);
+    const current = checkKeys(keys, name), old = checkKeys(retired, name);
+    for (const k of old) if (current.includes(k)) throw new Error(`groups: ${k} in ${name} is both current and retired`);
+    out[name] = old.length === 0 ? current : { keys: current, retired: old };
   }
   return out;
+}
+
+function checkKeys(given: unknown, name: string): string[] {
+  if (!Array.isArray(given)) throw new Error(`groups: the keys of ${name} are not a list`);
+  const keys = new Set<string>();
+  for (const m of given) {
+    const key = String(m).toLowerCase();
+    if (!/^[0-9a-f]{64}$/.test(key)) throw new Error(`groups: "${m}" in ${name} is not a 64-hex-character key`);
+    keys.add(key);
+  }
+  return [...keys];
 }
 
 function soleGroup(groups: Groups): string {

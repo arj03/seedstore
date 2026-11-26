@@ -39,7 +39,7 @@ export interface Descriptor {
   m: number;            // losses this chunk survives: m parity blocks, or m extra replicas
   blockSize: number;
   tailBytes: number;    // real plaintext bytes in this chunk; the rest is zero padding
-  group: string;        // the group the author placed it in; each holder reads it against its own roster
+  group: string;        // the group the author placed it in; each holder reads it against its own groups
   authTag: Uint8Array;  // AES-256-GCM tag over this chunk's padded ciphertext
   blockIds: Uint8Array[]; // k + m ids by generator-row index; a k=1 chunk repeats its one id
 }
@@ -48,9 +48,11 @@ const FIXED_HEAD = 13; // tag,level,k,m (4) + blockSize (4) + tailBytes (4) + n 
 // The shortest core: a one-character group and no ids.
 export const MIN_CORE = FIXED_HEAD + 2 + AUTH_TAG_LEN;
 
-// A group name is local to each node's roster but travels in the signed descriptor, so it
+// A group name is local to each node's groups but travels in the signed descriptor, so it
 // is kept to a short ASCII set that encodes the same everywhere (QuickJS has no TextEncoder).
-export const GROUP_MAX = 32;
+// 64 characters fit a 32-byte id in hex, for groups kept by something that names them the
+// same on every node.
+export const GROUP_MAX = 64;
 export function validGroupName(name: unknown): name is string {
   return typeof name === "string" && name.length >= 1 && name.length <= GROUP_MAX && /^[A-Za-z0-9._-]+$/.test(name);
 }

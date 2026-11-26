@@ -399,7 +399,7 @@ function dependable(group, peerHex) { return peerHex === myPeer() || availabilit
 async function observeAvailability() {
   const linked = new Set(decodePeers(await netOp("peers", EMPTY, call)));
   const me = myPeer(), t = Date.now(), seen = [];
-  for (const [group, members] of groups) for (const p of members) if (p !== me) seen.push([group, p]);
+  for (const [group, g] of groups) for (const p of g.keys) if (p !== me) seen.push([group, p]);
   // Prune once and seat every new member first: a prune per new entry would drop the
   // others' fresh zero entries before their observations land.
   if (seen.some(([g, p]) => !availReps.has(repKey(g, p)))) {
@@ -557,21 +557,32 @@ function decodePeers(r) {
   for (let o = 0; o + 32 <= r.length; o += 32) out.push(toHex(r.slice(o, o + 32)));
   return out;
 }
-// ── the roster (§5.1) ──
-// This node's groups: name → Set of member hex, from LOCAL at boot and replaced by
-// Op.GROUPS. The cohort is every member of every group. A link alone admits nothing: a peer
-// outside the roster is answered nothing, and a chunk is stored only among its own group.
+// ── this node's groups (§5.1) ──
+// name → { keys, retired }, Sets of key hex, from LOCAL at boot and replaced by Op.GROUPS.
+// A current key may send, place data and author chunks; a retired key may only have
+// authored chunks this node still keeps and repairs. The cohort is every current key of
+// every group. A link alone admits nothing: a peer that is not a current key is answered
+// nothing, and a chunk is stored only among its own group.
 let groups = new Map();
-let rosterMembers = new Set();
-function setRoster(map) {
+let cohortKeys = new Set();
+function applyGroups(map) {
   groups = map;
-  rosterMembers = new Set();
-  for (const members of map.values()) for (const m of members) rosterMembers.add(m);
+  cohortKeys = new Set();
+  for (const g of map.values()) for (const k of g.keys) cohortKeys.add(k);
 }
-setRoster(new Map(Object.entries(LOCAL.groups ?? {}).map(([name, members]) => [name, new Set(members)])));
-function inGroup(group, peerHex) { const g = groups.get(group); return g !== undefined && g.has(peerHex); }
-// The linked peers in the roster: everyone a broadcast (have/want) may ask.
-async function cohortPeers(via) { return decodePeers(await netOp("peers", EMPTY, via)).filter((p) => rosterMembers.has(p)); }
+// LOCAL gives each group as its current keys alone, or as { keys, retired }.
+function groupsFromConfig(config) {
+  return new Map(Object.entries(config).map(([name, g]) => [name, Array.isArray(g)
+    ? { keys: new Set(g), retired: new Set() }
+    : { keys: new Set(g.keys ?? []), retired: new Set(g.retired ?? []) }]));
+}
+applyGroups(groupsFromConfig(LOCAL.groups ?? {}));
+// A current key of `group`: it may send to this node and place data in the group.
+function inGroup(group, peerHex) { const g = groups.get(group); return g !== undefined && g.keys.has(peerHex); }
+// A current or retired key of `group`: a chunk it authored is kept and repaired.
+function mayAuthor(group, keyHex) { const g = groups.get(group); return g !== undefined && (g.keys.has(keyHex) || g.retired.has(keyHex)); }
+// The linked peers that are current keys: everyone a broadcast (have/want) may ask.
+async function cohortPeers(via) { return decodePeers(await netOp("peers", EMPTY, via)).filter((p) => cohortKeys.has(p)); }
 // The linked members of one group: everyone a chunk of that group may be placed on.
 async function groupPeers(group, via) { return (await cohortPeers(via)).filter((p) => inGroup(group, p)); }
 // A ranker (§13): orders peers best-first by their standing in `group`, reliability times
@@ -697,7 +708,7 @@ async function haveWant(ids) {
 // verifyDescriptor checks the author signature AND structurally validates the core:
 // a signed-but-malformed descriptor (bad id count) is rejected rather than parsed
 // into block-ids that sidestep the §10 sibling rule. Returns the whole envelope —
-// a valid signature is only half the check; the holder's roster (admitBatch) is the other half.
+// a valid signature is only half the check; the holder's groups (admitBatch) are the other half.
 // `parsed` is the envelope's parse when the caller already has it (a STORE hashes with it).
 async function verifyDescriptor(env, via, parsed) {
   // Length-gate before the verify seam: the envelope is [pk 32][sig 64][core ≥ MIN_CORE]
@@ -849,8 +860,8 @@ const VERDICT_REASONS = {
 // and only that group's linked members are candidates. Answers the cohort size it placed across.
 async function placeChunksBatched(jobs, what, ranker) {
   const group = jobs[0].group;
-  const roster = await groupPeers(group, call);
-  const ranked = await (ranker ?? ((peers) => rank(peers, group)))(roster);
+  const members = await groupPeers(group, call);
+  const ranked = await (ranker ?? ((peers) => rank(peers, group)))(members);
   // Each job draws from the ranked cohort minus peers to avoid. PUT excludes nothing;
   // repair excludes peers already holding part of the chunk, so a restored copy lands
   // somewhere new instead of a sibling-declining or silently-overwritten holder.
@@ -960,7 +971,7 @@ async function placeChunksBatched(jobs, what, ranker) {
     }
     ch.placedIds = [...distinct].map(fromHex);  // the distinct ids that landed, for the PUT result
   }
-  return roster.length;
+  return members.length;
 }
 // Run a windowed batched FETCH over a peer→[idHex] plan: self reads the local store,
 // other holders fan out fanoutWindow() FETCH messages at a time. Every block is
@@ -1262,7 +1273,7 @@ function descriptorBytes(group) { return 4 + 32 + 64 + MIN_CORE - 1 + group.leng
 // The stream keeps one ranker: each peer is scored once for every window, not per window.
 // Every chunk, index levels included, is placed in `group` and signs its name (§5.1).
 async function putStart(group) {
-  if (!groups.has(group)) throw new Error("put: no group \"" + group + "\" in this node's roster");
+  if (!groups.has(group)) throw new Error("put: no group \"" + group + "\" in this node's groups");
   const chunkData = CFG.k * CFG.blockSize;
   if (chunkData < 2 * descriptorBytes(group)) {
     throw new Error("put: k·blockSize (" + chunkData + " B) must hold two chunk descriptors ("
@@ -2195,10 +2206,12 @@ async function admitBatch(offers, caller, mode = ADMIT_OFFER, evicted = null) {
     const o = offers[oi], sd = signed[oi];
     if (!sd) { verdicts.push(VERDICT_DESCRIPTOR); continue; }          // absent, forged, unsigned, or malformed
     const d = sd.descriptor, authorHex = toHex(sd.authorPk);
-    // ANCHOR the signature (§4.3) in the roster (§5.1): the author must be a member of the
-    // group the chunk names, or this node itself, and so must the caller. A key that merely
-    // signed proves nothing, since the envelope carries its own pubkey.
-    if (!inGroup(d.group, callerHex) || (authorHex !== me && !inGroup(d.group, authorHex))) { verdicts.push(VERDICT_GROUP); continue; }
+    // ANCHOR the signature (§4.3) in this node's groups (§5.1): the caller must be a current
+    // key of the group the chunk names, and the author a current or retired one, or this
+    // node itself. A key that merely signed proves nothing, since the envelope carries its
+    // own pubkey. A placement's author is its caller (below), so a retired key places nothing
+    // new, while a repair keeps the chunks it authored.
+    if (!inGroup(d.group, callerHex) || (authorHex !== me && !mayAuthor(d.group, authorHex))) { verdicts.push(VERDICT_GROUP); continue; }
     if (mode !== ADMIT_REPAIR && authorHex !== callerHex) { verdicts.push(VERDICT_NOT_AUTHOR); continue; }
     if (!descriptorContains(d, o.blockId)) { verdicts.push(VERDICT_DESCRIPTOR); continue; } // not a block of this chunk
     // Geometry is the SIGNED descriptor's, never a field the sender picks: every block
@@ -2332,7 +2345,7 @@ async function onHost(body) {
       case Op.REQUEST: return doRequest(payload);
       case Op.WARM: return doWarm();
       case Op.SCORE: return repScoreBytes(groupName(payload.subarray(32)), payload.subarray(0, 32), Date.now());
-      case Op.GROUPS: setRoster(decodeGroups(payload)); return EMPTY;
+      case Op.GROUPS: applyGroups(decodeGroups(payload)); return EMPTY;
       case Op.STATS: return encodeStats();
       case Op.FILES: return doFiles();
       case Op.PLACEMENT: return doPlacement(payload);
@@ -2351,7 +2364,7 @@ async function onPeer(caller, body) {
   const type = body[0], payload = body.subarray(1); // a view — the decoders below own no bytes
   // A link is not membership (§5.1): a peer in none of this node's groups learns nothing,
   // not even what it holds, and an empty answer is what a turned-away request gets.
-  if (!rosterMembers.has(toHex(caller))) return EMPTY;
+  if (!cohortKeys.has(toHex(caller))) return EMPTY;
   const t0 = Date.now();
   let out;
   if (type === MsgType.HAVE) out = encodeMask(await Promise.all(decodeHaveReq(payload).map((id) => storeHas(id))));
@@ -2435,7 +2448,7 @@ async function doPlacement(arg) {
       return { level: d.level, holders };
     });
     const group = fileInfo(f).group;
-    const members = new Set([...(groups.get(group) ?? []), ...holdsChunks.keys()]);
+    const members = new Set([...(groups.get(group)?.keys ?? []), ...holdsChunks.keys()]);
     members.delete(myPeer());
     for (const p of members) {
       const rel = peerReps.get(repKey(group, p)), av = availReps.get(repKey(group, p));
@@ -2474,7 +2487,7 @@ async function doHoldings() {
   return answer({ quota: quota(), used: bytesUsed, cache: cacheBytes, holds, keepsForUs });
 }
 
-// Ask every roster member, now, which of this node's blocks it has: one file's (`arg`, its
+// Ask every current key of every group, now, which of this node's blocks it has: one file's (`arg`, its
 // root descriptor) or every file's. A HAVE goes out as the placement engine's would; no
 // answer is down, and an empty answer is a member that does not list this node (§5.1).
 async function doProbe(arg) {
@@ -2486,7 +2499,7 @@ async function doProbe(arg) {
   const asked = ids.length > 0 ? ids : [new Uint8Array(BLOCK_ID_LEN)]; // nothing to ask: a ping
   const maxIds = Math.max(1, Math.floor((maxMsgBytes() - BATCH_HEAD) / BLOCK_ID_LEN));
   const me = myPeer(), linked = new Set(decodePeers(await netOp("peers", EMPTY, call)));
-  const members = [...rosterMembers].filter((p) => p !== me).sort();
+  const members = [...cohortKeys].filter((p) => p !== me).sort();
   const peers = await Promise.all(members.map(async (peer) => {
     const out = { peer, linked: linked.has(peer), up: false, refused: false, rtt: null, has: new Set() };
     for (const slice of sliceN(asked, maxIds)) {

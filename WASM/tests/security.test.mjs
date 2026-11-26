@@ -267,7 +267,7 @@ export async function run(t) {
       env, other, id, d: parseSignedDescriptor(env).descriptor });
     vm.runInContext(source, ctx);
     const r = await vm.runInContext(`(async () => {
-      for (const name of ["hintFromRepairFetch", "isRepairing", "requestRepairs", "auditChunk", "chunkKey", "setRoster",
+      for (const name of ["hintFromRepairFetch", "isRepairing", "requestRepairs", "auditChunk", "chunkKey", "applyGroups",
                           "storeGetDescriptor", "groupPeers", "rank", "netSend", "liveHolders", "verifyEnv", "myPeer"]) {
         if (typeof globalThis[name] !== "function") throw new Error("fault injection: the guest no longer defines " + name);
       }
@@ -276,7 +276,7 @@ export async function run(t) {
       const self = "0f".repeat(32), member = "01".repeat(32), outsider = "02".repeat(32), helper = "03".repeat(32);
       globalThis.myPeer = () => self;
       globalThis.verifyEnv = async () => true;
-      setRoster(new Map([["g", new Set([member, helper])], ["other", new Set([outsider])]]));
+      applyGroups(new Map([["g", { keys: new Set([member, helper]), retired: new Set() }], ["other", { keys: new Set([outsider]), retired: new Set() }]]));
       heldBlocks = new Map([[toHex(id), { size: 1200, author: "aa".repeat(32), group: "g", cache: false }]]);
       bytesUsed = 1200;
       storeIndexDirty = false;

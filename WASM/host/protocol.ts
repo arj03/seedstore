@@ -47,14 +47,14 @@ export const Op = {
   REPAIR: "repair",         // one repair pass → [replaced u32]
   REQUEST: "request",       // one control-plane message: [peer 32][type u8][payload] → [ok u8][resp]
   SCORE: "score",           // this node's decayed standing for a peer in a group: [peer 32][group ..] → [score f64 LE]
-  GROUPS: "groups",         // replace the roster: encodeGroups → (empty)
+  GROUPS: "groups",         // replace this node's groups: encodeGroups → (empty)
   WARM: "warm",             // JIT warm-up, no result
   STATS: "stats",           // request counters, read-and-cleared: → `RequestStats` (below)
   // The client surface (SPEC §18.1): read-only, each answering versioned JSON (host/client.ts).
   FILES: "files",           // this node's own files → { files }
   PLACEMENT: "placement",   // [root ..] or empty for every file → { files } with per-chunk holders
   HOLDINGS: "holdings",     // what this node keeps, per author/group/tier → { holds, keepsForUs, … }
-  PROBE: "probe",           // [root ..] or empty: HAVE to every roster member now → { peers, files }
+  PROBE: "probe",           // [root ..] or empty: HAVE to every current key of every group now → { peers, files }
 } as const;
 
 // ── the STATS op wire format (§18) ──────────────────────────────────────────
@@ -194,47 +194,63 @@ export const VERDICT_GROUP      = 7;
 // (§6); a repair is pulled by the device that will keep it (§9).
 export const VERDICT_NOT_AUTHOR = 8;
 
-// ── the roster (Op.GROUPS) ───────────────────────────────────────────────────
-// A node's groups (§5.1): name → member keys. Every member of every group is in its
-// cohort; anyone else is not. [count u16]([nameLen u8][name][n u16][key 32]*n)*
-export type Groups = Record<string, string[]>;
+// ── a node's groups (Op.GROUPS) ──────────────────────────────────────────────
+// A node's groups (§5.1): name → keys. A group's current keys may send, place data and
+// author chunks; its retired keys may do none of that, but chunks they authored are still
+// kept and repaired. Every current key of every group is in the cohort; anyone else is not.
+// A group is given as its current keys alone, or as { keys, retired }.
+// [count u16]([nameLen u8][name][n u16][key 32]*n[r u16][key 32]*r)*
+export type GroupKeys = string[] | { keys: string[]; retired?: string[] };
+export type Groups = Record<string, GroupKeys>;
+/** One group with both lists spelled out. */
+export interface GroupKeySets { keys: string[]; retired: string[] }
+
+/** A group's current and retired keys, whichever form it was given in. */
+export function groupKeySets(g: GroupKeys): GroupKeySets {
+  return Array.isArray(g) ? { keys: g, retired: [] } : { keys: g.keys, retired: g.retired ?? [] };
+}
+
+function u16(n: number): Uint8Array { const b = new Uint8Array(2); b[0] = n >> 8; b[1] = n & 255; return b; }
+function keyBytes(k: string): Uint8Array {
+  if (!/^[0-9a-f]{64}$/.test(k)) throw new Error("groups: a key is 64 hex characters: " + k);
+  return fromHex(k);
+}
 
 export function encodeGroups(groups: Groups): Uint8Array {
   const parts: Uint8Array[] = [];
   const names = Object.keys(groups);
-  const head = new Uint8Array(2);
-  head[0] = names.length >> 8; head[1] = names.length & 255;
-  parts.push(head);
+  parts.push(u16(names.length));
   for (const name of names) {
-    const nb = groupBytes(name), members = groups[name];
-    const h = new Uint8Array(1 + nb.length + 2);
-    h[0] = nb.length; h.set(nb, 1);
-    h[1 + nb.length] = members.length >> 8; h[2 + nb.length] = members.length & 255;
-    parts.push(h);
-    for (const m of members) {
-      if (!/^[0-9a-f]{64}$/.test(m)) throw new Error("groups: a member is a 64-hex-character key: " + m);
-      parts.push(fromHex(m));
-    }
+    const nb = groupBytes(name), { keys, retired } = groupKeySets(groups[name]);
+    parts.push(new Uint8Array([nb.length]), nb);
+    parts.push(u16(keys.length), ...keys.map(keyBytes));
+    parts.push(u16(retired.length), ...retired.map(keyBytes));
   }
   return concatBytes(parts);
 }
 
-/** name → Set of member hex. Throws on a malformed roster. */
-export function decodeGroups(buf: Uint8Array): Map<string, Set<string>> {
-  const out = new Map<string, Set<string>>();
-  if (buf.length < 2) throw new Error("groups: truncated");
-  const count = (buf[0] << 8) | buf[1];
-  let o = 2;
-  for (let g = 0; g < count; g++) {
-    if (o + 1 > buf.length) throw new Error("groups: truncated");
-    const nl = buf[o++];
-    if (o + nl + 2 > buf.length) throw new Error("groups: truncated");
-    const name = groupName(buf.subarray(o, o + nl)); o += nl;
+/** name → { keys, retired }, each a Set of key hex. Throws on malformed groups. */
+export function decodeGroups(buf: Uint8Array): Map<string, { keys: Set<string>; retired: Set<string> }> {
+  const out = new Map<string, { keys: Set<string>; retired: Set<string> }>();
+  let o = 0;
+  const need = (n: number) => { if (o + n > buf.length) throw new Error("groups: truncated"); };
+  const keySet = () => {
+    need(2);
     const n = (buf[o] << 8) | buf[o + 1]; o += 2;
-    if (o + n * 32 > buf.length) throw new Error("groups: truncated");
-    const members = new Set<string>();
-    for (let i = 0; i < n; i++, o += 32) members.add(toHex(buf.subarray(o, o + 32)));
-    out.set(name, members);
+    need(n * 32);
+    const s = new Set<string>();
+    for (let i = 0; i < n; i++, o += 32) s.add(toHex(buf.subarray(o, o + 32)));
+    return s;
+  };
+  need(2);
+  const count = (buf[0] << 8) | buf[1]; o = 2;
+  for (let g = 0; g < count; g++) {
+    need(1);
+    const nl = buf[o++];
+    need(nl);
+    const name = groupName(buf.subarray(o, o + nl)); o += nl;
+    const keys = keySet(), retired = keySet();
+    out.set(name, { keys, retired });
   }
   if (o !== buf.length) throw new Error("groups: trailing bytes");
   return out;

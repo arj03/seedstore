@@ -26,7 +26,7 @@ export interface CohortOptions {
   wasm: WasmBytes;
   config?: Partial<StorageConfig>;
   quota?: number;
-  /** Each node's roster, given every node's key. Default: one group, "cohort", of them all. */
+  /** Each node's groups, given every node's key. Default: one group, "cohort", of them all. */
   groups?: (peerIds: string[]) => Groups;
   timeoutMs?: number;
   guestDeadlineMs?: number;
